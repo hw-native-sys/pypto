@@ -45,7 +45,7 @@ def get_alloc_addresses(func):
             if stmt.value.op.name == "tile.alloc" and len(stmt.value.args) >= 2:
                 addr_expr = stmt.value.args[1]
                 if isinstance(addr_expr, ir.ConstInt):
-                    addrs.append((stmt.var.name, addr_expr.value))
+                    addrs.append((stmt.var.name_hint, addr_expr.value))
     return addrs
 
 
@@ -64,7 +64,7 @@ def get_memref_addresses_from_tiles(func):
             if isinstance(var_type, ir.TileType) and var_type.memref is not None:
                 memref = var_type.memref
                 if isinstance(memref.addr_, ir.ConstInt):
-                    memref_addrs[stmt.var.name] = memref.addr_.value
+                    memref_addrs[stmt.var.name_hint] = memref.addr_.value
     return memref_addrs
 
 

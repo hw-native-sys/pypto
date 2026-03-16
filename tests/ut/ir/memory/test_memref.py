@@ -65,7 +65,7 @@ class TestMemRef:
         memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024, 0)
 
         assert not hasattr(memref, "memory_space_")
-        assert memref.name == "mem_ddr_0"
+        assert memref.name_hint == "mem_ddr_0"
         assert memref.addr_.same_as(addr)
         assert memref.size_ == 1024
 
@@ -84,7 +84,7 @@ class TestMemRef:
             ir.MemorySpace.Acc,
         ]:
             memref = ir.MemRef(mem_space, addr, 2048, 1)
-            assert memref.name == f"mem_{mem_space.name.lower()}_1"
+            assert memref.name_hint == f"mem_{mem_space.name.lower()}_1"
             assert not hasattr(memref, "memory_space_")
 
     def test_memref_with_symbolic_address(self):
@@ -330,7 +330,7 @@ class TestTileTypeWithMemRef:
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, None, ir.MemorySpace.Right)
         assert tile_type.memref is not None
-        assert tile_type.memref.name == "mem_left_121"
+        assert tile_type.memref.name_hint == "mem_left_121"
         assert tile_type.memory_space == ir.MemorySpace.Right
 
     def test_tile_type_with_memref_and_tileview(self):
@@ -606,7 +606,7 @@ class TestMemRefStandaloneSerialization:
 
         assert isinstance(restored, ir.MemRef)
         assert not hasattr(restored, "memory_space_")
-        assert restored.name == "mem_vec_42"
+        assert restored.name_hint == "mem_vec_42"
         assert isinstance(restored.addr_, ir.ConstInt)
         assert restored.addr_.value == 0x1000
         assert restored.size_ == 2048
@@ -630,7 +630,7 @@ class TestMemRefStandaloneSerialization:
             restored = ir.deserialize(data)
 
             assert isinstance(restored, ir.MemRef)
-            assert restored.name == f"mem_{mem_space.name.lower()}_1"
+            assert restored.name_hint == f"mem_{mem_space.name.lower()}_1"
 
     def test_serialize_memref_roundtrip_structural_equal(self):
         """Serialize a MemRef, deserialize, and verify structural equality."""
@@ -889,7 +889,7 @@ class TestMemRefConstructor:
         # Create MemRef with constructor
         memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024, 5)
 
-        assert memref.name == "mem_ddr_5"
+        assert memref.name_hint == "mem_ddr_5"
         assert not hasattr(memref, "memory_space_")
         assert memref.addr_.same_as(addr)
         assert memref.size_ == 1024
@@ -908,7 +908,7 @@ class TestMemRefConstructor:
         ]:
             addr = ir.ConstInt(0, DataType.INT64, span)
             memref = ir.MemRef(mem_space, addr, 2048, 6)
-            assert memref.name == f"mem_{mem_space.name.lower()}_6"
+            assert memref.name_hint == f"mem_{mem_space.name.lower()}_6"
             assert memref.size_ == 2048
 
 
@@ -1319,7 +1319,7 @@ class TestIRBuilderHelpers:
         memref = ib.memref(ir.MemorySpace.DDR, 0x1000, 1024, 33)
 
         assert isinstance(memref, ir.MemRef)
-        assert memref.name == "mem_ddr_33"
+        assert memref.name_hint == "mem_ddr_33"
         assert not hasattr(memref, "memory_space_")
         assert memref.size_ == 1024
 
@@ -1582,7 +1582,7 @@ class TestTensorTypeWithTensorView:
         # Create a Var with this TensorType
         var = ir.Var("x", tensor_type, span)
 
-        assert var.name == "x"
+        assert var.name_hint == "x"
         assert isinstance(var.type, ir.TensorType)
         assert var.type.dtype == DataType.FP32
         assert var.type.tensor_view is not None

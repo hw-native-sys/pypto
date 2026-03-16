@@ -366,7 +366,7 @@ class TestProgramDecorator:
         assert add_func.name == "add_one"
         # self parameter should be stripped
         assert len(add_func.params) == 1
-        assert add_func.params[0].name == "x"
+        assert add_func.params[0].name_hint == "x"
 
     def test_multiple_functions_program(self):
         """Test @pl.program with multiple functions."""
@@ -497,8 +497,8 @@ class TestProgramDecorator:
         assert func is not None
         # Should only have x and y parameters (self stripped)
         assert len(func.params) == 2
-        assert func.params[0].name == "x"
-        assert func.params[1].name == "y"
+        assert func.params[0].name_hint == "x"
+        assert func.params[1].name_hint == "y"
 
     def test_program_name_from_class(self):
         """Test that program name is extracted from class name."""

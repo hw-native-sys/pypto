@@ -214,7 +214,7 @@ class ChunkedLoopSplitter : public IRMutator {
     int64_t remainder = trip_count % chunk_size;
 
     const Var* loop_var_key = op->loop_var_.get();
-    std::string base_name = op->loop_var_->name_;
+    std::string base_name = op->loop_var_->name_hint_;
 
     // Save previous substitutions for loop var and iter_args
     auto prev_loop_sub = SaveSubstitution(loop_var_key);
@@ -270,14 +270,15 @@ class ChunkedLoopSplitter : public IRMutator {
       for (const auto& ia : op->iter_args_) {
         auto visited_init = VisitExpr(ia->initValue_);
         auto outer_ia =
-            std::make_shared<IterArg>(ia->name_ + "_outer", ia->GetType(), visited_init, ia->span_);
-        auto outer_rv = std::make_shared<Var>(ia->name_ + "_outer_rv", ia->GetType(), ia->span_);
+            std::make_shared<IterArg>(ia->name_hint_ + "_outer", ia->GetType(), visited_init, ia->span_);
+        auto outer_rv = std::make_shared<Var>(ia->name_hint_ + "_outer_rv", ia->GetType(), ia->span_);
         outer_iter_args.push_back(outer_ia);
         outer_return_vars.push_back(outer_rv);
 
         ExprPtr inner_init = outer_ia;
-        auto inner_ia = std::make_shared<IterArg>(ia->name_ + "_inner", ia->GetType(), inner_init, ia->span_);
-        auto inner_rv = std::make_shared<Var>(ia->name_ + "_inner_rv", ia->GetType(), ia->span_);
+        auto inner_ia =
+            std::make_shared<IterArg>(ia->name_hint_ + "_inner", ia->GetType(), inner_init, ia->span_);
+        auto inner_rv = std::make_shared<Var>(ia->name_hint_ + "_inner_rv", ia->GetType(), ia->span_);
         inner_iter_args.push_back(inner_ia);
         inner_return_vars.push_back(inner_rv);
 
@@ -329,8 +330,8 @@ class ChunkedLoopSplitter : public IRMutator {
       for (size_t i = 0; i < op->iter_args_.size(); ++i) {
         const auto& ia = op->iter_args_[i];
         ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : VisitExpr(ia->initValue_);
-        auto rem_ia = std::make_shared<IterArg>(ia->name_ + "_rem", ia->GetType(), rem_init, ia->span_);
-        auto rem_rv = std::make_shared<Var>(ia->name_ + "_rem_rv", ia->GetType(), ia->span_);
+        auto rem_ia = std::make_shared<IterArg>(ia->name_hint_ + "_rem", ia->GetType(), rem_init, ia->span_);
+        auto rem_rv = std::make_shared<Var>(ia->name_hint_ + "_rem_rv", ia->GetType(), ia->span_);
         rem_iter_args.push_back(rem_ia);
         rem_return_vars.push_back(rem_rv);
 
@@ -350,7 +351,7 @@ class ChunkedLoopSplitter : public IRMutator {
         CollectDefVars(op->body_, body_def_vars);
         for (const auto& var : body_def_vars) {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh = std::make_shared<Var>(var->name_, var->GetType(), var->span_);
+          auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
       }
@@ -496,7 +497,7 @@ class ChunkedLoopSplitter : public IRMutator {
         CollectDefVars(op->body_, body_def_vars);
         for (const auto& var : body_def_vars) {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh = std::make_shared<Var>(var->name_, var->GetType(), var->span_);
+          auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
       }

@@ -49,8 +49,8 @@ class TestFunction:
         assert len(func.params) == 2
         assert len(func.return_types) == 1
         assert func.body is not None
-        assert func.params[0].name == "a"
-        assert func.params[1].name == "b"
+        assert func.params[0].name_hint == "a"
+        assert func.params[1].name_hint == "b"
         assert isinstance(func.return_types[0], ir.ScalarType)
         assert isinstance(func.body, ir.SeqStmts)
 
@@ -134,8 +134,8 @@ class TestFunction:
         func = ir.Function("add_func", [a, b], [ir.ScalarType(dtype)], assign, span)
 
         assert len(func.params) == 2
-        assert func.params[0].name == "a"
-        assert func.params[1].name == "b"
+        assert func.params[0].name_hint == "a"
+        assert func.params[1].name_hint == "b"
 
     def test_function_with_multiple_return_types(self):
         """Test Function with multiple return types."""
@@ -207,7 +207,7 @@ class TestFunction:
         )
 
         assert len(func.params) == 1
-        assert func.params[0].name == "x"
+        assert func.params[0].name_hint == "x"
         assert func.param_directions[0] == ir.ParamDirection.Out
 
     def test_function_with_mixed_directions(self):

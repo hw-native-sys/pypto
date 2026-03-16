@@ -26,8 +26,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         add_expr = ir.Add(x, y, dtype, span)
 
-        assert cast(ir.Var, add_expr.left).name == "x"
-        assert cast(ir.Var, add_expr.right).name == "y"
+        assert cast(ir.Var, add_expr.left).name_hint == "x"
+        assert cast(ir.Var, add_expr.right).name_hint == "y"
 
     def test_add_is_binary_expr(self):
         """Test that Add is an instance of BinaryExpr."""
@@ -49,8 +49,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         sub_expr = ir.Sub(x, y, dtype, span)
 
-        assert cast(ir.Var, sub_expr.left).name == "x"
-        assert cast(ir.Var, sub_expr.right).name == "y"
+        assert cast(ir.Var, sub_expr.left).name_hint == "x"
+        assert cast(ir.Var, sub_expr.right).name_hint == "y"
 
     def test_mul_creation(self):
         """Test creating a Mul expression."""
@@ -60,8 +60,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         mul_expr = ir.Mul(x, y, dtype, span)
 
-        assert cast(ir.Var, mul_expr.left).name == "x"
-        assert cast(ir.Var, mul_expr.right).name == "y"
+        assert cast(ir.Var, mul_expr.left).name_hint == "x"
+        assert cast(ir.Var, mul_expr.right).name_hint == "y"
 
     def test_floatdiv_creation(self):
         """Test creating a FloatDiv expression."""
@@ -71,8 +71,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         div_expr = ir.FloatDiv(x, y, dtype, span)
 
-        assert cast(ir.Var, div_expr.left).name == "x"
-        assert cast(ir.Var, div_expr.right).name == "y"
+        assert cast(ir.Var, div_expr.left).name_hint == "x"
+        assert cast(ir.Var, div_expr.right).name_hint == "y"
 
     def test_floormod_creation(self):
         """Test creating a FloorMod expression."""
@@ -82,8 +82,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         mod_expr = ir.FloorMod(x, y, dtype, span)
 
-        assert cast(ir.Var, mod_expr.left).name == "x"
-        assert cast(ir.Var, mod_expr.right).name == "y"
+        assert cast(ir.Var, mod_expr.left).name_hint == "x"
+        assert cast(ir.Var, mod_expr.right).name_hint == "y"
 
     def test_floordiv_creation(self):
         """Test creating a FloorDiv expression."""
@@ -93,8 +93,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
         floordiv_expr = ir.FloorDiv(x, y, dtype, span)
 
-        assert cast(ir.Var, floordiv_expr.left).name == "x"
-        assert cast(ir.Var, floordiv_expr.right).name == "y"
+        assert cast(ir.Var, floordiv_expr.left).name_hint == "x"
+        assert cast(ir.Var, floordiv_expr.right).name_hint == "y"
 
     def test_pow(self):
         """Test creating Pow expression."""
@@ -104,8 +104,8 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         pow_expr = ir.Pow(x, y, dtype, span)
-        assert cast(ir.Var, pow_expr.left).name == "x"
-        assert cast(ir.Var, pow_expr.right).name == "y"
+        assert cast(ir.Var, pow_expr.left).name_hint == "x"
+        assert cast(ir.Var, pow_expr.right).name_hint == "y"
 
     def test_min_max(self):
         """Test creating Min and Max expressions."""
@@ -115,10 +115,10 @@ class TestArithmeticOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         min_expr = ir.Min(x, y, dtype, span)
-        assert cast(ir.Var, min_expr.left).name == "x"
+        assert cast(ir.Var, min_expr.left).name_hint == "x"
 
         max_expr = ir.Max(x, y, dtype, span)
-        assert cast(ir.Var, max_expr.left).name == "x"
+        assert cast(ir.Var, max_expr.left).name_hint == "x"
 
 
 class TestLogicalOps:
@@ -132,13 +132,13 @@ class TestLogicalOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         and_expr = ir.And(x, y, dtype, span)
-        assert cast(ir.Var, and_expr.left).name == "x"
+        assert cast(ir.Var, and_expr.left).name_hint == "x"
 
         or_expr = ir.Or(x, y, dtype, span)
-        assert cast(ir.Var, or_expr.left).name == "x"
+        assert cast(ir.Var, or_expr.left).name_hint == "x"
 
         xor_expr = ir.Xor(x, y, dtype, span)
-        assert cast(ir.Var, xor_expr.left).name == "x"
+        assert cast(ir.Var, xor_expr.left).name_hint == "x"
 
 
 class TestBitwiseOps:
@@ -152,19 +152,19 @@ class TestBitwiseOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         bitand_expr = ir.BitAnd(x, y, dtype, span)
-        assert cast(ir.Var, bitand_expr.left).name == "x"
+        assert cast(ir.Var, bitand_expr.left).name_hint == "x"
 
         bitor_expr = ir.BitOr(x, y, dtype, span)
-        assert cast(ir.Var, bitor_expr.left).name == "x"
+        assert cast(ir.Var, bitor_expr.left).name_hint == "x"
 
         bitxor_expr = ir.BitXor(x, y, dtype, span)
-        assert cast(ir.Var, bitxor_expr.left).name == "x"
+        assert cast(ir.Var, bitxor_expr.left).name_hint == "x"
 
         shl_expr = ir.BitShiftLeft(x, y, dtype, span)
-        assert cast(ir.Var, shl_expr.left).name == "x"
+        assert cast(ir.Var, shl_expr.left).name_hint == "x"
 
         shr_expr = ir.BitShiftRight(x, y, dtype, span)
-        assert cast(ir.Var, shr_expr.left).name == "x"
+        assert cast(ir.Var, shr_expr.left).name_hint == "x"
 
 
 class TestUnaryOps:
@@ -177,7 +177,7 @@ class TestUnaryOps:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         neg_expr = ir.Neg(x, dtype, span)
 
-        assert cast(ir.Var, neg_expr.operand).name == "x"
+        assert cast(ir.Var, neg_expr.operand).name_hint == "x"
         assert isinstance(neg_expr, ir.UnaryExpr)
         assert isinstance(neg_expr, ir.Expr)
 
@@ -188,7 +188,7 @@ class TestUnaryOps:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         abs_expr = ir.Abs(x, dtype, span)
 
-        assert cast(ir.Var, abs_expr.operand).name == "x"
+        assert cast(ir.Var, abs_expr.operand).name_hint == "x"
 
     def test_not_creation(self):
         """Test creating a Not expression."""
@@ -197,7 +197,7 @@ class TestUnaryOps:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         not_expr = ir.Not(x, dtype, span)
 
-        assert cast(ir.Var, not_expr.operand).name == "x"
+        assert cast(ir.Var, not_expr.operand).name_hint == "x"
 
     def test_bitnot_creation(self):
         """Test creating a BitNot expression."""
@@ -206,7 +206,7 @@ class TestUnaryOps:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         bitnot_expr = ir.BitNot(x, dtype, span)
 
-        assert cast(ir.Var, bitnot_expr.operand).name == "x"
+        assert cast(ir.Var, bitnot_expr.operand).name_hint == "x"
 
 
 class TestNestedExpressions:
@@ -225,7 +225,7 @@ class TestNestedExpressions:
 
         # Verify structure
         assert isinstance(mul_expr.left, ir.Add)
-        assert cast(ir.Var, mul_expr.left.left).name == "x"
+        assert cast(ir.Var, mul_expr.left.left).name_hint == "x"
         assert cast(ir.ConstInt, mul_expr.left.right).value == 5
         assert cast(ir.ConstInt, mul_expr.right).value == 2
 
@@ -245,10 +245,10 @@ class TestNestedExpressions:
         # Verify structure
         assert isinstance(mul_expr.left, ir.Add)
         assert isinstance(mul_expr.right, ir.Sub)
-        assert cast(ir.Var, mul_expr.left.left).name == "a"
-        assert cast(ir.Var, mul_expr.left.right).name == "b"
-        assert cast(ir.Var, mul_expr.right.left).name == "c"
-        assert cast(ir.Var, mul_expr.right.right).name == "d"
+        assert cast(ir.Var, mul_expr.left.left).name_hint == "a"
+        assert cast(ir.Var, mul_expr.left.right).name_hint == "b"
+        assert cast(ir.Var, mul_expr.right.left).name_hint == "c"
+        assert cast(ir.Var, mul_expr.right.right).name_hint == "d"
 
     def test_deeply_nested_expression(self):
         """Test building a deeply nested expression: (((x + 1) - 2) * 3) / 4."""
@@ -305,7 +305,7 @@ class TestNestedExpressions:
         # Verify structure
         assert isinstance(neg_expr, ir.Neg)
         assert isinstance(neg_expr.operand, ir.Add)
-        assert cast(ir.Var, neg_expr.operand.left).name == "x"
+        assert cast(ir.Var, neg_expr.operand.left).name_hint == "x"
 
 
 class TestImmutability:

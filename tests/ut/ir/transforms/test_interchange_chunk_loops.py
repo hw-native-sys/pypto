@@ -286,7 +286,7 @@ class TestChunkWithRemainderInChain:
         assert len(i_in.iter_args) == 1
 
         # i_in's iter_arg should chain from i_out's iter_arg (not from original init)
-        assert i_in.iter_args[0].initValue.name == i_out.iter_args[0].name
+        assert i_in.iter_args[0].initValue.name_hint == i_out.iter_args[0].name_hint
 
     def test_chunk_with_remainder_body_contains_remainder_loop(self):
         """Remainder loop inside chain body must be preserved after interchange."""

@@ -800,14 +800,14 @@ ScalarExprType = Expr | int | float
 class Var(Expr):
     """Variable reference expression."""
 
-    name: Final[str]
-    """Variable name."""
+    name_hint: Final[str]
+    """Variable name hint (cosmetic label, not an identifier)."""
 
-    def __init__(self, name: str, type: Type, span: Span) -> None:
+    def __init__(self, name_hint: str, type: Type, span: Span) -> None:
         """Create a variable reference.
 
         Args:
-            name: Variable name
+            name_hint: Variable name hint (cosmetic label, not an identifier)
             type: Type of the variable (ScalarType, TensorType, or TileType)
                   Memory reference information is stored in ShapedType for Tensor/Tile types
             span: Source location
@@ -825,11 +825,11 @@ class IterArg(Var):
     initValue: Final[Expr]
     """Initial value expression (can be any Expr)."""
 
-    def __init__(self, name: str, type: Type, initValue: Expr, span: Span) -> None:
+    def __init__(self, name_hint: str, type: Type, initValue: Expr, span: Span) -> None:
         """Create an iteration argument.
 
         Args:
-            name: Variable name
+            name_hint: Variable name hint (cosmetic label, not an identifier)
             type: Type of the variable (ScalarType, TensorType, or TileType)
                   Memory reference information is stored in ShapedType for Tensor/Tile types
             initValue: Initial value expression (can be any Expr)

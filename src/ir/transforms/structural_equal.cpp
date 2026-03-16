@@ -976,8 +976,8 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
         if constexpr (AssertMode) {
           ThrowMismatch("Variable mapping inconsistent (without auto-mapping)",
                         std::static_pointer_cast<const IRNode>(lhs),
-                        std::static_pointer_cast<const IRNode>(rhs), "var " + lhs->name_,
-                        "var " + rhs->name_);
+                        std::static_pointer_cast<const IRNode>(rhs), "var " + lhs->name_hint_,
+                        "var " + rhs->name_hint_);
         }
         return false;
       }
@@ -986,9 +986,9 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
     // Case 2: different variables
     if (lhs.get() != rhs.get()) {
       if constexpr (AssertMode) {
-        ThrowMismatch("Variable pointer mismatch (without auto-mapping)",
-                      std::static_pointer_cast<const IRNode>(lhs),
-                      std::static_pointer_cast<const IRNode>(rhs), "var " + lhs->name_, "var " + rhs->name_);
+        ThrowMismatch(
+            "Variable pointer mismatch (without auto-mapping)", std::static_pointer_cast<const IRNode>(lhs),
+            std::static_pointer_cast<const IRNode>(rhs), "var " + lhs->name_hint_, "var " + rhs->name_hint_);
       }
       return false;
     }
@@ -1010,8 +1010,8 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
     if (it->second != rhs) {
       if constexpr (AssertMode) {
         std::ostringstream msg;
-        msg << "Variable mapping inconsistent ('" << lhs->name_ << "' cannot map to both '"
-            << it->second->name_ << "' and '" << rhs->name_ << "')";
+        msg << "Variable mapping inconsistent ('" << lhs->name_hint_ << "' cannot map to both '"
+            << it->second->name_hint_ << "' and '" << rhs->name_hint_ << "')";
         ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
                       std::static_pointer_cast<const IRNode>(rhs));
       }
@@ -1024,8 +1024,8 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
   if (rhs_it != rhs_to_lhs_var_map_.end() && rhs_it->second != lhs) {
     if constexpr (AssertMode) {
       std::ostringstream msg;
-      msg << "Variable mapping inconsistent ('" << rhs->name_ << "' is already mapped from '"
-          << rhs_it->second->name_ << "', cannot map from '" << lhs->name_ << "')";
+      msg << "Variable mapping inconsistent ('" << rhs->name_hint_ << "' is already mapped from '"
+          << rhs_it->second->name_hint_ << "', cannot map from '" << lhs->name_hint_ << "')";
       ThrowMismatch(msg.str(), std::static_pointer_cast<const IRNode>(lhs),
                     std::static_pointer_cast<const IRNode>(rhs));
     }

@@ -37,8 +37,8 @@ class TestIRBuilderFunction:
         assert func.name == "my_func"
         assert len(func.params) == 2
         assert len(func.return_types) == 1
-        assert func.params[0].name == "x"
-        assert func.params[1].name == "y"
+        assert func.params[0].name_hint == "x"
+        assert func.params[1].name_hint == "y"
         assert func.body is not None
 
     def test_function_with_explicit_span(self):
@@ -149,7 +149,7 @@ class TestIRBuilderForLoop:
         assert func is not None
         # Function body should be a for loop
         assert isinstance(func.body, ir.ForStmt)
-        assert func.body.loop_var.name == "i"
+        assert func.body.loop_var.name_hint == "i"
 
     def test_for_loop_with_iter_args(self):
         """Test for loop with iteration arguments."""
@@ -545,7 +545,7 @@ class TestIRBuilderLet:
             # let() should infer the type from the expression
             x = ib.let("x", const)
 
-            assert x.name == "x"
+            assert x.name_hint == "x"
             assert isinstance(x.type, ir.ScalarType)
             assert x.type.dtype == DataType.INT64
 
@@ -566,7 +566,7 @@ class TestIRBuilderLet:
             explicit_type = ir.ScalarType(DataType.INT64)
             x = ib.let("x", const, type=explicit_type)
 
-            assert x.name == "x"
+            assert x.name_hint == "x"
             assert isinstance(x.type, ir.ScalarType)
             assert x.type.dtype == DataType.INT64
 
@@ -616,7 +616,7 @@ class TestIRBuilderLet:
             # let() should handle int values via _normalize_expr
             x = ib.let("x", 42)
 
-            assert x.name == "x"
+            assert x.name_hint == "x"
             # Type should be inferred from the normalized expression
             assert isinstance(x.type, ir.ScalarType)
 
@@ -636,7 +636,7 @@ class TestIRBuilderLet:
             # let() should infer TensorType from the create operation
             t = ib.let("t", tensor_create)
 
-            assert t.name == "t"
+            assert t.name_hint == "t"
             assert isinstance(t.type, ir.TensorType)
             assert t.type.dtype == DataType.FP32
 
@@ -658,7 +658,7 @@ class TestIRBuilderLet:
             # let() should infer type from Add expression
             result = ib.let("result", add_expr)
 
-            assert result.name == "result"
+            assert result.name_hint == "result"
             assert isinstance(result.type, ir.ScalarType)
             assert result.type.dtype == DataType.INT64
 
@@ -676,7 +676,7 @@ class TestIRBuilderLet:
             const = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
             x = ib.let("x", const, span=my_span)
 
-            assert x.name == "x"
+            assert x.name_hint == "x"
             assert x.span.filename == "test.py"
             assert x.span.begin_line == 100
 
@@ -702,7 +702,7 @@ class TestIRBuilderIterArgAndReturnVar:
                 # Must have matching return_var
                 _ = loop.return_var("sum_final")
 
-                assert sum_iter.name == "sum"
+                assert sum_iter.name_hint == "sum"
                 assert isinstance(sum_iter.type, ir.ScalarType)
                 # Integer literal 0 defaults to DEFAULT_CONST_INT = INDEX
                 assert sum_iter.type.dtype == DataType.INDEX
@@ -726,7 +726,7 @@ class TestIRBuilderIterArgAndReturnVar:
                 # Must have matching return_var
                 _ = loop.return_var("sum_final")
 
-                assert sum_iter.name == "sum"
+                assert sum_iter.name_hint == "sum"
                 assert isinstance(sum_iter.type, ir.ScalarType)
                 assert sum_iter.type.dtype == DataType.INDEX
 
@@ -762,7 +762,7 @@ class TestIRBuilderIterArgAndReturnVar:
                 # Type should be inferred from corresponding iter_arg
                 sum_final = loop.return_var("sum_final")
 
-                assert sum_final.name == "sum_final"
+                assert sum_final.name_hint == "sum_final"
                 assert isinstance(sum_final.type, ir.ScalarType)
                 assert sum_final.type.dtype == DataType.INDEX
 
@@ -906,7 +906,7 @@ class TestIRBuilderForLoopOutput:
             # Get the output return variable
             result = loop.output()
 
-            assert result.name == "sum_final"
+            assert result.name_hint == "sum_final"
             assert isinstance(result.type, ir.ScalarType)
             assert result.type.dtype == DataType.INDEX
 
@@ -942,8 +942,8 @@ class TestIRBuilderForLoopOutput:
             result1 = loop.output(0)
             result2 = loop.output(1)
 
-            assert result1.name == "sum_final"
-            assert result2.name == "prod_final"
+            assert result1.name_hint == "sum_final"
+            assert result2.name_hint == "prod_final"
             assert isinstance(result1.type, ir.ScalarType)
             assert isinstance(result2.type, ir.ScalarType)
             assert result1.type.dtype == DataType.INDEX
@@ -981,13 +981,13 @@ class TestIRBuilderForLoopOutput:
             results = loop.outputs()
 
             assert len(results) == 2
-            assert results[0].name == "sum_final"
-            assert results[1].name == "prod_final"
+            assert results[0].name_hint == "sum_final"
+            assert results[1].name_hint == "prod_final"
 
             # Test unpacking
             sum_out, prod_out = loop.outputs()
-            assert sum_out.name == "sum_final"
-            assert prod_out.name == "prod_final"
+            assert sum_out.name_hint == "sum_final"
+            assert prod_out.name_hint == "prod_final"
 
             ib.return_stmt(results)
 
@@ -1020,8 +1020,8 @@ class TestIRBuilderForLoopOutput:
             default_output = loop.output()
             explicit_output = loop.output(0)
 
-            assert default_output.name == explicit_output.name
-            assert default_output.name == "sum_final"
+            assert default_output.name_hint == explicit_output.name_hint
+            assert default_output.name_hint == "sum_final"
 
         func = f.get_result()
         assert func is not None
@@ -1077,7 +1077,7 @@ class TestIRBuilderIfOutput:
             # Get the output return variable
             result = if_builder.output()
 
-            assert result.name == "result"
+            assert result.name_hint == "result"
             assert isinstance(result.type, ir.ScalarType)
             assert result.type.dtype == DataType.INT64
 
@@ -1110,8 +1110,8 @@ class TestIRBuilderIfOutput:
             result1 = if_builder.output(0)
             result2 = if_builder.output(1)
 
-            assert result1.name == "result1"
-            assert result2.name == "result2"
+            assert result1.name_hint == "result1"
+            assert result2.name_hint == "result2"
             assert isinstance(result1.type, ir.ScalarType)
             assert isinstance(result2.type, ir.ScalarType)
             assert result1.type.dtype == DataType.INT64
@@ -1146,8 +1146,8 @@ class TestIRBuilderIfOutput:
             results = if_builder.outputs()
 
             assert len(results) == 2
-            assert results[0].name == "result1"
-            assert results[1].name == "result2"
+            assert results[0].name_hint == "result1"
+            assert results[1].name_hint == "result2"
 
         func = f.get_result()
         assert func is not None

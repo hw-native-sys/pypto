@@ -125,7 +125,7 @@ ExprPtr expr = ...;
 
 // Cast to Var (returns nullptr if not a Var)
 if (auto var = As<Var>(expr)) {
-  std::cout << "Variable name: " << var->name_ << std::endl;
+  std::cout << "Variable name: " << var->name_hint_ << std::endl;
 }
 
 // Cast ConstInt

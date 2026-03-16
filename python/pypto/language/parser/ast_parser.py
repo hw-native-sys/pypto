@@ -867,7 +867,7 @@ class ASTParser:
     def _format_ir_arg(expr: ir.Expr) -> str:
         """Format an IR expression for static_print output."""
         if isinstance(expr, ir.Var):
-            return f"{expr.name}: {python_print(expr.type)}"
+            return f"{expr.name_hint}: {python_print(expr.type)}"
         if isinstance(expr, (ir.ConstInt, ir.ConstFloat, ir.ConstBool)):
             return f"{expr.value}: {python_print(expr.type)}"
         return python_print(expr)
@@ -1880,7 +1880,7 @@ class ASTParser:
         """
         expected = len(func.params)
         if got != expected:
-            param_info = [f"{p.name}: {d.name}" for p, d in zip(func.params, func.param_directions)]
+            param_info = [f"{p.name_hint}: {d.name}" for p, d in zip(func.params, func.param_directions)]
             raise ParserTypeError(
                 f"Function '{func_name}' expects {expected} argument(s), got {got}",
                 span=span,

@@ -394,7 +394,7 @@ class CallTest:
         caller_func = program.get_function("caller")
         assert caller_func is not None
         assert len(caller_func.params) == 1
-        assert caller_func.params[0].name == "x"
+        assert caller_func.params[0].name_hint == "x"
 
     def test_parse_program_no_program_error(self):
         """Test that code without @pl.program raises error."""

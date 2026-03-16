@@ -314,9 +314,9 @@ class TestDynamicShapeResolution:
         shape = resolver._parse_shape(node)
         assert len(shape) == 2
         assert isinstance(shape[0], ir.Var)
-        assert shape[0].name == "M"
+        assert shape[0].name_hint == "M"
         assert isinstance(shape[1], ir.Var)
-        assert shape[1].name == "N"
+        assert shape[1].name_hint == "N"
 
     def test_parse_shape_dynvar_and_literal_mixed(self):
         """Mix of DynVar and int literal in same shape."""
@@ -324,7 +324,7 @@ class TestDynamicShapeResolution:
         node = ast.parse("[M, 128]", mode="eval").body
         shape = resolver._parse_shape(node)
         assert isinstance(shape[0], ir.Var)
-        assert shape[0].name == "M"
+        assert shape[0].name_hint == "M"
         assert shape[1] == 128
 
     def test_parse_shape_dynvar_and_int_var_mixed(self):
@@ -400,7 +400,7 @@ class TestDynamicShapeResolution:
         result = resolver.resolve_type(node)
         assert isinstance(result, ir.TensorType)
         assert isinstance(result.shape[0], ir.Var)
-        assert result.shape[0].name == "M"
+        assert result.shape[0].name_hint == "M"
 
     def test_resolve_tile_type_with_dynvar(self):
         """TileType also supports dynamic shapes."""
@@ -456,9 +456,9 @@ class TestDynamicShapeResolution:
         shape = resolver._parse_shape(node)
         assert len(shape) == 2
         assert isinstance(shape[0], ir.Var)
-        assert shape[0].name == "M"
+        assert shape[0].name_hint == "M"
         assert isinstance(shape[1], ir.Var)
-        assert shape[1].name == "N"
+        assert shape[1].name_hint == "N"
 
     def test_parse_shape_list_variable_mixed_int_dynvar(self):
         """List variable with mixed int and DynVar."""
@@ -466,7 +466,7 @@ class TestDynamicShapeResolution:
         node = ast.parse("shape", mode="eval").body
         shape = resolver._parse_shape(node)
         assert isinstance(shape[0], ir.Var)
-        assert shape[0].name == "M"
+        assert shape[0].name_hint == "M"
         assert shape[1] == 128
 
     def test_parse_shape_unknown_variable(self):
@@ -609,7 +609,7 @@ class TestDynamicShapeIntegration:
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(param_type.shape[0], ir.Var)
-        assert param_type.shape[0].name == "M"
+        assert param_type.shape[0].name_hint == "M"
         # Second dim is still a ConstInt
         assert isinstance(param_type.shape[1], ir.ConstInt)
         assert param_type.shape[1].value == 128
@@ -635,10 +635,10 @@ class TestDynamicShapeIntegration:
         assert isinstance(a_type.shape[1], ir.Var)
         assert isinstance(b_type.shape[0], ir.Var)
         assert isinstance(b_type.shape[1], ir.Var)
-        assert a_type.shape[0].name == "M"
-        assert a_type.shape[1].name == "K"
-        assert b_type.shape[0].name == "K"
-        assert b_type.shape[1].name == "N"
+        assert a_type.shape[0].name_hint == "M"
+        assert a_type.shape[1].name_hint == "K"
+        assert b_type.shape[0].name_hint == "K"
+        assert b_type.shape[1].name_hint == "N"
         # Same DynVar must map to the same ir.Var instance (pointer identity)
         assert a_type.shape[1] is b_type.shape[0], "K should be deduplicated across shapes"
 
@@ -655,7 +655,7 @@ class TestDynamicShapeIntegration:
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(ret_type, ir.TensorType)
         assert isinstance(ret_type.shape[0], ir.Var)
-        assert ret_type.shape[0].name == "M"
+        assert ret_type.shape[0].name_hint == "M"
         # Same DynVar in param and return type must be the same ir.Var instance
         assert param_type.shape[0] is ret_type.shape[0], "M should be deduplicated across param and return"
 
@@ -676,7 +676,7 @@ class TestDynamicShapeIntegration:
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(param_type.shape[0], ir.Var)
-        assert param_type.shape[0].name == "M"
+        assert param_type.shape[0].name_hint == "M"
 
     # --- Parametrized testing (issue #163 primary use case) ---
 
@@ -1060,9 +1060,9 @@ class TestDynamicShapeEdgeCases:
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(param_type.shape[0], ir.Var)
-        assert param_type.shape[0].name == "M"
+        assert param_type.shape[0].name_hint == "M"
         assert isinstance(param_type.shape[1], ir.Var)
-        assert param_type.shape[1].name == "N"
+        assert param_type.shape[1].name_hint == "N"
 
     def test_dynvar_mixed_with_int_in_variable_shape(self):
         """User mixes DynVar and int in a shape variable."""
@@ -1076,7 +1076,7 @@ class TestDynamicShapeEdgeCases:
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(param_type.shape[0], ir.Var)
-        assert param_type.shape[0].name == "M"
+        assert param_type.shape[0].name_hint == "M"
         assert isinstance(param_type.shape[1], ir.ConstInt)
         assert param_type.shape[1].value == 128
 
@@ -1094,7 +1094,7 @@ class TestDynamicShapeEdgeCases:
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)
         assert isinstance(param_type.shape[0], ir.Var)
-        assert param_type.shape[0].name == "M"
+        assert param_type.shape[0].name_hint == "M"
         # base * 2 evaluates to 128 at compile time, then gets wrapped as ConstInt
         # because the shape is mixed (Var + int → all Expr)
         assert isinstance(param_type.shape[1], ir.ConstInt)
@@ -1260,7 +1260,7 @@ class TestLayoutResolution:
         memref = resolver.resolve_memref(node)
 
         assert isinstance(memref, ir.MemRef)
-        assert memref.name == "mem_ddr_7"
+        assert memref.name_hint == "mem_ddr_7"
 
     def test_resolve_layout_bare_name(self):
         """Layout specified as bare name (NZ) instead of pl.NZ."""
@@ -1298,7 +1298,7 @@ class TestLayoutResolution:
 
         assert isinstance(result, ir.TensorType)
         assert isinstance(result.shape[0], ir.Var)
-        assert result.shape[0].name == "M"
+        assert result.shape[0].name_hint == "M"
         assert result.tensor_view is not None
         assert result.tensor_view.layout == ir.TensorLayout.NZ
 

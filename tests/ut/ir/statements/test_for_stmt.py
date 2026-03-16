@@ -32,7 +32,7 @@ class TestForStmt:
 
         assert for_stmt is not None
         assert for_stmt.span.filename == "test.py"
-        assert cast(ir.Var, for_stmt.loop_var).name == "i"
+        assert cast(ir.Var, for_stmt.loop_var).name_hint == "i"
         assert isinstance(for_stmt.start, ir.ConstInt)
         assert isinstance(for_stmt.stop, ir.ConstInt)
         assert isinstance(for_stmt.step, ir.ConstInt)
@@ -57,7 +57,7 @@ class TestForStmt:
         assert for_stmt.step is not None
         assert isinstance(for_stmt.body, ir.SeqStmts)
         assert len(for_stmt.body.stmts) == 2
-        assert cast(ir.Var, for_stmt.loop_var).name == "i"
+        assert cast(ir.Var, for_stmt.loop_var).name_hint == "i"
         assert cast(ir.ConstInt, for_stmt.start).value == 0
         assert cast(ir.ConstInt, for_stmt.stop).value == 10
         assert cast(ir.ConstInt, for_stmt.step).value == 2
@@ -190,14 +190,14 @@ class TestForStmt:
         # ForStmt with single return variable
         for_stmt2 = ir.ForStmt(i, start, stop, step, [], assign, [x], span)
         assert len(for_stmt2.return_vars) == 1
-        assert for_stmt2.return_vars[0].name == "x"
+        assert for_stmt2.return_vars[0].name_hint == "x"
 
         # ForStmt with multiple return variables
         for_stmt3 = ir.ForStmt(i, start, stop, step, [], assign, [x, y, z], span)
         assert len(for_stmt3.return_vars) == 3
-        assert for_stmt3.return_vars[0].name == "x"
-        assert for_stmt3.return_vars[1].name == "y"
-        assert for_stmt3.return_vars[2].name == "z"
+        assert for_stmt3.return_vars[0].name_hint == "x"
+        assert for_stmt3.return_vars[1].name_hint == "y"
+        assert for_stmt3.return_vars[2].name_hint == "z"
 
     def test_for_stmt_with_iter_args(self):
         """Test ForStmt with iter_args."""
@@ -224,13 +224,13 @@ class TestForStmt:
         # ForStmt with single iter_arg
         for_stmt2 = ir.ForStmt(i, start, stop, step, [iter_arg1], assign, [], span)
         assert len(for_stmt2.iter_args) == 1
-        assert for_stmt2.iter_args[0].name == "arg1"
+        assert for_stmt2.iter_args[0].name_hint == "arg1"
 
         # ForStmt with multiple iter_args
         for_stmt3 = ir.ForStmt(i, start, stop, step, [iter_arg1, iter_arg2], assign, [], span)
         assert len(for_stmt3.iter_args) == 2
-        assert for_stmt3.iter_args[0].name == "arg1"
-        assert for_stmt3.iter_args[1].name == "arg2"
+        assert for_stmt3.iter_args[0].name_hint == "arg1"
+        assert for_stmt3.iter_args[1].name_hint == "arg2"
 
 
 class TestForStmtHash:

@@ -67,13 +67,34 @@
 
 | 节点类型 | 字段 | 说明 |
 | -------- | ---- | ---- |
-| **Var** | `name_`, `type_` | 变量引用 |
-| **IterArg** | `name_`, `type_`, `initValue_` | 循环迭代参数（扩展自 Var） |
+| **Var** | `name_hint_`, `type_` | 变量引用（以指针为标识，而非名称） |
+| **IterArg** | `name_hint_`, `type_`, `initValue_` | 循环迭代参数（扩展自 Var） |
 | **ConstInt** | `value_`, `dtype_` | 整数常量 |
 | **ConstBool** | `value_` | 布尔常量（始终为 BOOL dtype） |
 | **ConstFloat** | `value_`, `dtype_` | 浮点常量 |
 | **Call** | `op_`, `args_`, `kwargs_` | 函数/运算符调用 |
 | **TupleGetItemExpr** | `tuple_`, `index_` | 元组元素访问 |
+
+### Var 的标识（Identity）
+
+变量的标识由**对象指针**（或等价的 `unique_id_`）决定，**而非** `name_hint_`。两个具有相同 `name_hint_` 的 `Var` 对象，如果是不同对象，则是不同的变量。该字段命名为 `name_hint_`（而非 `name_`），正是为了明确这一语义。
+
+| 字段 | 用途 |
+| ---- | ---- |
+| `name_hint_` | 用于打印和调试的装饰性标签。属于 `IgnoreField` —— 不参与结构比较和哈希。 |
+| `unique_id_` | 构造时分配的单调递增 ID，用于确定性哈希。 |
+| 对象指针 | 权威标识 —— 两个引用指向同一变量，当且仅当它们指向同一个 `Var` 对象。 |
+
+```cpp
+// 相同的 name_hint，但是不同的变量
+auto x1 = std::make_shared<Var>("x", type, span);
+auto x2 = std::make_shared<Var>("x", type, span);
+// x1 != x2 —— 尽管共享名称 "x"，它们是不同的变量
+
+// 同一个变量的两次引用
+auto x_ref = x1;
+// x1 == x_ref —— 相同的指针，相同的变量
+```
 
 ### 二元表达式节点
 

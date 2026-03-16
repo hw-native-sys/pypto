@@ -222,7 +222,7 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (call) result = ClassifyCallAffinity(call);
-    var_affinity[assign->var_->name_] = result;
+    var_affinity[assign->var_->name_hint_] = result;
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyCallAffinity(call);
@@ -365,7 +365,7 @@ void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_se
       live.insert(refs.var_refs.begin(), refs.var_refs.end());
       // Mark LHS of side-effect assignments as live for downstream propagation
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        live.insert(assign->var_->name_);
+        live.insert(assign->var_->name_hint_);
       }
     }
     // Collect variable refs from control expressions and iter_args init values
@@ -407,7 +407,7 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (live.count(assign->var_->name_) || IsSideEffectOp(stmt)) {
+      if (live.count(assign->var_->name_hint_) || IsSideEffectOp(stmt)) {
         result.push_back(stmt);
       }
     } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
@@ -453,7 +453,7 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
   while (changed) {
     changed = false;
     for (auto it = all_assigns.rbegin(); it != all_assigns.rend(); ++it) {
-      if (!live.count((*it)->var_->name_)) continue;
+      if (!live.count((*it)->var_->name_hint_)) continue;
 
       outline_utils::VarRefCollector refs;
       refs.VisitExpr((*it)->value_);
@@ -662,8 +662,8 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
     // Determine which iter_args are live
     std::vector<size_t> kept_indices;
     for (size_t i = 0; i < iter_args.size(); ++i) {
-      bool used_in_body = body_refs.count(iter_args[i]->name_) > 0;
-      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i]->name_) > 0;
+      bool used_in_body = body_refs.count(iter_args[i]->name_hint_) > 0;
+      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i]->name_hint_) > 0;
       if (used_in_body || return_var_used) {
         kept_indices.push_back(i);
       }
@@ -701,7 +701,7 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
 void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<std::string, StmtPtr>& def_map) {
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      def_map[assign->var_->name_] = stmt;
+      def_map[assign->var_->name_hint_] = stmt;
     }
   }
 }
@@ -768,7 +768,7 @@ std::vector<StmtPtr> FixupIterArgInitValues(
       // Add pulled definitions to defined_so_far so later statements see them
       for (const auto& def : missing_defs) {
         if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(def)) {
-          defined_so_far.insert(assign->var_->name_);
+          defined_so_far.insert(assign->var_->name_hint_);
         }
       }
       result.insert(result.end(), missing_defs.begin(), missing_defs.end());
@@ -958,7 +958,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // Use the dest_var's type (which has memory_space from infer_tile_memory_space)
           // as the source, then strip TileView so the type is DSL-expressible.
           auto clean_type = CleanTileType(bm.dest_var->GetType());
-          auto clean_var = std::make_shared<Var>(bm.dest_var->name_, clean_type, stmt->span_);
+          auto clean_var = std::make_shared<Var>(bm.dest_var->name_hint_, clean_type, stmt->span_);
           tpop_var_remap[bm.dest_var.get()] = clean_var;
           result.push_back(std::make_shared<AssignStmt>(
               clean_var, CreateTpop(pop_op, clean_type, stmt->span_), stmt->span_));
@@ -1057,7 +1057,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     std::unordered_map<const Var*, ExprPtr> param_map;
     std::vector<VarPtr> fresh_params;
     for (const auto& var : func->params_) {
-      auto fresh = std::make_shared<Var>(var->name_, var->GetType(), func->span_);
+      auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), func->span_);
       fresh_params.push_back(fresh);
       param_map[var.get()] = fresh;
     }

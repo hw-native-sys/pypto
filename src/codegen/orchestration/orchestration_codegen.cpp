@@ -230,9 +230,9 @@ class OrchestrationInfoCollector : public IRVisitor {
   void VisitStmt_(const ReturnStmtPtr& ret) override {
     for (const auto& val : ret->value_) {
       if (auto var = As<Var>(val)) {
-        return_vars.push_back(GetSSABaseName(var->name_));
+        return_vars.push_back(GetSSABaseName(var->name_hint_));
       } else if (auto iter_arg = As<IterArg>(val)) {
-        return_vars.push_back(GetSSABaseName(iter_arg->name_));
+        return_vars.push_back(GetSSABaseName(iter_arg->name_hint_));
       }
     }
     IRVisitor::VisitStmt_(ret);
@@ -242,17 +242,17 @@ class OrchestrationInfoCollector : public IRVisitor {
     if (auto call = As<Call>(assign->value_)) {
       if (call->op_->name_ == "tensor.create") {
         // tensor.create produces a local tensor that needs make_tensor allocation
-        std::string var_name = GetSSABaseName(assign->var_->name_);
+        std::string var_name = GetSSABaseName(assign->var_->name_hint_);
         output_tensors.insert(var_name);
         output_tensor_assigns[var_name] = assign;
       } else if (!IsBuiltinOp(call->op_->name_)) {
-        std::string var_name = GetSSABaseName(assign->var_->name_);
+        std::string var_name = GetSSABaseName(assign->var_->name_hint_);
 
         // Check if this call returns a TupleType
         if (As<TupleType>(call->GetType())) {
           // Generate unique key per tuple-returning call (works with/without SSA)
           std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
-          current_tuple_key_[assign->var_->name_] = unique_key;
+          current_tuple_key_[assign->var_->name_hint_] = unique_key;
           call_to_tuple_key[call.get()] = unique_key;
           call_to_result_var[call.get()] = var_name;
           output_tensor_assigns[var_name] = assign;
@@ -265,12 +265,12 @@ class OrchestrationInfoCollector : public IRVisitor {
       }
     } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
       // Handle: mi = TupleGetItemExpr(_tuple_tmp, 0)
-      std::string var_name = GetSSABaseName(assign->var_->name_);
+      std::string var_name = GetSSABaseName(assign->var_->name_hint_);
       std::string tuple_ref_name;
       if (auto var = As<Var>(tuple_get->tuple_)) {
-        tuple_ref_name = var->name_;
+        tuple_ref_name = var->name_hint_;
       } else if (auto iter_arg = As<IterArg>(tuple_get->tuple_)) {
-        tuple_ref_name = iter_arg->name_;
+        tuple_ref_name = iter_arg->name_hint_;
       }
 
       // Find the unique key for the most recent tuple call with this var name
@@ -289,7 +289,7 @@ class OrchestrationInfoCollector : public IRVisitor {
 
  private:
   int tuple_call_counter_ = 0;
-  // Maps raw var name (from assign->var_->name_) to the unique key of the most recent tuple call
+  // Maps raw var name (from assign->var_->name_hint_) to the unique key of the most recent tuple call
   std::map<std::string, std::string> current_tuple_key_;
 };
 
@@ -354,7 +354,7 @@ std::string GenerateArgDefines(const FunctionPtr& func, const std::vector<std::s
   // Pointer defines for input tensor params
   for (const auto& var : func->params_) {
     if (As<TensorType>(var->GetType())) {
-      std::string name = GetSSABaseName(var->name_);
+      std::string name = GetSSABaseName(var->name_hint_);
       std::string upper_name = name;
       for (auto& ch : upper_name) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
       oss << "#define ARG_PTR_" << upper_name << " " << idx++ << "\n";
@@ -533,7 +533,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK(ci) << "Internal error: expected ConstInt expression";
     return ci->value_;
   }
-  std::string GetVarName(const VarPtr& var) override { return GetSSABaseName(var->name_); }
+  std::string GetVarName(const VarPtr& var) override { return GetSSABaseName(var->name_hint_); }
   [[nodiscard]] std::string TryGetVarName(const ir::ExprPtr& expr) const override {
     std::string name = CodegenBase::TryGetVarName(expr);
     return name.empty() ? name : GetSSABaseName(name);
@@ -551,7 +551,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                   "generating sequential loop as fallback";
     }
 
-    std::string loop_var = GetSSABaseName(for_stmt->loop_var_->name_);
+    std::string loop_var = GetSSABaseName(for_stmt->loop_var_->name_hint_);
     std::string start_expr = GenerateExprString(for_stmt->start_);
     std::string stop_expr = GenerateExprString(for_stmt->stop_);
     std::string step_expr = GenerateExprString(for_stmt->step_);
@@ -559,7 +559,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       const auto& iter_arg = for_stmt->iter_args_[i];
       const auto& return_var = for_stmt->return_vars_[i];
-      std::string resolved_return = GetSSABaseName(return_var->name_);
+      std::string resolved_return = GetSSABaseName(return_var->name_hint_);
       std::string init_value = GenerateExprString(iter_arg->initValue_);
       // Skip iter_arg init when:
       // 1. Variable already declared (e.g., via make_tensor) — would be C++ redeclaration error
@@ -580,7 +580,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto saved = current_return_var_names_;
     current_return_var_names_.clear();
     for (const auto& rv : for_stmt->return_vars_) {
-      current_return_var_names_.push_back(GetSSABaseName(rv->name_));
+      current_return_var_names_.push_back(GetSSABaseName(rv->name_hint_));
     }
     VisitStmt(for_stmt->body_);
     current_return_var_names_ = saved;
@@ -596,7 +596,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // Declare return variables before the if block
     for (const auto& rv : if_stmt->return_vars_) {
-      code_ << Indent() << GetCppType(rv->GetType()) << " " << GetSSABaseName(rv->name_) << ";\n";
+      code_ << Indent() << GetCppType(rv->GetType()) << " " << GetSSABaseName(rv->name_hint_) << ";\n";
     }
 
     code_ << Indent() << "if (" << cond_expr << ") {\n";
@@ -607,7 +607,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto saved = current_return_var_names_;
     current_return_var_names_.clear();
     for (const auto& rv : if_stmt->return_vars_) {
-      current_return_var_names_.push_back(GetSSABaseName(rv->name_));
+      current_return_var_names_.push_back(GetSSABaseName(rv->name_hint_));
     }
     VisitStmt(if_stmt->then_body_);
     current_return_var_names_ = saved;
@@ -625,7 +625,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       auto saved2 = current_return_var_names_;
       current_return_var_names_.clear();
       for (const auto& rv : if_stmt->return_vars_) {
-        current_return_var_names_.push_back(GetSSABaseName(rv->name_));
+        current_return_var_names_.push_back(GetSSABaseName(rv->name_hint_));
       }
       VisitStmt(*if_stmt->else_body_);
       current_return_var_names_ = saved2;
@@ -639,7 +639,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
-    std::string var_name = GetSSABaseName(assign->var_->name_);
+    std::string var_name = GetSSABaseName(assign->var_->name_hint_);
 
     if (auto call = As<Call>(assign->value_)) {
       const std::string& op_name = call->op_->name_;
@@ -964,7 +964,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // Build param and return name sets (using resolved base names)
   std::set<std::string> param_names;
   for (const auto& var : func->params_) {
-    param_names.insert(GetSSABaseName(var->name_));
+    param_names.insert(GetSSABaseName(var->name_hint_));
   }
   std::set<std::string> return_name_set(return_vars.begin(), return_vars.end());
 
@@ -1010,7 +1010,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "    // Extract device pointers\n";
   for (const auto& var : func->params_) {
     if (As<TensorType>(var->GetType())) {
-      std::string name = GetSSABaseName(var->name_);
+      std::string name = GetSSABaseName(var->name_hint_);
       std::string upper_name = name;
       for (auto& ch : upper_name) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
       oss << "    void* arg_" << name << "_ptr = reinterpret_cast<void*>(args[ARG_PTR_" << upper_name
@@ -1036,7 +1036,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   for (const auto& var : func->params_) {
     auto tensor_type = As<TensorType>(var->GetType());
     if (tensor_type) {
-      std::string name = GetSSABaseName(var->name_);
+      std::string name = GetSSABaseName(var->name_hint_);
       oss << GenerateMakeTensorExternal(name, "arg_" + name + "_ptr", tensor_type, stmt_codegen);
     }
   }

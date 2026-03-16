@@ -207,20 +207,20 @@ struct GlobalVarPtrLess {
  */
 class Var : public Expr {
  public:
-  std::string name_;
+  std::string name_hint_;
 
   /**
    * @brief Create a variable reference
    *
-   * @param name Variable name
+   * @param name_hint Variable name hint (cosmetic label, not an identifier)
    * @param type Type of the variable (ScalarType, TensorType, or TileType)
    *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param span Source location
    * @return Shared pointer to const Var expression
    */
-  Var(std::string name, TypePtr type, Span span)
+  Var(std::string name_hint, TypePtr type, Span span)
       : Expr(std::move(span), std::move(type)),
-        name_(std::move(name)),
+        name_hint_(std::move(name_hint)),
         unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
 
   /**
@@ -239,11 +239,11 @@ class Var : public Expr {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (name_ as IGNORE field)
+   * @return Tuple of field descriptors (name_hint_ as IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
-                          std::make_tuple(reflection::IgnoreField(&Var::name_, "name")));
+                          std::make_tuple(reflection::IgnoreField(&Var::name_hint_, "name_hint")));
   }
 
  private:
@@ -292,14 +292,14 @@ class IterArg : public Var {
   /**
    * @brief Create an iteration argument
    *
-   * @param name Variable name (scoped to loop body)
+   * @param name_hint Variable name hint (scoped to loop body)
    * @param type Type of the variable (ScalarType, TensorType, or TileType)
    *             Memory reference information is stored in ShapedType for Tensor/Tile types
    * @param initValue Initial value expression for first iteration
    * @param span Source location
    */
-  IterArg(std::string name, TypePtr type, ExprPtr initValue, Span span)
-      : Var(std::move(name), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
+  IterArg(std::string name_hint, TypePtr type, ExprPtr initValue, Span span)
+      : Var(std::move(name_hint), std::move(type), std::move(span)), initValue_(std::move(initValue)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::IterArg; }
   [[nodiscard]] std::string TypeName() const override { return "IterArg"; }

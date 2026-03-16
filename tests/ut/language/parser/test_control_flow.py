@@ -457,7 +457,7 @@ class TestScalarRange:
         for_stmt = _find_for_stmt(scalar_stop)
         # stop should be a Var reference to the Scalar parameter 'n'
         assert isinstance(for_stmt.stop, ir.Var)
-        assert for_stmt.stop.name == "n"
+        assert for_stmt.stop.name_hint == "n"
         assert isinstance(for_stmt.stop.type, ir.ScalarType)
 
     def test_scalar_param_as_start_stop(self):
@@ -475,7 +475,7 @@ class TestScalarRange:
         for_stmt = _find_for_stmt(scalar_start_stop)
         assert isinstance(for_stmt.start, ir.ConstInt)
         assert isinstance(for_stmt.stop, ir.Var)
-        assert for_stmt.stop.name == "n"
+        assert for_stmt.stop.name_hint == "n"
 
     def test_scalar_param_as_start_stop_step(self):
         """Test pl.range(0, n, s) where n and s are Scalar[INT64] parameters."""
@@ -494,9 +494,9 @@ class TestScalarRange:
         for_stmt = _find_for_stmt(scalar_full_range)
         assert isinstance(for_stmt.start, ir.ConstInt)
         assert isinstance(for_stmt.stop, ir.Var)
-        assert for_stmt.stop.name == "n"
+        assert for_stmt.stop.name_hint == "n"
         assert isinstance(for_stmt.step, ir.Var)
-        assert for_stmt.step.name == "s"
+        assert for_stmt.step.name_hint == "s"
 
     def test_scalar_expression_as_stop(self):
         """Test pl.range(n * 2) where n is a Scalar[INT64] parameter."""
@@ -560,7 +560,7 @@ class TestScalarRange:
         assert isinstance(scalar_range_iter, ir.Function)
         for_stmt = _find_for_stmt(scalar_range_iter)
         assert isinstance(for_stmt.stop, ir.Var)
-        assert for_stmt.stop.name == "n"
+        assert for_stmt.stop.name_hint == "n"
         assert len(for_stmt.iter_args) == 1
 
     def test_scalar_parallel_range(self):
@@ -575,7 +575,7 @@ class TestScalarRange:
         assert isinstance(scalar_parallel, ir.Function)
         for_stmt = _find_for_stmt(scalar_parallel)
         assert isinstance(for_stmt.stop, ir.Var)
-        assert for_stmt.stop.name == "n"
+        assert for_stmt.stop.name_hint == "n"
         assert for_stmt.kind == ir.ForKind.Parallel
 
 

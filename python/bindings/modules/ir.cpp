@@ -430,7 +430,7 @@ void BindIR(nb::module_& m) {
   auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
 
   var_class.def(
-      nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name"), nb::arg("type"),
+      nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name_hint"), nb::arg("type"),
       nb::arg("span"),
       "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
   BindFields<Var>(var_class);
@@ -438,7 +438,7 @@ void BindIR(nb::module_& m) {
   // IterArg - const shared_ptr
   auto iterarg_class = nb::class_<IterArg, Var>(ir, "IterArg", "Iteration argument variable");
   iterarg_class.def(nb::init<const std::string&, const TypePtr&, const ExprPtr&, const Span&>(),
-                    nb::arg("name"), nb::arg("type"), nb::arg("initValue"), nb::arg("span"),
+                    nb::arg("name_hint"), nb::arg("type"), nb::arg("initValue"), nb::arg("span"),
                     "Create an iteration argument with initial value");
   BindFields<IterArg>(iterarg_class);
 

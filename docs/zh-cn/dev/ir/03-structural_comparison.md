@@ -170,7 +170,7 @@ assert ir.structural_hash(c1) == ir.structural_hash(c2)
 
 ### 确定性
 
-`structural_hash` 在单次进程运行中是确定性的。变量标识基于构造时分配的单调递增唯一 ID，而非指针地址，因此相同的构造序列始终产生相同的哈希值。
+`structural_hash` 在单次进程运行中是确定性的。变量标识基于构造时分配的单调递增唯一 ID（`Var::unique_id_`），而非指针地址或 `name_hint_` 字符串，因此相同的构造序列始终产生相同的哈希值。`name_hint_` 字段属于 `IgnoreField`，不参与结构比较和哈希计算。
 
 ### 哈希一致性保证
 

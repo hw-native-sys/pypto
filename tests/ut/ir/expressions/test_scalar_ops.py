@@ -28,8 +28,8 @@ class TestScalarMakeHelpers:
         result = ir.min_(x, y, span)
 
         assert isinstance(result, ir.Min)
-        assert cast(ir.Var, result.left).name == "x"
-        assert cast(ir.Var, result.right).name == "y"
+        assert cast(ir.Var, result.left).name_hint == "x"
+        assert cast(ir.Var, result.right).name_hint == "y"
 
     def test_max_creation(self):
         """Test ir.max_ creates a Max expression with type promotion."""
@@ -41,8 +41,8 @@ class TestScalarMakeHelpers:
         result = ir.max_(x, y, span)
 
         assert isinstance(result, ir.Max)
-        assert cast(ir.Var, result.left).name == "x"
-        assert cast(ir.Var, result.right).name == "y"
+        assert cast(ir.Var, result.left).name_hint == "x"
+        assert cast(ir.Var, result.right).name_hint == "y"
 
     def test_min_type_promotion(self):
         """Test that min_ promotes operand types (e.g. INT32 + INT64 -> INT64)."""
@@ -63,7 +63,7 @@ class TestScalarMakeHelpers:
         result = ir.not_(x)
 
         assert isinstance(result, ir.Not)
-        assert cast(ir.Var, result.operand).name == "x"
+        assert cast(ir.Var, result.operand).name_hint == "x"
 
     def test_not_returns_bool(self):
         """Test ir.not_ always returns BOOL type, consistent with logical operators."""
@@ -83,7 +83,7 @@ class TestScalarMakeHelpers:
         result = ir.bit_not(x)
 
         assert isinstance(result, ir.BitNot)
-        assert cast(ir.Var, result.operand).name == "x"
+        assert cast(ir.Var, result.operand).name_hint == "x"
 
     def test_bit_not_rejects_float(self):
         """Test ir.bit_not raises TypeError for float operand."""

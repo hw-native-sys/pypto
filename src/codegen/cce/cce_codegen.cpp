@@ -212,8 +212,8 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
                         "->start_offset;");
 
       // Register pointer/struct by IR var name for later lookup in tile.load/store
-      context_.RegisterPointer(param->name_, param_name);
-      context_.RegisterTensorStruct(param->name_, tensor_var);
+      context_.RegisterPointer(param->name_hint_, param_name);
+      context_.RegisterTensorStruct(param->name_hint_, tensor_var);
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
       // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
@@ -385,8 +385,9 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
         // Tensor: propagate pointer/struct from yielded var, no assignment
         if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
           auto& yielded_var = yield_var_buffer_[i];
-          context_.RegisterPointer(return_var->name_, context_.GetPointer(yielded_var->name_));
-          context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(yielded_var->name_));
+          context_.RegisterPointer(return_var->name_hint_, context_.GetPointer(yielded_var->name_hint_));
+          context_.RegisterTensorStruct(return_var->name_hint_,
+                                        context_.GetTensorStruct(yielded_var->name_hint_));
         }
       } else {
         std::string return_var_name = context_.SanitizeName(return_var);
@@ -414,8 +415,9 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
         if (std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
           if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
             auto& yielded_var = yield_var_buffer_[i];
-            context_.RegisterPointer(return_var->name_, context_.GetPointer(yielded_var->name_));
-            context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(yielded_var->name_));
+            context_.RegisterPointer(return_var->name_hint_, context_.GetPointer(yielded_var->name_hint_));
+            context_.RegisterTensorStruct(return_var->name_hint_,
+                                          context_.GetTensorStruct(yielded_var->name_hint_));
           }
         } else {
           std::string return_var_name = context_.SanitizeName(return_var);
@@ -466,8 +468,8 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
         // Tensor iter_arg: propagate pointer/struct from init value, no declaration
         auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
         INTERNAL_CHECK(init_var != nullptr) << "Internal error: tensor iter_arg init must be a Var";
-        context_.RegisterPointer(iter_arg->name_, context_.GetPointer(init_var->name_));
-        context_.RegisterTensorStruct(iter_arg->name_, context_.GetTensorStruct(init_var->name_));
+        context_.RegisterPointer(iter_arg->name_hint_, context_.GetPointer(init_var->name_hint_));
+        context_.RegisterTensorStruct(iter_arg->name_hint_, context_.GetTensorStruct(init_var->name_hint_));
         iter_arg_names.emplace_back("");  // Placeholder — not used for tensor
       } else {
         std::string iter_arg_name = context_.SanitizeName(iter_arg);
@@ -517,9 +519,10 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
         // Tensor: propagate pointer/struct from yielded var
         if (i < yield_var_buffer_.size() && yield_var_buffer_[i]) {
           auto& yielded_var = yield_var_buffer_[i];
-          context_.RegisterPointer(op->iter_args_[i]->name_, context_.GetPointer(yielded_var->name_));
-          context_.RegisterTensorStruct(op->iter_args_[i]->name_,
-                                        context_.GetTensorStruct(yielded_var->name_));
+          context_.RegisterPointer(op->iter_args_[i]->name_hint_,
+                                   context_.GetPointer(yielded_var->name_hint_));
+          context_.RegisterTensorStruct(op->iter_args_[i]->name_hint_,
+                                        context_.GetTensorStruct(yielded_var->name_hint_));
         }
       } else {
         emitter_.EmitLine(iter_arg_names[i] + " = " + yield_buffer_[i] + ";");
@@ -542,8 +545,9 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
 
       if (is_tensor) {
         // Tensor: propagate pointer/struct from iter_arg
-        context_.RegisterPointer(return_var->name_, context_.GetPointer(op->iter_args_[i]->name_));
-        context_.RegisterTensorStruct(return_var->name_, context_.GetTensorStruct(op->iter_args_[i]->name_));
+        context_.RegisterPointer(return_var->name_hint_, context_.GetPointer(op->iter_args_[i]->name_hint_));
+        context_.RegisterTensorStruct(return_var->name_hint_,
+                                      context_.GetTensorStruct(op->iter_args_[i]->name_hint_));
       } else if (i < iter_arg_names.size()) {
         context_.RegisterVar(return_var, iter_arg_names[i]);
       } else {

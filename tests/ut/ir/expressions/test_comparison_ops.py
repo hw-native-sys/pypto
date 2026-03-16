@@ -26,22 +26,22 @@ class TestComparisonOps:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         eq_expr = ir.Eq(x, y, dtype, span)
-        assert cast(ir.Var, eq_expr.left).name == "x"
+        assert cast(ir.Var, eq_expr.left).name_hint == "x"
 
         ne_expr = ir.Ne(x, y, dtype, span)
-        assert cast(ir.Var, ne_expr.left).name == "x"
+        assert cast(ir.Var, ne_expr.left).name_hint == "x"
 
         lt_expr = ir.Lt(x, y, dtype, span)
-        assert cast(ir.Var, lt_expr.left).name == "x"
+        assert cast(ir.Var, lt_expr.left).name_hint == "x"
 
         le_expr = ir.Le(x, y, dtype, span)
-        assert cast(ir.Var, le_expr.left).name == "x"
+        assert cast(ir.Var, le_expr.left).name_hint == "x"
 
         gt_expr = ir.Gt(x, y, dtype, span)
-        assert cast(ir.Var, gt_expr.left).name == "x"
+        assert cast(ir.Var, gt_expr.left).name_hint == "x"
 
         ge_expr = ir.Ge(x, y, dtype, span)
-        assert cast(ir.Var, ge_expr.left).name == "x"
+        assert cast(ir.Var, ge_expr.left).name_hint == "x"
 
 
 if __name__ == "__main__":

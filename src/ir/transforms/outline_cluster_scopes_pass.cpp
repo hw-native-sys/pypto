@@ -61,8 +61,8 @@ Pass OutlineClusterScopes() {
 
       outline_utils::VarCollector type_collector;
       for (const auto& var : func->params_) {
-        type_collector.var_types[var->name_] = var->GetType();
-        type_collector.var_objects[var->name_] = var;
+        type_collector.var_types[var->name_hint_] = var->GetType();
+        type_collector.var_objects[var->name_hint_] = var;
       }
       type_collector.VisitStmt(func->body_);
 

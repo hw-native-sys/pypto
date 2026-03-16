@@ -190,8 +190,8 @@ static IRNodePtr DeserializeVar(const msgpack::object& fields_obj, msgpack::zone
                                 DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
-  std::string name = GET_FIELD(std::string, "name");
-  return std::make_shared<Var>(name, type, span);
+  std::string name_hint = GET_FIELD(std::string, "name_hint");
+  return std::make_shared<Var>(name_hint, type, span);
 }
 
 // Deserialize IterArg
@@ -199,21 +199,21 @@ static IRNodePtr DeserializeIterArg(const msgpack::object& fields_obj, msgpack::
                                     DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
-  std::string name = GET_FIELD(std::string, "name");
+  std::string name_hint = GET_FIELD(std::string, "name_hint");
   auto initValue =
       std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("initValue"), zone));
-  return std::make_shared<IterArg>(name, type, initValue, span);
+  return std::make_shared<IterArg>(name_hint, type, initValue, span);
 }
 
 // Deserialize MemRef
 static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::zone& zone,
                                    DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  std::string name = GET_FIELD(std::string, "name");
+  std::string name_hint = GET_FIELD(std::string, "name_hint");
   auto addr = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("addr"), zone));
   uint64_t size = GET_FIELD(uint64_t, "size");
   uint64_t id = GET_FIELD(uint64_t, "id");
-  return std::make_shared<MemRef>(name, addr, size, id, span);
+  return std::make_shared<MemRef>(name_hint, addr, size, id, span);
 }
 
 // Deserialize ConstInt

@@ -229,7 +229,7 @@ bool IsA(const std::shared_ptr<const Base>& base) {
  * // Concrete cast
  * if (auto var = As<Var>(expr)) {
  *   // Use var safely
- *   std::cout << var->name_;
+ *   std::cout << var->name_hint_;
  * }
  *
  * // Base class cast (NEW)

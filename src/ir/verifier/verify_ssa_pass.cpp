@@ -110,7 +110,7 @@ void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
 
   if (var_assignment_count_[key] > 1) {
     std::ostringstream msg;
-    msg << "Variable '" << var->name_ << "' is assigned more than once (" << var_assignment_count_[key]
+    msg << "Variable '" << var->name_hint_ << "' is assigned more than once (" << var_assignment_count_[key]
         << " times), violating SSA form";
     RecordError(ssa::ErrorType::MULTIPLE_ASSIGNMENT, msg.str(), var->span_);
   }

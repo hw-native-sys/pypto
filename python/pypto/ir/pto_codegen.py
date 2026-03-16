@@ -206,7 +206,7 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
     var_names: list[str] = []
 
     for i, param in enumerate(func.params):
-        param_name = param.name
+        param_name = param.name_hint
         param_type = param.type
 
         if isinstance(param_type, _ir_core.TensorType):
@@ -245,12 +245,13 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
         if not isinstance(param.type, _ir_core.TensorType):
             continue
         for dim_idx, dim in enumerate(param.type.shape):
-            if isinstance(dim, _ir_core.Var) and dim.name not in seen_dyn_vars:
-                var_name = dim.name
+            if isinstance(dim, _ir_core.Var) and dim.name_hint not in seen_dyn_vars:
+                var_name = dim.name_hint
                 seen_dyn_vars.add(var_name)
                 lines.append(f"    // Extract dynamic dim: {var_name}")
                 lines.append(
-                    f"    int64_t {var_name} = static_cast<int64_t>({param.name}_tensor->shapes[{dim_idx}]);"
+                    f"    int64_t {var_name} = static_cast<int64_t>"
+                    f"({param.name_hint}_tensor->shapes[{dim_idx}]);"
                 )
                 lines.append("")
                 var_names.append(var_name)

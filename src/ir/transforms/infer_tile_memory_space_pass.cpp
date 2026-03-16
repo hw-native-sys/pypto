@@ -75,7 +75,7 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
  public:
   explicit TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params) {
     for (const auto& var : params) {
-      CHECK(!As<TileType>(var->GetType())) << "InCore function parameter '" << var->name_
+      CHECK(!As<TileType>(var->GetType())) << "InCore function parameter '" << var->name_hint_
                                            << "' has TileType, but InCore parameters must be TensorType";
     }
   }
@@ -241,7 +241,7 @@ class TileMemorySpaceMutator : public IRMutator {
     if (tile_type && mem_it != var_memory_.end()) {
       auto new_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
                                                  tile_type->tile_view_, mem_it->second);
-      auto new_var = std::make_shared<Var>(op->name_, std::move(new_type), op->span_);
+      auto new_var = std::make_shared<Var>(op->name_hint_, std::move(new_type), op->span_);
       var_cache_[op] = new_var;
       return new_var;
     }
@@ -340,8 +340,8 @@ class TileMemorySpaceMutator : public IRMutator {
                                                  move_type->tile_view_, target);
     auto mutated_producer_var = As<Var>(mutated_producer);
     INTERNAL_CHECK(mutated_producer_var) << "Internal error: mutated producer is not a Var";
-    auto moved_var = std::make_shared<Var>(mutated_producer_var->name_ + "_" + MemorySpaceToString(target),
-                                           std::move(moved_type), span);
+    auto moved_var = std::make_shared<Var>(
+        mutated_producer_var->name_hint_ + "_" + MemorySpaceToString(target), std::move(moved_type), span);
 
     // Register for substitution and in var_cache_ so VisitExpr_(VarPtr) returns it as-is
     MoveKey key = {original_var, target};
@@ -420,7 +420,7 @@ class TileMemoryInferredVerifier : public IRVisitor {
       if (tile_type && !tile_type->memory_space_.has_value()) {
         diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileMemoryInferred", 0,
                                   "InCore function '" + func_name_ + "': TileType variable '" +
-                                      op->var_->name_ + "' has no memory_space set",
+                                      op->var_->name_hint_ + "' has no memory_space set",
                                   op->var_->span_);
       }
     }
@@ -460,8 +460,9 @@ class TileMemoryInferredVerifier : public IRVisitor {
         }
         diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileMemoryInferred", 0,
                                   "InCore function '" + func_name_ + "': Op '" + call->op_->name_ +
-                                      "' input " + std::to_string(i) + " ('" + var->name_ + "') requires " +
-                                      allowed_str + " but is in " + MemorySpaceToString(actual),
+                                      "' input " + std::to_string(i) + " ('" + var->name_hint_ +
+                                      "') requires " + allowed_str + " but is in " +
+                                      MemorySpaceToString(actual),
                                   var->span_);
       }
     }

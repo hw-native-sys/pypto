@@ -49,7 +49,7 @@ class VarSubstitutor : public IRMutator {
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = var_map_.find(op->name_);
+    auto it = var_map_.find(op->name_hint_);
     if (it != var_map_.end()) {
       return it->second;
     }
@@ -66,16 +66,16 @@ class VarRefCollector : public IRVisitor {
   std::unordered_set<std::string> var_refs;
 
  protected:
-  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op->name_); }
+  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op->name_hint_); }
 
   void VisitExpr_(const IterArgPtr& op) override {
-    var_refs.insert(op->name_);
+    var_refs.insert(op->name_hint_);
     // Use dynamic_pointer_cast (not As<Var>) to match both Var and IterArg,
     // avoiding recursive initValue_ traversal that would pull in outer-scope vars.
     if (op->initValue_) {
       auto as_var = std::dynamic_pointer_cast<const Var>(op->initValue_);
       if (as_var) {
-        var_refs.insert(as_var->name_);
+        var_refs.insert(as_var->name_hint_);
       } else {
         VisitExpr(op->initValue_);
       }
@@ -90,34 +90,34 @@ class VarDefCollector : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    var_defs.insert(op->var_->name_);
+    var_defs.insert(op->var_->name_hint_);
     // Don't visit the RHS - we only care about definitions
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    var_defs.insert(op->loop_var_->name_);
+    var_defs.insert(op->loop_var_->name_hint_);
     for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg->name_);
+      var_defs.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_);
+      var_defs.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg->name_);
+      var_defs.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_);
+      var_defs.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var->name_);
+      var_defs.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -139,7 +139,7 @@ class StoreTargetCollector : public IRVisitor {
     auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
     if (opnode && opnode->name_ == "tile.store" && op->args_.size() >= 3) {
       if (auto var = As<Var>(op->args_[2])) {
-        store_targets.insert(var->name_);
+        store_targets.insert(var->name_hint_);
       }
     }
     IRVisitor::VisitExpr_(op);
@@ -172,7 +172,7 @@ class StoreEvalToAssignMutator : public IRMutator {
     if (call->args_.size() < 3) return op;
     auto var = As<Var>(call->args_[2]);
     if (!var) return op;
-    auto it = target_vars_.find(var->name_);
+    auto it = target_vars_.find(var->name_hint_);
     if (it == target_vars_.end()) return op;
     return std::make_shared<AssignStmt>(it->second, call, op->span_);
   }
@@ -189,47 +189,47 @@ class VarCollector : public IRVisitor {
 
  protected:
   void VisitExpr_(const VarPtr& op) override {
-    var_types.try_emplace(op->name_, op->GetType());
-    var_objects.try_emplace(op->name_, op);
+    var_types.try_emplace(op->name_hint_, op->GetType());
+    var_objects.try_emplace(op->name_hint_, op);
     IRVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    var_types[op->var_->name_] = op->var_->GetType();
-    var_objects[op->var_->name_] = op->var_;
+    var_types[op->var_->name_hint_] = op->var_->GetType();
+    var_objects[op->var_->name_hint_] = op->var_;
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    var_types[op->loop_var_->name_] = op->loop_var_->GetType();
-    var_objects[op->loop_var_->name_] = op->loop_var_;
+    var_types[op->loop_var_->name_hint_] = op->loop_var_->GetType();
+    var_objects[op->loop_var_->name_hint_] = op->loop_var_;
     for (const auto& iter_arg : op->iter_args_) {
-      var_types[iter_arg->name_] = iter_arg->GetType();
-      var_objects[iter_arg->name_] = iter_arg;
+      var_types[iter_arg->name_hint_] = iter_arg->GetType();
+      var_objects[iter_arg->name_hint_] = iter_arg;
     }
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_] = return_var->GetType();
-      var_objects[return_var->name_] = return_var;
+      var_types[return_var->name_hint_] = return_var->GetType();
+      var_objects[return_var->name_hint_] = return_var;
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& iter_arg : op->iter_args_) {
-      var_types[iter_arg->name_] = iter_arg->GetType();
-      var_objects[iter_arg->name_] = iter_arg;
+      var_types[iter_arg->name_hint_] = iter_arg->GetType();
+      var_objects[iter_arg->name_hint_] = iter_arg;
     }
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_] = return_var->GetType();
-      var_objects[return_var->name_] = return_var;
+      var_types[return_var->name_hint_] = return_var->GetType();
+      var_objects[return_var->name_hint_] = return_var;
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_] = return_var->GetType();
-      var_objects[return_var->name_] = return_var;
+      var_types[return_var->name_hint_] = return_var->GetType();
+      var_objects[return_var->name_hint_] = return_var;
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -269,7 +269,7 @@ class ScopeOutliner : public IRMutator {
    * (e.g., buf_0 -> buf_1), subsequent references must use the new name.
    */
   ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = store_target_renames_.find(op->name_);
+    auto it = store_target_renames_.find(op->name_hint_);
     if (it != store_target_renames_.end()) {
       return it->second;
     }

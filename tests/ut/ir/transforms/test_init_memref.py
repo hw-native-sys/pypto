@@ -33,7 +33,7 @@ def _get_tile_types(func):
     result = {}
     for stmt in _iter_assign_stmts(func):
         if isinstance(stmt.var.type, ir.TileType) and stmt.var.type.memref is not None:
-            result[stmt.var.name] = stmt.var.type
+            result[stmt.var.name_hint] = stmt.var.type
     return result
 
 
@@ -42,7 +42,7 @@ def _get_param_types(func):
     result = {}
     for param in func.params:
         if isinstance(param.type, ir.TensorType) and param.type.memref is not None:
-            result[param.name] = param.type
+            result[param.name_hint] = param.type
     return result
 
 
@@ -120,7 +120,7 @@ def test_init_memref_simple():
     result_memrefs = {}
     for stmt in _iter_assign_stmts(func):
         if isinstance(stmt.var.type, ir.TensorType) and stmt.var.type.memref is not None:
-            result_memrefs[stmt.var.name] = stmt.var.type.memref
+            result_memrefs[stmt.var.name_hint] = stmt.var.type.memref
     assert "result" in result_memrefs
     assert result_memrefs["result"] is param_types["output"].memref
 
@@ -201,7 +201,7 @@ def test_init_memref_matmul():
     result_memrefs = {}
     for stmt in _iter_assign_stmts(func):
         if isinstance(stmt.var.type, ir.TensorType) and stmt.var.type.memref is not None:
-            result_memrefs[stmt.var.name] = stmt.var.type.memref
+            result_memrefs[stmt.var.name_hint] = stmt.var.type.memref
     assert "result" in result_memrefs
     assert result_memrefs["result"] is param_types["output"].memref
 
@@ -364,12 +364,12 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
     add_stmt = next(
         stmt
         for stmt in _iter_assign_stmts(result_func)
-        if stmt.var.name == "tile_sum" and isinstance(stmt.value, ir.Call)
+        if stmt.var.name_hint == "tile_sum" and isinstance(stmt.value, ir.Call)
     )
     add_call = cast(ir.Call, add_stmt.value)
     external_tile = add_call.args[0]
     assert isinstance(external_tile, ir.Var)
-    assert external_tile.name == "tile_external"
+    assert external_tile.name_hint == "tile_external"
     assert isinstance(external_tile.type, ir.TileType)
     external_tile_type = external_tile.type
     assert external_tile_type.memory_space == MemorySpace.DDR

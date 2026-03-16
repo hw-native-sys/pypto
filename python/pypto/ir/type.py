@@ -35,7 +35,7 @@ def _infer_tile_memory_space_from_memref(memref: MemRef | None) -> MemorySpace |
     if memref is None:
         return None
     for prefix, memory_space in _MEMREF_NAME_PREFIX_TO_SPACE.items():
-        if memref.name.startswith(prefix):
+        if memref.name_hint.startswith(prefix):
             return memory_space
     return None
 

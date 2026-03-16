@@ -94,7 +94,7 @@ class MemRefUpdateMutator : public IRMutator {
   ExprPtr VisitExpr_(const VarPtr& op) override {
     TypePtr new_type = UpdateTypeMemRef(op->GetType());
     if (new_type != op->GetType()) {
-      return std::make_shared<Var>(op->name_, new_type, op->span_);
+      return std::make_shared<Var>(op->name_hint_, new_type, op->span_);
     }
     return op;
   }
@@ -104,7 +104,7 @@ class MemRefUpdateMutator : public IRMutator {
     TypePtr new_type = UpdateTypeMemRef(op->GetType());
 
     if (new_init != op->initValue_ || new_type != op->GetType()) {
-      return std::make_shared<IterArg>(op->name_, new_type, new_init, op->span_);
+      return std::make_shared<IterArg>(op->name_hint_, new_type, new_init, op->span_);
     }
     return op;
   }
@@ -294,7 +294,7 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
       auto memory_space = tile_type->GetMemorySpace();
       CHECK(memory_space.has_value())
           << "TileType with MemRef must have memory_space for address verification";
-      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_, op->span_);
+      CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_hint_, op->span_);
     }
   }
 

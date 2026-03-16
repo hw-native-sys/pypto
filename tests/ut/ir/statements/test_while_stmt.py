@@ -74,8 +74,8 @@ class TestWhileStmt:
 
         assert len(while_stmt.iter_args) == 1
         assert len(while_stmt.return_vars) == 1
-        assert cast(ir.IterArg, while_stmt.iter_args[0]).name == "x"
-        assert cast(ir.Var, while_stmt.return_vars[0]).name == "x_final"
+        assert cast(ir.IterArg, while_stmt.iter_args[0]).name_hint == "x"
+        assert cast(ir.Var, while_stmt.return_vars[0]).name_hint == "x_final"
         assert isinstance(while_stmt.body, ir.YieldStmt)
 
     def test_while_stmt_is_stmt(self):

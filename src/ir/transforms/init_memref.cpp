@@ -273,7 +273,7 @@ class InitMemRefMutator : public IRMutator {
     auto source_memory_space = ExtractMemorySpaceFromType(new_init->GetType());
     TypePtr new_type = CloneTypeWithMemRef(old_var_expr->GetType(), memref, source_memory_space);
 
-    return std::make_shared<IterArg>(iter_arg->name_, new_type, new_init, iter_arg->span_);
+    return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
   }
 
   // Process normal Var variable (creates new MemRef based on usage)
@@ -289,7 +289,7 @@ class InitMemRefMutator : public IRMutator {
                               ResolveTileMemorySpace(var_expr->GetType(), var, /*default_to_ddr=*/true));
     }
 
-    return std::make_shared<Var>(var->name_, new_type, var->span_);
+    return std::make_shared<Var>(var->name_hint_, new_type, var->span_);
   }
 
   // Create a new Var with MemRef initialized
@@ -330,7 +330,8 @@ class InitMemRefMutator : public IRMutator {
 
     // Check if the RHS is a Call expression
     if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
-      LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_ << " with call to " << call->op_->name_;
+      LOG_DEBUG << "Processing AssignStmt for " << op->var_->name_hint_ << " with call to "
+                << call->op_->name_;
 
       // Handle view operations: output should share MemRef with input tile
       if (IsViewOperation(call->op_->name_) && call->args_.size() > 0) {
@@ -345,10 +346,10 @@ class InitMemRefMutator : public IRMutator {
 
           // Create new variable with shared MemRef
           if (shared_memref.has_value()) {
-            LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_;
+            LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
             auto source_memory_space = ExtractMemorySpaceFromType(input_tile_arg->GetType());
             TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref, source_memory_space);
-            VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
+            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
 
             return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
@@ -373,7 +374,7 @@ class InitMemRefMutator : public IRMutator {
             TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref,
                                                    ResolveTileMemorySpace(op->var_->GetType(), op->var_));
 
-            VarPtr new_var = std::make_shared<Var>(op->var_->name_, new_type, op->var_->span_);
+            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
 
             return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
@@ -413,7 +414,7 @@ class InitMemRefMutator : public IRMutator {
         auto new_type = CloneTypeWithMemRef(new_for->return_vars_[i]->GetType(), ia_tile->memref_,
                                             ia_tile->GetMemorySpace());
         auto new_rv =
-            std::make_shared<Var>(new_for->return_vars_[i]->name_, new_type, new_for->return_vars_[i]->span_);
+            std::make_shared<Var>(new_for->return_vars_[i]->name_hint_, new_type, new_for->return_vars_[i]->span_);
         // Update the cache so downstream references use the patched var
         var_map_[op->return_vars_[i]] = new_rv;
         patched_return_vars.push_back(new_rv);
@@ -615,7 +616,7 @@ class HasMemRefsVerifier : public IRVisitor {
     auto tile_type = std::dynamic_pointer_cast<const TileType>(var->GetType());
     if (tile_type && !tile_type->memref_.has_value()) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "HasMemRefs", 0,
-                                "TileType variable '" + var->name_ + "' has no MemRef initialized",
+                                "TileType variable '" + var->name_hint_ + "' has no MemRef initialized",
                                 var->span_);
     }
   }

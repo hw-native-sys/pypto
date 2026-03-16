@@ -42,7 +42,7 @@ class TestBasicSerialization:
         restored_iter_arg = cast(ir.IterArg, restored)
 
         ir.assert_structural_equal(iter_arg, restored, enable_auto_mapping=True)
-        assert restored_iter_arg.name == "iter_arg"
+        assert restored_iter_arg.name_hint == "iter_arg"
         assert isinstance(restored_iter_arg.initValue, ir.ConstInt)
         assert cast(ir.ConstInt, restored_iter_arg.initValue).value == 5
 
@@ -340,8 +340,8 @@ class TestStatementSerialization:
 
         ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
         assert len(restored_for_stmt.iter_args) == 2
-        assert restored_for_stmt.iter_args[0].name == "arg1"
-        assert restored_for_stmt.iter_args[1].name == "arg2"
+        assert restored_for_stmt.iter_args[0].name_hint == "arg1"
+        assert restored_for_stmt.iter_args[1].name_hint == "arg2"
         assert isinstance(restored_for_stmt.iter_args[0].initValue, ir.ConstInt)
         assert isinstance(restored_for_stmt.iter_args[1].initValue, ir.Var)
 

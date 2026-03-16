@@ -170,7 +170,7 @@ assert ir.structural_hash(c1) == ir.structural_hash(c2)
 
 ### Determinism
 
-`structural_hash` is deterministic within a single process run. Variable identity is based on monotonic unique IDs assigned at construction, not pointer addresses, so the same construction sequence always produces the same hashes.
+`structural_hash` is deterministic within a single process run. Variable identity is based on monotonic unique IDs (`Var::unique_id_`) assigned at construction, not pointer addresses or `name_hint_` strings, so the same construction sequence always produces the same hashes. The `name_hint_` field is an `IgnoreField` and is excluded from both structural comparison and hashing.
 
 ### Hash Consistency Guarantee
 

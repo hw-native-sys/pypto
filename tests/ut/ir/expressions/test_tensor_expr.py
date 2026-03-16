@@ -27,7 +27,7 @@ class TestTensorVar:
         tensor_type = ir.TensorType(shape, DataType.FP32)
         tensor_var = ir.Var("A", tensor_type, span)
 
-        assert tensor_var.name == "A"
+        assert tensor_var.name_hint == "A"
         assert isinstance(tensor_var.type, ir.TensorType)
         assert tensor_var.type.dtype == DataType.FP32
         assert len(tensor_var.type.shape) == 3
@@ -47,7 +47,7 @@ class TestTensorVar:
         tensor_type = ir.TensorType(shape, DataType.FP16)
         tensor_var = ir.Var("B", tensor_type, span)
 
-        assert tensor_var.name == "B"
+        assert tensor_var.name_hint == "B"
         assert isinstance(tensor_var.type, ir.TensorType)
         assert tensor_var.type.dtype == DataType.FP16
         assert len(tensor_var.type.shape) == 3

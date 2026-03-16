@@ -52,7 +52,7 @@ class TransposeLoadScanner : public IRVisitor {
  public:
   explicit TransposeLoadScanner(const std::vector<VarPtr>& params) {
     for (size_t i = 0; i < params.size(); ++i) {
-      param_name_to_index_[params[i]->name_] = i;
+      param_name_to_index_[params[i]->name_hint_] = i;
     }
   }
 
@@ -66,7 +66,7 @@ class TransposeLoadScanner : public IRVisitor {
       if (transpose && !call->args_.empty()) {
         auto src_var = As<Var>(call->args_[0]);
         if (src_var) {
-          auto it = param_name_to_index_.find(src_var->name_);
+          auto it = param_name_to_index_.find(src_var->name_hint_);
           if (it != param_name_to_index_.end()) {
             size_t param_idx = it->second;
             if (visited_params_.count(param_idx) == 0) {
@@ -106,7 +106,7 @@ class VarSubstitutionMutator : public IRMutator {
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& var) override {
-    auto it = substitutions_.find(var->name_);
+    auto it = substitutions_.find(var->name_hint_);
     if (it != substitutions_.end()) {
       return it->second;
     }
@@ -155,9 +155,9 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
         std::make_shared<TensorType>(info.new_shape, old_tensor_type->dtype_, old_tensor_type->memref_,
                                      std::optional<TensorView>(TensorView({}, TensorLayout::DN)));
 
-    auto new_var = std::make_shared<Var>(old_param->name_, new_tensor_type, old_param->span_);
+    auto new_var = std::make_shared<Var>(old_param->name_hint_, new_tensor_type, old_param->span_);
     new_params[info.param_index] = new_var;
-    substitutions[old_param->name_] = new_var;
+    substitutions[old_param->name_hint_] = new_var;
     modified_params[info.param_index] = new_tensor_type;
   }
 
@@ -205,8 +205,8 @@ class CallerArgCollector : public IRVisitor {
         for (const auto& [param_idx, new_type] : it->second) {
           if (param_idx < call->args_.size()) {
             auto arg_var = As<Var>(call->args_[param_idx]);
-            if (arg_var && var_updates_.find(arg_var->name_) == var_updates_.end()) {
-              var_updates_[arg_var->name_] = new_type;
+            if (arg_var && var_updates_.find(arg_var->name_hint_) == var_updates_.end()) {
+              var_updates_[arg_var->name_hint_] = new_type;
             }
           }
         }
@@ -238,11 +238,11 @@ FunctionPtr UpdateCallerFunction(
   std::vector<VarPtr> new_params = func->params_;
 
   for (size_t i = 0; i < func->params_.size(); ++i) {
-    auto it = var_updates.find(func->params_[i]->name_);
+    auto it = var_updates.find(func->params_[i]->name_hint_);
     if (it != var_updates.end()) {
-      auto new_var = std::make_shared<Var>(func->params_[i]->name_, it->second, func->params_[i]->span_);
+      auto new_var = std::make_shared<Var>(func->params_[i]->name_hint_, it->second, func->params_[i]->span_);
       new_params[i] = new_var;
-      substitutions[func->params_[i]->name_] = new_var;
+      substitutions[func->params_[i]->name_hint_] = new_var;
     }
   }
 

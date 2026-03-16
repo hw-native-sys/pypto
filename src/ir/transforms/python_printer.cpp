@@ -421,9 +421,9 @@ void IRPythonPrinter::DecreaseIndent() {
 // Expression visitors - reuse precedence logic from base printer
 void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << GetVarName(op.get()); }
 
-void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_; }
+void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_hint_; }
 
-void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_; }
+void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
@@ -813,7 +813,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << ", (";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      stream_ << op->iter_args_[i]->name_;
+      stream_ << op->iter_args_[i]->name_hint_;
     }
     // Add trailing comma for single-element tuples to distinguish from parenthesized expression
     if (op->iter_args_.size() == 1) {
@@ -919,7 +919,7 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
     stream_ << "for (";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      stream_ << op->iter_args_[i]->name_;
+      stream_ << op->iter_args_[i]->name_hint_;
     }
     // Add trailing comma for single-element tuples
     if (op->iter_args_.size() == 1) {
@@ -1108,7 +1108,7 @@ static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& 
 std::string IRPythonPrinter::GetVarName(const Var* var) const {
   auto it = var_rename_map_.find(var);
   if (it != var_rename_map_.end()) return it->second;
-  return var->name_;
+  return var->name_hint_;
 }
 
 void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
@@ -1131,26 +1131,26 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
 
   // Count occurrences of each name across distinct Var objects.
   std::unordered_map<std::string, int> name_counts;
-  for (const Var* v : defs) name_counts[v->name_]++;
+  for (const Var* v : defs) name_counts[v->name_hint_]++;
 
   // Assign printed names: unique names keep their original; duplicate names get suffixes.
   std::set<std::string> used_names;
   for (const Var* v : defs) {
-    if (name_counts[v->name_] == 1) {
+    if (name_counts[v->name_hint_] == 1) {
       // No conflict — no rename map entry needed (GetVarName falls back to name_).
-      used_names.insert(v->name_);
+      used_names.insert(v->name_hint_);
     }
   }
   for (const Var* v : defs) {
-    if (name_counts[v->name_] == 1) continue;  // Already handled above.
-    std::string candidate = v->name_;
+    if (name_counts[v->name_hint_] == 1) continue;  // Already handled above.
+    std::string candidate = v->name_hint_;
     if (used_names.find(candidate) == used_names.end()) {
       used_names.insert(candidate);
       var_rename_map_[v] = candidate;
     } else {
       int suffix = 1;
       while (true) {
-        candidate = v->name_ + "_" + std::to_string(suffix);
+        candidate = v->name_hint_ + "_" + std::to_string(suffix);
         if (used_names.find(candidate) == used_names.end()) {
           used_names.insert(candidate);
           var_rename_map_[v] = candidate;
@@ -1337,30 +1337,30 @@ static std::set<std::string> CollectDynVarNames(const ProgramPtr& program) {
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
     if (auto tensor_type = As<TensorType>(type)) {
       for (const auto& dim : tensor_type->shape_) {
-        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
       }
       if (tensor_type->tensor_view_.has_value()) {
         for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
         }
         for (const auto& dim : tensor_type->tensor_view_->stride) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
         }
       }
     } else if (auto tile_type = As<TileType>(type)) {
       for (const auto& dim : tile_type->shape_) {
-        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
       }
       if (tile_type->tile_view_.has_value()) {
         for (const auto& dim : tile_type->tile_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
         }
         for (const auto& dim : tile_type->tile_view_->stride) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_);
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
         }
         if (tile_type->tile_view_->start_offset) {
           if (auto var = As<Var>(tile_type->tile_view_->start_offset)) {
-            dyn_vars.insert(var->name_);
+            dyn_vars.insert(var->name_hint_);
           }
         }
       }

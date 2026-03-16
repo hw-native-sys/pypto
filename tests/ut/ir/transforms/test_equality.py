@@ -1542,10 +1542,10 @@ class TestGetItemNavigation:
         )
 
         stmt0, stmt1, stmt_last, stmt_first = body[0], body[1], body[-1], body[-2]
-        assert isinstance(stmt0, ir.AssignStmt) and stmt0.var.name == "x"
-        assert isinstance(stmt1, ir.AssignStmt) and stmt1.var.name == "y"
-        assert isinstance(stmt_last, ir.AssignStmt) and stmt_last.var.name == "y"
-        assert isinstance(stmt_first, ir.AssignStmt) and stmt_first.var.name == "x"
+        assert isinstance(stmt0, ir.AssignStmt) and stmt0.var.name_hint == "x"
+        assert isinstance(stmt1, ir.AssignStmt) and stmt1.var.name_hint == "y"
+        assert isinstance(stmt_last, ir.AssignStmt) and stmt_last.var.name_hint == "y"
+        assert isinstance(stmt_first, ir.AssignStmt) and stmt_first.var.name_hint == "x"
 
     def test_seqstmts_getitem_out_of_range(self):
         """SeqStmts.__getitem__ raises for out-of-range indices."""
@@ -1582,7 +1582,7 @@ class TestGetItemNavigation:
         assert isinstance(func_body, ir.SeqStmts)
         stmt = func_body[1]
         assert isinstance(stmt, ir.AssignStmt)
-        assert stmt.var.name == "y"
+        assert stmt.var.name_hint == "y"
 
 
 # ---------------------------------------------------------------------------

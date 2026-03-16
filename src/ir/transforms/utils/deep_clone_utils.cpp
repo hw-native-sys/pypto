@@ -93,7 +93,7 @@ class DeepCloneMutator : public IRMutator {
     // Create fresh IterArg with cloned initValue_
     INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto fresh = std::make_shared<IterArg>(op->name_, op->GetType(), std::move(new_init), op->span_);
+    auto fresh = std::make_shared<IterArg>(op->name_hint_, op->GetType(), std::move(new_init), op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }
@@ -105,7 +105,7 @@ class DeepCloneMutator : public IRMutator {
     }
     // Create fresh MemRef with cloned addr_
     auto new_addr = op->addr_ ? IRMutator::VisitExpr(op->addr_) : op->addr_;
-    auto fresh = std::make_shared<MemRef>(op->name_, std::move(new_addr), op->size_, op->id_, op->span_);
+    auto fresh = std::make_shared<MemRef>(op->name_hint_, std::move(new_addr), op->size_, op->id_, op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }
@@ -119,7 +119,7 @@ class DeepCloneMutator : public IRMutator {
       // MemRef will be handled by VisitExpr_(MemRefPtr) during traversal
       return;
     }
-    auto fresh = std::make_shared<Var>(op->name_, op->GetType(), op->span_);
+    auto fresh = std::make_shared<Var>(op->name_hint_, op->GetType(), op->span_);
     expr_map_[op.get()] = fresh;
   }
 

@@ -21,7 +21,7 @@ class TestVar:
         span = ir.Span("test.py", 1, 1, 1, 5)
         var = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
-        assert var.name == "x"
+        assert var.name_hint == "x"
         assert var.span.filename == "test.py"
 
     def test_var_is_expr(self):
@@ -39,7 +39,7 @@ class TestVar:
 
         # Attempting to modify should raise AttributeError
         with pytest.raises(AttributeError):
-            var.name = "y"  # type: ignore
+            var.name_hint = "y"  # type: ignore
 
 
 if __name__ == "__main__":

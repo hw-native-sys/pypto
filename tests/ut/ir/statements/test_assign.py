@@ -82,8 +82,8 @@ class TestAssignStmt:
 
         assert assign is not None
         assert assign.span.filename == "test.py"
-        assert cast(ir.Var, assign.var).name == "x"
-        assert cast(ir.Var, assign.value).name == "y"
+        assert cast(ir.Var, assign.var).name_hint == "x"
+        assert cast(ir.Var, assign.value).name_hint == "y"
 
     def test_assign_stmt_has_lhs_rhs(self):
         """Test that AssignStmt has var and value attributes."""
@@ -95,8 +95,8 @@ class TestAssignStmt:
 
         assert assign.var is not None
         assert assign.value is not None
-        assert cast(ir.Var, assign.var).name == "a"
-        assert cast(ir.Var, assign.value).name == "b"
+        assert cast(ir.Var, assign.var).name_hint == "a"
+        assert cast(ir.Var, assign.value).name_hint == "b"
 
     def test_assign_stmt_is_stmt(self):
         """Test that AssignStmt is an instance of Stmt."""
@@ -132,13 +132,13 @@ class TestAssignStmt:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign1 = ir.AssignStmt(x, y, span)
-        assert cast(ir.Var, assign1.var).name == "x"
-        assert cast(ir.Var, assign1.value).name == "y"
+        assert cast(ir.Var, assign1.var).name_hint == "x"
+        assert cast(ir.Var, assign1.value).name_hint == "y"
 
         # Test with ConstInt on value
         c5 = ir.ConstInt(5, dtype, span)
         assign2 = ir.AssignStmt(x, c5, span)
-        assert cast(ir.Var, assign2.var).name == "x"
+        assert cast(ir.Var, assign2.var).name_hint == "x"
         assert cast(ir.ConstInt, assign2.value).value == 5
 
         # Test with Call on value
@@ -146,13 +146,13 @@ class TestAssignStmt:
         z = ir.Var("z", ir.ScalarType(dtype), span)
         call = ir.Call(op, [x, z], span)
         assign3 = ir.AssignStmt(y, call, span)
-        assert cast(ir.Var, assign3.var).name == "y"
+        assert cast(ir.Var, assign3.var).name_hint == "y"
         assert isinstance(assign3.value, ir.Call)
 
         # Test with binary expression on value
         add_expr = ir.Add(x, z, dtype, span)
         assign4 = ir.AssignStmt(x, add_expr, span)
-        assert cast(ir.Var, assign4.var).name == "x"
+        assert cast(ir.Var, assign4.var).name_hint == "x"
         assert isinstance(assign4.value, ir.Add)
 
 
@@ -170,7 +170,7 @@ class TestYieldStmt:
         assert yield_stmt.span.filename == "test.py"
         assert len(yield_stmt.value) == 1
         assert isinstance(yield_stmt.value[0], ir.Var)
-        assert yield_stmt.value[0].name == "x"
+        assert yield_stmt.value[0].name_hint == "x"
 
     def test_yield_stmt_creation_without_value(self):
         """Test creating a YieldStmt instance without a value."""
@@ -190,7 +190,7 @@ class TestYieldStmt:
 
         assert len(yield_stmt.value) == 1
         assert isinstance(yield_stmt.value[0], ir.Var)
-        assert yield_stmt.value[0].name == "a"
+        assert yield_stmt.value[0].name_hint == "a"
 
     def test_yield_stmt_is_stmt(self):
         """Test that YieldStmt is an instance of Stmt."""
@@ -226,15 +226,15 @@ class TestYieldStmt:
         yield_stmt1 = ir.YieldStmt([x], span)
         assert len(yield_stmt1.value) == 1
         assert isinstance(yield_stmt1.value[0], ir.Var)
-        assert yield_stmt1.value[0].name == "x"
+        assert yield_stmt1.value[0].name_hint == "x"
 
         # Test with multiple Vars
         yield_stmt2 = ir.YieldStmt([x, y], span)
         assert len(yield_stmt2.value) == 2
         assert isinstance(yield_stmt2.value[0], ir.Var)
         assert isinstance(yield_stmt2.value[1], ir.Var)
-        assert yield_stmt2.value[0].name == "x"
-        assert yield_stmt2.value[1].name == "y"
+        assert yield_stmt2.value[0].name_hint == "x"
+        assert yield_stmt2.value[1].name_hint == "y"
 
         # Test with three Vars
         yield_stmt3 = ir.YieldStmt([x, y, z], span)
@@ -242,9 +242,9 @@ class TestYieldStmt:
         assert isinstance(yield_stmt3.value[0], ir.Var)
         assert isinstance(yield_stmt3.value[1], ir.Var)
         assert isinstance(yield_stmt3.value[2], ir.Var)
-        assert yield_stmt3.value[0].name == "x"
-        assert yield_stmt3.value[1].name == "y"
-        assert yield_stmt3.value[2].name == "z"
+        assert yield_stmt3.value[0].name_hint == "x"
+        assert yield_stmt3.value[1].name_hint == "y"
+        assert yield_stmt3.value[2].name_hint == "z"
 
 
 class TestReturnStmt:
@@ -261,7 +261,7 @@ class TestReturnStmt:
         assert return_stmt.span.filename == "test.py"
         assert len(return_stmt.value) == 1
         assert isinstance(return_stmt.value[0], ir.Var)
-        assert cast(ir.Var, return_stmt.value[0]).name == "x"
+        assert cast(ir.Var, return_stmt.value[0]).name_hint == "x"
 
     def test_return_stmt_creation_without_value(self):
         """Test creating a ReturnStmt instance without a value."""
@@ -281,7 +281,7 @@ class TestReturnStmt:
 
         assert len(return_stmt.value) == 1
         assert isinstance(return_stmt.value[0], ir.Var)
-        assert cast(ir.Var, return_stmt.value[0]).name == "a"
+        assert cast(ir.Var, return_stmt.value[0]).name_hint == "a"
 
     def test_return_stmt_is_stmt(self):
         """Test that ReturnStmt is an instance of Stmt."""
@@ -316,20 +316,20 @@ class TestReturnStmt:
         # Test with single value
         return_stmt1 = ir.ReturnStmt([x], span)
         assert len(return_stmt1.value) == 1
-        assert cast(ir.Var, return_stmt1.value[0]).name == "x"
+        assert cast(ir.Var, return_stmt1.value[0]).name_hint == "x"
 
         # Test with multiple values
         return_stmt2 = ir.ReturnStmt([x, y], span)
         assert len(return_stmt2.value) == 2
-        assert cast(ir.Var, return_stmt2.value[0]).name == "x"
-        assert cast(ir.Var, return_stmt2.value[1]).name == "y"
+        assert cast(ir.Var, return_stmt2.value[0]).name_hint == "x"
+        assert cast(ir.Var, return_stmt2.value[1]).name_hint == "y"
 
         # Test with three values
         return_stmt3 = ir.ReturnStmt([x, y, z], span)
         assert len(return_stmt3.value) == 3
-        assert cast(ir.Var, return_stmt3.value[0]).name == "x"
-        assert cast(ir.Var, return_stmt3.value[1]).name == "y"
-        assert cast(ir.Var, return_stmt3.value[2]).name == "z"
+        assert cast(ir.Var, return_stmt3.value[0]).name_hint == "x"
+        assert cast(ir.Var, return_stmt3.value[1]).name_hint == "y"
+        assert cast(ir.Var, return_stmt3.value[2]).name_hint == "z"
 
     def test_return_stmt_with_expressions(self):
         """Test ReturnStmt with different expression types."""

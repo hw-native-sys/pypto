@@ -24,8 +24,8 @@ namespace codegen {
 
 std::string CodeContext::GetVarName(const ir::VarPtr& var) {
   CHECK(var != nullptr) << "Cannot get name for null variable";
-  auto it = name_to_cpp_.find(var->name_);
-  CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_ << " not found in context";
+  auto it = name_to_cpp_.find(var->name_hint_);
+  CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_hint_ << " not found in context";
   return it->second;
 }
 
@@ -34,14 +34,14 @@ void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name
   CHECK(!cpp_name.empty()) << "Cannot register variable with empty name";
 
   // Check if this name is already registered
-  auto it = name_to_cpp_.find(var->name_);
+  auto it = name_to_cpp_.find(var->name_hint_);
   if (it != name_to_cpp_.end()) {
-    LOG_WARN << "Variable " << var->name_ << " re-registered with different C++ name: " << cpp_name << " vs "
-             << it->second;
+    LOG_WARN << "Variable " << var->name_hint_ << " re-registered with different C++ name: " << cpp_name
+             << " vs " << it->second;
   }
 
   // Register name-based mapping
-  name_to_cpp_[var->name_] = cpp_name;
+  name_to_cpp_[var->name_hint_] = cpp_name;
 }
 
 void CodeContext::Clear() {
@@ -90,7 +90,7 @@ std::string CodeContext::GetTensorStruct(const std::string& tensor_var_name) con
 
 std::string CodeContext::SanitizeName(const ir::VarPtr& var) const {
   CHECK(var != nullptr) << "Cannot sanitize null variable";
-  auto ir_name = var->name_;
+  auto ir_name = var->name_hint_;
   if (ir_name.empty()) {
     return "var";
   }

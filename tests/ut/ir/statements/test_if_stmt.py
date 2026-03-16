@@ -144,14 +144,14 @@ class TestIfStmt:
         # IfStmt with single return variable
         if_stmt2 = ir.IfStmt(condition, assign, None, [a], span)
         assert len(if_stmt2.return_vars) == 1
-        assert if_stmt2.return_vars[0].name == "a"
+        assert if_stmt2.return_vars[0].name_hint == "a"
 
         # IfStmt with multiple return variables
         if_stmt3 = ir.IfStmt(condition, assign, None, [a, b, c], span)
         assert len(if_stmt3.return_vars) == 3
-        assert if_stmt3.return_vars[0].name == "a"
-        assert if_stmt3.return_vars[1].name == "b"
-        assert if_stmt3.return_vars[2].name == "c"
+        assert if_stmt3.return_vars[0].name_hint == "a"
+        assert if_stmt3.return_vars[1].name_hint == "b"
+        assert if_stmt3.return_vars[2].name_hint == "c"
 
 
 class TestIfStmtHash:

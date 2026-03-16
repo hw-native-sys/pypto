@@ -430,7 +430,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     for (const auto& ia : op->iter_args_) {
       auto new_init = VisitExpr(ia->initValue_);
       if (new_init.get() != ia->initValue_.get()) {
-        new_iter_args.push_back(std::make_shared<IterArg>(ia->name_, ia->GetType(), new_init, ia->span_));
+        new_iter_args.push_back(
+            std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), new_init, ia->span_));
         iter_args_changed = true;
       } else {
         new_iter_args.push_back(ia);
@@ -570,8 +571,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       const auto& orig_loop = reordered[loop_idx];
       for (size_t ia_idx = 0; ia_idx < num_iter_args; ++ia_idx) {
         const auto& orig_ia = first_orig->iter_args_[ia_idx];
-        std::string ia_name = orig_ia->name_ + "_l" + std::to_string(loop_idx);
-        std::string rv_name = orig_ia->name_ + "_l" + std::to_string(loop_idx) + "_rv";
+        std::string ia_name = orig_ia->name_hint_ + "_l" + std::to_string(loop_idx);
+        std::string rv_name = orig_ia->name_hint_ + "_l" + std::to_string(loop_idx) + "_rv";
 
         ExprPtr init_value;
         if (loop_idx == 0) {

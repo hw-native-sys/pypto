@@ -28,10 +28,10 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 std::string CodegenBase::TryGetVarName(const ir::ExprPtr& expr) const {
   if (auto var = As<Var>(expr)) {
-    return var->name_;
+    return var->name_hint_;
   }
   if (auto iter_arg = As<IterArg>(expr)) {
-    return iter_arg->name_;
+    return iter_arg->name_hint_;
   }
   return "";
 }

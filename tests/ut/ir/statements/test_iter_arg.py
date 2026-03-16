@@ -28,7 +28,7 @@ class TestIterArg:
 
         assert iter_arg is not None
         assert iter_arg.span.filename == "test.py"
-        assert iter_arg.name == name
+        assert iter_arg.name_hint == name
         assert iter_arg.initValue is not None
         assert isinstance(iter_arg.initValue, ir.ConstInt)
 
@@ -40,7 +40,7 @@ class TestIterArg:
         init_value = ir.ConstInt(5, dtype, span)
         iter_arg = ir.IterArg(name, ir.ScalarType(dtype), init_value, span)
 
-        assert iter_arg.name == name
+        assert iter_arg.name_hint == name
         assert iter_arg.initValue is not None
         assert cast(ir.ConstInt, iter_arg.initValue).value == 5
 
@@ -64,7 +64,7 @@ class TestIterArg:
 
         # Attempting to modify should raise AttributeError
         with pytest.raises(AttributeError):
-            iter_arg.name = "new_name"  # type: ignore
+            iter_arg.name_hint = "new_name"  # type: ignore
         with pytest.raises(AttributeError):
             iter_arg.initValue = ir.ConstInt(1, dtype, span)  # type: ignore
         with pytest.raises(AttributeError):

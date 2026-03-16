@@ -67,13 +67,34 @@ is present, `memory_space` must also be present on the `TileType`.
 
 | Node Type | Fields | Description |
 | --------- | ------ | ----------- |
-| **Var** | `name_`, `type_` | Variable reference |
-| **IterArg** | `name_`, `type_`, `initValue_` | Loop iteration argument (extends Var) |
+| **Var** | `name_hint_`, `type_` | Variable reference (identity by pointer, not by name) |
+| **IterArg** | `name_hint_`, `type_`, `initValue_` | Loop iteration argument (extends Var) |
 | **ConstInt** | `value_`, `dtype_` | Integer constant |
 | **ConstBool** | `value_` | Boolean constant (always BOOL dtype) |
 | **ConstFloat** | `value_`, `dtype_` | Floating-point constant |
 | **Call** | `op_`, `args_`, `kwargs_` | Function/operator call |
 | **TupleGetItemExpr** | `tuple_`, `index_` | Tuple element access |
+
+### Var Identity
+
+Variable identity is determined by **object pointer** (or equivalently `unique_id_`), **not** by `name_hint_`. Two `Var` objects with the same `name_hint_` are distinct variables if they are different objects. The field is named `name_hint_` (rather than `name_`) to make this explicit.
+
+| Field | Purpose |
+| ----- | ------- |
+| `name_hint_` | Cosmetic label for printing and debugging. `IgnoreField` — excluded from structural comparison and hashing. |
+| `unique_id_` | Monotonically increasing ID assigned at construction. Used for deterministic hashing. |
+| object pointer | The canonical identity — two references denote the same variable iff they point to the same `Var` object. |
+
+```cpp
+// Same name_hint, different variables
+auto x1 = std::make_shared<Var>("x", type, span);
+auto x2 = std::make_shared<Var>("x", type, span);
+// x1 != x2 — they are distinct variables despite sharing the name "x"
+
+// Same variable referenced twice
+auto x_ref = x1;
+// x1 == x_ref — same pointer, same variable
+```
 
 ### Binary Expression Nodes
 

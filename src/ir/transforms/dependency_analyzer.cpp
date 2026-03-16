@@ -337,7 +337,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Check for RAW dependencies (Read-After-Write)
       for (const auto& read_var : collector.read_vars) {
-        std::string var_name = read_var->name_;
+        std::string var_name = read_var->name_hint_;
         if (last_write.count(var_name)) {
           DependencyEdge edge;
           edge.producer = last_write[var_name];
@@ -351,7 +351,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
       }
 
       // Check for WAR dependencies (Write-After-Read)
-      std::string def_name = def_var->name_;
+      std::string def_name = def_var->name_hint_;
       if (last_reads.count(def_name)) {
         for (const auto& read_stmt : last_reads[def_name]) {
           DependencyEdge edge;
@@ -382,7 +382,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Record reads for this statement
       for (const auto& read_var : collector.read_vars) {
-        last_reads[read_var->name_].push_back(stmt);
+        last_reads[read_var->name_hint_].push_back(stmt);
       }
 
     } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
@@ -391,7 +391,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Check for RAW dependencies
       for (const auto& read_var : collector.read_vars) {
-        std::string var_name = read_var->name_;
+        std::string var_name = read_var->name_hint_;
         if (last_write.count(var_name)) {
           DependencyEdge edge;
           edge.producer = last_write[var_name];
@@ -406,7 +406,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Record reads
       for (const auto& read_var : collector.read_vars) {
-        last_reads[read_var->name_].push_back(stmt);
+        last_reads[read_var->name_hint_].push_back(stmt);
       }
     }
   }
@@ -446,7 +446,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::MergeDependencies(
 
   for (const auto& path : path_dependencies) {
     for (const auto& edge : path) {
-      auto key = std::make_tuple(edge.producer, edge.consumer, edge.variable->name_, edge.type);
+      auto key = std::make_tuple(edge.producer, edge.consumer, edge.variable->name_hint_, edge.type);
       if (seen.find(key) == seen.end()) {
         seen.insert(key);
         merged.push_back(edge);

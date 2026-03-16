@@ -201,7 +201,7 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
       int last_use = def_point;
 
       if (var_use_stmts.count(group_var)) {
-        LOG_DEBUG << "Variable " << group_var->name_ << " has " << var_use_stmts[group_var].size()
+        LOG_DEBUG << "Variable " << group_var->name_hint_ << " has " << var_use_stmts[group_var].size()
                   << " use statements";
         for (const auto& use_stmt : var_use_stmts[group_var]) {
           if (stmt_order.count(use_stmt)) {
@@ -211,7 +211,7 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
           }
         }
       } else {
-        LOG_DEBUG << "Variable " << group_var->name_ << " has no recorded uses";
+        LOG_DEBUG << "Variable " << group_var->name_hint_ << " has no recorded uses";
       }
 
       min_def_point = std::min(min_def_point, def_point);
@@ -238,7 +238,7 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
       processed_vars.insert(group_var);
     }
 
-    LOG_DEBUG << "Lifetime for sharing group (representative: " << sharing_group[0]->name_
+    LOG_DEBUG << "Lifetime for sharing group (representative: " << sharing_group[0]->name_hint_
               << ", size: " << sharing_group.size() << "): [" << min_def_point << ", " << max_last_use << "]"
               << " space=" << static_cast<int>(interval.memory_space) << " size=" << interval.size;
   }
@@ -379,8 +379,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
             bool overlaps = LifetimesOverlap(*root_lifetime, curr_lifetime);
             if (overlaps) {
               overlaps_with_users = true;
-              LOG_DEBUG << "Variable " << curr_var->name_ << " cannot reuse " << prev_var->name_
-                        << " due to overlap with root MemRef owner " << root->name_;
+              LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
+                        << " due to overlap with root MemRef owner " << root->name_hint_;
             }
           }
         }
@@ -393,8 +393,8 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
 
               if (overlaps) {
                 overlaps_with_users = true;
-                LOG_DEBUG << "Variable " << curr_var->name_ << " cannot reuse " << prev_var->name_
-                          << " due to overlap with existing user " << user_var->name_ << " (lifetime ["
+                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
+                          << " due to overlap with existing user " << user_var->name_hint_ << " (lifetime ["
                           << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "] vs ["
                           << user_lifetime->def_point << ", " << user_lifetime->last_use_point << "])";
                 break;
@@ -407,8 +407,9 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           // Can safely reuse!
           reuse_map[curr_var] = prev_var;
           memref_users[root].push_back(curr_var);  // Track under root MemRef owner
-          LOG_DEBUG << "Variable " << curr_var->name_ << " can reuse " << prev_var->name_ << " (lifetime ["
-                    << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "]"
+          LOG_DEBUG << "Variable " << curr_var->name_hint_ << " can reuse " << prev_var->name_hint_
+                    << " (lifetime [" << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point
+                    << "]"
                     << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";
           break;  // Found a reuse target, stop searching
         }
@@ -440,7 +441,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
         auto source_tile_type = As<TileType>(source_var->GetType());
 
         if (!source_tile_type || !source_tile_type->memref_.has_value()) {
-          LOG_ERROR << "Source variable " << source_var->name_ << " does not have MemRef";
+          LOG_ERROR << "Source variable " << source_var->name_hint_ << " does not have MemRef";
           return IRMutator::VisitStmt_(op);
         }
 
@@ -450,7 +451,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
         auto curr_tile_type = As<TileType>(op->var_->GetType());
 
         if (!curr_tile_type) {
-          LOG_ERROR << "Current variable " << op->var_->name_ << " is not TileType";
+          LOG_ERROR << "Current variable " << op->var_->name_hint_ << " is not TileType";
           return IRMutator::VisitStmt_(op);
         }
 
@@ -459,7 +460,7 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
             std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRef(curr_tile_type, source_memref));
 
         // Create new Var
-        auto new_var = std::make_shared<const Var>(op->var_->name_, new_tile_type, op->var_->span_);
+        auto new_var = std::make_shared<const Var>(op->var_->name_hint_, new_tile_type, op->var_->span_);
 
         // Record the variable substitution mapping (old -> new)
         // This ensures that all subsequent references to the old variable will be replaced with the new one
@@ -477,10 +478,10 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
                 auto new_shared_tile_type = std::dynamic_pointer_cast<const TileType>(
                     CloneTypeWithMemRef(shared_tile_type, source_memref));
                 auto new_shared_var =
-                    std::make_shared<const Var>(shared_var->name_, new_shared_tile_type, shared_var->span_);
+                    std::make_shared<const Var>(shared_var->name_hint_, new_shared_tile_type, shared_var->span_);
                 var_substitution_map_[shared_var] = new_shared_var;
 
-                LOG_DEBUG << "Propagating reuse to sharing group member: " << shared_var->name_;
+                LOG_DEBUG << "Propagating reuse to sharing group member: " << shared_var->name_hint_;
               }
             }
           }

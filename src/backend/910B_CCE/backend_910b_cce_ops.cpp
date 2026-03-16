@@ -159,8 +159,8 @@ static std::string MakeTileLoadCodegenCCE(const ir::CallPtr& op, codegen::Codege
   CHECK(src_tensor_type != nullptr) << "tile.load source must be TensorType";
 
   // Look up pointer/struct by IR var name
-  std::string src_ptr = codegen.GetPointer(src_tensor_var_ptr->name_);
-  std::string src_struct = codegen.GetTensorStruct(src_tensor_var_ptr->name_);
+  std::string src_ptr = codegen.GetPointer(src_tensor_var_ptr->name_hint_);
+  std::string src_struct = codegen.GetTensorStruct(src_tensor_var_ptr->name_hint_);
 
   // Generate temp GlobalTensor with unique name and load shape
   int id = codegen.GetNextGlobalTensorId();
@@ -196,8 +196,8 @@ static std::string MakeTileStoreCodegenCCE(const ir::CallPtr& op, codegen::Codeg
   CHECK(dst_tensor_type != nullptr) << "tile.store destination must be TensorType";
 
   // Look up pointer/struct by IR var name
-  std::string dst_ptr = codegen.GetPointer(dst_tensor_var_ptr->name_);
-  std::string dst_struct = codegen.GetTensorStruct(dst_tensor_var_ptr->name_);
+  std::string dst_ptr = codegen.GetPointer(dst_tensor_var_ptr->name_hint_);
+  std::string dst_struct = codegen.GetTensorStruct(dst_tensor_var_ptr->name_hint_);
 
   // Extract shape from source tile type
   auto src_tile_var = std::dynamic_pointer_cast<const ir::Var>(op->args_[0]);

@@ -41,7 +41,7 @@ def _iter_assign_stmts(func):
 def _get_var_type(func, var_name):
     """Extract ShapedType for a variable by name."""
     for stmt in _iter_assign_stmts(func):
-        if stmt.var.name == var_name:
+        if stmt.var.name_hint == var_name:
             if isinstance(stmt.var.type, ir.ShapedType):
                 return stmt.var.type
     return None
@@ -81,7 +81,7 @@ def _assert_all_have_memrefs(func):
     assert isinstance(func.body, ir.SeqStmts)
     for stmt in _iter_assign_stmts(func):
         if isinstance(stmt.var.type, ir.ShapedType):
-            assert stmt.var.type.memref is not None, f"{stmt.var.name} should have a memref"
+            assert stmt.var.type.memref is not None, f"{stmt.var.name_hint} should have a memref"
 
 
 def _count_alloc_stmts(func):

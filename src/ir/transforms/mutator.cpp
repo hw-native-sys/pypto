@@ -61,7 +61,8 @@ ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
   INTERNAL_CHECK(new_init_value) << "IterArg initValue mutated to null";
   // Copy-on-write: only create new node if children changed
   if (new_init_value.get() != op->initValue_.get()) {
-    return std::make_shared<const IterArg>(op->name_, op->GetType(), std::move(new_init_value), op->span_);
+    return std::make_shared<const IterArg>(op->name_hint_, op->GetType(), std::move(new_init_value),
+                                           op->span_);
   } else {
     return op;
   }
