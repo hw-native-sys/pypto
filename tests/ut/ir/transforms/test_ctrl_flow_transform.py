@@ -41,7 +41,7 @@ class TestBreakOnly:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 5:
@@ -71,7 +71,7 @@ class TestBreakOnly:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 0:
@@ -93,7 +93,7 @@ class TestContinueOnly:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 5:
@@ -117,7 +117,7 @@ class TestContinueOnly:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 5:
@@ -141,7 +141,7 @@ class TestBreakAndContinue:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 10:
@@ -174,7 +174,7 @@ class TestWhileLoops:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 i: pl.Scalar[pl.INT64] = 0
                 while i < n:
@@ -197,7 +197,7 @@ class TestWhileLoops:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 i: pl.Scalar[pl.INT64] = 0
                 while i < n:
@@ -246,6 +246,22 @@ class TestIdentity:
         After = passes.ctrl_flow_transform()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_orchestration_skipped(self):
+        """Orchestration functions should not be transformed (break/continue are native)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.range(n):
+                    if i > 5:
+                        break
+                    x = pl.add(x, 1.0)
+                return x
+
+        After = passes.ctrl_flow_transform()(Before)
+        ir.assert_structural_equal(After, Before)
+
 
 class TestNestedLoops:
     """Tests for nested loops with break/continue."""
@@ -255,7 +271,7 @@ class TestNestedLoops:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self, x: pl.Tensor[[64], pl.FP32], m: pl.Scalar[pl.INT64], n: pl.Scalar[pl.INT64]
             ) -> pl.Tensor[[64], pl.FP32]:
@@ -278,14 +294,14 @@ class TestNestedLoops:
 
 
 class TestEndToEnd:
-    """End-to-end tests: CtrlFlowTransform -> ConvertToSSA."""
+    """End-to-end tests: CtrlFlowTransform -> NormalizeStmtStructure -> ConvertToSSA."""
 
     def test_break_then_ssa(self):
         """Verify break-transformed code correctly converts to SSA."""
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 5:
@@ -305,7 +321,7 @@ class TestEndToEnd:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 5:
@@ -324,7 +340,7 @@ class TestEndToEnd:
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(n):
                     if i > 10:

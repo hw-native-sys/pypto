@@ -1090,7 +1090,7 @@ void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
 
 void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   std::string result = NewTemp();
-  std::string val = op->value_ ? "true" : "false";
+  std::string val = op->value_ ? "1" : "0";
   Emit(result + " = arith.constant " + val + " : i1");
   current_expr_value_ = result;
 }

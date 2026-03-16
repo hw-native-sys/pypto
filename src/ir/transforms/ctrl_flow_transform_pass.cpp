@@ -264,8 +264,10 @@ class CtrlFlowTransformMutator : public IRMutator {
 
       // Append iter_adv guarded by if (!__break)
       auto not_break = std::make_shared<Not>(break_var, DataType::BOOL, span);
+      auto loop_var_type = As<ScalarType>(op->loop_var_->GetType());
+      auto add_dtype = loop_var_type ? loop_var_type->dtype_ : DataType::INDEX;
       auto iter_adv = std::make_shared<AssignStmt>(
-          op->loop_var_, std::make_shared<Add>(op->loop_var_, op->step_, DataType::INT32, span), span);
+          op->loop_var_, std::make_shared<Add>(op->loop_var_, op->step_, add_dtype, span), span);
       auto guarded_adv =
           std::make_shared<IfStmt>(not_break, iter_adv, std::nullopt, std::vector<VarPtr>{}, span);
       stmts.push_back(guarded_adv);
@@ -359,6 +361,12 @@ class CtrlFlowTransformMutator : public IRMutator {
 /// Transform a function by eliminating break/continue.
 FunctionPtr TransformCtrlFlow(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "CtrlFlowTransform cannot run on null function";
+
+  // Only transform InCore-type functions (InCore, AIC, AIV).
+  // Host/Orchestration code can use break/continue natively.
+  if (!IsInCoreType(func->func_type_)) {
+    return func;
+  }
 
   CtrlFlowTransformMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);

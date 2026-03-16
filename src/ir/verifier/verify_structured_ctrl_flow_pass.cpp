@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -66,6 +67,10 @@ class StructuredCtrlFlowPropertyVerifierImpl : public PropertyVerifier {
 
     for (const auto& [global_var, func] : program->functions_) {
       if (!func || !func->body_) continue;
+
+      // Only verify InCore-type functions (InCore, AIC, AIV).
+      // Orchestration/Host functions can use break/continue natively.
+      if (!IsInCoreType(func->func_type_)) continue;
 
       StructuredCtrlFlowChecker checker(diagnostics);
       checker.VisitStmt(func->body_);

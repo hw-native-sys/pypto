@@ -6,6 +6,8 @@
 
 PTO codegen 生成 MLIR 格式的 SCF（结构化控制流），不直接支持 `break` 和 `continue`。该 Pass 通过将循环重写为等价的结构化形式来消除两者。
 
+**适用范围**: 仅对 InCore 类函数生效（InCore、AIC、AIV）。Orchestration/Host 函数会被跳过，因为它们可以原生支持 `break`/`continue`。
+
 **所需属性**: `TypeChecked`
 
 **产生属性**: `TypeChecked`, `StructuredCtrlFlow`

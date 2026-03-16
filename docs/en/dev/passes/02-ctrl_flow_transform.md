@@ -6,6 +6,8 @@ Transforms `break` and `continue` statements into equivalent structured control 
 
 PTO codegen emits MLIR-style SCF (structured control flow), which does not directly support `break` or `continue`. This pass eliminates both by rewriting loops into equivalent structured forms.
 
+**Applies to**: InCore-type functions only (InCore, AIC, AIV). Orchestration/Host functions are skipped because they can use `break`/`continue` natively.
+
 **Requires**: `TypeChecked`
 
 **Produces**: `TypeChecked`, `StructuredCtrlFlow`
