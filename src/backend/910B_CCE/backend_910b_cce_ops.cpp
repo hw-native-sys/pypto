@@ -303,14 +303,19 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.matmul_acc")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) -> std::string {
       CHECK(op->args_.size() == 3) << "tile.matmul_acc requires 3 arguments: acc, lhs, rhs";
 
-      [[maybe_unused]] std::string acc = codegen.GetExprAsCode(op->args_[0]);
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
       std::string rhs = codegen.GetExprAsCode(op->args_[2]);
       std::string dst = codegen.GetCurrentResultTarget();
 
-      // TMATMUL_ACC accumulates into dst, which should be initialized from acc
-      // In CCE ISA, this is typically: TMATMUL_ACC(dst, acc, lhs, rhs)
-      codegen.Emit("TMATMUL_ACC(" + dst + ", " + acc + ", " + lhs + ", " + rhs + ");");
+      // The CUBE engine reads the accumulator from the OUTPUT buffer (dst).
+      // Memory reuse must merge the acc input and dst into the same buffer;
+      // a separate acc buffer is unsupported because the ISA cannot TMOV
+      // between two Acc-space tiles.
+      // NOTE: We cannot validate buffer aliasing here because GetExprAsCode
+      // returns variable names (e.g. acc_0 vs acc_1), not resolved buffer
+      // names.  The memory reuse pass is responsible for ensuring the merge.
+      // Use the 3-arg form: TMATMUL_ACC(dst, lhs, rhs) — accumulates into dst.
+      codegen.Emit("TMATMUL_ACC(" + dst + ", " + lhs + ", " + rhs + ");");
 
       return "";  // Statement-emitting mode
     });

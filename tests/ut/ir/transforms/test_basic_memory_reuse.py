@@ -108,10 +108,11 @@ class TestBasicMemoryReuse:
     """Tests for BasicMemoryReusePass with TileType variables."""
 
     def test_simple(self):
-        """tile_c/tile_d/tile_e all reuse tile_a (producer-consumer at same statement).
+        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent.
 
         Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,3], tile_d[3,4], tile_e[4,5]
-        tile_c reuses tile_a (last_use==def), tile_d and tile_e chain through tile_a.
+        Touching lifetimes (end == start) are non-overlapping, so tile_c reuses
+        tile_a at the boundary, and tile_d and tile_e continue the chain.
         """
 
         @pl.program
@@ -251,10 +252,10 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_b", "tile_d")
 
     def test_with_dependencies(self):
-        """tile_c/tile_d/tile_e all reuse tile_a (producer-consumer at same statement).
+        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent.
 
         Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,3], tile_d[3,4], tile_e[4,5]
-        tile_c reuses tile_a (last_use==def), tile_d and tile_e chain through tile_a.
+        Same as test_simple — touching lifetimes form a non-overlapping chain.
         """
 
         @pl.program
@@ -285,8 +286,10 @@ class TestBasicMemoryReuse:
         """Transitive conflict: tile_c and tile_d must NOT share memory.
 
         Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,4], tile_d[3,4], tile_e[4,5]
-        tile_b and tile_c reuse tile_a. tile_d cannot reuse tile_a (conflict with
-        tile_c which is still live), so tile_d reuses tile_b's original buffer.
+        tile_b reuses tile_a (touching at 1). tile_c reuses tile_a (touching at 2,
+        checked against tile_b which is also non-overlapping). tile_d cannot reuse
+        tile_a (conflict with tile_c[2,4]) or tile_b (same root, conflict with tile_c).
+        tile_e reuses tile_a (tile_c[2,4] touches tile_e[4,5] at 4).
         """
 
         @pl.program
@@ -311,7 +314,7 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_a", "tile_b")
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_not_shares_memref(func, "tile_c", "tile_d")
-        _assert_not_shares_memref(func, "tile_a", "tile_d")
+        _assert_shares_memref(func, "tile_a", "tile_e")
 
     def test_multiple_memory_spaces(self):
         """Memory reuse happens within the same memory space (UB tiles).
@@ -432,9 +435,9 @@ class TestAllocCleanup:
     def test_unused_alloc_removed_after_reuse(self):
         """Alloc stmts for MemRefs replaced by reuse should be removed.
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,3]
-        tile_b reuses tile_a (last_use==def), tile_c reuses tile_a (transitive).
-        Both memref_b and memref_c allocs removed → 1 alloc remains.
+        Lifetimes: tile_a[3,4], tile_b[4,5], tile_c[5,6]
+        With touching-lifetime reuse, tile_b reuses tile_a and tile_c
+        reuses tile_a (chain) → all share one MemRef → 1 alloc remains.
         """
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
@@ -452,7 +455,7 @@ class TestAllocCleanup:
         func = list(after.functions.values())[0]
 
         assert _count_alloc_stmts(func) == 1, (
-            f"Expected 1 alloc stmt after reuse, got {_count_alloc_stmts(func)}"
+            f"Expected 1 alloc stmt after chain reuse, got {_count_alloc_stmts(func)}"
         )
 
         alloc_ids = _get_alloc_memref_ids(func)
@@ -461,11 +464,11 @@ class TestAllocCleanup:
         assert tile_a_type.memref.id_ in alloc_ids
 
     def test_partial_reuse_with_overlapping_lifetimes(self):
-        """Producer-consumer reuse still works even when some lifetimes overlap.
+        """When some lifetimes truly overlap, partial reuse happens.
 
-        Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,3]
-        tile_a and tile_b overlap (both alive at stmt 2), but tile_c reuses
-        tile_a (last_use==def). Only memref_c alloc removed → 2 allocs remain.
+        Lifetimes: tile_a[3,5], tile_b[4,5], tile_c[5,6]
+        tile_a and tile_b truly overlap ([3,5] vs [4,5]). tile_c touches tile_a
+        at 5 and reuses it → 2 allocs remain (tile_a and tile_b).
         """
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
@@ -483,7 +486,7 @@ class TestAllocCleanup:
         func = list(after.functions.values())[0]
 
         assert _count_alloc_stmts(func) == 2, (
-            f"Expected 2 alloc stmts after reuse, got {_count_alloc_stmts(func)}"
+            f"Expected 2 alloc stmts (tile_c reuses tile_a), got {_count_alloc_stmts(func)}"
         )
 
 

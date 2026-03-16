@@ -47,3 +47,46 @@ class MatmulProgram:
         out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         out_c = self.matmul(a, b, out_c)
         return out_c
+
+
+@pl.program
+class MatmulaccProgram:
+    """Matrix multiply with accumulation — K=64 split into two K=32 chunks.
+
+    First chunk initialises L0C via ``matmul``; second chunk accumulates via
+    ``matmul_acc``.  The final result equals the full 64×64 matrix product.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def matmul_acc(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        # First K-chunk: A[:,0:32] @ B[0:32,:] — initialises L0C via matmul
+        tile_a0_l1 = pl.load(a, offsets=[0, 0], shapes=[64, 32], target_memory=pl.MemorySpace.Mat)
+        tile_b0_l1 = pl.load(b, offsets=[0, 0], shapes=[32, 64], target_memory=pl.MemorySpace.Mat)
+        tile_a0_l0a = pl.move(tile_a0_l1, target_memory=pl.MemorySpace.Left)
+        tile_b0_l0b = pl.move(tile_b0_l1, target_memory=pl.MemorySpace.Right)
+        acc = pl.matmul(tile_a0_l0a, tile_b0_l0b)
+
+        # Second K-chunk: A[:,32:64] @ B[32:64,:] — accumulates into existing L0C
+        tile_a1_l1 = pl.load(a, offsets=[0, 32], shapes=[64, 32], target_memory=pl.MemorySpace.Mat)
+        tile_b1_l1 = pl.load(b, offsets=[32, 0], shapes=[32, 64], target_memory=pl.MemorySpace.Mat)
+        tile_a1_l0a = pl.move(tile_a1_l1, target_memory=pl.MemorySpace.Left)
+        tile_b1_l0b = pl.move(tile_b1_l1, target_memory=pl.MemorySpace.Right)
+        acc = pl.matmul_acc(acc, tile_a1_l0a, tile_b1_l0b)
+
+        out_c = pl.store(acc, offsets=[0, 0], output_tensor=c)
+        return out_c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+        out_c = self.matmul_acc(a, b, out_c)
+        return out_c

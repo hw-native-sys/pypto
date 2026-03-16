@@ -293,6 +293,17 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
 }
 
 /**
+ * @brief Check if two lifetimes overlap.
+ *
+ * Uses <= to allow "touching" lifetimes (last_use == def_point) to share
+ * buffers: within a single statement, inputs are consumed before outputs
+ * are produced.
+ */
+static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& b) {
+  return !(a.last_use_point <= b.def_point || b.last_use_point <= a.def_point);
+}
+
+/**
  * @brief Identify memory reuse opportunities from lifetime intervals
  */
 std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeInterval>& lifetimes) {
@@ -330,12 +341,12 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         const auto& prev_lifetime = lifetimes[prev_idx];
         VarPtr prev_var = prev_lifetime.variable;
 
-        // Check if lifetimes overlap with source variable
-        // Use <= because within a single statement, inputs are read before outputs
-        // are written (SSA semantics), so a variable whose last use is at the same
-        // statement as another variable's definition does NOT overlap.
-        bool overlaps_with_source = !(prev_lifetime.last_use_point <= curr_lifetime.def_point ||
-                                      curr_lifetime.last_use_point < prev_lifetime.def_point);
+        // Check if lifetimes overlap with source variable.
+        // Use <= to allow "touching" lifetimes (last_use == def_point) to be
+        // merged: within a single statement, inputs are consumed before outputs
+        // are produced, so a variable whose last use is in the same statement as
+        // another variable's definition can safely share the same buffer.
+        bool overlaps_with_source = LifetimesOverlap(prev_lifetime, curr_lifetime);
 
         // Check if size is sufficient
         bool size_ok = prev_lifetime.size >= curr_lifetime.size;
@@ -350,15 +361,34 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         }
 
         // CRITICAL: Check if current variable's lifetime overlaps with ANY variable
-        // that is already reusing the same MemRef (transitive reuse check)
+        // that is already reusing the same MemRef (transitive reuse check).
+        // Follow the reuse chain to the root, since all variables in the chain
+        // share the same physical MemRef.
+        VarPtr root = prev_var;
+        while (reuse_map.count(root)) {
+          root = reuse_map.at(root);
+        }
         bool overlaps_with_users = false;
-        if (memref_users.count(prev_var)) {
-          for (const auto& user_var : memref_users[prev_var]) {
-            // Use the fast lookup map instead of std::find_if
+        // When prev_var itself reuses another variable, we must also check
+        // against root (the ultimate MemRef owner) since it's not tracked
+        // in memref_users.
+        if (root != prev_var) {
+          const LifetimeInterval* root_lifetime = var_to_lifetime[root];
+          if (root_lifetime) {
+            bool overlaps = LifetimesOverlap(*root_lifetime, curr_lifetime);
+            if (overlaps) {
+              overlaps_with_users = true;
+              LOG_DEBUG << "Variable " << curr_var->name_ << " cannot reuse " << prev_var->name_
+                        << " due to overlap with root MemRef owner " << root->name_;
+            }
+          }
+        }
+        if (!overlaps_with_users && memref_users.count(root)) {
+          for (const auto& user_var : memref_users[root]) {
+            if (user_var == prev_var) continue;  // Already checked in source overlap
             const LifetimeInterval* user_lifetime = var_to_lifetime[user_var];
             if (user_lifetime) {
-              bool overlaps = !(user_lifetime->last_use_point <= curr_lifetime.def_point ||
-                                curr_lifetime.last_use_point < user_lifetime->def_point);
+              bool overlaps = LifetimesOverlap(*user_lifetime, curr_lifetime);
 
               if (overlaps) {
                 overlaps_with_users = true;
@@ -375,7 +405,7 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         if (!overlaps_with_users) {
           // Can safely reuse!
           reuse_map[curr_var] = prev_var;
-          memref_users[prev_var].push_back(curr_var);  // Track this reuse relationship
+          memref_users[root].push_back(curr_var);  // Track under root MemRef owner
           LOG_DEBUG << "Variable " << curr_var->name_ << " can reuse " << prev_var->name_ << " (lifetime ["
                     << curr_lifetime.def_point << ", " << curr_lifetime.last_use_point << "]"
                     << " vs [" << prev_lifetime.def_point << ", " << prev_lifetime.last_use_point << "])";

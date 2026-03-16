@@ -865,10 +865,10 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
     {"tile.matmul_mx_acc",   "pto.tmatmul.mx.acc",   5},
     {"tile.matmul_mx_bias",  "pto.tmatmul.mx.bias",  5},
-    {"tile.matmul_acc",      "pto.tmatmul.acc",      3},
+    // tile.matmul_acc and tile.gemv_acc have custom codegen (in-place accumulation)
     {"tile.matmul_bias",     "pto.tmatmul.bias",     3},
     {"tile.gemv",            "pto.tgemv",            2},
-    {"tile.gemv_acc",        "pto.tgemv.acc",        3},
+    // tile.gemv_acc has custom codegen (in-place accumulation)
     {"tile.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations
     {"tile.move",            "pto.tmov",             1},
@@ -966,6 +966,67 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.print", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
   });
+
+  // In-place accumulation ops (matmul_acc, gemv_acc): the CUBE engine
+  // accumulates into the output buffer, NOT from a separate accumulator input.
+  // When memory reuse cannot merge c_in and c_out (touching lifetimes treated
+  // as overlapping), they get separate buffers.  We emit a pto.tmov to copy
+  // c_in → c_out so the hardware reads the correct accumulator value.
+  auto make_acc_codegen = [](const std::string& pto_op) {
+    return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+      auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+      CHECK(op->args_.size() == 3) << pto_op << " requires 3 arguments: acc, lhs, rhs";
+
+      std::string acc = codegen.GetExprAsCode(op->args_[0]);
+      std::string dst = codegen.GetCurrentResultTarget();
+
+      // Copy accumulator to output buffer when they differ
+      if (acc != dst) {
+        std::string acc_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+        std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+        std::ostringstream mov;
+        mov << "pto.tmov ins(" << acc;
+        if (!acc_type.empty()) mov << " : " << acc_type;
+        mov << ") outs(" << dst;
+        if (!dst_type.empty()) mov << " : " << dst_type;
+        mov << ")";
+        codegen.Emit(mov.str());
+      }
+
+      // Emit the accumulation instruction with dst (accumulator), lhs, rhs
+      // as ins() operands.  ptoas expects all three in ins(); the hardware
+      // reads the accumulator from the output buffer, but the MLIR op still
+      // models it as an input for correct data-flow tracking.
+      std::string lhs = codegen.GetExprAsCode(op->args_[1]);
+      std::string rhs = codegen.GetExprAsCode(op->args_[2]);
+      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+      std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+      std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+      std::ostringstream acc_inst;
+      acc_inst << pto_op << " ins(" << dst << ", " << lhs << ", " << rhs;
+      std::vector<std::string> ins_type_parts;
+      for (const auto& t : {dst_type, lhs_type, rhs_type}) {
+        if (!t.empty()) ins_type_parts.push_back(t);
+      }
+      if (!ins_type_parts.empty()) {
+        acc_inst << " : ";
+        for (size_t i = 0; i < ins_type_parts.size(); ++i) {
+          if (i > 0) acc_inst << ", ";
+          acc_inst << ins_type_parts[i];
+        }
+      }
+      acc_inst << ") outs(" << dst;
+      if (!dst_type.empty()) acc_inst << " : " << dst_type;
+      acc_inst << ")";
+      codegen.Emit(acc_inst.str());
+      return "";
+    };
+  };
+
+  reg("tile.matmul_acc", make_acc_codegen("pto.tmatmul.acc"));
+  reg("tile.gemv_acc", make_acc_codegen("pto.tgemv.acc"));
+
   reg("tensor.dim", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTensorDimCodegenPTO(op, codegen);
   });
