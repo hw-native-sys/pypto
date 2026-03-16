@@ -1166,6 +1166,100 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
 }
 
 // ========================================================================
+// Expression visitors - Logical & Bitwise
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::AndPtr& op) { VisitBinaryArithExpr(op, "arith.andi", "arith.andi"); }
+void PTOCodegen::VisitExpr_(const ir::OrPtr& op) { VisitBinaryArithExpr(op, "arith.ori", "arith.ori"); }
+void PTOCodegen::VisitExpr_(const ir::XorPtr& op) { VisitBinaryArithExpr(op, "arith.xori", "arith.xori"); }
+void PTOCodegen::VisitExpr_(const ir::BitAndPtr& op) { VisitBinaryArithExpr(op, "arith.andi", "arith.andi"); }
+void PTOCodegen::VisitExpr_(const ir::BitOrPtr& op) { VisitBinaryArithExpr(op, "arith.ori", "arith.ori"); }
+void PTOCodegen::VisitExpr_(const ir::BitXorPtr& op) { VisitBinaryArithExpr(op, "arith.xori", "arith.xori"); }
+void PTOCodegen::VisitExpr_(const ir::BitShiftLeftPtr& op) {
+  VisitBinaryArithExpr(op, "arith.shli", "arith.shli");
+}
+void PTOCodegen::VisitExpr_(const ir::BitShiftRightPtr& op) {
+  VisitBinaryArithExpr(op, "arith.shrsi", "arith.shrsi");
+}
+
+// ========================================================================
+// Expression visitors - Other binary
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::FloatDivPtr& op) {
+  VisitBinaryArithExpr(op, "arith.divsi", "arith.divf");
+}
+void PTOCodegen::VisitExpr_(const ir::MinPtr& op) {
+  VisitBinaryArithExpr(op, "arith.minsi", "arith.minimumf");
+}
+void PTOCodegen::VisitExpr_(const ir::MaxPtr& op) {
+  VisitBinaryArithExpr(op, "arith.maxsi", "arith.maximumf");
+}
+
+// ========================================================================
+// Expression visitors - Unary
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::NotPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
+  std::string src_type = GetTypeString(src_dtype);
+  std::string zero = NewTemp();
+  std::string result = NewTemp();
+  if (src_dtype.IsFloat()) {
+    Emit(zero + " = arith.constant 0.0 : " + src_type);
+    Emit(result + " = arith.cmpf oeq, " + src + ", " + zero + " : " + src_type);
+  } else {
+    Emit(zero + " = arith.constant 0 : " + src_type);
+    Emit(result + " = arith.cmpi eq, " + src + ", " + zero + " : " + src_type);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::NegPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string result = NewTemp();
+  if (dtype.IsFloat()) {
+    Emit(result + " = arith.negf " + src + " : " + type_str);
+  } else {
+    std::string zero = NewTemp();
+    Emit(zero + " = arith.constant 0 : " + type_str);
+    Emit(result + " = arith.subi " + zero + ", " + src + " : " + type_str);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::AbsPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string result = NewTemp();
+  if (dtype.IsFloat()) {
+    Emit(result + " = math.absf " + src + " : " + type_str);
+  } else {
+    Emit(result + " = math.absi " + src + " : " + type_str);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::BitNotPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string all_ones = NewTemp();
+  Emit(all_ones + " = arith.constant -1 : " + type_str);
+  std::string result = NewTemp();
+  Emit(result + " = arith.xori " + src + ", " + all_ones + " : " + type_str);
+  current_expr_value_ = result;
+}
+
+// ========================================================================
 // Statement visitors - Control flow
 // ========================================================================
 
