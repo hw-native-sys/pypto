@@ -27,6 +27,7 @@ from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 from pypto.ir.pto_codegen import (
+    _format_error_report,
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
     _preprocess_ptoas_output,
@@ -646,6 +647,44 @@ class TestGenerateSkipPtoas:
         for key in kernel_keys:
             assert key.endswith(".pto"), f"Expected .pto extension, got: {key}"
             assert not key.endswith(".cpp"), f"Unexpected .cpp extension: {key}"
+
+
+class TestFormatErrorReport:
+    """Tests for codegen error summary formatting."""
+
+    def test_summary_lists_function_name_first(self, tmp_path):
+        report = _format_error_report(
+            [
+                ("vector_func", RuntimeError("vector_func invalid tile shape\n\nC++ Traceback:\n...")),
+                ("cube_func", ValueError("cube_func unsupported memory space")),
+            ],
+            str(tmp_path),
+        )
+
+        assert "2 function(s) failed to compile:" in report
+        assert "  Function" in report
+        assert "| Error" in report
+        assert "  vector_func" in report
+        assert "  cube_func" in report
+        assert "| vector_func" not in report
+        assert "| cube_func" not in report
+        assert "invalid tile shape | vector_func" not in report
+        assert "unsupported memory space | cube_func" not in report
+        assert "| invalid tile shape" in report
+        assert "| unsupported memory space" in report
+
+    def test_summary_does_not_group_same_error(self, tmp_path):
+        report = _format_error_report(
+            [
+                ("func_a", RuntimeError("func_a same failure")),
+                ("func_b", RuntimeError("func_b same failure")),
+            ],
+            str(tmp_path),
+        )
+
+        assert report.count("| same failure") == 2
+        assert "  func_a" in report
+        assert "  func_b" in report
 
 
 def test_pto_codegen_for_loop_tensor_iter_arg():

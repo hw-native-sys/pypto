@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/core/logging.h"
@@ -23,6 +24,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 
@@ -68,6 +70,85 @@ static bool ContainsInCoreScope(const StmtPtr& stmt) {
   }
 }
 
+/// Returns true if op_name is a compute tensor op, not a host-side memory op.
+static bool IsComputeTensorOp(const std::string& op_name) {
+  if (op_name.compare(0, 7, "tensor.") != 0) return false;
+  static const std::unordered_set<std::string> kHostSideOps = {
+      "tensor.create",   "tensor.read", "tensor.write",   "tensor.slice",
+      "tensor.assemble", "tensor.dim",  "tensor.reshape", "tensor.transpose",
+  };
+  return kHostSideOps.count(op_name) == 0;
+}
+
+class ComputeTensorOpDetector : public IRVisitor {
+ public:
+  [[nodiscard]] bool Found() const { return found_; }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (!op || found_) return;
+    if (op->op_ && IsComputeTensorOp(op->op_->name_)) {
+      found_ = true;
+      return;
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  bool found_ = false;
+};
+
+static bool ContainsComputeTensorOp(const StmtPtr& stmt) {
+  if (!stmt) return false;
+  ComputeTensorOpDetector detector;
+  detector.VisitStmt(stmt);
+  return detector.Found();
+}
+
+static bool ContainsChunkLoop(const StmtPtr& stmt) {
+  if (!stmt) return false;
+
+  auto kind = stmt->GetKind();
+  switch (kind) {
+    case ObjectKind::ForStmt: {
+      auto for_stmt = std::static_pointer_cast<const ForStmt>(stmt);
+      return for_stmt->loop_origin_ != LoopOrigin::Original || ContainsChunkLoop(for_stmt->body_);
+    }
+    case ObjectKind::SeqStmts: {
+      auto seq = std::static_pointer_cast<const SeqStmts>(stmt);
+      for (const auto& s : seq->stmts_) {
+        if (ContainsChunkLoop(s)) return true;
+      }
+      return false;
+    }
+    case ObjectKind::ScopeStmt: {
+      auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
+      return ContainsChunkLoop(scope->body_);
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * @brief Check whether a statement needs an InCore wrapper after auto_incore is consumed.
+ *
+ * We only wrap statements that still need outlining:
+ * - compute tensor ops
+ * - chunk loops that failed interchange or remain sequential
+ *
+ * Pure host-side groups such as a lone tensor.assemble/create/slice should stay
+ * in orchestration rather than becoming tiny outlined InCore functions.
+ */
+static bool NeedsInCoreWrapping(const StmtPtr& stmt) {
+  if (!stmt) return false;
+
+  auto kind = stmt->GetKind();
+  if (kind == ObjectKind::YieldStmt || kind == ObjectKind::ReturnStmt) return false;
+  if (ContainsInCoreScope(stmt)) return false;
+
+  return ContainsChunkLoop(stmt) || ContainsComputeTensorOp(stmt);
+}
+
 /**
  * @brief Wrap statements that lack InCore coverage in ScopeStmt(InCore).
  *
@@ -79,13 +160,6 @@ static bool ContainsInCoreScope(const StmtPtr& stmt) {
  * Control flow statements (YieldStmt, ReturnStmt) are never wrapped.
  */
 static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& span) {
-  auto needs_wrapping = [](const StmtPtr& s) -> bool {
-    if (!s) return false;
-    auto kind = s->GetKind();
-    if (kind == ObjectKind::YieldStmt || kind == ObjectKind::ReturnStmt) return false;
-    return !ContainsInCoreScope(s);
-  };
-
   // When a ForStmt contains InCore scopes in its body (e.g. a pl.range loop
   // wrapping interchanged parallel chunks), recurse into it so that non-InCore
   // statements *inside* the loop body also get wrapped.
@@ -104,7 +178,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
 
   auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
   if (!seq) {
-    if (needs_wrapping(body)) {
+    if (NeedsInCoreWrapping(body)) {
       return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span);
     }
     return maybe_recurse_into_compound(body);
@@ -113,7 +187,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   // Check if any wrapping or recursion is needed (fast path)
   bool has_work = false;
   for (const auto& s : seq->stmts_) {
-    if (needs_wrapping(s)) {
+    if (NeedsInCoreWrapping(s)) {
       has_work = true;
       break;
     }
@@ -137,7 +211,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   };
 
   for (const auto& s : seq->stmts_) {
-    if (needs_wrapping(s)) {
+    if (NeedsInCoreWrapping(s)) {
       pending.push_back(s);
     } else {
       flush();

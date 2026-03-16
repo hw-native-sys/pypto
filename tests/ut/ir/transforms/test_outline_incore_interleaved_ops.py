@@ -321,5 +321,39 @@ class TestNestedForStmtRecursion:
         assert "tensor.muls" not in orch_str
 
 
+class TestHostSideTailOps:
+    """Host-side tensor ops may stay in Orchestration after outline."""
+
+    def test_tail_assemble_after_parallel_chunk_stays_in_orchestration(self):
+        """A trailing tensor.assemble should not become its own InCore function."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
+                    [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 4, 1, chunk=2):
+                        x = pl.tensor.adds(x, 1.0)
+                    out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
+                return out_1
+
+        program = _prepare_for_interchange(Input)
+        program = passes.interchange_chunk_loops()(program)
+        program = passes.outline_incore_scopes()(program)
+
+        orch_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.Orchestration]
+        assert len(orch_funcs) == 1
+        orch_str = orch_funcs[0].as_python()
+
+        assert "tensor.adds" not in orch_str
+        assert "tensor.assemble" in orch_str
+
+        incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

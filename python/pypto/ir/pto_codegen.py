@@ -38,8 +38,8 @@ def _get_error_summary(exc: Exception, func_name: str) -> str:
     """Extract the first meaningful line from an exception, without the function name.
 
     Strips the C++ Traceback tail, takes only the first line, and removes
-    occurrences of *func_name* so that identical errors across different
-    functions can be grouped together.
+    occurrences of *func_name* so the summary column focuses on the error
+    itself instead of repeating the function name.
     """
     msg = str(exc)
     traceback_marker = msg.find("\n\nC++ Traceback")
@@ -58,35 +58,29 @@ def _format_error_report(
 ) -> str:
     """Build a concise error summary table and write full details to a log file.
 
-    Groups functions by their error summary so that identical errors appear on a
-    single row.  Returns the summary string for use in the ``RuntimeError`` message.
+    Each failed function is shown on its own row, with ``Function`` as the
+    first column and ``Error`` as the second column. Returns the summary string
+    for use in the ``RuntimeError`` message.
     """
     max_error_col = 60
 
-    grouped: OrderedDict[str, list[str]] = OrderedDict()
-    for name, exc in errors:
-        summary = _get_error_summary(exc, name)
-        grouped.setdefault(summary, []).append(name)
-
-    longest_error = max(len(s) for s in grouped)
+    summaries = OrderedDict((name, _get_error_summary(exc, name)) for name, exc in errors)
+    longest_error = max(len(summary) for summary in summaries.values())
     error_col_width = min(longest_error, max_error_col) + 2
     error_col_width = max(error_col_width, len("Error") + 2)
     func_col_width = max(len(n) for n, _ in errors) + 2
     func_col_width = max(func_col_width, len("Function") + 2)
 
     lines: list[str] = [f"{len(errors)} function(s) failed to compile:\n"]
-    lines.append(f"  {'Error':<{error_col_width}}| {'Function'}")
-    lines.append(f"  {'-' * error_col_width}+{'-' * func_col_width}")
+    lines.append(f"  {'Function':<{func_col_width}}| {'Error'}")
+    lines.append(f"  {'-' * func_col_width}+{'-' * error_col_width}")
 
-    sep_line = f"  {'-' * error_col_width}+{'-' * func_col_width}"
-    for summary, func_names in grouped.items():
+    sep_line = f"  {'-' * func_col_width}+{'-' * error_col_width}"
+    for func_name, summary in summaries.items():
         wrapped = textwrap.wrap(summary, width=max_error_col) or [summary]
-        lines.append(f"  {wrapped[0]:<{error_col_width}}| {func_names[0]}")
-        remaining = max(len(wrapped) - 1, len(func_names) - 1)
-        for i in range(remaining):
-            err_part = wrapped[i + 1] if i + 1 < len(wrapped) else ""
-            func_part = func_names[i + 1] if i + 1 < len(func_names) else ""
-            lines.append(f"  {err_part:<{error_col_width}}| {func_part}")
+        lines.append(f"  {func_name:<{func_col_width}}| {wrapped[0]}")
+        for err_part in wrapped[1:]:
+            lines.append(f"  {'':<{func_col_width}}| {err_part}")
         lines.append(sep_line)
 
     summary_text = "\n".join(lines)

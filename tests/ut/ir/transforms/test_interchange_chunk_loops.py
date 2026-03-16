@@ -587,6 +587,30 @@ class TestNonChunkStatementsWrapping:
         incore_count = after_str.count("pl.incore()")
         assert incore_count >= 2
 
+    def test_host_side_assemble_after_parallel_chunk_not_wrapped(self):
+        """Host-side tail assemble after a chunk should stay outside InCore."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
+                    [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 4, 1, chunk=2):
+                        x = pl.tensor.adds(x, 1.0)
+                    out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
+                return out_1
+
+        Before = _prepare_for_interchange(Input)
+        After = passes.interchange_chunk_loops()(Before)
+
+        after_str = python_print(After)
+        # Only the interchanged chunk body should be in InCore.
+        assert after_str.count("pl.incore()") == 1
+        assert "pl.tensor.assemble(" in after_str
+
     def test_multiple_parallel_chunks_no_regression(self):
         """Multiple parallel chunks with no standalone ops: all interchanged, no extra wrapping."""
 
