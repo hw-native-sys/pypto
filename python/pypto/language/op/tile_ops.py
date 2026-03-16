@@ -25,6 +25,7 @@ __all__ = [
     "write",
     "load",
     "store",
+    "assemble",
     "move",
     "full",
     "fillpad",
@@ -240,6 +241,21 @@ def store(
     """
     call_expr = _ir_ops.store(tile.unwrap(), _normalize_intlike(offsets), output_tensor.unwrap())
     return Tensor(expr=call_expr)
+
+
+def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
+    """Write source tile data into target tile at specified offset.
+
+    Args:
+        target: Target tile to update
+        source: Source tile to write
+        offset: Offset dimensions for where to write
+
+    Returns:
+        Tile wrapping the assemble operation
+    """
+    call_expr = _ir_ops.assemble(target.unwrap(), source.unwrap(), _normalize_intlike(offset))
+    return Tile(expr=call_expr)
 
 
 def move(tile: Tile, target_memory: MemorySpace) -> Tile:
