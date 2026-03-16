@@ -683,16 +683,16 @@ class SSAConverter : public IRMutator {
         // Replace last yield
         std::vector<StmtPtr> new_stmts(seq->stmts_.begin(), seq->stmts_.end() - 1);
         new_stmts.push_back(yield);
-        return std::make_shared<SeqStmts>(new_stmts, seq->span_);
+        return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
       }
       // Append yield
       std::vector<StmtPtr> new_stmts = seq->stmts_;
       new_stmts.push_back(yield);
-      return std::make_shared<SeqStmts>(new_stmts, seq->span_);
+      return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
     }
 
     // Wrap single statement and yield in SeqStmts
-    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{stmt, yield}, span);
+    return SeqStmts::Flatten(std::vector<StmtPtr>{stmt, yield}, span);
   }
 
   /**
@@ -721,12 +721,12 @@ class SSAConverter : public IRMutator {
         // Replace last yield
         std::vector<StmtPtr> new_stmts(seq->stmts_.begin(), seq->stmts_.end() - 1);
         new_stmts.push_back(new_yield);
-        return std::make_shared<SeqStmts>(new_stmts, seq->span_);
+        return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
       }
       // Append yield
       std::vector<StmtPtr> new_stmts = seq->stmts_;
       new_stmts.push_back(new_yield);
-      return std::make_shared<SeqStmts>(new_stmts, seq->span_);
+      return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
     }
 
     if (As<YieldStmt>(stmt)) {
@@ -734,7 +734,7 @@ class SSAConverter : public IRMutator {
     }
 
     // Wrap single statement and yield in SeqStmts
-    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{stmt, new_yield}, span);
+    return SeqStmts::Flatten(std::vector<StmtPtr>{stmt, new_yield}, span);
   }
 };
 

@@ -264,12 +264,14 @@ class ASTParser:
             self.parse_break(stmt)
         elif isinstance(stmt, ast.Continue):
             self.parse_continue(stmt)
+        elif isinstance(stmt, ast.Pass):
+            pass  # No-op: pass statements produce no IR
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
                 span=self.span_tracker.get_span(stmt),
                 hint="Only assignments, for loops, while loops, if statements, "
-                "with statements, returns, break, and continue are supported in DSL functions",
+                "with statements, returns, break, continue, and pass are supported in DSL functions",
             )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:  # noqa: PLR0912

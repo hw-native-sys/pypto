@@ -1195,6 +1195,42 @@ class TestPlainSyntax:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_if_with_empty_then_branch_plain(self):
+        """Empty then-branch (e.g. from continue elimination) should not create single-child SeqStmts.
+
+        Regression test for issue #561: ConvertToSSA was wrapping a single yield
+        in a SeqStmts when inserting into an empty branch, violating NoRedundantBlocks.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = x
+                for i in pl.range(10):
+                    if i > 5:
+                        pass
+                    else:
+                        result = pl.add(result, 1.0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result_0: pl.Tensor[[64], pl.FP32] = x_0
+                for i_0, (result_iter_1,) in pl.range(0, 10, 1, init_values=(result_0,)):
+                    if i_0 > 5:
+                        result_4 = pl.yield_(result_iter_1)
+                    else:
+                        result_3: pl.Tensor[[64], pl.FP32] = pl.add(result_iter_1, 1.0)
+                        result_4 = pl.yield_(result_3)
+                    result_2 = pl.yield_(result_4)
+                return result_2
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
