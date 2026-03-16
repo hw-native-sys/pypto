@@ -138,8 +138,8 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
       // no_memory_spec ops (e.g. tile.tpop_*): read memory_space from Call return type
       if (auto tile_type = As<TileType>(call->GetType())) {
-        if (tile_type->memory_space_ != MemorySpace::DDR) {
-          return tile_type->memory_space_;
+        if (tile_type->memory_space_.has_value() && *tile_type->memory_space_ != MemorySpace::DDR) {
+          return *tile_type->memory_space_;
         }
       }
       return MemorySpace::Vec;
