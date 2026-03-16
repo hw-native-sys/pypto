@@ -442,8 +442,12 @@ class BlockOperationsTest:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Matmul: output = matmul(lhs, rhs)."""
-        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
-        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
+        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+            lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        )
+        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+            rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        )
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.matmul(lhs_tile, rhs_tile)
         updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output
@@ -457,9 +461,15 @@ class BlockOperationsTest:
         output: pl.Tensor[[16, 16], pl.FP32],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Matmul_acc: output = matmul_acc(factor, lhs, rhs)."""
-        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
-        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
-        factor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(factor, [0, 0], [16, 16])
+        lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+            lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        )
+        rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+            rhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        )
+        factor_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+            factor, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+        )
         result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.matmul_acc(factor_tile, lhs_tile, rhs_tile)
         updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
         return updated_output

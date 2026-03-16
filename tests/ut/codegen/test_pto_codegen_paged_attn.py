@@ -63,12 +63,13 @@ class PagedAttention:
     def qk_matmul(
         self,
         qi: pl.Tensor[[16, 128], pl.BF16],
-        kj: pl.Tensor[[128, 128], pl.BF16],
+        kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
         s_ij: pl.Tensor[[16, 128], pl.FP32],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
-        q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128])
-        k_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(kj, [0, 0], [128, 128])
-        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.transpose(k_tile, axis1=0, axis2=1)
+        q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+        k_tile_T: pl.Tile[[128, 128], pl.BF16] = pl.load(
+            kj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+        )
         s_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.matmul(q_tile, k_tile_T)
         updated_sij: pl.Tensor[[16, 128], pl.FP32] = pl.store(s_tile, [0, 0], s_ij)
         return updated_sij
@@ -80,8 +81,12 @@ class PagedAttention:
         vj: pl.Tensor[[128, 128], pl.BF16],
         oij: pl.Tensor[[16, 128], pl.FP32],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
-        p_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(pij, [0, 0], [16, 128])
-        v_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(vj, [0, 0], [128, 128])
+        p_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+            pij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+        )
+        v_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(
+            vj, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+        )
         o_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.matmul(p_tile, v_tile)
         updated_oij: pl.Tensor[[16, 128], pl.FP32] = pl.store(o_tile, [0, 0], oij)
         return updated_oij

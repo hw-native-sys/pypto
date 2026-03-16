@@ -163,6 +163,16 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   // Other tile.* ops are vector
   if (name.substr(0, 5) == "tile.") return CoreAffinity::VECTOR;
 
+  // Cross-core ops: AIV-side ops are VECTOR, AIC-side ops are CUBE.
+  // reserve_buffer and import_peer_buffer are SHARED (used by both sides).
+  static const std::unordered_set<std::string> vector_cross_core_ops = {
+      "system.aiv_initialize_pipe", "system.tpush_to_aic", "system.tfree_to_aic"};
+  if (vector_cross_core_ops.count(name)) return CoreAffinity::VECTOR;
+
+  static const std::unordered_set<std::string> cube_cross_core_ops = {
+      "system.aic_initialize_pipe", "system.tfree_to_aiv", "system.tpush_to_aiv"};
+  if (cube_cross_core_ops.count(name)) return CoreAffinity::CUBE;
+
   return CoreAffinity::SHARED;
 }
 

@@ -63,9 +63,7 @@ class PassManager:
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
                 ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-                # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
-                # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
-                # Codegen already supports AIC/AIV/Group function types.
+                ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),

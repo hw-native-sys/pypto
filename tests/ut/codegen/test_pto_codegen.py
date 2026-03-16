@@ -66,7 +66,7 @@ def _get_dyn_incore_func():
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed = pm.run_passes(_DynKernel)
     for func in transformed.functions.values():
-        if func.func_type == ir.FunctionType.InCore:
+        if ir.is_incore_type(func.func_type):
             return func
     raise RuntimeError("No InCore function found in _DynKernel")
 

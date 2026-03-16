@@ -26,7 +26,6 @@ import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 # ============================================================================
 # Test Program: Vector Producer + Cube Consumer (V2C unidirectional)
@@ -162,14 +161,32 @@ class TestCrossCoreTpushTpopCodegen:
     def _compile_and_generate(program) -> dict[str, str]:
         """Compile program and return dict of {func_name: mlir_code}.
 
-        Runs PassManager with Default strategy (no InsertSync), then generates
-        PTO MLIR for each InCore function individually.
+        Uses a custom pipeline matching the Default strategy but without
+        ExpandMixedKernel, since these programs already have manual cross-core
+        setup with explicit AIC/AIV tpush/tpop ops.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B_PTO)
 
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program)
+        pipeline = passes.PassPipeline()
+        for factory in [
+            passes.unroll_loops,
+            passes.convert_to_ssa,
+            passes.flatten_call_expr,
+            passes.split_chunked_loops,
+            passes.interchange_chunk_loops,
+            passes.outline_incore_scopes,
+            passes.outline_cluster_scopes,
+            passes.convert_tensor_to_tile_ops,
+            passes.flatten_tile_nd_to_2d,
+            passes.infer_tile_memory_space,
+            passes.resolve_transpose_layout,
+            passes.init_mem_ref,
+            passes.basic_memory_reuse,
+            passes.allocate_memory_addr,
+        ]:
+            pipeline.add_pass(factory())
+        optimized = pipeline.run(program)
 
         result = {}
         codegen_instance = codegen.PTOCodegen()
