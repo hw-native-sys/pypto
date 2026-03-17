@@ -12,7 +12,6 @@
 #include "pypto/ir/builder.h"
 
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -20,12 +19,9 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -34,18 +30,17 @@ namespace ir {
 
 IRBuilder::IRBuilder() = default;
 
-IRBuilder::~IRBuilder() = default;
-
 // ========== Function Building ==========
 
-void IRBuilder::BeginFunction(const std::string& name, const Span& span, FunctionType type) {
+void IRBuilder::BeginFunction(const std::string& name, const Span& span, FunctionType type,
+                              std::optional<Level> level, std::optional<Role> role) {
   if (InFunction()) {
     throw pypto::RuntimeError("Cannot begin function '" + name + "': already inside function '" +
                               static_cast<FunctionContext*>(CurrentContext())->GetName() + "' at " +
                               CurrentContext()->GetBeginSpan().to_string());
   }
 
-  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type));
+  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type, level, role));
 }
 
 VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span,
@@ -68,16 +63,8 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
   auto* func_ctx = static_cast<FunctionContext*>(CurrentContext());
 
   // Build body from accumulated statements
-  StmtPtr body;
   const auto& stmts = func_ctx->GetStmts();
-  if (stmts.empty()) {
-    // Empty body - create empty SeqStmts
-    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
-  } else if (stmts.size() == 1) {
-    body = stmts[0];
-  } else {
-    body = std::make_shared<SeqStmts>(stmts, end_span);
-  }
+  StmtPtr body = (stmts.size() == 1) ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
 
   // Combine begin and end spans
   const Span& begin_span = func_ctx->GetBeginSpan();
@@ -85,9 +72,9 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create function
-  auto func =
-      std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(),
-                                 func_ctx->GetReturnTypes(), body, combined_span, func_ctx->GetFuncType());
+  auto func = std::make_shared<Function>(
+      func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(), func_ctx->GetReturnTypes(),
+      body, combined_span, func_ctx->GetFuncType(), func_ctx->GetLevel(), func_ctx->GetRole());
 
   // Pop context
   context_stack_.pop_back();
@@ -137,15 +124,8 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
   }
 
   // Build body from accumulated statements
-  StmtPtr body;
   const auto& stmts = loop_ctx->GetStmts();
-  if (stmts.empty()) {
-    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
-  } else if (stmts.size() == 1) {
-    body = stmts[0];
-  } else {
-    body = std::make_shared<SeqStmts>(stmts, end_span);
-  }
+  StmtPtr body = (stmts.size() == 1) ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
 
   // Combine begin and end spans
   const Span& begin_span = loop_ctx->GetBeginSpan();
@@ -212,15 +192,8 @@ StmtPtr IRBuilder::EndWhileLoop(const Span& end_span) {
   }
 
   // Build body from accumulated statements
-  StmtPtr body;
   const auto& stmts = loop_ctx->GetStmts();
-  if (stmts.empty()) {
-    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
-  } else if (stmts.size() == 1) {
-    body = stmts[0];
-  } else {
-    body = std::make_shared<SeqStmts>(stmts, end_span);
-  }
+  StmtPtr body = (stmts.size() == 1) ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
 
   // Combine begin and end spans
   const Span& begin_span = loop_ctx->GetBeginSpan();
@@ -271,26 +244,16 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
   auto* if_ctx = static_cast<IfStmtContext*>(CurrentContext());
 
   // Build then body
-  StmtPtr then_body;
   const auto& then_stmts = if_ctx->GetStmts();
-  if (then_stmts.empty()) {
-    then_body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
-  } else if (then_stmts.size() == 1) {
-    then_body = then_stmts[0];
-  } else {
-    then_body = std::make_shared<SeqStmts>(then_stmts, end_span);
-  }
+  StmtPtr then_body =
+      (then_stmts.size() == 1) ? then_stmts[0] : std::make_shared<SeqStmts>(then_stmts, end_span);
 
   // Build else body (optional)
   std::optional<StmtPtr> else_body;
   if (if_ctx->InElseBranch()) {
     const auto& else_stmts = if_ctx->GetElseStmts();
     if (!else_stmts.empty()) {
-      if (else_stmts.size() == 1) {
-        else_body = else_stmts[0];
-      } else {
-        else_body = std::make_shared<SeqStmts>(else_stmts, end_span);
-      }
+      else_body = (else_stmts.size() == 1) ? else_stmts[0] : std::make_shared<SeqStmts>(else_stmts, end_span);
     }
   }
 
@@ -316,10 +279,11 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 
 // ========== Scope Building ==========
 
-void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span) {
+void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
+                           std::optional<Role> role) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
-  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span));
+  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -329,15 +293,8 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   auto* scope_ctx = static_cast<ScopeContext*>(CurrentContext());
 
   // Build body
-  StmtPtr body;
   const auto& stmts = scope_ctx->GetStmts();
-  if (stmts.empty()) {
-    body = std::make_shared<SeqStmts>(std::vector<StmtPtr>(), end_span);
-  } else if (stmts.size() == 1) {
-    body = stmts[0];
-  } else {
-    body = std::make_shared<SeqStmts>(stmts, end_span);
-  }
+  StmtPtr body = (stmts.size() == 1) ? stmts[0] : std::make_shared<SeqStmts>(stmts, end_span);
 
   // Combine spans
   const Span& begin_span = scope_ctx->GetBeginSpan();
@@ -345,7 +302,8 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create scope statement
-  auto scope_stmt = std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span);
+  auto scope_stmt = std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span,
+                                                scope_ctx->GetLevel(), scope_ctx->GetRole());
 
   // Pop context
   context_stack_.pop_back();

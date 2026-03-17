@@ -266,6 +266,107 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
     return ir.FunctionType.Opaque
 
 
+_LEVEL_MAP: dict[str, ir.Level] = {
+    "AIV": ir.Level.AIV,
+    "AIC": ir.Level.AIC,
+    "CORE_GROUP": ir.Level.CORE_GROUP,
+    "CHIP_DIE": ir.Level.CHIP_DIE,
+    "CHIP": ir.Level.CHIP,
+    "HOST": ir.Level.HOST,
+    "CLUSTER_0": ir.Level.CLUSTER_0,
+    "CLUSTER_1": ir.Level.CLUSTER_1,
+    "CLUSTER_2": ir.Level.CLUSTER_2,
+    "GLOBAL": ir.Level.GLOBAL,
+    # Readability aliases
+    "L2CACHE": ir.Level.L2CACHE,
+    "PROCESSOR": ir.Level.PROCESSOR,
+    "UMA": ir.Level.UMA,
+    "NODE": ir.Level.NODE,
+    "POD": ir.Level.POD,
+    "CLOS1": ir.Level.CLOS1,
+    "CLOS2": ir.Level.CLOS2,
+}
+
+_ROLE_MAP: dict[str, ir.Role] = {
+    "Orchestrator": ir.Role.Orchestrator,
+    "Worker": ir.Role.Worker,
+}
+
+
+def _extract_enum_value(
+    value: ast.expr,
+    enum_map: dict[str, Any],
+    enum_name: str,
+    qualified: str,
+) -> Any:
+    """Extract enum value from AST: pl.Level.HOST or Level.HOST.
+
+    Args:
+        value: AST expression node
+        enum_map: Mapping from attribute name to enum value
+        enum_name: Enum class name (e.g., "Level")
+        qualified: Qualified name for error messages (e.g., "pl.Level")
+
+    Returns:
+        Enum value from enum_map
+    """
+    if not isinstance(value, ast.Attribute):
+        raise ParserSyntaxError(
+            f"Expected {qualified}.<name>",
+            hint=f"Use {qualified}.<name>.",
+        )
+    if value.attr not in enum_map:
+        raise ParserSyntaxError(
+            f"Unknown {enum_name} value: {value.attr}",
+            hint=f"Valid values: {', '.join(enum_map.keys())}",
+        )
+    # Check prefix: Level.X
+    if isinstance(value.value, ast.Name) and value.value.id == enum_name:
+        return enum_map[value.attr]
+    # Check prefix: pl.Level.X
+    if (
+        isinstance(value.value, ast.Attribute)
+        and isinstance(value.value.value, ast.Name)
+        and value.value.value.id == "pl"
+        and value.value.attr == enum_name
+    ):
+        return enum_map[value.attr]
+    raise ParserSyntaxError(f"Expected {qualified}.<name>")
+
+
+def _extract_function_level_role_from_decorator(
+    node: ast.FunctionDef,
+) -> tuple[ir.Level | None, ir.Role | None]:
+    """Extract level and role from @pl.function(level=..., role=...) decorator.
+
+    Args:
+        node: AST FunctionDef node to extract level/role from
+
+    Returns:
+        Tuple of (level, role), either or both may be None
+    """
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+
+        is_function_call = (
+            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
+        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
+
+        if not is_function_call:
+            continue
+
+        level = None
+        role = None
+        for keyword in decorator.keywords:
+            if keyword.arg == "level":
+                level = _extract_enum_value(keyword.value, _LEVEL_MAP, "Level", "pl.Level")
+            elif keyword.arg == "role":
+                role = _extract_enum_value(keyword.value, _ROLE_MAP, "Role", "pl.Role")
+        return level, role
+    return None, None
+
+
 def _prescan_reserve_buffers(
     func_def: ast.FunctionDef, buffer_name_meta: dict[tuple[str, str], dict[str, Any]]
 ) -> None:
@@ -484,6 +585,8 @@ def function(
     func: Callable | None = None,
     *,
     type: ir.FunctionType = ir.FunctionType.Opaque,
+    level: ir.Level | None = None,
+    role: ir.Role | None = None,
     strict_ssa: bool = False,
 ) -> ir.Function:
     """Decorator that parses a DSL function and returns IR Function.
@@ -495,6 +598,8 @@ def function(
     Args:
         func: Python function decorated with @pl.function
         type: Function type (Opaque, Orchestration, or InCore)
+        level: Hierarchy level (e.g. pl.Level.HOST)
+        role: Function role (e.g. pl.Role.Worker)
         strict_ssa: If True, enforce SSA (single assignment per variable).
                    If False (default), allow variable reassignment (non-SSA mode).
 
@@ -506,9 +611,9 @@ def function(
         ... def my_func(x: pl.Tensor[[64, 128], pl.FP16]) -> pl.Tensor[[64, 128], pl.FP32]:
         ...     result = pl.create_tensor([64, 128], dtype=pl.FP32)
         ...     return result
-        >>> @pl.function(type=pl.FunctionType.Orchestration)
-        ... def orchestrator():
-        ...     pass
+        >>> @pl.function(level=pl.Level.HOST, role=pl.Role.Worker)
+        ... def worker(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        ...     return x
     """
 
     # Capture the caller's scope for variable resolution in type annotations
@@ -553,7 +658,7 @@ def function(
             )
 
             try:
-                ir_func = parser.parse_function(func_def, func_type=type)
+                ir_func = parser.parse_function(func_def, func_type=type, func_level=level, func_role=role)
             except ParserError:
                 # Re-raise ParserError as-is, it already has source lines
                 raise
@@ -717,8 +822,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                 _prescan_reserve_buffers(func_def, buffer_name_meta)
 
             for func_def in func_defs:
-                # Extract function type from decorator
+                # Extract function type and level/role from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
+                func_level, func_role = _extract_function_level_role_from_decorator(func_def)
 
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = _strip_self_parameter(func_def)
@@ -737,7 +843,9 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                 )
 
                 try:
-                    ir_func = parser.parse_function(func_def_to_parse, func_type=func_type)
+                    ir_func = parser.parse_function(
+                        func_def_to_parse, func_type=func_type, func_level=func_level, func_role=func_role
+                    )
                 except ParserError:
                     raise
                 except SyntaxError as e:

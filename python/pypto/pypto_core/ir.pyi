@@ -2328,13 +2328,22 @@ class IRBuilder:
         """Create an IR builder."""
 
     # Function building
-    def begin_function(self, name: str, span: Span, type: FunctionType = FunctionType.Opaque) -> None:
+    def begin_function(
+        self,
+        name: str,
+        span: Span,
+        type: FunctionType = FunctionType.Opaque,
+        level: Level | None = None,
+        role: Role | None = None,
+    ) -> None:
         """Begin building a function.
 
         Args:
             name: Function name
             span: Source location for function definition
             type: Function type (default: Opaque)
+            level: Hierarchy level (default: None)
+            role: Function role (default: None)
         """
 
     def func_arg(
@@ -2509,12 +2518,20 @@ class IRBuilder:
         """
 
     # Scope building
-    def begin_scope(self, scope_kind: ScopeKind, span: Span) -> None:
+    def begin_scope(
+        self,
+        scope_kind: ScopeKind,
+        span: Span,
+        level: Level | None = None,
+        role: Role | None = None,
+    ) -> None:
         """Begin building a scope statement.
 
         Args:
             scope_kind: The kind of scope (e.g., ScopeKind.InCore)
             span: Source location for scope statement
+            level: Hierarchy level (default: None)
+            role: Function role (default: None)
         """
 
     def end_scope(self, end_span: Span) -> ScopeStmt:

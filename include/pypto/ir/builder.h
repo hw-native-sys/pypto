@@ -63,7 +63,7 @@ class IfStmtContext;
 class IRBuilder {
  public:
   IRBuilder();
-  ~IRBuilder();
+  ~IRBuilder() = default;
 
   // Disable copying and moving since we have unique_ptr members
   IRBuilder(const IRBuilder&) = delete;
@@ -84,7 +84,8 @@ class IRBuilder {
    * @param type Function type (default: Opaque)
    * @throws RuntimeError if already inside a function (no nested functions allowed)
    */
-  void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque);
+  void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque,
+                     std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt);
 
   /**
    * @brief Add a function parameter
@@ -293,7 +294,8 @@ class IRBuilder {
    * @param span Source location for scope statement
    * @throws RuntimeError if not inside a function or loop
    */
-  void BeginScope(ScopeKind scope_kind, const Span& span);
+  void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
+                  std::optional<Role> role = std::nullopt);
 
   /**
    * @brief End building a scope statement
@@ -525,8 +527,13 @@ class BuildContext {
  */
 class FunctionContext : public BuildContext {
  public:
-  FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque)
-      : BuildContext(Type::FUNCTION, std::move(span)), name_(std::move(name)), func_type_(func_type) {}
+  FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque,
+                  std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt)
+      : BuildContext(Type::FUNCTION, std::move(span)),
+        name_(std::move(name)),
+        func_type_(func_type),
+        level_(level),
+        role_(role) {}
 
   void AddParam(const VarPtr& param, ParamDirection direction = ParamDirection::In) {
     params_.push_back(param);
@@ -540,10 +547,14 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] const std::vector<ParamDirection>& GetParamDirections() const { return param_directions_; }
   [[nodiscard]] const std::vector<TypePtr>& GetReturnTypes() const { return return_types_; }
   [[nodiscard]] FunctionType GetFuncType() const { return func_type_; }
+  [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
+  [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
 
  private:
   std::string name_;
   FunctionType func_type_;
+  std::optional<Level> level_;
+  std::optional<Role> role_;
   std::vector<VarPtr> params_;
   std::vector<ParamDirection> param_directions_;
   std::vector<TypePtr> return_types_;
@@ -634,13 +645,7 @@ class IfStmtContext : public BuildContext {
 
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
 
-  void AddStmt(const StmtPtr& stmt) override {
-    if (in_else_branch_) {
-      else_stmts_.push_back(stmt);
-    } else {
-      stmts_.push_back(stmt);
-    }
-  }
+  void AddStmt(const StmtPtr& stmt) override { (in_else_branch_ ? else_stmts_ : stmts_).push_back(stmt); }
   [[nodiscard]] const ExprPtr& GetCondition() const { return condition_; }
   [[nodiscard]] bool InElseBranch() const { return in_else_branch_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetElseStmts() const { return else_stmts_; }
@@ -658,16 +663,21 @@ class IfStmtContext : public BuildContext {
  */
 class ScopeContext : public BuildContext {
  public:
-  ScopeContext(ScopeKind scope_kind, Span span)
-      : BuildContext(Type::SCOPE, std::move(span)), scope_kind_(scope_kind) {}
+  ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
+               std::optional<Role> role = std::nullopt)
+      : BuildContext(Type::SCOPE, std::move(span)), scope_kind_(scope_kind), level_(level), role_(role) {}
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
 
   [[nodiscard]] ScopeKind GetScopeKind() const { return scope_kind_; }
+  [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
+  [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
  private:
   ScopeKind scope_kind_;
+  std::optional<Level> level_;
+  std::optional<Role> role_;
   std::vector<StmtPtr> stmts_;
 };
 

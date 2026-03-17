@@ -55,7 +55,12 @@ class IRBuilder:
 
     @contextmanager
     def function(
-        self, name: str, span: ir.Span | None = None, type: ir.FunctionType = ir.FunctionType.Opaque
+        self,
+        name: str,
+        span: ir.Span | None = None,
+        type: ir.FunctionType = ir.FunctionType.Opaque,
+        level: ir.Level | None = None,
+        role: ir.Role | None = None,
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -80,7 +85,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(name, begin_span, type)
+        self._builder.begin_function(name, begin_span, type, level, role)
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj
@@ -235,12 +240,20 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
-    def scope(self, scope_kind: ir.ScopeKind, span: ir.Span | None = None) -> Iterator["ScopeBuilder"]:
+    def scope(
+        self,
+        scope_kind: ir.ScopeKind,
+        span: ir.Span | None = None,
+        level: ir.Level | None = None,
+        role: ir.Role | None = None,
+    ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
         Args:
             scope_kind: The kind of scope (e.g., ir.ScopeKind.InCore)
             span: Optional explicit span. If None, automatically captured.
+            level: Hierarchy level (for ScopeKind.Hierarchy)
+            role: Function role (for ScopeKind.Hierarchy)
 
         Yields:
             ScopeBuilder: Helper object for building the scope statement
@@ -255,7 +268,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_scope(scope_kind, begin_span)
+        self._builder.begin_scope(scope_kind, begin_span, level, role)
         builder_obj = ScopeBuilder(self)
         try:
             yield builder_obj

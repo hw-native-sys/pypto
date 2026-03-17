@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
 if TYPE_CHECKING:
     from pypto.language.typing import Scalar, Tensor, Tile
+    from pypto.pypto_core import ir
 
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
@@ -644,6 +645,44 @@ def cluster() -> ClusterContext:
     return ClusterContext()
 
 
+class AtContext:
+    """Context manager for hierarchy-level scope.
+
+    Returned by pl.at(level=..., role=...) and used with the 'with' statement.
+    The parser recognizes this pattern and creates a ScopeStmt(Hierarchy).
+    """
+
+    def __init__(self, level: ir.Level, role: ir.Role | None = None) -> None:
+        self.level = level
+        self.role = role
+
+    def __enter__(self) -> None:
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        pass
+
+
+def at(
+    level: ir.Level,
+    role: ir.Role | None = None,
+) -> AtContext:
+    """Mark a region of code for execution at a specific hierarchy level.
+
+    Args:
+        level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.POD)
+        role: Function role (Orchestrator or Worker). Default: None.
+
+    Returns:
+        Context manager for hierarchy-level scope
+
+    Examples:
+        >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
+        ...     y = pl.add(x, x)
+    """
+    return AtContext(level, role)
+
+
 __all__ = [
     "const",
     "range",
@@ -656,12 +695,14 @@ __all__ = [
     "static_assert",
     "incore",
     "auto_incore",
+    "at",
     "cluster",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",
     "AutoIncoreContext",
     "ClusterContext",
+    "AtContext",
     "RangeArg",
     "CondArg",
 ]

@@ -54,6 +54,7 @@ from pypto.pypto_core.ir import (
 
 from . import parser
 from .dsl_api import (
+    at,
     auto_incore,
     cluster,
     cond,
@@ -224,6 +225,7 @@ __all__ = [
     "cond",
     "static_print",
     "static_assert",
+    "at",
     "incore",
     "auto_incore",
     "cluster",

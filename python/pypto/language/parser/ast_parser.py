@@ -172,12 +172,16 @@ class ASTParser:
         self,
         func_def: ast.FunctionDef,
         func_type: ir.FunctionType = ir.FunctionType.Opaque,
+        func_level: ir.Level | None = None,
+        func_role: ir.Role | None = None,
     ) -> ir.Function:
         """Parse function definition and build IR.
 
         Args:
             func_def: AST FunctionDef node
             func_type: Function type (default: Opaque)
+            func_level: Hierarchy level (default: None)
+            func_role: Function role (default: None)
 
         Returns:
             IR Function object
@@ -190,7 +194,9 @@ class ASTParser:
         self.scope_manager.enter_scope("function")
 
         # Begin building function
-        with self.builder.function(func_name, func_span, type=func_type) as f:
+        with self.builder.function(
+            func_name, func_span, type=func_type, level=func_level, role=func_role
+        ) as f:
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
                 param_name = arg.arg
@@ -1256,6 +1262,101 @@ class ASTParser:
         self.in_if_stmt = False
         self.current_if_builder = None
 
+    # Enum lookup maps for pl.at() keyword arguments
+    _LEVEL_MAP: dict[str, ir.Level] = {
+        "AIV": ir.Level.AIV,
+        "AIC": ir.Level.AIC,
+        "CORE_GROUP": ir.Level.CORE_GROUP,
+        "CHIP_DIE": ir.Level.CHIP_DIE,
+        "CHIP": ir.Level.CHIP,
+        "HOST": ir.Level.HOST,
+        "CLUSTER_0": ir.Level.CLUSTER_0,
+        "CLUSTER_1": ir.Level.CLUSTER_1,
+        "CLUSTER_2": ir.Level.CLUSTER_2,
+        "GLOBAL": ir.Level.GLOBAL,
+        # Readability aliases
+        "L2CACHE": ir.Level.L2CACHE,
+        "PROCESSOR": ir.Level.PROCESSOR,
+        "UMA": ir.Level.UMA,
+        "NODE": ir.Level.NODE,
+        "POD": ir.Level.POD,
+        "CLOS1": ir.Level.CLOS1,
+        "CLOS2": ir.Level.CLOS2,
+    }
+
+    _ROLE_MAP: dict[str, ir.Role] = {
+        "Orchestrator": ir.Role.Orchestrator,
+        "Worker": ir.Role.Worker,
+    }
+
+    def _parse_enum_attr(
+        self,
+        node: ast.expr,
+        enum_map: dict[str, Any],
+        enum_name: str,
+        qualified_name: str,
+    ) -> Any:
+        """Parse pl.Level.X or Level.X from an AST Attribute node.
+
+        Args:
+            node: AST expression node
+            enum_map: Mapping from attribute name to enum value
+            enum_name: Enum class name (e.g., "Level")
+            qualified_name: Qualified name for error messages (e.g., "pl.Level")
+
+        Returns:
+            Enum value from enum_map
+        """
+        if isinstance(node, ast.Attribute) and node.attr in enum_map:
+            # Check prefix: Level.X
+            if isinstance(node.value, ast.Name) and node.value.id == enum_name:
+                return enum_map[node.attr]
+            # Check prefix: pl.Level.X
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "pl"
+                and node.value.attr == enum_name
+            ):
+                return enum_map[node.attr]
+        raise ParserSyntaxError(
+            f"Expected {qualified_name}.<name>, got unsupported expression",
+            hint=f"Valid values: {', '.join(enum_map.keys())}",
+        )
+
+    def _parse_at_kwargs(self, call: ast.Call) -> tuple[ir.Level, ir.Role | None]:
+        """Extract level and role from pl.at(level=..., role=...) call.
+
+        Args:
+            call: AST Call node for pl.at(...)
+
+        Returns:
+            Tuple of (level, role)
+        """
+        level = None
+        role = None
+        for kw in call.keywords:
+            if kw.arg == "level":
+                level = self._parse_enum_attr(kw.value, self._LEVEL_MAP, "Level", "pl.Level")
+            elif kw.arg == "role":
+                role = self._parse_enum_attr(kw.value, self._ROLE_MAP, "Role", "pl.Role")
+            elif kw.arg is None:
+                raise ParserSyntaxError(
+                    "Unsupported **kwargs in pl.at()",
+                    hint="Use keyword arguments: pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+                )
+            else:
+                raise ParserSyntaxError(
+                    f"Unknown keyword argument '{kw.arg}' in pl.at()",
+                    hint="Supported arguments: level, role",
+                )
+        if level is None:
+            raise ParserSyntaxError(
+                "pl.at() requires level= argument",
+                hint="Use pl.at(level=pl.Level.HOST) or pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+            )
+        return level, role
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
@@ -1263,6 +1364,7 @@ class ASTParser:
         - with pl.incore(): ... (creates ScopeStmt with InCore scope)
         - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
         - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
+        - with pl.at(level=..., role=...): ... (creates ScopeStmt with Hierarchy scope)
 
         Args:
             stmt: With AST node
@@ -1273,7 +1375,8 @@ class ASTParser:
                 "Only single context manager supported in with statement",
                 span=self.span_tracker.get_span(stmt),
                 hint="Use 'with pl.incore():', 'with pl.auto_incore():',"
-                " or 'with pl.cluster():' without multiple context managers",
+                " 'with pl.cluster():', or 'with pl.at(level=...):'"
+                " without multiple context managers",
             )
 
         item = stmt.items[0]
@@ -1288,33 +1391,43 @@ class ASTParser:
 
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
-            if (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "pl"
-                and func.attr in _SCOPE_KIND_MAP
-            ):
-                if context_expr.args or context_expr.keywords:
-                    raise ParserSyntaxError(
-                        f"pl.{func.attr}() does not accept arguments",
-                        span=self.span_tracker.get_span(stmt),
-                        hint=f"Use 'with pl.{func.attr}():' without arguments",
-                    )
-                scope_kind = _SCOPE_KIND_MAP[func.attr]
-                span = self.span_tracker.get_span(stmt)
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
+                # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
+                if func.attr in _SCOPE_KIND_MAP:
+                    if context_expr.args or context_expr.keywords:
+                        raise ParserSyntaxError(
+                            f"pl.{func.attr}() does not accept arguments",
+                            span=self.span_tracker.get_span(stmt),
+                            hint=f"Use 'with pl.{func.attr}():' without arguments",
+                        )
+                    scope_kind = _SCOPE_KIND_MAP[func.attr]
+                    span = self.span_tracker.get_span(stmt)
 
-                with self.builder.scope(scope_kind, span):
-                    self.scope_manager.enter_scope("scope")
-                    for body_stmt in stmt.body:
-                        self.parse_statement(body_stmt)
-                    self.scope_manager.exit_scope(leak_vars=True)
-                return
+                    with self.builder.scope(scope_kind, span):
+                        self.scope_manager.enter_scope("scope")
+                        for body_stmt in stmt.body:
+                            self.parse_statement(body_stmt)
+                        self.scope_manager.exit_scope(leak_vars=True)
+                    return
+
+                # NEW: pl.at(level=..., role=...)
+                if func.attr == "at":
+                    level, role = self._parse_at_kwargs(context_expr)
+                    span = self.span_tracker.get_span(stmt)
+
+                    with self.builder.scope(ir.ScopeKind.Hierarchy, span, level=level, role=role):
+                        self.scope_manager.enter_scope("scope")
+                        for body_stmt in stmt.body:
+                            self.parse_statement(body_stmt)
+                        self.scope_manager.exit_scope(leak_vars=True)
+                    return
 
         # Unsupported context manager
         raise UnsupportedFeatureError(
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
-            hint="Only 'with pl.incore():', 'with pl.auto_incore():', and 'with pl.cluster():' are supported",
+            hint="Supported: 'with pl.incore():', 'with pl.auto_incore():',"
+            " 'with pl.cluster():', 'with pl.at(level=...):' ",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:
