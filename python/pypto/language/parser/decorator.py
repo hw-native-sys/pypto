@@ -293,9 +293,15 @@ def _extract_function_level_role_from_decorator(
         role = None
         for keyword in decorator.keywords:
             if keyword.arg == "level":
-                level = extract_enum_value(keyword.value, LEVEL_MAP, "Level", "pl.Level")
+                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                    level = None
+                else:
+                    level = extract_enum_value(keyword.value, LEVEL_MAP, "Level", "pl.Level")
             elif keyword.arg == "role":
-                role = extract_enum_value(keyword.value, ROLE_MAP, "Role", "pl.Role")
+                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                    role = None
+                else:
+                    role = extract_enum_value(keyword.value, ROLE_MAP, "Role", "pl.Role")
         return level, role
     return None, None
 

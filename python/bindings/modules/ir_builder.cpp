@@ -231,7 +231,7 @@ void BindIRBuilder(nb::module_& m) {
            "    scope_kind: The kind of scope (e.g., ScopeKind.InCore)\n"
            "    span: Source location for scope statement\n"
            "    level: Hierarchy level (default: None)\n"
-           "    role: Function role (default: None)\n\n"
+           "    role: Hierarchy scope role (default: None)\n\n"
            "Raises:\n"
            "    RuntimeError: If not inside a function or loop")
       .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),

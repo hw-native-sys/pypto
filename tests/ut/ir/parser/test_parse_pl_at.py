@@ -11,6 +11,7 @@
 
 import pypto.language as pl
 import pytest
+from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
 
@@ -121,7 +122,7 @@ def test_parse_pl_at_nested():
 
 def test_parse_pl_at_missing_level():
     """pl.at() without level= raises error."""
-    with pytest.raises(Exception, match="level"):
+    with pytest.raises(ParserSyntaxError, match="level"):
 
         @pl.function
         def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -132,7 +133,7 @@ def test_parse_pl_at_missing_level():
 
 def test_parse_pl_at_unknown_kwarg():
     """pl.at() with unknown keyword raises error."""
-    with pytest.raises(Exception, match="Unknown keyword"):
+    with pytest.raises(ParserSyntaxError, match="Unknown keyword"):
 
         @pl.function
         def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

@@ -2531,7 +2531,7 @@ class IRBuilder:
             scope_kind: The kind of scope (e.g., ScopeKind.InCore)
             span: Source location for scope statement
             level: Hierarchy level (default: None)
-            role: Function role (default: None)
+            role: Hierarchy scope role (default: None)
         """
 
     def end_scope(self, end_span: Span) -> ScopeStmt:

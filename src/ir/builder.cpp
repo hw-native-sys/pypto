@@ -12,6 +12,7 @@
 #include "pypto/ir/builder.h"
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -19,9 +20,12 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -283,6 +287,8 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
                            std::optional<Role> role) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
+  CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
+      << "Hierarchy scope requires a level at " << span.to_string();
   context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role));
 }
 

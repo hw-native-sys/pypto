@@ -91,7 +91,7 @@ def test_dist_call_different_op_not_equal():
     op2 = ir.Op("dist.submit_worker")
     c1 = ir.Call(op1, [], _span())
     c2 = ir.Call(op2, [], _span())
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(c1, c2)
 
 

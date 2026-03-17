@@ -1264,7 +1264,12 @@ class ASTParser:
         self.current_if_builder = None
 
     def _parse_at_kwargs(self, call: ast.Call) -> tuple[ir.Level, ir.Role | None]:
-        """Extract level and role from pl.at(level=..., role=...) call.
+        """Extract level and role from pl.at(...) call.
+
+        Supports both positional and keyword forms:
+        - pl.at(pl.Level.HOST)
+        - pl.at(pl.Level.HOST, pl.Role.Worker)
+        - pl.at(level=pl.Level.HOST, role=pl.Role.Worker)
 
         Args:
             call: AST Call node for pl.at(...)
@@ -1272,22 +1277,39 @@ class ASTParser:
         Returns:
             Tuple of (level, role)
         """
-        if call.args:
+        if len(call.args) > 2:
             raise ParserSyntaxError(
-                "pl.at() does not accept positional arguments",
-                hint="Use keyword arguments: pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+                f"pl.at() takes at most 2 positional arguments, got {len(call.args)}",
+                hint="Use pl.at(level) or pl.at(level, role)",
             )
+
         level = None
         role = None
+
+        # Parse positional arguments
+        if len(call.args) >= 1:
+            level = extract_enum_value(call.args[0], LEVEL_MAP, "Level", "pl.Level")
+        if len(call.args) >= 2:
+            role = extract_enum_value(call.args[1], ROLE_MAP, "Role", "pl.Role")
+
+        # Parse keyword arguments
         for kw in call.keywords:
             if kw.arg == "level":
+                if level is not None:
+                    raise ParserSyntaxError(
+                        "pl.at() got multiple values for argument 'level'",
+                    )
                 level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
             elif kw.arg == "role":
+                if role is not None:
+                    raise ParserSyntaxError(
+                        "pl.at() got multiple values for argument 'role'",
+                    )
                 role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
             elif kw.arg is None:
                 raise ParserSyntaxError(
                     "Unsupported **kwargs in pl.at()",
-                    hint="Use keyword arguments: pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+                    hint="Use pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
                 )
             else:
                 raise ParserSyntaxError(
@@ -1296,8 +1318,8 @@ class ASTParser:
                 )
         if level is None:
             raise ParserSyntaxError(
-                "pl.at() requires level= argument",
-                hint="Use pl.at(level=pl.Level.HOST) or pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+                "pl.at() requires a level argument",
+                hint="Use pl.at(pl.Level.HOST) or pl.at(level=pl.Level.HOST)",
             )
         return level, role
 
