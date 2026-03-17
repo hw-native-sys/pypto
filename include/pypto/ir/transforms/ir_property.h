@@ -44,6 +44,7 @@ enum class IRProperty : uint64_t {
   TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
+  UseAfterDef,              ///< All variable uses are dominated by a definition
   kCount                    ///< Sentinel (must be last)
 };
 
@@ -182,7 +183,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks}.
+ * NoRedundantBlocks, UseAfterDef}.
  */
 const IRPropertySet& GetStructuralProperties();
 

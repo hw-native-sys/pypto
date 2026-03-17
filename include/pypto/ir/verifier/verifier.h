@@ -177,6 +177,16 @@ PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
  */
 PropertyVerifierPtr CreateTileMemoryInferredPropertyVerifier();
 
+/**
+ * @brief Factory function for creating UseAfterDef property verifier
+ *
+ * Verifies that every Var reference in an expression is dominated by a
+ * definition (function parameter, ForStmt/WhileStmt loop variable,
+ * iter_arg, return_var, or AssignStmt).
+ * @return Shared pointer to UseAfterDef PropertyVerifier
+ */
+PropertyVerifierPtr CreateUseAfterDefPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

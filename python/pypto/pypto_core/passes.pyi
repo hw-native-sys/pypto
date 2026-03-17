@@ -31,6 +31,7 @@ class IRProperty(Enum):
     TileOps2D = ...
     TileMemoryInferred = ...
     BreakContinueValid = ...
+    UseAfterDef = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -280,6 +281,12 @@ class NestedCallErrorType(Enum):
     CALL_IN_BINARY_EXPR = ...
     CALL_IN_UNARY_EXPR = ...
 
+class UseAfterDefErrorType(Enum):
+    """Use-after-def verification error types."""
+
+    USE_BEFORE_DEF = ...
+    """Variable used before any definition in scope."""
+
 class DiagnosticSeverity(Enum):
     """Severity level for diagnostics."""
 
@@ -346,6 +353,7 @@ __all__ = [
     "flatten_call_expr",
     "normalize_stmt_structure",
     "NestedCallErrorType",
+    "UseAfterDefErrorType",
     "DiagnosticSeverity",
     "Diagnostic",
     "PropertyVerifierRegistry",

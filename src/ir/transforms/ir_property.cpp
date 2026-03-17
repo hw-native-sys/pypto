@@ -51,6 +51,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileMemoryInferred";
     case IRProperty::BreakContinueValid:
       return "BreakContinueValid";
+    case IRProperty::UseAfterDef:
+      return "UseAfterDef";
     default:
       return "Unknown";
   }
@@ -110,7 +112,7 @@ VerificationLevel GetDefaultVerificationLevel() {
 
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked, IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks};
+                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
   return props;
 }
 
