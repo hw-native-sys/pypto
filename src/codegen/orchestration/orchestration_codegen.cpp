@@ -90,7 +90,8 @@ std::string GetSSABaseName(const std::string& name) {
     {
       size_t pos = current.rfind('_');
       if (pos != std::string::npos && pos + 1 < current.size() && current[pos + 1] == 'l' &&
-          pos + 2 < current.size() && std::all_of(current.begin() + pos + 2, current.end(), ::isdigit)) {
+          pos + 2 < current.size() &&
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 2), current.end(), ::isdigit)) {
         current.resize(pos);
         changed = true;
         continue;
@@ -98,20 +99,17 @@ std::string GetSSABaseName(const std::string& name) {
     }
 
     // Strip "_outer", "_inner", "_rem" suffixes (split_chunked_loops)
-    for (const auto& [suffix, len] :
-         {std::pair{"_outer", size_t{6}}, {"_inner", size_t{6}}, {"_rem", size_t{4}}}) {
-      if (strip_suffix(current, suffix, len)) {
-        changed = true;
-        break;
-      }
+    if (strip_suffix(current, "_outer", 6) || strip_suffix(current, "_inner", 6) ||
+        strip_suffix(current, "_rem", 4)) {
+      changed = true;
+      continue;
     }
-    if (changed) continue;
 
     // Strip "_iter_N" suffix (SSA iter_arg pattern)
     {
       size_t pos = current.rfind("_iter_");
       if (pos != std::string::npos && pos > 0 &&
-          std::all_of(current.begin() + pos + 6, current.end(), ::isdigit)) {
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 6), current.end(), ::isdigit)) {
         current.resize(pos);
         changed = true;
         continue;
@@ -122,7 +120,7 @@ std::string GetSSABaseName(const std::string& name) {
     {
       size_t pos = current.rfind('_');
       if (pos != std::string::npos && pos > 0 &&
-          std::all_of(current.begin() + pos + 1, current.end(), ::isdigit)) {
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 1), current.end(), ::isdigit)) {
         current.resize(pos);
         changed = true;
         continue;
