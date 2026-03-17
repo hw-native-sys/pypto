@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 _PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
 
 
+class PartialCodegenError(RuntimeError):
+    """Codegen failed after producing some output files."""
+
+    def __init__(self, message: str, files: dict[str, str]) -> None:
+        super().__init__(message)
+        self.files = files
+
+
 def _get_error_summary(exc: Exception, func_name: str) -> str:
     """Extract the first meaningful line from an exception, without the function name.
 
@@ -408,6 +416,9 @@ def generate(
             errors.append((orch_func.name, e))
 
     if errors:
-        raise RuntimeError(_format_error_report(errors, output_dir))
+        report = _format_error_report(errors, output_dir)
+        if result_files:
+            raise PartialCodegenError(report, result_files)
+        raise RuntimeError(report)
 
     return result_files

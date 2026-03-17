@@ -113,9 +113,13 @@ def compile(
         transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
     if backend_type in (BackendType.Ascend910B_PTO, BackendType.Ascend950):
-        from .pto_codegen import generate  # noqa: PLC0415
+        from .pto_codegen import PartialCodegenError, generate  # noqa: PLC0415
 
-        files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
+        try:
+            files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
+        except PartialCodegenError as exc:
+            _write_files(exc.files, output_dir)
+            raise
         _write_files(files, output_dir)
     elif backend_type == BackendType.Ascend910B_CCE:
         codegen_instance = _codegen_core.CCECodegen()

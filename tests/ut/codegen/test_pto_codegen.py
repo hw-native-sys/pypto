@@ -731,6 +731,54 @@ class TestGenerateSkipPtoas:
             assert not key.endswith(".cpp"), f"Unexpected .cpp extension: {key}"
 
 
+def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
+    """compile() should preserve generated files when some InCore functions fail."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class PartialFailureProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def good_kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            tile = pl.load(a, offsets=[0, 0], shapes=[16, 16])
+            out = pl.store(tile, offsets=[0, 0], output_tensor=output)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def bad_kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            source = pl.slice(a, [16, 16], [0, 0])
+            result = pl.create_tensor([16, 16], dtype=pl.FP32)
+            result = pl.assemble(result, source, [0, 0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, a: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out = pl.create_tensor([16, 16], dtype=pl.FP32)
+            out = self.good_kernel(a, out)
+            return out
+
+    output_dir = tmp_path / "partial_codegen"
+    with pytest.raises(RuntimeError, match="bad_kernel"):
+        ir.compile(
+            PartialFailureProgram,
+            output_dir=str(output_dir),
+            strategy=OptimizationStrategy.Default,
+            dump_passes=False,
+            backend_type=BackendType.Ascend910B_PTO,
+            skip_ptoas=True,
+        )
+
+    assert (output_dir / "orchestration" / "orch.cpp").exists()
+    assert (output_dir / "kernels" / "aiv" / "good_kernel.pto").exists()
+
+
 class TestFormatErrorReport:
     """Tests for codegen error summary formatting."""
 
