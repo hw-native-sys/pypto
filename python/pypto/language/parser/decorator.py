@@ -22,6 +22,7 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
+from .enum_utils import LEVEL_MAP, ROLE_MAP, extract_enum_value
 
 
 @dataclasses.dataclass
@@ -266,74 +267,6 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
     return ir.FunctionType.Opaque
 
 
-_LEVEL_MAP: dict[str, ir.Level] = {
-    "AIV": ir.Level.AIV,
-    "AIC": ir.Level.AIC,
-    "CORE_GROUP": ir.Level.CORE_GROUP,
-    "CHIP_DIE": ir.Level.CHIP_DIE,
-    "CHIP": ir.Level.CHIP,
-    "HOST": ir.Level.HOST,
-    "CLUSTER_0": ir.Level.CLUSTER_0,
-    "CLUSTER_1": ir.Level.CLUSTER_1,
-    "CLUSTER_2": ir.Level.CLUSTER_2,
-    "GLOBAL": ir.Level.GLOBAL,
-    # Readability aliases
-    "L2CACHE": ir.Level.L2CACHE,
-    "PROCESSOR": ir.Level.PROCESSOR,
-    "UMA": ir.Level.UMA,
-    "NODE": ir.Level.NODE,
-    "POD": ir.Level.POD,
-    "CLOS1": ir.Level.CLOS1,
-    "CLOS2": ir.Level.CLOS2,
-}
-
-_ROLE_MAP: dict[str, ir.Role] = {
-    "Orchestrator": ir.Role.Orchestrator,
-    "Worker": ir.Role.Worker,
-}
-
-
-def _extract_enum_value(
-    value: ast.expr,
-    enum_map: dict[str, Any],
-    enum_name: str,
-    qualified: str,
-) -> Any:
-    """Extract enum value from AST: pl.Level.HOST or Level.HOST.
-
-    Args:
-        value: AST expression node
-        enum_map: Mapping from attribute name to enum value
-        enum_name: Enum class name (e.g., "Level")
-        qualified: Qualified name for error messages (e.g., "pl.Level")
-
-    Returns:
-        Enum value from enum_map
-    """
-    if not isinstance(value, ast.Attribute):
-        raise ParserSyntaxError(
-            f"Expected {qualified}.<name>",
-            hint=f"Use {qualified}.<name>.",
-        )
-    if value.attr not in enum_map:
-        raise ParserSyntaxError(
-            f"Unknown {enum_name} value: {value.attr}",
-            hint=f"Valid values: {', '.join(enum_map.keys())}",
-        )
-    # Check prefix: Level.X
-    if isinstance(value.value, ast.Name) and value.value.id == enum_name:
-        return enum_map[value.attr]
-    # Check prefix: pl.Level.X
-    if (
-        isinstance(value.value, ast.Attribute)
-        and isinstance(value.value.value, ast.Name)
-        and value.value.value.id == "pl"
-        and value.value.attr == enum_name
-    ):
-        return enum_map[value.attr]
-    raise ParserSyntaxError(f"Expected {qualified}.<name>")
-
-
 def _extract_function_level_role_from_decorator(
     node: ast.FunctionDef,
 ) -> tuple[ir.Level | None, ir.Role | None]:
@@ -360,9 +293,9 @@ def _extract_function_level_role_from_decorator(
         role = None
         for keyword in decorator.keywords:
             if keyword.arg == "level":
-                level = _extract_enum_value(keyword.value, _LEVEL_MAP, "Level", "pl.Level")
+                level = extract_enum_value(keyword.value, LEVEL_MAP, "Level", "pl.Level")
             elif keyword.arg == "role":
-                role = _extract_enum_value(keyword.value, _ROLE_MAP, "Role", "pl.Role")
+                role = extract_enum_value(keyword.value, ROLE_MAP, "Role", "pl.Role")
         return level, role
     return None, None
 

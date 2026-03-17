@@ -68,6 +68,8 @@ class IRBuilder:
             name: Function name
             span: Optional explicit span. If None, automatically captured from call site.
             type: Function type (default: Opaque)
+            level: Hierarchy level (default: None)
+            role: Function role (default: None)
 
         Yields:
             FunctionBuilder: Helper object for building the function

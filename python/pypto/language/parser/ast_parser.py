@@ -28,6 +28,7 @@ from .diagnostics import (
     UnsupportedFeatureError,
     concise_error_message,
 )
+from .enum_utils import LEVEL_MAP, ROLE_MAP, extract_enum_value
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
@@ -1262,68 +1263,6 @@ class ASTParser:
         self.in_if_stmt = False
         self.current_if_builder = None
 
-    # Enum lookup maps for pl.at() keyword arguments
-    _LEVEL_MAP: dict[str, ir.Level] = {
-        "AIV": ir.Level.AIV,
-        "AIC": ir.Level.AIC,
-        "CORE_GROUP": ir.Level.CORE_GROUP,
-        "CHIP_DIE": ir.Level.CHIP_DIE,
-        "CHIP": ir.Level.CHIP,
-        "HOST": ir.Level.HOST,
-        "CLUSTER_0": ir.Level.CLUSTER_0,
-        "CLUSTER_1": ir.Level.CLUSTER_1,
-        "CLUSTER_2": ir.Level.CLUSTER_2,
-        "GLOBAL": ir.Level.GLOBAL,
-        # Readability aliases
-        "L2CACHE": ir.Level.L2CACHE,
-        "PROCESSOR": ir.Level.PROCESSOR,
-        "UMA": ir.Level.UMA,
-        "NODE": ir.Level.NODE,
-        "POD": ir.Level.POD,
-        "CLOS1": ir.Level.CLOS1,
-        "CLOS2": ir.Level.CLOS2,
-    }
-
-    _ROLE_MAP: dict[str, ir.Role] = {
-        "Orchestrator": ir.Role.Orchestrator,
-        "Worker": ir.Role.Worker,
-    }
-
-    def _parse_enum_attr(
-        self,
-        node: ast.expr,
-        enum_map: dict[str, Any],
-        enum_name: str,
-        qualified_name: str,
-    ) -> Any:
-        """Parse pl.Level.X or Level.X from an AST Attribute node.
-
-        Args:
-            node: AST expression node
-            enum_map: Mapping from attribute name to enum value
-            enum_name: Enum class name (e.g., "Level")
-            qualified_name: Qualified name for error messages (e.g., "pl.Level")
-
-        Returns:
-            Enum value from enum_map
-        """
-        if isinstance(node, ast.Attribute) and node.attr in enum_map:
-            # Check prefix: Level.X
-            if isinstance(node.value, ast.Name) and node.value.id == enum_name:
-                return enum_map[node.attr]
-            # Check prefix: pl.Level.X
-            if (
-                isinstance(node.value, ast.Attribute)
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id == "pl"
-                and node.value.attr == enum_name
-            ):
-                return enum_map[node.attr]
-        raise ParserSyntaxError(
-            f"Expected {qualified_name}.<name>, got unsupported expression",
-            hint=f"Valid values: {', '.join(enum_map.keys())}",
-        )
-
     def _parse_at_kwargs(self, call: ast.Call) -> tuple[ir.Level, ir.Role | None]:
         """Extract level and role from pl.at(level=..., role=...) call.
 
@@ -1333,13 +1272,18 @@ class ASTParser:
         Returns:
             Tuple of (level, role)
         """
+        if call.args:
+            raise ParserSyntaxError(
+                "pl.at() does not accept positional arguments",
+                hint="Use keyword arguments: pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+            )
         level = None
         role = None
         for kw in call.keywords:
             if kw.arg == "level":
-                level = self._parse_enum_attr(kw.value, self._LEVEL_MAP, "Level", "pl.Level")
+                level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
             elif kw.arg == "role":
-                role = self._parse_enum_attr(kw.value, self._ROLE_MAP, "Role", "pl.Role")
+                role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
             elif kw.arg is None:
                 raise ParserSyntaxError(
                     "Unsupported **kwargs in pl.at()",
@@ -1427,7 +1371,7 @@ class ASTParser:
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
             hint="Supported: 'with pl.incore():', 'with pl.auto_incore():',"
-            " 'with pl.cluster():', 'with pl.at(level=...):' ",
+            " 'with pl.cluster():', 'with pl.at(level=...):'",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:

@@ -82,6 +82,8 @@ class IRBuilder {
    * @param name Function name
    * @param span Source location for function definition
    * @param type Function type (default: Opaque)
+   * @param level Hierarchy level (default: nullopt — unspecified)
+   * @param role Function role (default: nullopt)
    * @throws RuntimeError if already inside a function (no nested functions allowed)
    */
   void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque,
@@ -292,6 +294,8 @@ class IRBuilder {
    *
    * @param scope_kind The kind of scope (e.g., InCore)
    * @param span Source location for scope statement
+   * @param level Hierarchy level (for Hierarchy scopes)
+   * @param role Function role (for Hierarchy scopes)
    * @throws RuntimeError if not inside a function or loop
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
