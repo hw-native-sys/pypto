@@ -447,6 +447,57 @@ class TestReportInstrument:
 
         assert not (tmp_path / "report").exists()
 
+    def test_memory_report_includes_aic_and_aiv_functions(self, tmp_path):
+        """Memory report includes post-ExpandMixedKernel compute functions."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile = pl.load(x, [0], [64])
+                y_tile = pl.add(x_tile, x_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_kernel(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_1: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                out_1: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_1)
+                return out_1
+
+        report_dir = str(tmp_path / "report")
+        (tmp_path / "report").mkdir()
+        instrument = passes.ReportInstrument(report_dir)
+        instrument.enable_report(passes.ReportType.Memory, "AllocateMemoryAddr")
+
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.init_mem_ref())
+        pipeline.add_pass(passes.allocate_memory_addr())
+
+        with passes.PassContext([instrument]):
+            pipeline.run(Program)
+
+        report_path = tmp_path / "report" / "memory_after_AllocateMemoryAddr.txt"
+        assert report_path.exists()
+
+        report_text = report_path.read_text()
+        assert "Functions: 2 compute functions" in report_text
+        assert "vector_kernel" in report_text
+        assert "cube_kernel" in report_text
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
