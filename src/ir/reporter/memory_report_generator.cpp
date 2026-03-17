@@ -34,6 +34,11 @@ namespace ir {
 
 namespace {
 
+bool IsReportableFunctionType(FunctionType func_type) {
+  return func_type == FunctionType::InCore || func_type == FunctionType::AIC ||
+         func_type == FunctionType::AIV;
+}
+
 // Visitor to collect MemRef objects and compute per-space high-water marks.
 // Follows the same pattern as AllocatedMemoryAddrVerifier in allocate_memory_addr_pass.cpp.
 class MemoryUsageCollector : public IRVisitor {
@@ -94,7 +99,7 @@ class MemoryReportGeneratorImpl : public ReportGenerator {
     std::vector<MemoryReport::FunctionMemoryUsage> functions;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      if (func->func_type_ != FunctionType::InCore) continue;
+      if (!IsReportableFunctionType(func->func_type_)) continue;
 
       MemoryUsageCollector collector;
       collector.VisitStmt(func->body_);

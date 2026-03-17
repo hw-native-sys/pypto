@@ -845,7 +845,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
             << func->return_types_[i]->TypeName();
 
         // Add output tensor parameter
-        std::string out_name = "out_" + std::to_string(num_added_outputs);
+        std::string out_name = "outbuf" + std::to_string(num_added_outputs);
         auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
         new_params.push_back(out_param);
         new_param_directions.push_back(ParamDirection::Out);
@@ -1162,7 +1162,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
                                                                      {"layout", layout}};
       auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
 
-      std::string out_name = "out_" + std::to_string(i);
+      std::string out_name = "outbuf" + std::to_string(i);
       auto out_var = std::make_shared<Var>(out_name, create_call->GetType(), span);
       result.push_back(std::make_shared<AssignStmt>(out_var, create_call, span));
       extra_args.push_back(out_var);

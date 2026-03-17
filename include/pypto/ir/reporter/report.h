@@ -87,10 +87,10 @@ class ReportGenerator {
 using ReportGeneratorPtr = std::shared_ptr<ReportGenerator>;
 
 /**
- * @brief Memory usage report for all InCore functions in a program.
+ * @brief Memory usage report for all compute functions in a program.
  *
- * Collects per-MemorySpace usage statistics for each InCore function
- * and compares with platform limits.
+ * Collects per-MemorySpace usage statistics for each compute function
+ * (InCore, AIC, or AIV) and compares them with platform limits.
  */
 class MemoryReport : public Report {
  public:

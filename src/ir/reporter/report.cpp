@@ -62,7 +62,7 @@ std::string MemoryReport::Format() const {
   os << "=== Memory Usage Report ===\n";
   os << "Pass: " << pass_name_ << "\n";
   os << "Backend: " << backend_name_ << "\n";
-  os << "Functions: " << functions_.size() << " InCore\n";
+  os << "Functions: " << functions_.size() << " compute functions\n";
 
   for (const auto& func : functions_) {
     os << "\n--- " << func.function_name << " ---\n\n";
