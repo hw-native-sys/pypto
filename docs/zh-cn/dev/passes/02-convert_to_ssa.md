@@ -39,7 +39,7 @@ program_ssa = ssa_pass(program)
 ## 算法
 
 1. **变量重命名**：为每次赋值添加版本后缀（x -> x_0, x_1, x_2）
-2. **If 的 Phi 节点**：为在 if 分支中修改的变量添加 phi 节点（return_vars + YieldStmt）
+2. **If 的 Phi 节点**：为在 if 分支中修改的变量添加 phi 节点（return_vars + YieldStmt），包括在两个分支中独立定义的变量
 3. **循环的 Iter_args**：将循环中修改的变量转换为 iter_args + return_vars 模式，带有 YieldStmt
 4. **作用域跟踪**：跨嵌套作用域跟踪变量定义
 5. **保留**：保持现有 SSA 构造不变

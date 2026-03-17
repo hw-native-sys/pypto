@@ -61,7 +61,7 @@
 
 | 规则名称 | IRProperty | 用途 |
 | -------- | ---------- | ---- |
-| **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield |
+| **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield、作用域违规、基数检查 |
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
@@ -81,6 +81,9 @@
 | 1 | `MULTIPLE_ASSIGNMENT` | 变量在同一作用域中被多次赋值 |
 | 2 | `NAME_SHADOWING` | 变量名遮蔽了外层作用域的变量 |
 | 3 | `MISSING_YIELD` | ForStmt 或 IfStmt 缺少必需的 YieldStmt |
+| 4 | `ITER_ARGS_RETURN_VARS_MISMATCH` | ForStmt/WhileStmt 中 iter_args 数量 != return_vars 数量 |
+| 5 | `YIELD_COUNT_MISMATCH` | YieldStmt 值数量 != iter_args/return_vars 数量 |
+| 6 | `SCOPE_VIOLATION` | 变量在其定义作用域之外被使用 |
 
 ### TypeCheck
 

@@ -20,9 +20,6 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -36,20 +33,11 @@ namespace ir {
 
 namespace {
 
-/**
- * @brief Get the identity key for a variable name
- *
- * Returns the name unchanged. Each variable name is treated as a unique identity.
- * This ensures variables like "tmp_0" and "tmp_1" are treated as distinct variables,
- * not as different versions of the same base variable "tmp".
- *
- * Note: The function name "GetBaseName" is retained for compatibility with existing
- * call sites throughout the SSA converter, but no name normalization is performed.
- */
-static std::string GetBaseName(const std::string& name) { return name; }
+// SSA naming strategy: each variable name (e.g. "tmp_0", "tmp_1") is treated
+// as a unique identity — no suffix stripping or base name normalization.
 
 /**
- * @brief Collects all assigned variable base names in a statement
+ * @brief Collects all assigned variable names in a statement.
  *
  * Used to pre-analyze loop bodies to find which outer variables are modified,
  * allowing us to create iter_args before visiting the body.
@@ -62,8 +50,7 @@ class AssignmentCollector : public IRVisitor {
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    // Extract base name from assignment target
-    assigned_vars.insert(GetBaseName(op->var_->name_hint_));
+    assigned_vars.insert(op->var_->name_hint_);
     // Also visit the value in case of nested assignments
     VisitExpr(op->value_);
   }
@@ -71,7 +58,7 @@ class AssignmentCollector : public IRVisitor {
   void VisitStmt_(const ForStmtPtr& op) override {
     // Don't recurse into nested for loops - they handle their own iter_args
     // But we do need to record the loop variable
-    assigned_vars.insert(GetBaseName(op->loop_var_->name_hint_));
+    assigned_vars.insert(op->loop_var_->name_hint_);
     // Visit the body to collect assignments
     VisitStmt(op->body_);
   }
@@ -118,7 +105,7 @@ class SSAConverter : public IRMutator {
     // Initialize version counters for parameters
     for (size_t i = 0; i < func->params_.size(); ++i) {
       const auto& var = func->params_[i];
-      std::string base_name = GetBaseName(var->name_hint_);
+      std::string base_name = var->name_hint_;
       int version = NextVersion(base_name);
       auto versioned_param = CreateVersionedVar(var, base_name, version);
       current_version_[base_name] = versioned_param;
@@ -140,7 +127,7 @@ class SSAConverter : public IRMutator {
  protected:
   // Override expression visitation to replace Var with current version
   ExprPtr VisitExpr_(const VarPtr& op) override {
-    std::string base_name = GetBaseName(op->name_hint_);
+    std::string base_name = op->name_hint_;
     auto it = current_version_.find(base_name);
     if (it != current_version_.end()) {
       return it->second;
@@ -155,7 +142,7 @@ class SSAConverter : public IRMutator {
     auto new_init = VisitExpr(op->initValue_);
 
     // IterArgs are handled specially - they become the current version within loop
-    std::string base_name = GetBaseName(op->name_hint_);
+    std::string base_name = op->name_hint_;
     auto it = current_version_.find(base_name);
     if (it != current_version_.end()) {
       // Return the current version (which should be the iter_arg itself)
@@ -175,7 +162,7 @@ class SSAConverter : public IRMutator {
     auto new_value = VisitExpr(op->value_);
 
     // Create a new versioned variable for LHS
-    std::string base_name = GetBaseName(op->var_->name_hint_);
+    std::string base_name = op->var_->name_hint_;
     int version = NextVersion(base_name);
     auto new_var = CreateVersionedVar(op->var_, base_name, version);
 
@@ -214,8 +201,9 @@ class SSAConverter : public IRMutator {
     }
 
     // Find variables that diverged between branches (need phi nodes).
-    // Only consider variables that existed before the if statement -
-    // variables created only inside a branch are branch-local and don't need phi nodes.
+    // Consider variables that existed before the if (re-assigned in a branch),
+    // AND variables that are new but defined in BOTH branches (both branches
+    // created the same base name independently).
     std::vector<std::string> phi_vars;
     std::set<std::string> checked_vars;
 
@@ -224,15 +212,22 @@ class SSAConverter : public IRMutator {
       checked_vars.insert(base_name);
       auto before_it = versions_before.find(base_name);
 
-      // Skip variables not defined before the if (branch-local)
-      if (before_it == versions_before.end()) continue;
+      if (before_it != versions_before.end()) {
+        // Variable existed before: check if either branch changed it
+        bool changed_in_then = (before_it->second != var);
+        auto else_it = versions_after_else.find(base_name);
+        bool changed_in_else = (else_it != versions_after_else.end() && before_it->second != else_it->second);
 
-      bool changed_in_then = (before_it->second != var);
-      auto else_it = versions_after_else.find(base_name);
-      bool changed_in_else = (else_it != versions_after_else.end() && before_it->second != else_it->second);
-
-      if (changed_in_then || changed_in_else) {
-        phi_vars.push_back(base_name);
+        if (changed_in_then || changed_in_else) {
+          phi_vars.push_back(base_name);
+        }
+      } else {
+        // Variable is new (not in versions_before). If it exists in BOTH branches,
+        // it needs a phi node to merge the two independent definitions.
+        auto else_it = versions_after_else.find(base_name);
+        if (else_it != versions_after_else.end()) {
+          phi_vars.push_back(base_name);
+        }
       }
     }
 
@@ -241,7 +236,7 @@ class SSAConverter : public IRMutator {
       if (checked_vars.count(base_name)) continue;
 
       auto before_it = versions_before.find(base_name);
-      // Skip variables not defined before the if (branch-local)
+      // Skip variables not defined before the if (branch-local only in else)
       if (before_it == versions_before.end()) continue;
 
       if (before_it->second != var) {
@@ -254,9 +249,12 @@ class SSAConverter : public IRMutator {
 
     // If no variables diverged, just return the updated if statement
     if (phi_vars.empty() && op->return_vars_.empty()) {
-      current_version_ = versions_after_then;  // Use then branch versions as default
+      current_version_ = versions_before;
       return std::make_shared<IfStmt>(new_condition, new_then, new_else, std::vector<VarPtr>{}, op->span_);
     }
+
+    // Restore to pre-branch state before creating phi outputs
+    current_version_ = versions_before;
 
     // Create return_vars and yields for phi nodes
     std::vector<VarPtr> return_vars;
@@ -285,7 +283,7 @@ class SSAConverter : public IRMutator {
 
     // Preserve any existing return_vars (version them)
     for (const auto& existing_rv : op->return_vars_) {
-      std::string base_name = GetBaseName(existing_rv->name_hint_);
+      std::string base_name = existing_rv->name_hint_;
       // Only add if not already in phi_vars
       bool already_handled = false;
       for (const auto& pv : phi_vars) {
@@ -342,7 +340,7 @@ class SSAConverter : public IRMutator {
     collector.Collect(op->body_);
 
     // Identify loop-carried variables: assigned in body AND existed before the loop
-    std::string loop_var_base = GetBaseName(op->loop_var_->name_hint_);
+    std::string loop_var_base = op->loop_var_->name_hint_;
     std::vector<std::string> loop_carried_vars;
     for (const auto& assigned_name : collector.assigned_vars) {
       // Skip loop variable
@@ -351,7 +349,7 @@ class SSAConverter : public IRMutator {
       // Skip existing iter_args
       bool is_existing_iter_arg = false;
       for (const auto& ia : op->iter_args_) {
-        if (GetBaseName(ia->name_hint_) == assigned_name) {
+        if (ia->name_hint_ == assigned_name) {
           is_existing_iter_arg = true;
           break;
         }
@@ -390,16 +388,7 @@ class SSAConverter : public IRMutator {
                                               op->loop_var_->GetType(), op->loop_var_->span_);
     current_version_[loop_var_base] = new_loop_var;
 
-    // Register ALL iter_args (existing + new loop-carried) in loop scope
-    for (const auto& iter_arg : new_iter_args) {
-      std::string base_name = GetBaseName(iter_arg->name_hint_);
-      // For iter_args like "acc_iter_1", extract "acc" as base
-      size_t iter_pos = base_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        base_name = base_name.substr(0, iter_pos);
-      }
-      current_version_[base_name] = iter_arg;
-    }
+    RegisterIterArgs(new_iter_args);
 
     // Visit loop body - now it will correctly reference iter_args
     auto new_body = VisitStmt(op->body_);
@@ -418,15 +407,7 @@ class SSAConverter : public IRMutator {
       current_version_[loop_carried_vars[i]] = return_vars[i];
     }
 
-    // Register existing iter_args' return_vars in current_version_
-    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
-      std::string base_name = GetBaseName(op->iter_args_[i]->name_hint_);
-      size_t iter_pos = base_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        base_name = base_name.substr(0, iter_pos);
-      }
-      current_version_[base_name] = op->return_vars_[i];
-    }
+    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
 
     // Collect yield values: first existing iter_args, then new loop-carried
     std::vector<ExprPtr> yield_values;
@@ -485,7 +466,7 @@ class SSAConverter : public IRMutator {
       // Skip existing iter_args
       bool is_existing_iter_arg = false;
       for (const auto& ia : op->iter_args_) {
-        if (GetBaseName(ia->name_hint_) == assigned_name) {
+        if (ia->name_hint_ == assigned_name) {
           is_existing_iter_arg = true;
           break;
         }
@@ -518,16 +499,7 @@ class SSAConverter : public IRMutator {
     // Enter loop scope
     EnterScope();
 
-    // Register ALL iter_args (existing + new loop-carried) in loop scope
-    for (const auto& iter_arg : new_iter_args) {
-      std::string base_name = GetBaseName(iter_arg->name_hint_);
-      // For iter_args like "acc_iter_1", extract "acc" as base
-      size_t iter_pos = base_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        base_name = base_name.substr(0, iter_pos);
-      }
-      current_version_[base_name] = iter_arg;
-    }
+    RegisterIterArgs(new_iter_args);
 
     // Visit condition - it will reference iter_args
     auto new_condition = VisitExpr(op->condition_);
@@ -557,15 +529,7 @@ class SSAConverter : public IRMutator {
       current_version_[loop_carried_vars[i]] = new_loop_carried_return_vars[i];
     }
 
-    // Register existing iter_args' return_vars in current_version_
-    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
-      std::string base_name = GetBaseName(op->iter_args_[i]->name_hint_);
-      size_t iter_pos = base_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        base_name = base_name.substr(0, iter_pos);
-      }
-      current_version_[base_name] = op->return_vars_[i];
-    }
+    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
 
     // Collect yield values: first existing iter_args, then new loop-carried
     std::vector<ExprPtr> yield_values;
@@ -656,6 +620,41 @@ class SSAConverter : public IRMutator {
   }
 
   /**
+   * @brief Register iter_args in current_version_ under both their full name
+   * and stripped base name (e.g., "acc_iter_1" registers as both "acc_iter_1" and "acc").
+   */
+  void RegisterIterArgs(const std::vector<IterArgPtr>& iter_args) {
+    for (const auto& iter_arg : iter_args) {
+      std::string full_name = iter_arg->name_hint_;
+      std::string stripped_name = full_name;
+      size_t iter_pos = stripped_name.find("_iter");
+      if (iter_pos != std::string::npos) {
+        stripped_name = stripped_name.substr(0, iter_pos);
+      }
+      current_version_[stripped_name] = iter_arg;
+      if (full_name != stripped_name) {
+        current_version_[full_name] = iter_arg;
+      }
+    }
+  }
+
+  /**
+   * @brief Map existing iter_args' return_vars back into current_version_
+   * using the stripped base name.
+   */
+  void RegisterExistingReturnVars(const std::vector<IterArgPtr>& iter_args,
+                                  const std::vector<VarPtr>& return_vars) {
+    for (size_t i = 0; i < iter_args.size() && i < return_vars.size(); ++i) {
+      std::string base_name = iter_args[i]->name_hint_;
+      size_t iter_pos = base_name.find("_iter");
+      if (iter_pos != std::string::npos) {
+        base_name = base_name.substr(0, iter_pos);
+      }
+      current_version_[base_name] = return_vars[i];
+    }
+  }
+
+  /**
    * @brief Enter a new scope
    */
   void EnterScope() { scope_stack_.push_back(current_version_); }
@@ -674,25 +673,7 @@ class SSAConverter : public IRMutator {
    */
   StmtPtr AppendYield(const StmtPtr& stmt, const std::vector<ExprPtr>& values, const Span& span) {
     if (values.empty()) return stmt;
-
-    auto yield = std::make_shared<YieldStmt>(values, span);
-
-    if (auto seq = As<SeqStmts>(stmt)) {
-      // Check if last statement is already a yield
-      if (!seq->stmts_.empty() && As<YieldStmt>(seq->stmts_.back())) {
-        // Replace last yield
-        std::vector<StmtPtr> new_stmts(seq->stmts_.begin(), seq->stmts_.end() - 1);
-        new_stmts.push_back(yield);
-        return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
-      }
-      // Append yield
-      std::vector<StmtPtr> new_stmts = seq->stmts_;
-      new_stmts.push_back(yield);
-      return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
-    }
-
-    // Wrap single statement and yield in SeqStmts
-    return SeqStmts::Flatten(std::vector<StmtPtr>{stmt, yield}, span);
+    return ReplaceOrAppendYield(stmt, values, span);
   }
 
   /**

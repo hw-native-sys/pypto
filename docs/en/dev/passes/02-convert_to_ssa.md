@@ -39,7 +39,7 @@ program_ssa = ssa_pass(program)
 ## Algorithm
 
 1. **Variable Renaming**: Rename variables with version suffixes (x → x_0, x_1, x_2) for each assignment
-2. **Phi Nodes for If**: Add phi nodes (return_vars + YieldStmt) for variables modified in if branches
+2. **Phi Nodes for If**: Add phi nodes (return_vars + YieldStmt) for variables modified in if branches, including variables defined independently in both branches
 3. **Iter_args for Loops**: Convert loop-modified variables to iter_args + return_vars pattern with YieldStmt
 4. **Scope Tracking**: Track variable definitions across nested scopes
 5. **Preservation**: Keep existing SSA constructs unchanged

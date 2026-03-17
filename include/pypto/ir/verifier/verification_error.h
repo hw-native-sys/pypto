@@ -26,9 +26,12 @@ namespace ssa {
  * @brief Error types for SSA verification
  */
 enum class ErrorType : int {
-  MULTIPLE_ASSIGNMENT = 1,  // Variable assigned more than once
-  NAME_SHADOWING = 2,       // Variable name shadows outer scope variable
-  MISSING_YIELD = 3         // ForStmt or IfStmt missing required YieldStmt
+  MULTIPLE_ASSIGNMENT = 1,             // Variable assigned more than once
+  NAME_SHADOWING = 2,                  // Variable name shadows outer scope variable
+  MISSING_YIELD = 3,                   // ForStmt or IfStmt missing required YieldStmt
+  ITER_ARGS_RETURN_VARS_MISMATCH = 4,  // iter_args.size() != return_vars.size()
+  YIELD_COUNT_MISMATCH = 5,            // YieldStmt value count != iter_args/return_vars count
+  SCOPE_VIOLATION = 6                  // Variable used outside its defining scope
 };
 
 /**

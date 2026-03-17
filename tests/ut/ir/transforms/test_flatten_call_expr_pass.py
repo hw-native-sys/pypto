@@ -249,8 +249,8 @@ class TestFlattenCallInIfCondition:
                         result = pl.add(_t0, 1.0)
                 return result
 
-        After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, NormalizeIR(Expected))
+        After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
 
     def test_nested_calls_before_and_after_if(self):
         """Test nested calls before and after if statement
@@ -366,8 +366,8 @@ class TestFlattenCallInForRange:
                     result = pl.mul(_t0, 2.0)
                 return result
 
-        After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, NormalizeIR(Expected))
+        After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
 
     def test_for_with_get_block_idx_in_range(self):
         """Test get_block_idx call in for range expression"""
@@ -434,8 +434,8 @@ class TestFlattenComplexNesting:
                         result = pl.add(temp, 1.0)
                 return result
 
-        After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, NormalizeIR(Expected))
+        After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
 
     def test_multiple_statements_with_nested_calls(self):
         """Test multiple statements with nested calls"""

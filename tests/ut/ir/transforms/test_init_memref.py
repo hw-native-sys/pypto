@@ -351,7 +351,7 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
 
     func = ir.Function(
         "test_func",
-        [(input_tensor, ir.ParamDirection.In)],
+        [(input_tensor, ir.ParamDirection.In), (tile_external, ir.ParamDirection.In)],
         [ir.TensorType([64, 64], ir.DataType.FP32)],
         body,
         span,
