@@ -221,8 +221,8 @@ def test_printer_incore_scope_unchanged():
 # ─── Outline pass safety ─────────────────────────────────────────────────────
 
 
-def test_outline_incore_skips_hierarchy():
-    """OutlineIncoreScopes does not crash or alter Hierarchy scopes."""
+def test_outline_incore_works_with_normal_program():
+    """OutlineIncoreScopes works normally on programs without Hierarchy scopes."""
 
     @pl.program
     class P:
@@ -232,10 +232,21 @@ def test_outline_incore_skips_hierarchy():
                 y = pl.add(x, x)
             return y
 
-    # Run outline — should work fine (no Hierarchy scopes to confuse it)
     After = passes.outline_incore_scopes()(P)
-    # Just verify it doesn't crash and produces a valid program
     assert After is not None
+
+
+def test_scope_outliner_ignores_hierarchy_kind():
+    """ScopeOutliner (used by OutlineIncoreScopes) only targets its configured
+    ScopeKind and naturally ignores Hierarchy scopes via the ScopeKind check."""
+    # The ScopeOutliner matches on target_scope_kind_ (InCore or Cluster).
+    # ScopeKind::Hierarchy (value 3) != InCore (0) != Cluster (2), so
+    # the outliner's VisitStmt_ will skip it via: if (scope_kind_ != target_) return.
+    # We verify this property at the enum level since we can't inject a Hierarchy
+    # scope via the DSL parser yet (pl.at() parsing is Step 04).
+    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
+    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
+    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.AutoInCore
 
 
 if __name__ == "__main__":

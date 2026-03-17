@@ -600,7 +600,7 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *     body
  * with pl.cluster():   # Cluster scope
  *     body
- * with pl.at(level=pl.Level.HOST, role=pl.Role.WORKER):  # Hierarchy scope
+ * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # Hierarchy scope
  *     body
  *
  * **Semantics:**
@@ -610,7 +610,7 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * - SSA conversion treats it as transparent (just visits body)
  * - OutlineIncoreScopes extracts InCore scopes into InCore functions
  * - OutlineClusterScopes extracts Cluster scopes into Group functions
- * - OutlineHierarchyScopes extracts Hierarchy scopes into level-/role-annotated functions
+ * - Hierarchy scopes (planned) will be outlined into level-/role-annotated functions
  *
  * **Key Properties:**
  * - scope_kind: The kind of scope (InCore, AutoInCore, Cluster, or Hierarchy)
@@ -641,7 +641,9 @@ class ScopeStmt : public Stmt {
    */
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
             std::optional<Role> role = std::nullopt)
-      : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)), level_(level), role_(role) {}
+      : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)), level_(level), role_(role) {
+    CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScopeStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ScopeStmt"; }

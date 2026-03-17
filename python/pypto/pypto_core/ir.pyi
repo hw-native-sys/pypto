@@ -1877,10 +1877,10 @@ class Function(IRNode):
     """Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)."""
 
     level: Final[Level | None]
-    """Hierarchy level (None = infer from func_type)."""
+    """Hierarchy level (None = unspecified)."""
 
     role: Final[Role | None]
-    """Function role (None = default per level)."""
+    """Function role (None = unspecified)."""
 
     params: Final[list[Var]]
     """Parameter variables."""
@@ -1914,8 +1914,8 @@ class Function(IRNode):
             body: Function body statement (use SeqStmts for multiple statements)
             span: Source location
             type: Function type (default: Opaque)
-            level: Hierarchy level (default: None — infer from func_type)
-            role: Function role (default: None)
+            level: Hierarchy level (default: None — unspecified)
+            role: Function role (default: None — unspecified)
         """
 
     def __str__(self) -> str:

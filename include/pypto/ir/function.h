@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -125,16 +126,27 @@ inline std::string LevelToString(Level level) {
  * @brief Convert string to Level
  */
 inline Level StringToLevel(const std::string& str) {
-  if (str == "AIV") return Level::AIV;
-  if (str == "AIC") return Level::AIC;
-  if (str == "CORE_GROUP") return Level::CORE_GROUP;
-  if (str == "CHIP_DIE" || str == "L2CACHE") return Level::CHIP_DIE;
-  if (str == "CHIP" || str == "PROCESSOR" || str == "UMA") return Level::CHIP;
-  if (str == "HOST" || str == "NODE") return Level::HOST;
-  if (str == "CLUSTER_0" || str == "POD") return Level::CLUSTER_0;
-  if (str == "CLUSTER_1" || str == "CLOS1") return Level::CLUSTER_1;
-  if (str == "CLUSTER_2" || str == "CLOS2") return Level::CLUSTER_2;
-  if (str == "GLOBAL") return Level::GLOBAL;
+  static const std::unordered_map<std::string, Level> kMap = {
+      {"AIV", Level::AIV},
+      {"AIC", Level::AIC},
+      {"CORE_GROUP", Level::CORE_GROUP},
+      {"CHIP_DIE", Level::CHIP_DIE},
+      {"L2CACHE", Level::CHIP_DIE},
+      {"CHIP", Level::CHIP},
+      {"PROCESSOR", Level::CHIP},
+      {"UMA", Level::CHIP},
+      {"HOST", Level::HOST},
+      {"NODE", Level::HOST},
+      {"CLUSTER_0", Level::CLUSTER_0},
+      {"POD", Level::CLUSTER_0},
+      {"CLUSTER_1", Level::CLUSTER_1},
+      {"CLOS1", Level::CLUSTER_1},
+      {"CLUSTER_2", Level::CLUSTER_2},
+      {"CLOS2", Level::CLUSTER_2},
+      {"GLOBAL", Level::GLOBAL},
+  };
+  auto it = kMap.find(str);
+  if (it != kMap.end()) return it->second;
   throw pypto::TypeError("Unknown Level: " + str);
 }
 
@@ -184,8 +196,14 @@ inline std::string RoleToString(Role role) {
  * @brief Convert string to Role
  */
 inline Role StringToRole(const std::string& str) {
-  if (str == "Orchestrator" || str == "ORCHESTRATOR") return Role::Orchestrator;
-  if (str == "Worker" || str == "WORKER") return Role::Worker;
+  static const std::unordered_map<std::string, Role> kMap = {
+      {"Orchestrator", Role::Orchestrator},
+      {"ORCHESTRATOR", Role::Orchestrator},
+      {"Worker", Role::Worker},
+      {"WORKER", Role::Worker},
+  };
+  auto it = kMap.find(str);
+  if (it != kMap.end()) return it->second;
   throw pypto::TypeError("Unknown Role: " + str);
 }
 
@@ -312,7 +330,7 @@ class Function : public IRNode {
    * @param body Function body statement (use SeqStmts for multiple statements)
    * @param span Source location
    * @param type Function type (default: Opaque)
-   * @param level Hierarchy level (default: nullopt — infer from func_type)
+   * @param level Hierarchy level (default: nullopt — unspecified)
    * @param role Function role (default: nullopt)
    */
   Function(std::string name, std::vector<VarPtr> params, std::vector<ParamDirection> param_directions,
