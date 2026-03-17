@@ -43,7 +43,8 @@ program_2d = flatten_pass(program)
 | Tile 操作 | 变换方式 |
 | --------- | -------- |
 | `tile.load`（>2D） | 保持加载原样，之后插入 `tile.reshape` 为 2D |
-| `tile.store`（>2D） | 在存储前插入 `tile.reshape` 恢复为 ND |
+| `tile.store`（tile 覆盖完整 tensor 或已追踪 ND 形状） | 在存储前插入 `tile.reshape` 恢复为 ND |
+| `tile.store`（较大 tensor 的 2D 切片） | 直接透传，不插入 reshape |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.sum`/`tile.max`/`tile.min`（>2D） | 将 axis 映射为 1（2D 的最后轴） |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |

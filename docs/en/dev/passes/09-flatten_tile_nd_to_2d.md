@@ -43,7 +43,8 @@ Per-statement handling:
 | Tile op | Transformation |
 | ------- | -------------- |
 | `tile.load` (>2D) | Keep load as-is, insert `tile.reshape` to 2D after |
-| `tile.store` (>2D) | Insert `tile.reshape` back to ND before store |
+| `tile.store` (tile covers full tensor or ND-tracked) | Insert `tile.reshape` back to ND before store |
+| `tile.store` (2D slice of larger tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |

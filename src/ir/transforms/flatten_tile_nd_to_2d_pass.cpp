@@ -83,6 +83,26 @@ int64_t GetStaticDim(const ExprPtr& expr, const std::string& context) {
 }
 
 /**
+ * @brief Compute the product of all static ConstInt dimensions.
+ *
+ * Returns -1 if any dimension is not a ConstInt (dynamic shape).
+ * Raises pypto::ValueError if a ConstInt dimension is non-positive or
+ * if the product would overflow int64_t.
+ */
+int64_t StaticShapeProduct(const std::vector<ExprPtr>& shape) {
+  int64_t prod = 1;
+  for (const auto& dim : shape) {
+    auto ci = As<ConstInt>(dim);
+    if (!ci) return -1;
+    CHECK(ci->value_ > 0) << "StaticShapeProduct: tile dimension must be positive, got " << ci->value_;
+    CHECK(prod <= INT64_MAX / ci->value_) << "StaticShapeProduct: integer overflow computing shape product"
+                                          << " (accumulated=" << prod << ", dim=" << ci->value_ << ")";
+    prod *= ci->value_;
+  }
+  return prod;
+}
+
+/**
  * @brief Compute the merged 2D shape from an ND shape.
  *
  * [A, B, C, D] -> {A*B*C, D}
@@ -520,8 +540,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // Determine the ND shape for reshape-back:
         // 1. Prefer tracked ND shape from ctx.nd_shapes (set by tile.load/tile.create,
         //    propagated through shape-preserving ops)
-        // 2. Fall back to output tensor shape (covers reduce ops and other cases
-        //    where the shape was not propagated)
+        // 2. Fall back to output tensor shape when tile covers the full tensor
         const std::vector<ExprPtr>* nd_shape_ptr = nullptr;
         std::string orig_tile_name;
         if (auto var = As<Var>(call->args_[0])) {
@@ -532,10 +551,16 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           }
         }
 
-        // Fall back to tensor shape if no tracked ND shape
+        // Fall back to tensor shape only when the tile covers the full tensor
+        // (element counts match). A loop-indexed slice of a larger tensor has a
+        // smaller tile — no reshape is needed in that case.
         auto out_tensor_type = As<TensorType>(call->args_[2]->GetType());
-        if (!nd_shape_ptr && out_tensor_type) {
-          nd_shape_ptr = &out_tensor_type->shape_;
+        if (!nd_shape_ptr && out_tensor_type && tile_type) {
+          int64_t tile_sz = StaticShapeProduct(tile_type->shape_);
+          int64_t tensor_sz = StaticShapeProduct(out_tensor_type->shape_);
+          if (tile_sz >= 1 && tensor_sz >= 1 && tile_sz == tensor_sz) {
+            nd_shape_ptr = &out_tensor_type->shape_;
+          }
         }
 
         if (nd_shape_ptr && nd_shape_ptr->size() > 2 && tile_type && tile_type->shape_.size() <= 2) {

@@ -781,11 +781,12 @@ class TestViewOperationsMemoryReuse:
 class TestInplaceSafetyCheck:
     """Tests verifying that ops marked not_inplace_safe block producer-consumer reuse."""
 
-    def test_inplace_unsafe_op_no_producer_consumer_reuse(self):
-        """tile.recip must NOT reuse its input's buffer when last_use == def (src == dst).
+    def test_inplace_unsafe_ops_no_producer_consumer_reuse(self):
+        """Inplace-unsafe ops (recip, ands, ors, xors) must NOT reuse their input's buffer.
 
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.recip does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
+        For each op: the tile's last_use == the result tile's def (producer-consumer),
+        but because the op does not support in-place execution, each result tile must
+        get a distinct MemRef from its input tile.
         """
 
         @pl.program
@@ -793,19 +794,36 @@ class TestInplaceSafetyCheck:
             @pl.function
             def main(
                 self,
-                input_a: pl.Tensor[[32, 32], pl.FP32],
-                output: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.recip(tile_a)
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
+                input_fp: pl.Tensor[[32, 32], pl.FP32],
+                input_int1: pl.Tensor[[32, 32], pl.INT32],
+                input_int2: pl.Tensor[[32, 32], pl.INT32],
+                input_int3: pl.Tensor[[32, 32], pl.INT32],
+                input_int4: pl.Tensor[[32, 32], pl.INT32],
+                output_fp: pl.Tensor[[32, 32], pl.FP32],
+                output_int: pl.Tensor[[32, 32], pl.INT32],
+            ) -> pl.Tensor[[32, 32], pl.INT32]:
+                tile_recip_in: pl.Tile[[32, 32], pl.FP32] = pl.load(input_fp, [0, 0], [32, 32])
+                tile_recip_out: pl.Tile[[32, 32], pl.FP32] = pl.recip(tile_recip_in)
+                _s1: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_recip_out, [0, 0], output_fp)
+                tile_ands_in: pl.Tile[[32, 32], pl.INT32] = pl.load(input_int1, [0, 0], [32, 32])
+                tile_ands_out: pl.Tile[[32, 32], pl.INT32] = pl.ands(tile_ands_in, 255)
+                _s2: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_ands_out, [0, 0], output_int)
+                tile_ors_in: pl.Tile[[32, 32], pl.INT32] = pl.load(input_int2, [0, 0], [32, 32])
+                tile_ors_out: pl.Tile[[32, 32], pl.INT32] = pl.ors(tile_ors_in, 255)
+                _s3: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_ors_out, [0, 0], output_int)
+                tile_xors_in: pl.Tile[[32, 32], pl.INT32] = pl.load(input_int3, [0, 0], [32, 32])
+                tile_xors_dst: pl.Tile[[32, 32], pl.INT32] = pl.load(input_int4, [0, 0], [32, 32])
+                tile_xors_out: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_xors_in, 255, tile_xors_dst)
+                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_xors_out, [0, 0], output_int)
                 return result
 
         func = _prepare_and_run_memory_reuse(Before)
-
         _assert_all_have_memrefs(func)
-        # tile.recip does not support in-place: tile_b must have its own MemRef
-        _assert_not_shares_memref(func, "tile_a", "tile_b")
+        _assert_not_shares_memref(func, "tile_recip_in", "tile_recip_out")
+        _assert_not_shares_memref(func, "tile_ands_in", "tile_ands_out")
+        _assert_not_shares_memref(func, "tile_ors_in", "tile_ors_out")
+        _assert_not_shares_memref(func, "tile_xors_in", "tile_xors_out")
+        _assert_not_shares_memref(func, "tile_xors_dst", "tile_xors_out")
 
     def test_inplace_unsafe_op_allows_non_producer_consumer_reuse(self):
         """tile.recip output does not share a buffer with its input (tile_x) in any case.
@@ -869,87 +887,6 @@ class TestInplaceSafetyCheck:
         _assert_all_have_memrefs(func)
         # tile.add is inplace-safe: producer-consumer reuse is allowed
         _assert_shares_memref(func, "tile_a", "tile_b")
-
-    def test_ands_no_producer_consumer_reuse(self):
-        """tile.ands must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.ands does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.ands(tile_a, 255)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
-        _assert_all_have_memrefs(func)
-        # tile.ands does not support in-place: tile_b must have its own MemRef
-        _assert_not_shares_memref(func, "tile_a", "tile_b")
-
-    def test_ors_no_producer_consumer_reuse(self):
-        """tile.ors must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.ors does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.ors(tile_a, 255)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
-        _assert_all_have_memrefs(func)
-        # tile.ors does not support in-place: tile_b must have its own MemRef
-        _assert_not_shares_memref(func, "tile_a", "tile_b")
-
-    def test_xors_no_producer_consumer_reuse(self):
-        """tile.xors must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.xors does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        tile_tmp is loaded from a separate tensor to ensure it has a MemRef assigned.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                input_b: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_tmp: pl.Tile[[32, 32], pl.INT32] = pl.load(input_b, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_a, 255, tile_tmp)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
-        _assert_all_have_memrefs(func)
-        # tile.xors does not support in-place: tile_b must have its own MemRef
-        _assert_not_shares_memref(func, "tile_a", "tile_b")
 
     def test_inplace_unsafe_two_level_transitive_chain(self):
         """tile.recip must not reuse a buffer occupied by its input via a two-level chain.

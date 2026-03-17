@@ -1442,6 +1442,38 @@ class TestFlattenTileNdTo2DReduceAndCompute:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_store_2d_tile_to_3d_tensor_no_reshape(self):
+        """Storing a 2D tile (loop-indexed slice) to a 3D tensor must not insert a reshape.
+
+        Regression test: the tile.store fallback incorrectly used the full 3D tensor
+        shape to reshape a 2D tile that was never ND-flattened, causing a size mismatch
+        (e.g., tile size 12 vs tensor size 24).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                # 2D tile loaded from 2D tensor — not tracked in nd_shapes
+                x_tile: pl.Tile[[3, 4], pl.FP32] = pl.load(x, [0, 0], [3, 4])
+                # Store 2D tile to 3D tensor at index [0, 0, 0] — no reshape needed
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(x_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        # The pass has nothing to flatten (no >2D tiles) — program should be unchanged
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Before)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
