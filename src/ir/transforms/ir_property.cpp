@@ -117,8 +117,9 @@ const IRPropertySet& GetStructuralProperties() {
 }
 
 const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked, IRProperty::NoNestedCalls,
-                                   IRProperty::BreakContinueValid, IRProperty::NoRedundantBlocks};
+  static const IRPropertySet props{IRProperty::SSAForm,           IRProperty::TypeChecked,
+                                   IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
   return props;
 }
 

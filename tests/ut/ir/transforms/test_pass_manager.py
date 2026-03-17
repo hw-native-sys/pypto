@@ -70,7 +70,7 @@ class TestPassManagerExecution:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
         pm = ir.PassManager.get_strategy()
         program = ir.Program([func], "test_run_with_implicit_default_strategy", ir.Span.unknown())
         result = pm.run_passes(program)
@@ -110,13 +110,13 @@ class TestPassManagerWithProgram:
         x1 = ir.Var("x", ir.ScalarType(dtype), span)
         y1 = ir.Var("y", ir.ScalarType(dtype), span)
         assign1 = ir.AssignStmt(x1, y1, span)
-        func1 = ir.Function("func1", [x1], [ir.ScalarType(dtype)], assign1, span)
+        func1 = ir.Function("func1", [x1, y1], [ir.ScalarType(dtype)], assign1, span)
 
         # Create second function
         x2 = ir.Var("x", ir.ScalarType(dtype), span)
         y2 = ir.Var("y", ir.ScalarType(dtype), span)
         assign2 = ir.AssignStmt(x2, y2, span)
-        func2 = ir.Function("func2", [x2], [ir.ScalarType(dtype)], assign2, span)
+        func2 = ir.Function("func2", [x2, y2], [ir.ScalarType(dtype)], assign2, span)
 
         # Create program with both functions
         program = ir.Program([func1, func2], "test_program", span)
@@ -142,7 +142,7 @@ class TestPassManagerWithProgram:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("single_func", [x], [ir.ScalarType(dtype)], assign, span)
+        func = ir.Function("single_func", [x, y], [ir.ScalarType(dtype)], assign, span)
 
         # Create program with single function
         program = ir.Program([func], "single_func_program", span)
@@ -168,7 +168,7 @@ class TestPassManagerDumpIR:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
@@ -190,7 +190,7 @@ class TestPassManagerDumpIR:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
@@ -204,7 +204,7 @@ class TestPassManagerDumpIR:
         x = ir.Var("x", ir.ScalarType(dtype), span)
         y = ir.Var("y", ir.ScalarType(dtype), span)
         assign = ir.AssignStmt(x, y, span)
-        func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+        func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
         log: list[str] = []

@@ -18,6 +18,7 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/verifier/verification_error.h"

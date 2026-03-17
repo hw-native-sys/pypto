@@ -195,8 +195,7 @@ def test_type_check_valid_types():
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
     iter_arg = ir.IterArg("tensor", tensor_type, a, span)
-    yield_value = ir.Var("temp", tensor_type, span)
-    body = ir.YieldStmt([yield_value], span)
+    body = ir.YieldStmt([iter_arg], span)
     result_var = ir.Var("result", tensor_type, span)
 
     for_stmt = ir.ForStmt(

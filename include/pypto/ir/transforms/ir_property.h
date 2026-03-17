@@ -191,7 +191,7 @@ const IRPropertySet& GetStructuralProperties();
  * @brief Default property set for explicit verification
  *
  * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks} — the properties checked by run_verifier() when no explicit set is given.
+ * NoRedundantBlocks, UseAfterDef} — the properties checked by run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

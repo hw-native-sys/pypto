@@ -21,7 +21,7 @@ def _make_simple_program():
     x = ir.Var("x", ir.ScalarType(dtype), span)
     y = ir.Var("y", ir.ScalarType(dtype), span)
     assign = ir.AssignStmt(x, y, span)
-    func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
+    func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
     return ir.Program([func], "test_program", span)
 
 

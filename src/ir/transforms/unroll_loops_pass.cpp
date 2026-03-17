@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -81,7 +82,7 @@ class LoopUnrollMutator : public IRMutator {
   /// Unroll a single ForStmt with ForKind::Unroll.
   /// Returns the unrolled SeqStmts and populates final_carry with the
   /// substitution map to apply to statements following this loop.
-  StmtPtr UnrollForStmt(const ForStmtPtr& op, std::unordered_map<const Var*, VarPtr>& final_carry) {
+  StmtPtr UnrollForStmt(const ForStmtPtr& op, std::map<const Var*, VarPtr>& final_carry) {
     // Validate: no iter_args for unroll loops
     CHECK(op->iter_args_.empty()) << "Unroll loops cannot have iter_args (init_values)";
 
@@ -108,7 +109,7 @@ class LoopUnrollMutator : public IRMutator {
 
     // Collect body def vars that shadow outer-scope vars by name.
     // shadow_map: body_def_var* → outer_var VarPtr (the var it shadows)
-    std::unordered_map<const Var*, VarPtr> shadow_map;
+    std::map<const Var*, VarPtr> shadow_map;
     {
       std::unordered_map<std::string, const Var*> def_by_name;
       std::function<void(const StmtPtr&)> collect_defs = [&](const StmtPtr& s) {
@@ -146,11 +147,11 @@ class LoopUnrollMutator : public IRMutator {
     // Generate unrolled bodies. carry_map maps outer_var* → fresh output var (as ExprPtr)
     // for substitution into each subsequent iteration's clone.
     std::vector<StmtPtr> unrolled;
-    std::unordered_map<const Var*, ExprPtr> carry_map;
+    std::map<const Var*, ExprPtr> carry_map;
 
     auto emit_iteration = [&](int64_t i) {
       auto const_expr = std::make_shared<ConstInt>(i, DataType::INDEX, op->loop_var_->span_);
-      std::unordered_map<const Var*, ExprPtr> sub_map = carry_map;
+      std::unordered_map<const Var*, ExprPtr> sub_map(carry_map.begin(), carry_map.end());
       sub_map[op->loop_var_.get()] = const_expr;
       auto [cloned_body, def_var_map] = DeepClone(op->body_, sub_map);
       // Update carry: outer_var → this iteration's fresh output var
@@ -195,7 +196,7 @@ class LoopUnrollMutator : public IRMutator {
     if (op->kind_ != ForKind::Unroll || op->chunk_size_.has_value()) {
       return IRMutator::VisitStmt_(op);
     }
-    std::unordered_map<const Var*, VarPtr> unused_carry;
+    std::map<const Var*, VarPtr> unused_carry;
     return UnrollForStmt(op, unused_carry);
   }
 
@@ -213,7 +214,7 @@ class LoopUnrollMutator : public IRMutator {
 
       auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(cur);
       if (for_stmt && for_stmt->kind_ == ForKind::Unroll && !for_stmt->chunk_size_.has_value()) {
-        std::unordered_map<const Var*, VarPtr> carry;
+        std::map<const Var*, VarPtr> carry;
         auto new_stmt = UnrollForStmt(for_stmt, carry);
         new_stmts.push_back(new_stmt);
         for (const auto& [k, v] : carry) pending_subst[k] = v;
