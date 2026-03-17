@@ -22,8 +22,9 @@ namespace ir {
 
 /// Substitute variable references by pointer identity.
 ///
-/// Walks the IR subtree and replaces each Var/IterArg whose raw pointer
-/// appears in @p var_map with the mapped VarPtr.
+/// Walks the IR subtree and replaces each Var whose raw pointer appears
+/// in @p var_map with the mapped VarPtr.  IterArg nodes are handled by
+/// the base IRMutator (preserving their type for ForStmt/WhileStmt slots).
 ///
 /// @param body    Statement subtree to transform.
 /// @param var_map Pointer-based substitution map (original Var* -> replacement VarPtr).

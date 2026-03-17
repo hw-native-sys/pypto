@@ -392,15 +392,24 @@ class ScopeOutliner : public IRMutator {
     // tile.store.  These represent side-effect outputs that must be
     // returned regardless of whether they appear in used_after, because the
     // store mutates an externally-visible buffer (e.g. loop-carried state).
+    //
+    // Track two pointer identities per store target:
+    //   - var_objects_ pointer (ext_it->second.get()) — goes into output_vars
+    //     and store_output_set for consistent classification
+    //   - body pointer (var_ptr) — kept in store_body_ptrs for the
+    //     StoreEvalToAssignMutator, which matches against the un-substituted
+    //     scope body where store targets retain their original pointers
     StoreTargetCollector store_collector;
     store_collector.VisitStmt(op->body_);
+    std::unordered_map<const Var*, const Var*> store_body_ptrs;
     for (const Var* var_ptr : store_collector.store_targets) {
       if (!def_collector.var_defs.count(var_ptr)) {
         auto ext_it = var_objects_.find(var_ptr->name_hint_);
         CHECK(ext_it != var_objects_.end())
             << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
         output_vars.push_back(ext_it->second);
-        store_output_set.insert(var_ptr);
+        store_output_set.insert(ext_it->second.get());
+        store_body_ptrs[ext_it->second.get()] = var_ptr;
       }
     }
 
@@ -493,11 +502,14 @@ class ScopeOutliner : public IRMutator {
     // Convert EvalStmt(tile.store) to AssignStmt for store targets
     // so the return value is captured with a fresh SSA name (e.g. oi_0_store_ret).
     if (!store_output_set.empty()) {
-      // Map: original target Var* -> new _store_ret Var
+      // Map: body Var* (from scope body's tile.store args) -> new _store_ret Var.
+      // Must use body pointers as keys because store targets are excluded from
+      // SubstituteVars and retain their original body pointers in transformed_body.
       std::unordered_map<const Var*, VarPtr> store_target_vars;
       for (size_t idx = 0; idx < output_vars.size(); ++idx) {
-        if (store_output_set.count(output_vars[idx].get())) {
-          store_target_vars[output_vars[idx].get()] = outlined_output_vars[idx];
+        auto body_it = store_body_ptrs.find(output_vars[idx].get());
+        if (body_it != store_body_ptrs.end()) {
+          store_target_vars[body_it->second] = outlined_output_vars[idx];
         }
       }
       StoreEvalToAssignMutator store_mutator(store_target_vars);

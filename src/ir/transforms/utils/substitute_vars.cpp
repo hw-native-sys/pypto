@@ -41,7 +41,7 @@ class SubstituteVarsMutator : public IRMutator {
   }
 
  private:
-  std::unordered_map<const Var*, VarPtr> var_map_;
+  const std::unordered_map<const Var*, VarPtr>& var_map_;
 };
 
 }  // namespace
