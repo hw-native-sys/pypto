@@ -1282,6 +1282,56 @@ class TestOrchestration:
         assert "kernel_update" in code
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
+    def test_for_loop_with_inplace_return_after_passes(self):
+        """Test inplace detection when return var has compound SSA suffixes from pass pipeline.
+
+        When an Opaque function with auto_incore + parallel(chunk=) goes through the full
+        pass pipeline (SSA → split_chunked_loops → interchange_chunk_loops → outline), the
+        return var acquires compound suffixes like "_iter_1_outer_l0_rv". GetSSABaseName must
+        strip all of these to match the return var back to the original param name for correct
+        inplace detection (2 arg slots, not 3).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class ChunkedInplaceProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def add_one(
+                self,
+                input_tensor: pl.Tensor[[1024, 256], pl.FP32],
+                output_tensor: pl.Tensor[[1024, 256], pl.FP32],
+            ) -> pl.Tensor[[1024, 256], pl.FP32]:
+                with pl.auto_incore():
+                    for r in pl.parallel(0, 1024, 1, chunk=64):
+                        row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
+                        row_result = pl.add(row_tile, 1.0)
+                        output_tensor = pl.assemble(output_tensor, row_result, [r, 0])
+                return output_tensor
+
+        # Run the full pass pipeline to produce compound SSA suffixes
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(ChunkedInplaceProgram)
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(transformed)
+        code = files["orchestration/add_one.cpp"]
+
+        # Inplace detection: output_tensor return var should match the param,
+        # so only 2 ARG slots (input_tensor + output_tensor), not 3
+        assert "expected_arg_count = 2" in code
+        assert "#define ARG_PTR_INPUT_TENSOR 0" in code
+        assert "#define ARG_PTR_OUTPUT_TENSOR 1" in code
+
+        # No third ARG define for the compound-named return var
+        assert "ARG_PTR_OUTPUT_TENSOR_ITER" not in code
+
+        # Task params should use ext_output_tensor (the inplace param), not a separate buffer
+        assert "ext_output_tensor)" in code
+        assert "ext_output_tensor_iter" not in code
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

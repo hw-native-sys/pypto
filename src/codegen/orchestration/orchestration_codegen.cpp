@@ -47,32 +47,88 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 /**
  * @brief Extract the original base name from an SSA-renamed variable
  *
- * SSA naming patterns:
+ * SSA naming patterns (applied by successive passes):
  *   Regular vars: "{base}_{version}"  (e.g., "mi_update_4" -> "mi_update")
  *   Iter args:    "{base}_iter_{version}" (e.g., "mi_update_iter_2" -> "mi_update")
  *
+ * Pass-pipeline suffixes (split_chunked_loops, interchange_chunk_loops):
+ *   Return var:   "_rv"
+ *   Loop level:   "_lN"  (interchange_chunk_loops)
+ *   Chunk split:  "_outer", "_inner", "_rem"  (split_chunked_loops)
+ *
+ * These suffixes compose, e.g.:
+ *   "output_tensor_iter_1_outer_l0_rv" -> "output_tensor"
+ *
+ * Stripping is applied iteratively until no more suffixes can be removed.
  * Used to match input args with output vars for inout parameter detection.
  */
 std::string GetSSABaseName(const std::string& name) {
-  // Helper to check if a string is all digits
-  auto is_all_digits = [](const std::string& s) {
-    return !s.empty() && std::all_of(s.begin(), s.end(), ::isdigit);
+  // Check if `str` ends with `suffix` (length `len`) and strip it in-place.
+  // Returns false if the suffix is absent or would consume the entire string.
+  auto strip_suffix = [](std::string& str, const char* suffix, size_t len) -> bool {
+    if (str.size() > len && str.compare(str.size() - len, len, suffix) == 0) {
+      str.resize(str.size() - len);
+      return true;
+    }
+    return false;
   };
 
-  // Check for iter_arg pattern: "{base}_iter_{version}"
-  size_t iter_pos = name.rfind("_iter_");
-  if (iter_pos != std::string::npos && is_all_digits(name.substr(iter_pos + 6))) {
-    return name.substr(0, iter_pos);
+  std::string current = name;
+
+  // Iteratively strip pass-pipeline suffixes from the end
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    // Strip "_rv" suffix (split_chunked_loops return var)
+    if (strip_suffix(current, "_rv", 3)) {
+      changed = true;
+      continue;
+    }
+
+    // Strip "_lN" suffix (interchange_chunk_loops level index)
+    {
+      size_t pos = current.rfind('_');
+      if (pos != std::string::npos && pos + 1 < current.size() && current[pos + 1] == 'l' &&
+          pos + 2 < current.size() &&
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 2), current.end(), ::isdigit)) {
+        current.resize(pos);
+        changed = true;
+        continue;
+      }
+    }
+
+    // Strip "_outer", "_inner", "_rem" suffixes (split_chunked_loops)
+    if (strip_suffix(current, "_outer", 6) || strip_suffix(current, "_inner", 6) ||
+        strip_suffix(current, "_rem", 4)) {
+      changed = true;
+      continue;
+    }
+
+    // Strip "_iter_N" suffix (SSA iter_arg pattern)
+    {
+      size_t pos = current.rfind("_iter_");
+      if (pos != std::string::npos && pos > 0 &&
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 6), current.end(), ::isdigit)) {
+        current.resize(pos);
+        changed = true;
+        continue;
+      }
+    }
+
+    // Strip "_N" suffix (regular SSA version)
+    {
+      size_t pos = current.rfind('_');
+      if (pos != std::string::npos && pos > 0 &&
+          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 1), current.end(), ::isdigit)) {
+        current.resize(pos);
+        changed = true;
+        continue;
+      }
+    }
   }
 
-  // Check for regular var pattern: "{base}_{version}"
-  size_t last_underscore = name.rfind('_');
-  if (last_underscore != std::string::npos && last_underscore > 0 &&
-      is_all_digits(name.substr(last_underscore + 1))) {
-    return name.substr(0, last_underscore);
-  }
-
-  return name;
+  return current;
 }
 
 /**
@@ -535,8 +591,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
   std::string GetVarName(const VarPtr& var) override { return GetSSABaseName(var->name_hint_); }
   [[nodiscard]] std::string TryGetVarName(const ir::ExprPtr& expr) const override {
+    // Resolve IterArg via iter_arg_to_var_ (maps to for-loop return var name)
+    if (auto iter_arg = As<IterArg>(expr)) {
+      auto it = iter_arg_to_var_.find(iter_arg.get());
+      if (it != iter_arg_to_var_.end()) {
+        return it->second;
+      }
+    }
     std::string name = CodegenBase::TryGetVarName(expr);
-    return name.empty() ? name : GetSSABaseName(name);
+    if (name.empty()) return name;
+    return GetSSABaseName(name);
   }
   [[nodiscard]] std::string GetTensorDataPtr(const std::string& name) const override {
     if (param_names_.count(name) || return_names_.count(name)) {
@@ -561,10 +625,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       const auto& return_var = for_stmt->return_vars_[i];
       std::string resolved_return = GetSSABaseName(return_var->name_hint_);
       std::string init_value = GenerateExprString(iter_arg->initValue_);
+      // Apply ext_ prefix for tensor-type init values referencing params/returns
+      if (As<TensorType>(iter_arg->GetType())) {
+        init_value = GetExternalTensorName(init_value);
+      }
       // Skip iter_arg init when:
       // 1. Variable already declared (e.g., via make_tensor) — would be C++ redeclaration error
       // 2. Self-assignment after SSA name collapse (e.g., "auto oi = oi;") — C++ UB
-      if (!declared_vars_.count(resolved_return) && resolved_return != init_value) {
+      // 3. Variable already exists as external tensor (param or return) — would shadow ext_ declaration
+      if (!declared_vars_.count(resolved_return) && !param_names_.count(resolved_return) &&
+          !return_names_.count(resolved_return) && resolved_return != init_value) {
         code_ << Indent() << GetCppType(iter_arg->GetType()) << " " << resolved_return << " = " << init_value
               << ";\n";
       }
@@ -655,6 +725,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
           result_key = var_name;
         }
         GenerateFunctionCallCode(call, result_key);
+
+        // Track call result vars — task submissions don't create C++ variables,
+        // so these names are "virtual" and must be skipped in yield statements.
+        if (!As<TupleType>(call->GetType())) {
+          call_result_vars_.insert(var_name);
+        }
       }
     } else if (As<TupleGetItemExpr>(assign->value_)) {
       // No-op: tuple elements handled via tuple_var_to_elements_
@@ -679,8 +755,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
       std::string value_expr = GenerateExprString(yield_stmt->value_[i]);
       if (i < current_return_var_names_.size()) {
-        // Skip self-assignment yields (e.g., "oi = oi;" for inplace tensor iter_args)
-        if (current_return_var_names_[i] != value_expr) {
+        // Skip yield when:
+        // 1. Self-assignment (e.g., "oi = oi;" for inplace tensor iter_args)
+        // 2. Value is a task-submission result (no C++ variable exists for it)
+        if (current_return_var_names_[i] != value_expr && !call_result_vars_.count(value_expr)) {
           code_ << Indent() << current_return_var_names_[i] << " = " << value_expr << ";\n";
         }
       }
@@ -941,6 +1019,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::map<std::string, std::vector<std::pair<int, std::string>>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;  // Call* → unique key for tuple calls
   std::set<std::string> declared_vars_;  // Track declared C++ variables for dedup after SSA name collapse
+  // Accumulates across the entire function body (not per-scope). Safe because SSA guarantees unique
+  // names — a task-submission result name from one scope cannot collide with an unrelated yield var.
+  std::set<std::string> call_result_vars_;  // Vars from task submissions (no C++ declaration, skip in yield)
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
