@@ -10,6 +10,7 @@
  */
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/substitute_vars.h"
 
 namespace pypto {
 namespace ir {
@@ -68,7 +70,7 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
 /**
  * @brief Mutator that expands ForStmt nodes with ForKind::Unroll into
  * a SeqStmts of deep-cloned bodies, substituting the loop variable with each
- * iteration's constant value.
+ * iteration's constant value, and chaining iteration outputs as inputs to the next.
  *
  * Uses DeepClone to create fresh Var objects at definition sites for each
  * iteration, ensuring structural equality works correctly and no Var identity
@@ -76,17 +78,10 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
  */
 class LoopUnrollMutator : public IRMutator {
  public:
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (op->kind_ != ForKind::Unroll) {
-      // Non-unroll loops: just recurse normally
-      return IRMutator::VisitStmt_(op);
-    }
-
-    if (op->chunk_size_.has_value()) {
-      // Chunked unroll loops: skip, let SplitChunkedLoops handle first
-      return IRMutator::VisitStmt_(op);
-    }
-
+  /// Unroll a single ForStmt with ForKind::Unroll.
+  /// Returns the unrolled SeqStmts and populates final_carry with the
+  /// substitution map to apply to statements following this loop.
+  StmtPtr UnrollForStmt(const ForStmtPtr& op, std::unordered_map<const Var*, VarPtr>& final_carry) {
     // Validate: no iter_args for unroll loops
     CHECK(op->iter_args_.empty()) << "Unroll loops cannot have iter_args (init_values)";
 
@@ -111,51 +106,156 @@ class LoopUnrollMutator : public IRMutator {
                               "). Reduce the loop range or use pl.range() instead");
     }
 
-    // Generate unrolled bodies using DeepClone for per-iteration fresh Vars
+    // Collect body def vars that shadow outer-scope vars by name.
+    // shadow_map: body_def_var* → outer_var VarPtr (the var it shadows)
+    std::unordered_map<const Var*, VarPtr> shadow_map;
+    {
+      std::unordered_map<std::string, const Var*> def_by_name;
+      std::function<void(const StmtPtr&)> collect_defs = [&](const StmtPtr& s) {
+        if (!s) return;
+        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+          if (assign->var_) def_by_name[assign->var_->name_hint_] = assign->var_.get();
+        } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
+          for (const auto& child : seq->stmts_) collect_defs(child);
+        }
+      };
+      collect_defs(op->body_);
+
+      std::function<void(const ExprPtr&)> collect_uses = [&](const ExprPtr& e) {
+        if (!e) return;
+        if (auto var = std::dynamic_pointer_cast<const Var>(e)) {
+          auto it = def_by_name.find(var->name_hint_);
+          if (it != def_by_name.end() && var.get() != it->second) {
+            shadow_map[it->second] = std::const_pointer_cast<Var>(var);
+          }
+        } else if (auto call = std::dynamic_pointer_cast<const Call>(e)) {
+          for (const auto& arg : call->args_) collect_uses(arg);
+        }
+      };
+      std::function<void(const StmtPtr&)> collect_rhs = [&](const StmtPtr& s) {
+        if (!s) return;
+        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+          collect_uses(assign->value_);
+        } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
+          for (const auto& child : seq->stmts_) collect_rhs(child);
+        }
+      };
+      collect_rhs(op->body_);
+    }
+
+    // Generate unrolled bodies. carry_map maps outer_var* → fresh output var (as ExprPtr)
+    // for substitution into each subsequent iteration's clone.
     std::vector<StmtPtr> unrolled;
+    std::unordered_map<const Var*, ExprPtr> carry_map;
+
     auto emit_iteration = [&](int64_t i) {
       auto const_expr = std::make_shared<ConstInt>(i, DataType::INDEX, op->loop_var_->span_);
-      std::unordered_map<const Var*, ExprPtr> sub_map = {{op->loop_var_.get(), const_expr}};
-      auto [cloned_body, clone_map_unused] = DeepClone(op->body_, sub_map);
-      (void)clone_map_unused;
-      // Recursively process nested unroll loops in the cloned body
+      std::unordered_map<const Var*, ExprPtr> sub_map = carry_map;
+      sub_map[op->loop_var_.get()] = const_expr;
+      auto [cloned_body, def_var_map] = DeepClone(op->body_, sub_map);
+      // Update carry: outer_var → this iteration's fresh output var
+      for (const auto& [body_def, outer_var] : shadow_map) {
+        auto it = def_var_map.find(body_def);
+        if (it != def_var_map.end()) {
+          carry_map[outer_var.get()] = it->second;
+        }
+      }
       unrolled.push_back(VisitStmt(cloned_body));
     };
 
     if (step > 0) {
-      for (int64_t i = start; i < stop; i += step) {
-        emit_iteration(i);
-      }
+      for (int64_t i = start; i < stop; i += step) emit_iteration(i);
     } else {
-      for (int64_t i = start; i > stop; i += step) {
-        emit_iteration(i);
+      for (int64_t i = start; i > stop; i += step) emit_iteration(i);
+    }
+
+    // Build final_carry for statements following the loop.
+    // Maps body_def_var → last fresh output (or outer_var for zero-trip).
+    for (const auto& [body_def, outer_var] : shadow_map) {
+      auto it = carry_map.find(outer_var.get());
+      if (it != carry_map.end()) {
+        auto fresh_var = std::dynamic_pointer_cast<const Var>(it->second);
+        if (fresh_var) {
+          final_carry[body_def] = std::const_pointer_cast<Var>(fresh_var);
+          final_carry[outer_var.get()] = std::const_pointer_cast<Var>(fresh_var);
+        }
+      } else {
+        // Zero-trip: body def var maps back to the outer var it shadows (identity)
+        final_carry[body_def] = outer_var;
       }
     }
 
     if (unrolled.empty()) {
-      // Zero-trip loop: return empty SeqStmts
       return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
     }
-
     return std::make_shared<SeqStmts>(unrolled, op->span_);
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    if (op->kind_ != ForKind::Unroll || op->chunk_size_.has_value()) {
+      return IRMutator::VisitStmt_(op);
+    }
+    std::unordered_map<const Var*, VarPtr> unused_carry;
+    return UnrollForStmt(op, unused_carry);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     std::vector<StmtPtr> new_stmts;
     bool changed = false;
+    std::unordered_map<const Var*, VarPtr> pending_subst;
 
     for (const auto& stmt : op->stmts_) {
-      auto new_stmt = VisitStmt(stmt);
-      if (new_stmt.get() != stmt.get()) {
+      StmtPtr cur = stmt;
+      if (!pending_subst.empty()) {
+        cur = SubstituteVars(cur, pending_subst);
         changed = true;
       }
-      new_stmts.push_back(new_stmt);
+
+      auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(cur);
+      if (for_stmt && for_stmt->kind_ == ForKind::Unroll && !for_stmt->chunk_size_.has_value()) {
+        std::unordered_map<const Var*, VarPtr> carry;
+        auto new_stmt = UnrollForStmt(for_stmt, carry);
+        new_stmts.push_back(new_stmt);
+        for (const auto& [k, v] : carry) pending_subst[k] = v;
+        changed = true;
+      } else {
+        // Collect original last-def vars by name before processing
+        std::unordered_map<std::string, VarPtr> orig_defs;
+        CollectLastDefsByName(cur, orig_defs);
+
+        auto new_stmt = VisitStmt(cur);
+        if (new_stmt.get() != cur.get()) {
+          changed = true;
+          // Build substitution: orig_def_var → new_def_var for each name that changed
+          std::unordered_map<std::string, VarPtr> new_defs;
+          CollectLastDefsByName(new_stmt, new_defs);
+          for (const auto& [name, orig_var] : orig_defs) {
+            auto it = new_defs.find(name);
+            if (it != new_defs.end() && it->second.get() != orig_var.get()) {
+              pending_subst[orig_var.get()] = it->second;
+            }
+          }
+        }
+        new_stmts.push_back(new_stmt);
+      }
     }
 
-    if (!changed) {
-      return op;
-    }
+    if (!changed) return op;
     return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+  }
+
+ private:
+  /// Collect the last AssignStmt VarPtr for each name_hint in a statement tree.
+  /// Recurses into ForStmt bodies and SeqStmts.
+  static void CollectLastDefsByName(const StmtPtr& s, std::unordered_map<std::string, VarPtr>& defs) {
+    if (!s) return;
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+      if (assign->var_) defs[assign->var_->name_hint_] = assign->var_;
+    } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
+      for (const auto& child : seq->stmts_) CollectLastDefsByName(child, defs);
+    } else if (auto for_s = std::dynamic_pointer_cast<const ForStmt>(s)) {
+      if (for_s->body_) CollectLastDefsByName(for_s->body_, defs);
+    }
   }
 };
 
