@@ -20,6 +20,15 @@
 #include <utility>
 #include <vector>
 
+// Forward-declare Level and Role from function.h to avoid circular include.
+// ScopeStmt uses these as optional fields; the full definitions are in function.h.
+namespace pypto {
+namespace ir {
+enum class Level : uint8_t;
+enum class Role : uint8_t;
+}  // namespace ir
+}  // namespace pypto
+
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -129,7 +138,8 @@ inline LoopOrigin StringToLoopOrigin(const std::string& str) {
 enum class ScopeKind : uint8_t {
   InCore = 0,      ///< InCore scope for AICore sub-graphs
   AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
-  Cluster = 2      ///< Cluster scope for co-scheduled AIC + AIV groups
+  Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
+  Hierarchy = 3    ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
 };
 
 /**
@@ -180,6 +190,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "AutoInCore";
     case ScopeKind::Cluster:
       return "Cluster";
+    case ScopeKind::Hierarchy:
+      return "Hierarchy";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -197,6 +209,8 @@ inline ScopeKind StringToScopeKind(const std::string& str) {
     return ScopeKind::AutoInCore;
   } else if (str == "Cluster") {
     return ScopeKind::Cluster;
+  } else if (str == "Hierarchy") {
+    return ScopeKind::Hierarchy;
   } else {
     throw pypto::TypeError("Unknown ScopeKind: " + str);
   }
@@ -586,6 +600,8 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *     body
  * with pl.cluster():   # Cluster scope
  *     body
+ * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # Hierarchy scope
+ *     body
  *
  * **Semantics:**
  * - Marks a region of code as belonging to a specific scope (e.g., InCore, Cluster)
@@ -594,15 +610,18 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * - SSA conversion treats it as transparent (just visits body)
  * - OutlineIncoreScopes extracts InCore scopes into InCore functions
  * - OutlineClusterScopes extracts Cluster scopes into Group functions
+ * - Hierarchy scopes (planned) will be outlined into level-/role-annotated functions
  *
  * **Key Properties:**
- * - scope_kind: The kind of scope (InCore, AutoInCore, or Cluster)
+ * - scope_kind: The kind of scope (InCore, AutoInCore, Cluster, or Hierarchy)
  * - body: The nested statements to execute within this scope
+ * - level: (Hierarchy only) Target hierarchy level
+ * - role: (Hierarchy only) Function role (Orchestrator or Worker)
  */
 class ScopeStmt : public Stmt {
  public:
   /**
-   * @brief Create a scope statement
+   * @brief Create a scope statement (legacy 3-arg constructor)
    *
    * @param scope_kind The kind of scope
    * @param body The nested statements
@@ -611,23 +630,42 @@ class ScopeStmt : public Stmt {
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span)
       : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)) {}
 
+  /**
+   * @brief Create a scope statement with hierarchy level and role
+   *
+   * @param scope_kind The kind of scope
+   * @param body The nested statements
+   * @param span Source location
+   * @param level Hierarchy level (for Hierarchy scopes)
+   * @param role Function role (for Hierarchy scopes)
+   */
+  ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
+            std::optional<Role> role = std::nullopt)
+      : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)), level_(level), role_(role) {
+    CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
+  }
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScopeStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ScopeStmt"; }
 
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (scope_kind and body as USUAL fields)
+   * @return Tuple of field descriptors (scope_kind, level, role, and body as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&ScopeStmt::scope_kind_, "scope_kind"),
+                                          reflection::UsualField(&ScopeStmt::level_, "level"),
+                                          reflection::UsualField(&ScopeStmt::role_, "role"),
                                           reflection::UsualField(&ScopeStmt::body_, "body")));
   }
 
  public:
-  ScopeKind scope_kind_;  // The kind of scope (e.g., InCore)
-  StmtPtr body_;          // The nested statements
+  ScopeKind scope_kind_;        // The kind of scope (e.g., InCore, Hierarchy)
+  std::optional<Level> level_;  // Hierarchy level (nullopt for non-Hierarchy scopes)
+  std::optional<Role> role_;    // Function role (nullopt for non-Hierarchy scopes)
+  StmtPtr body_;                // The nested statements
 };
 
 using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;

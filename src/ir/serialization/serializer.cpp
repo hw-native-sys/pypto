@@ -92,6 +92,10 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const LoopOrigin& field);
   result_type VisitLeafField(const ScopeKind& field);
   result_type VisitLeafField(const MemorySpace& field);
+  result_type VisitLeafField(const Level& field);
+  result_type VisitLeafField(const Role& field);
+  result_type VisitLeafField(const std::optional<Level>& field);
+  result_type VisitLeafField(const std::optional<Role>& field);
   result_type VisitLeafField(const ParamDirection& field);
   result_type VisitLeafField(const std::vector<ParamDirection>& field);
   result_type VisitLeafField(const TypePtr& field);
@@ -544,6 +548,28 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const MemorySpace& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const Level& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const Role& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<Level>& field) {
+  if (field.has_value()) {
+    return msgpack::object(static_cast<uint8_t>(*field), zone_);
+  }
+  return msgpack::object();  // null
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<Role>& field) {
+  if (field.has_value()) {
+    return msgpack::object(static_cast<uint8_t>(*field), zone_);
+  }
+  return msgpack::object();  // null
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ParamDirection& field) {

@@ -766,13 +766,16 @@ void BindIR(nb::module_& m) {
       .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
       .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
+      .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .export_values();
 
   // ScopeStmt - const shared_ptr
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
-  scope_stmt_class.def(nb::init<ScopeKind, const StmtPtr&, const Span&>(), nb::arg("scope_kind"),
-                       nb::arg("body"), nb::arg("span"), "Create a scope statement");
+  scope_stmt_class.def(
+      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>>(),
+      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
+      nb::arg("role") = nb::none(), "Create a scope statement");
   BindFields<ScopeStmt>(scope_stmt_class);
 
   // SeqStmts - const shared_ptr
@@ -840,6 +843,34 @@ void BindIR(nb::module_& m) {
       .value("Group", FunctionType::Group, "Co-scheduled group of AIC + AIV kernels")
       .export_values();
 
+  // Level enum — hierarchy level in the Linqu machine model
+  nb::enum_<Level>(ir, "Level", "Hierarchy level in the Linqu machine model")
+      .value("AIV", Level::AIV, "Single AIV (Vector) core")
+      .value("AIC", Level::AIC, "Single AIC (Cube) core")
+      .value("CORE_GROUP", Level::CORE_GROUP, "Core-group (e.g. 1 AIC + 2 AIV)")
+      .value("CHIP_DIE", Level::CHIP_DIE, "Chip die")
+      .value("CHIP", Level::CHIP, "Chip (UMA)")
+      .value("HOST", Level::HOST, "Host (single OS instance)")
+      .value("CLUSTER_0", Level::CLUSTER_0, "Cluster-level-0 (pod)")
+      .value("CLUSTER_1", Level::CLUSTER_1, "Cluster-level-1 (supernode)")
+      .value("CLUSTER_2", Level::CLUSTER_2, "Cluster-level-2 (cross-rack)")
+      .value("GLOBAL", Level::GLOBAL, "Global coordinator")
+      // Readability aliases
+      .value("L2CACHE", Level::L2CACHE, "Alias for CHIP_DIE")
+      .value("PROCESSOR", Level::PROCESSOR, "Alias for CHIP")
+      .value("UMA", Level::UMA, "Alias for CHIP")
+      .value("NODE", Level::NODE, "Alias for HOST")
+      .value("POD", Level::POD, "Alias for CLUSTER_0")
+      .value("CLOS1", Level::CLOS1, "Alias for CLUSTER_1")
+      .value("CLOS2", Level::CLOS2, "Alias for CLUSTER_2")
+      .export_values();
+
+  // Role enum — function role at L3-L7 hierarchy levels
+  nb::enum_<Role>(ir, "Role", "Function role at L3-L7 hierarchy levels")
+      .value("Orchestrator", Role::Orchestrator, "Builds DAG, submits tasks")
+      .value("Worker", Role::Worker, "Executes compute/data tasks")
+      .export_values();
+
   // ParamDirection enum
   nb::enum_<ParamDirection>(ir, "ParamDirection", "Parameter direction classification")
       .value("In", ParamDirection::In, "Read-only input (default)")
@@ -851,13 +882,18 @@ void BindIR(nb::module_& m) {
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
          "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
 
+  // LevelToLinquLevel helper
+  ir.def("level_to_linqu_level", &LevelToLinquLevel, nb::arg("level"),
+         "Map Level enum value to Linqu hierarchy level number (0-7)");
+
   // Function - const shared_ptr
   auto function_class = nb::class_<Function, IRNode>(
       ir, "Function", "Function definition with name, parameters, return types, and body");
   function_class.def(
       "__init__",
       [](Function* self, const std::string& name, const nb::list& params,
-         const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type) {
+         const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
+         std::optional<Level> level, std::optional<Role> role) {
         std::vector<VarPtr> param_vars;
         std::vector<ParamDirection> param_dirs;
         param_vars.reserve(nb::len(params));
@@ -876,11 +912,12 @@ void BindIR(nb::module_& m) {
             param_dirs.push_back(ParamDirection::In);
           }
         }
-        new (self)
-            Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span, type);
+        new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
+                            type, level, role);
       },
       nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
-      nb::arg("type") = FunctionType::Opaque, "Create a function definition");
+      nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
+      "Create a function definition");
   BindFields<Function>(function_class);
 
   // Program - const shared_ptr
