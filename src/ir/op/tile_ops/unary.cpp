@@ -121,6 +121,7 @@ REGISTER_OP("tile.recip")
     .add_argument("tile", "Input tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileUnaryType(args, kwargs, "tile.recip");

@@ -361,6 +361,18 @@ class OpRegistryEntry {
   /// Get memory spec (nullopt if not annotated)
   [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
 
+  /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
+  /// BasicMemoryReuse will skip producer-consumer reuse for such operations.
+  inline OpRegistryEntry& not_inplace_safe() {
+    is_inplace_safe_ = false;
+    return *this;
+  }
+
+  /// Returns true if this operation supports in-place execution (src == dst buffer).
+  /// Defaults to true (backward compatible). Ops that do not support src == dst must
+  /// explicitly call not_inplace_safe() during registration.
+  [[nodiscard]] bool IsInplaceSafe() const { return is_inplace_safe_; }
+
  private:
   void EnsureMemorySpec() {
     if (!memory_spec_.has_value()) {
@@ -393,6 +405,7 @@ class OpRegistryEntry {
                                       const std::vector<std::pair<std::string, std::any>>&)>>
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
+  bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
 };
 
 /**

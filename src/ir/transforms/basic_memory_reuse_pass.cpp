@@ -25,6 +25,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -48,6 +49,7 @@ struct LifetimeInterval {
   int last_use_point;        ///< Last use point (topological order)
   MemorySpace memory_space;  ///< Memory space
   uint64_t size;             ///< Size in bytes
+  std::string def_op_name;   ///< Op name that defines this variable (empty if unknown)
 };
 
 namespace {
@@ -231,6 +233,15 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     interval.memory_space = *memory_space;
     interval.size = memref->size_;
 
+    // Extract the defining op name for use in the in-place safety check
+    if (var_def_stmt.count(sharing_group[0])) {
+      if (auto assign = As<AssignStmt>(var_def_stmt.at(sharing_group[0]))) {
+        if (auto call = As<Call>(assign->value_)) {
+          interval.def_op_name = call->op_->name_;
+        }
+      }
+    }
+
     lifetimes.push_back(interval);
 
     // Mark all variables in the group as processed
@@ -404,6 +415,42 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
         }
 
         if (!overlaps_with_users) {
+          // For inplace-unsafe ops (src buffer == dst buffer not supported), block reuse
+          // whenever the buffer is still occupied at curr_var's definition statement.
+          // A conflict exists if root or any variable sharing root's buffer has
+          // last_use == curr_var.def — meaning it is still being read as an input
+          // to the inplace-unsafe op that defines curr_var (src == dst).
+          if (!curr_lifetime.def_op_name.empty()) {
+            auto& registry = OpRegistry::GetInstance();
+            if (registry.IsRegistered(curr_lifetime.def_op_name) &&
+                !registry.GetEntry(curr_lifetime.def_op_name).IsInplaceSafe()) {
+              // Check root (the ultimate buffer owner)
+              const LifetimeInterval* root_lifetime =
+                  var_to_lifetime.count(root) ? var_to_lifetime.at(root) : nullptr;
+              bool inplace_conflict =
+                  root_lifetime && root_lifetime->last_use_point == curr_lifetime.def_point;
+
+              // Check all variables sharing root's buffer
+              if (!inplace_conflict && memref_users.count(root)) {
+                for (const auto& user_var : memref_users.at(root)) {
+                  const LifetimeInterval* user_lifetime =
+                      var_to_lifetime.count(user_var) ? var_to_lifetime.at(user_var) : nullptr;
+                  if (user_lifetime && user_lifetime->last_use_point == curr_lifetime.def_point) {
+                    inplace_conflict = true;
+                    break;
+                  }
+                }
+              }
+
+              if (inplace_conflict) {
+                LOG_DEBUG << "Variable " << curr_var->name_hint_ << " cannot reuse " << prev_var->name_hint_
+                          << " (op=" << curr_lifetime.def_op_name
+                          << " does not support in-place execution, buffer still occupied at def)";
+                continue;
+              }
+            }
+          }
+
           // Can safely reuse!
           reuse_map[curr_var] = prev_var;
           memref_users[root].push_back(curr_var);  // Track under root MemRef owner

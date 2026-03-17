@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.language.intermediate.activation import (
     GegluProgram,
@@ -31,7 +33,19 @@ from examples.language.intermediate.activation import (
 )
 
 
-class TestSiluActivation(PTOTestCase):
+class BaseActivationTest(PTOTestCase):
+    """Base class for activation tests providing common backend configuration."""
+
+    __test__ = False  # Prevent pytest from collecting this as a test
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B_PTO
+
+
+class TestSiluActivation(BaseActivationTest):
     """SiLU (Swish) activation with 32x128 input: output = x * sigmoid(x)"""
 
     __test__ = False  # Not a pytest test class
@@ -53,7 +67,7 @@ class TestSiluActivation(PTOTestCase):
         tensors["output"][:] = x * torch.sigmoid(x)
 
 
-class TestGeluActivation(PTOTestCase):
+class TestGeluActivation(BaseActivationTest):
     """GELU activation with 32x128 input: output = x * sigmoid(1.702 * x)"""
 
     __test__ = False  # Not a pytest test class
@@ -75,7 +89,7 @@ class TestGeluActivation(PTOTestCase):
         tensors["output"][:] = x * torch.sigmoid(1.702 * x)
 
 
-class TestSwigluActivation(PTOTestCase):
+class TestSwigluActivation(BaseActivationTest):
     """SwiGLU activation with 32x128 input: output = gate * sigmoid(gate) * up"""
 
     __test__ = False  # Not a pytest test class
@@ -99,7 +113,7 @@ class TestSwigluActivation(PTOTestCase):
         tensors["output"][:] = gate * torch.sigmoid(gate) * up
 
 
-class TestGegluActivation(PTOTestCase):
+class TestGegluActivation(BaseActivationTest):
     """GeGLU activation with 32x128 input: output = gate * sigmoid(1.702 * gate) * up"""
 
     __test__ = False  # Not a pytest test class
@@ -126,28 +140,24 @@ class TestGegluActivation(PTOTestCase):
 class TestActivationOperations:
     """Test suite for activation operations."""
 
-    @pytest.mark.xfail(reason="producer-consumer reuse (last_use==def) causes in-place src==dst conflict")
     def test_silu_activation_32x128(self, test_runner):
         """Test SiLU (Swish) activation with 32x128 input."""
         test_case = TestSiluActivation()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="producer-consumer reuse (last_use==def) causes in-place src==dst conflict")
     def test_gelu_activation_32x128(self, test_runner):
         """Test GELU activation with 32x128 input."""
         test_case = TestGeluActivation()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="producer-consumer reuse (last_use==def) causes in-place src==dst conflict")
     def test_swiglu_activation_32x128(self, test_runner):
         """Test SwiGLU activation with 32x128 input."""
         test_case = TestSwigluActivation()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="producer-consumer reuse (last_use==def) causes in-place src==dst conflict")
     def test_geglu_activation_32x128(self, test_runner):
         """Test GeGLU activation with 32x128 input."""
         test_case = TestGegluActivation()

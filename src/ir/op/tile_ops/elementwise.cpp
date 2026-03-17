@@ -420,6 +420,7 @@ REGISTER_OP("tile.ands")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ands");
@@ -445,6 +446,7 @@ REGISTER_OP("tile.ors")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.ors");
@@ -613,6 +615,7 @@ REGISTER_OP("tile.xors")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpXorScalarType(args, kwargs, "tile.xors");
