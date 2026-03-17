@@ -667,6 +667,78 @@ class FunctionType(enum.Enum):
     Group = ...
     """Co-scheduled group of AIC + AIV kernels."""
 
+class Level(enum.Enum):
+    """Hierarchy level in the Linqu machine model.
+
+    Levels map bottom-up from individual cores (Level 0) to the global
+    coordinator. Alias values resolve to the same level as their primary name.
+    """
+
+    AIV = ...
+    """Single AIV (Vector) core."""
+
+    AIC = ...
+    """Single AIC (Cube) core."""
+
+    CORE_GROUP = ...
+    """Core-group (e.g. 1 AIC + 2 AIV)."""
+
+    CHIP_DIE = ...
+    """Chip die (optional in single-die models)."""
+
+    CHIP = ...
+    """Chip (UMA)."""
+
+    HOST = ...
+    """Host (single OS instance)."""
+
+    CLUSTER_0 = ...
+    """Cluster-level-0 (pod)."""
+
+    CLUSTER_1 = ...
+    """Cluster-level-1 (supernode)."""
+
+    CLUSTER_2 = ...
+    """Cluster-level-2 (cross-rack)."""
+
+    GLOBAL = ...
+    """Global coordinator."""
+
+    # Readability aliases
+    L2CACHE = ...
+    """Alias for CHIP_DIE."""
+
+    PROCESSOR = ...
+    """Alias for CHIP."""
+
+    UMA = ...
+    """Alias for CHIP."""
+
+    NODE = ...
+    """Alias for HOST."""
+
+    POD = ...
+    """Alias for CLUSTER_0."""
+
+    CLOS1 = ...
+    """Alias for CLUSTER_1."""
+
+    CLOS2 = ...
+    """Alias for CLUSTER_2."""
+
+class Role(enum.Enum):
+    """Function role at L3-L7 hierarchy levels.
+
+    Distinguishes orchestrators (which build task DAGs and submit work)
+    from workers (which execute concrete compute or data tasks).
+    """
+
+    Orchestrator = ...
+    """Builds DAG, submits tasks, never computes directly."""
+
+    Worker = ...
+    """Executes compute/data tasks, never submits further tasks."""
+
 class ParamDirection(enum.Enum):
     """Parameter direction classification.
 
@@ -1643,22 +1715,40 @@ class ScopeKind(enum.Enum):
     Cluster = 2
     """Cluster scope for co-scheduled AIC + AIV groups."""
 
+    Hierarchy = 3
+    """Distributed hierarchy scope (uses level/role on ScopeStmt)."""
+
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context."""
 
     scope_kind: Final[ScopeKind]
     """The kind of scope."""
 
+    level: Final[Level | None]
+    """Hierarchy level (None for non-Hierarchy scopes)."""
+
+    role: Final[Role | None]
+    """Function role (None for non-Hierarchy scopes)."""
+
     body: Final[Stmt]
     """The nested statements."""
 
-    def __init__(self, scope_kind: ScopeKind, body: Stmt, span: Span) -> None:
+    def __init__(
+        self,
+        scope_kind: ScopeKind,
+        body: Stmt,
+        span: Span,
+        level: Level | None = None,
+        role: Role | None = None,
+    ) -> None:
         """Create a scope statement.
 
         Args:
-            scope_kind: The kind of scope (e.g., ScopeKind.InCore)
+            scope_kind: The kind of scope (e.g., ScopeKind.InCore, ScopeKind.Hierarchy)
             body: The nested statements
             span: Source location
+            level: Hierarchy level (for Hierarchy scopes)
+            role: Function role (for Hierarchy scopes)
         """
 
 class SeqStmts(Stmt):
@@ -1786,6 +1876,12 @@ class Function(IRNode):
     func_type: Final[FunctionType]
     """Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)."""
 
+    level: Final[Level | None]
+    """Hierarchy level (None = unspecified)."""
+
+    role: Final[Role | None]
+    """Function role (None = unspecified)."""
+
     params: Final[list[Var]]
     """Parameter variables."""
 
@@ -1806,6 +1902,8 @@ class Function(IRNode):
         body: Stmt,
         span: Span,
         type: FunctionType = FunctionType.Opaque,
+        level: Level | None = None,
+        role: Role | None = None,
     ) -> None:
         """Create a function definition.
 
@@ -1816,6 +1914,8 @@ class Function(IRNode):
             body: Function body statement (use SeqStmts for multiple statements)
             span: Source location
             type: Function type (default: Opaque)
+            level: Hierarchy level (default: None — unspecified)
+            role: Function role (default: None — unspecified)
         """
 
     def __str__(self) -> str:
@@ -2139,6 +2239,19 @@ def is_incore_type(func_type: FunctionType) -> bool:
 
     Returns:
         True if the type is InCore, AIC, or AIV
+    """
+
+def level_to_linqu_level(level: Level) -> int:
+    """Map Level enum value to Linqu hierarchy level number (0-7).
+
+    Multiple Level values may map to the same Linqu level
+    (e.g. AIV, AIC, CORE_GROUP all map to 0).
+
+    Args:
+        level: The hierarchy level
+
+    Returns:
+        Integer Linqu level (0-7)
     """
 
 def is_op_registered(op_name: str) -> bool:

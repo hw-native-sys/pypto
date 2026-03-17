@@ -503,10 +503,24 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
   auto scope_kind_str = GET_FIELD_OBJ("scope_kind").as<std::string>();
   auto scope_kind = StringToScopeKind(scope_kind_str);
 
+  // Deserialize optional level
+  std::optional<Level> level = std::nullopt;
+  auto level_obj = GetOptionalFieldObj(fields_obj, "level", ctx);
+  if (level_obj.has_value() && level_obj->type != msgpack::type::NIL) {
+    level = static_cast<Level>(level_obj->via.u64);
+  }
+
+  // Deserialize optional role
+  std::optional<Role> role = std::nullopt;
+  auto role_obj = GetOptionalFieldObj(fields_obj, "role", ctx);
+  if (role_obj.has_value() && role_obj->type != msgpack::type::NIL) {
+    role = static_cast<Role>(role_obj->via.u64);
+  }
+
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<ScopeStmt>(scope_kind, body, span);
+  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role);
 }
 
 // Deserialize SeqStmts
@@ -615,9 +629,24 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     }
   }
 
+  // Deserialize optional level
+  std::optional<Level> level = std::nullopt;
+  auto level_obj = GetOptionalFieldObj(fields_obj, "level", ctx);
+  if (level_obj.has_value() && level_obj->type != msgpack::type::NIL) {
+    level = static_cast<Level>(level_obj->via.u64);
+  }
+
+  // Deserialize optional role
+  std::optional<Role> role = std::nullopt;
+  auto role_obj = GetOptionalFieldObj(fields_obj, "role", ctx);
+  if (role_obj.has_value() && role_obj->type != msgpack::type::NIL) {
+    role = static_cast<Role>(role_obj->via.u64);
+  }
+
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type);
+  return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type,
+                                    level, role);
 }
 
 // Deserialize Program
