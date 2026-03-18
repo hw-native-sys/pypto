@@ -51,6 +51,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileMemoryInferred";
     case IRProperty::BreakContinueValid:
       return "BreakContinueValid";
+    case IRProperty::HierarchyOutlined:
+      return "HierarchyOutlined";
     default:
       return "Unknown";
   }

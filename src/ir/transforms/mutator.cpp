@@ -512,7 +512,8 @@ StmtPtr IRMutator::VisitStmt_(const ScopeStmtPtr& op) {
 
   // Reconstruct if body changed
   if (new_body.get() != op->body_.get()) {
-    return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_);
+    return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
+                                             op->role_);
   } else {
     return op;
   }

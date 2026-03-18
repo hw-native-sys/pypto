@@ -150,9 +150,9 @@ class SSAConverter : public IRMutator {
       new_body = VisitStmt(func->body_);
     }
 
-    // Create the new function with versioned parameters
+    // Create the new function with versioned parameters (preserve level/role)
     return std::make_shared<Function>(func->name_, new_params_, new_param_directions_, func->return_types_,
-                                      new_body, func->span_, func->func_type_);
+                                      new_body, func->span_, func->func_type_, func->level_, func->role_);
   }
 
  protected:

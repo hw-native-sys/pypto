@@ -121,6 +121,12 @@ PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
 PropertyVerifierPtr CreateClusterOutlinedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating HierarchyOutlined property verifier
+ * @return Shared pointer to HierarchyOutlined PropertyVerifier
+ */
+PropertyVerifierPtr CreateHierarchyOutlinedPropertyVerifier();
+
+/**
  * @brief Factory function for creating HasMemRefs property verifier
  * @return Shared pointer to HasMemRefs PropertyVerifier
  */
