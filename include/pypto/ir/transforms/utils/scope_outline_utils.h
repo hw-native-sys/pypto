@@ -345,9 +345,12 @@ class ScopeOutliner : public IRMutator {
    * @param used_after Variables (by pointer) used in subsequent statements (determines outputs)
    */
   StmtPtr OutlineScope(const ScopeStmtPtr& op, const std::unordered_set<const Var*>& used_after) {
-    // Generate unique function name
+    // Generate unique function name (use level/role-aware suffix for Hierarchy scopes)
+    std::string suffix = (op->scope_kind_ == ScopeKind::Hierarchy && op->level_.has_value())
+                             ? GenerateHierarchySuffix(op->level_.value(), op->role_)
+                             : name_suffix_;
     std::ostringstream name_stream;
-    name_stream << func_name_ << name_suffix_ << scope_counter_++;
+    name_stream << func_name_ << suffix << scope_counter_++;
     std::string outlined_func_name = name_stream.str();
 
     // Analyze the scope body for inputs and outputs (before recursing)
@@ -534,10 +537,10 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function
+    // Register the outlined function (propagate level/role from ScopeStmt for Hierarchy scopes)
     auto outlined_func =
         std::make_shared<Function>(outlined_func_name, input_params, input_param_directions, return_types,
-                                   outlined_body, op->span_, outlined_func_type_);
+                                   outlined_body, op->span_, outlined_func_type_, op->level_, op->role_);
     outlined_functions_.push_back(outlined_func);
 
     // Build the call site in the parent function
@@ -665,6 +668,33 @@ class ScopeOutliner : public IRMutator {
     // Also update the original name so subsequent scopes pass the renamed var as call args
     var_objects_[original_var->name_hint_] = fresh_var;
     return fresh_var;
+  }
+
+  /**
+   * @brief Generate a naming suffix from hierarchy level and optional role.
+   *
+   * Produces lowercase suffixes like "_host_worker_", "_global_orch_", "_chip_".
+   */
+  static std::string GenerateHierarchySuffix(Level level, const std::optional<Role>& role) {
+    // Lowercase level name
+    static const std::unordered_map<Level, std::string> kLevelNames = {
+        {Level::AIV, "aiv"},
+        {Level::AIC, "aic"},
+        {Level::CORE_GROUP, "core_group"},
+        {Level::CHIP_DIE, "chip_die"},
+        {Level::CHIP, "chip"},
+        {Level::HOST, "host"},
+        {Level::CLUSTER_0, "cluster0"},
+        {Level::CLUSTER_1, "cluster1"},
+        {Level::CLUSTER_2, "cluster2"},
+        {Level::GLOBAL, "global"},
+    };
+    auto it = kLevelNames.find(level);
+    std::string name = "_" + (it != kLevelNames.end() ? it->second : "level");
+    if (role.has_value()) {
+      name += (role.value() == Role::Orchestrator) ? "_orch" : "_worker";
+    }
+    return name + "_";
   }
 
   std::string func_name_;

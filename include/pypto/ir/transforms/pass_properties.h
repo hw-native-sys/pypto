@@ -63,6 +63,11 @@ inline const PassProperties kOutlineIncoreScopesProperties{
 inline const PassProperties kOutlineClusterScopesProperties{
     .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
 
+// -- Hierarchy outlining pass -------------------------------------------------
+
+inline const PassProperties kOutlineHierarchyScopesProperties{
+    .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::HierarchyOutlined}};
+
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
 inline const PassProperties kConvertTensorToTileOpsProperties{

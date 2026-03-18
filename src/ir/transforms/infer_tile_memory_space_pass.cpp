@@ -375,7 +375,7 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
   auto new_body = mutator.VisitStmt(func->body_);
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_);
+                                    new_body, func->span_, func->func_type_, func->level_, func->role_);
 }
 
 }  // namespace

@@ -55,6 +55,8 @@ void BindPass(nb::module_& m) {
       .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
              "Mixed InCore functions split into AIC+AIV")
       .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions")
+      .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
+             "Hierarchy scopes outlined into level/role functions")
       .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles")
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
@@ -226,6 +228,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines InCore scopes into separate functions");
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
              "Create a pass that outlines Cluster scopes into separate Group functions");
+  passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
+             "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
