@@ -22,22 +22,37 @@ namespace ir {
 
 namespace {
 
-/// Mutator that substitutes Var references by pointer identity.
+/// Mutator that substitutes Var/IterArg references by pointer identity.
 ///
-/// Only overrides VisitExpr_(VarPtr), not VisitExpr_(IterArgPtr).  IterArg
-/// nodes are visited by the base IRMutator which handles initValue_ traversal
-/// and preserves the IterArg type required by ForStmt/WhileStmt iter_arg slots.
+/// Overrides both VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr) to ensure
+/// all variable references are substituted, including IterArgs used as
+/// expression operands. For IterArg, initValue_ is also visited recursively.
 class SubstituteVarsMutator : public IRMutator {
  public:
   explicit SubstituteVarsMutator(const std::unordered_map<const Var*, VarPtr>& var_map) : var_map_(var_map) {}
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& op) override {
+    // Check our explicit substitution map first
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) {
       return it->second;
     }
-    return op;
+    // Fall back to base class which checks var_remap_ (populated when
+    // ForStmt/WhileStmt iter_args are recreated with new initValues)
+    return IRMutator::VisitExpr_(op);
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    // Check our explicit substitution map first
+    auto it = var_map_.find(op.get());
+    if (it != var_map_.end()) {
+      return it->second;
+    }
+    // Delegate to base: visits initValue_ and may create a new IterArg.
+    // When a new IterArg is created, the base's ForStmt handler registers
+    // old→new in var_remap_, so body references get rewritten via VisitExpr_(VarPtr).
+    return IRMutator::VisitExpr_(op);
   }
 
  private:

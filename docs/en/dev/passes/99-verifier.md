@@ -61,7 +61,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 
 | Rule Name | IRProperty | Purpose |
 | --------- | ---------- | ------- |
-| **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield |
+| **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield, scope violations, cardinality checks |
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
@@ -81,6 +81,9 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 1 | `MULTIPLE_ASSIGNMENT` | Variable assigned more than once in the same scope |
 | 2 | `NAME_SHADOWING` | Variable name shadows an outer scope variable |
 | 3 | `MISSING_YIELD` | ForStmt or IfStmt missing required YieldStmt |
+| 4 | `ITER_ARGS_RETURN_VARS_MISMATCH` | iter_args count != return_vars count in ForStmt/WhileStmt |
+| 5 | `YIELD_COUNT_MISMATCH` | YieldStmt value count != iter_args/return_vars count |
+| 6 | `SCOPE_VIOLATION` | Variable used outside its defining scope |
 
 ### TypeCheck
 

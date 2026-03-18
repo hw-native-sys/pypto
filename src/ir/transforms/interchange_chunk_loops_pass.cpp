@@ -417,26 +417,29 @@ class InterchangeChunkLoopsMutator : public IRMutator {
    * for standalone parallel ChunkRemainder sub-loops and wrap each in InCore.
    */
   StmtPtr HandleChunkRemainder(const ForStmtPtr& op) {
-    // Recurse into the remainder body to handle nested chunk chains
-    auto new_body = VisitStmt(op->body_);
-
-    // Wrap standalone parallel ChunkRemainder sub-loops in InCore
-    new_body = WrapSubRemainderLoopsInInCore(new_body, op->span_);
-
-    // Visit iter_args to apply substitutions to initValue_
+    // Create new iter_args BEFORE visiting the body, and register old->new
+    // IterArg mappings in substitution_map_ so body references get rewritten.
     std::vector<IterArgPtr> new_iter_args;
     bool iter_args_changed = false;
     new_iter_args.reserve(op->iter_args_.size());
     for (const auto& ia : op->iter_args_) {
       auto new_init = VisitExpr(ia->initValue_);
       if (new_init.get() != ia->initValue_.get()) {
-        new_iter_args.push_back(
-            std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), new_init, ia->span_));
+        auto new_ia = std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), new_init, ia->span_);
+        new_iter_args.push_back(new_ia);
+        // Register old -> new mapping so body references get rewritten
+        substitution_map_[ia.get()] = new_ia;
         iter_args_changed = true;
       } else {
         new_iter_args.push_back(ia);
       }
     }
+
+    // Recurse into the remainder body to handle nested chunk chains
+    auto new_body = VisitStmt(op->body_);
+
+    // Wrap standalone parallel ChunkRemainder sub-loops in InCore
+    new_body = WrapSubRemainderLoopsInInCore(new_body, op->span_);
 
     if (new_body.get() == op->body_.get() && !iter_args_changed) {
       return op;

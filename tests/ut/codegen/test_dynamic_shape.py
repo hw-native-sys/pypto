@@ -75,13 +75,14 @@ class AddKernelLoopDynamic:
     ) -> pl.Tensor[[M, 128], pl.FP32]:
         """Adds two tensors element-wise with dynamic shapes: result = a + b"""
         M = pl.tensor.dim(a, 0)
-        for i in pl.range(0, M, 2):
+        for i, (out,) in pl.range(0, M, 2, init_values=(output,)):
             offset_1 = i * 2
             a_tile = pl.load(a, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
             b_tile = pl.load(b, [offset_1, 0], [2, 128], target_memory=pl.MemorySpace.Vec)
             result = pl.add(a_tile, b_tile)
-            out = pl.store(result, [offset_1, 0], output)
-        return out
+            updated: pl.Tensor[[M, 128], pl.FP32] = pl.store(result, [offset_1, 0], out)
+            loop_out = pl.yield_(updated)
+        return loop_out
 
 
 def test_add_kernel_dynamic_shape_pto_codegen():

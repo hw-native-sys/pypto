@@ -249,5 +249,359 @@ class TestConvertToSSAScope:
         passes.run_verifier()(After)
 
 
+class TestScopeViolation:
+    """Test SSA scope violation detection."""
+
+    def test_var_used_outside_defining_scope(self):
+        """Variable defined inside ForStmt body is not visible after the loop."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        inner_var = ir.Var("inner", ir.ScalarType(DataType.INT64), span)
+        body = ir.AssignStmt(inner_var, loop_var, span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [],
+            body,
+            [],
+            span,
+        )
+
+        # inner_var is used outside the loop — scope violation
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([inner_var], span)], span)
+        func = ir.Function("test_scope", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="used outside its defining scope"):
+            verify_pass(program)
+
+    def test_var_from_then_branch_used_after_if(self):
+        """Variable defined only in then-branch is not visible after the if."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        branch_var = ir.Var("branch_only", ir.ScalarType(DataType.INT64), span)
+        then_body = ir.AssignStmt(branch_var, a, span)
+
+        if_stmt = ir.IfStmt(condition, then_body, None, [], span)
+
+        # branch_var used after if — scope violation
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([branch_var], span)], span)
+        func = ir.Function("test_scope", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="used outside its defining scope"):
+            verify_pass(program)
+
+    def test_iter_arg_used_outside_loop(self):
+        """IterArg is only visible inside the loop body."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+        yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
+        body = ir.YieldStmt([yield_value], span)
+        result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [iter_arg],
+            body,
+            [result_var],
+            span,
+        )
+
+        # iter_arg used outside the loop — scope violation
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([iter_arg], span)], span)
+        func = ir.Function("test_scope", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="used outside its defining scope"):
+            verify_pass(program)
+
+    def test_loop_var_used_outside_loop(self):
+        """Loop variable is only visible inside the loop body."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        body = ir.YieldStmt([], span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [],
+            body,
+            [],
+            span,
+        )
+
+        # loop_var used outside the loop — scope violation
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([loop_var], span)], span)
+        func = ir.Function("test_scope", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="used outside its defining scope"):
+            verify_pass(program)
+
+    def test_if_return_var_not_visible_in_condition(self):
+        """IfStmt return_vars are only visible after the if finishes."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+        # result_var is referenced before the IfStmt defines it via return_vars
+        condition = ir.Gt(result_var, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        then_body = ir.YieldStmt([a], span)
+        else_body = ir.YieldStmt([ir.ConstInt(0, DataType.INT64, span)], span)
+
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [result_var], span)
+
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([result_var], span)], span)
+        func = ir.Function("test_scope", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="used outside its defining scope"):
+            verify_pass(program)
+
+
+class TestCardinalityChecks:
+    """Test iter_args/return_vars/yield cardinality mismatch detection."""
+
+    def test_for_iter_args_return_vars_mismatch(self):
+        """ForStmt iter_args count != return_vars count."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+        body = ir.YieldStmt([iter_arg], span)
+        # Two return_vars for one iter_arg — mismatch
+        rv1 = ir.Var("r1", ir.ScalarType(DataType.INT64), span)
+        rv2 = ir.Var("r2", ir.ScalarType(DataType.INT64), span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [iter_arg],
+            body,
+            [rv1, rv2],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv1], span)], span)
+        func = ir.Function("test_mismatch", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match=r"(iter_args count.*return_vars count|size mismatch)"):
+            verify_pass(program)
+
+    def test_for_yield_count_mismatch(self):
+        """ForStmt yield value count != iter_args count."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        iter_arg1 = ir.IterArg("acc1", ir.ScalarType(DataType.INT64), a, span)
+        iter_arg2 = ir.IterArg("acc2", ir.ScalarType(DataType.INT64), a, span)
+        # Only one yield value for two iter_args — mismatch
+        body = ir.YieldStmt([iter_arg1], span)
+        rv1 = ir.Var("r1", ir.ScalarType(DataType.INT64), span)
+        rv2 = ir.Var("r2", ir.ScalarType(DataType.INT64), span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [iter_arg1, iter_arg2],
+            body,
+            [rv1, rv2],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv1], span)], span)
+        func = ir.Function("test_yield_mismatch", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match=r"(YieldStmt value count.*iter_args count|size mismatch)"):
+            verify_pass(program)
+
+    def test_if_yield_count_mismatch(self):
+        """IfStmt yield value count != return_vars count."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        # Two yield values for one return_var — mismatch
+        then_body = ir.YieldStmt([a, a], span)
+        else_body = ir.YieldStmt([a], span)
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [rv], span)
+
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("test_if_yield_mismatch", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match=r"(YieldStmt value count.*return_vars count|size mismatch)"):
+            verify_pass(program)
+
+
+class TestValidScopePatterns:
+    """Test that valid scope patterns pass verification."""
+
+    def test_return_var_visible_after_for(self):
+        """return_vars from ForStmt are visible after the loop."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+        yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
+        body = ir.YieldStmt([yield_value], span)
+        result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [iter_arg],
+            body,
+            [result_var],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([result_var], span)], span)
+        func = ir.Function("test_valid", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        result = verify_pass(program)
+        assert result is not None
+
+    def test_return_var_visible_after_if(self):
+        """return_vars from IfStmt are visible after the if."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        then_body = ir.YieldStmt([a], span)
+        else_body = ir.YieldStmt([ir.ConstInt(0, DataType.INT64, span)], span)
+        result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [result_var], span)
+
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([result_var], span)], span)
+        func = ir.Function("test_valid", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        result = verify_pass(program)
+        assert result is not None
+
+    def test_param_visible_everywhere(self):
+        """Function parameters are visible in all scopes."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+        # Use 'a' (parameter) inside the loop body — should be valid
+        yield_value = ir.Add(iter_arg, a, DataType.INT64, span)
+        body = ir.YieldStmt([yield_value], span)
+        result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INT64, span),
+            ir.ConstInt(5, DataType.INT64, span),
+            ir.ConstInt(1, DataType.INT64, span),
+            [iter_arg],
+            body,
+            [result_var],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([result_var], span)], span)
+        func = ir.Function("test_valid", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        result = verify_pass(program)
+        assert result is not None
+
+    def test_dsl_ssa_converted_passes_scope_check(self):
+        """DSL program converted to SSA passes scope verification."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                for i in pl.range(5):
+                    result = pl.mul(result, result)
+                return result
+
+        After = passes.convert_to_ssa()(Before)
+        passes.run_verifier()(After)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

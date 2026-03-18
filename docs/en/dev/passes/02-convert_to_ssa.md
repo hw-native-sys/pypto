@@ -39,16 +39,18 @@ program_ssa = ssa_pass(program)
 ## Algorithm
 
 1. **Variable Renaming**: Rename variables with version suffixes (x → x_0, x_1, x_2) for each assignment
-2. **Phi Nodes for If**: Add phi nodes (return_vars + YieldStmt) for variables modified in if branches
+2. **Phi Nodes for If**: Add phi nodes (return_vars + YieldStmt) for variables modified in if branches, including variables defined independently in both branches
 3. **Iter_args for Loops**: Convert loop-modified variables to iter_args + return_vars pattern with YieldStmt
-4. **Scope Tracking**: Track variable definitions across nested scopes
-5. **Preservation**: Keep existing SSA constructs unchanged
+4. **Escaping Variable Promotion**: Variables first defined inside a loop body but used after the loop are promoted to iter_args + return_vars via forward-use analysis
+5. **Scope Tracking**: Track variable definitions across nested scopes
+6. **Preservation**: Keep existing SSA constructs unchanged
 
 **Key transformations**:
 
 - `x = 1; x = 2` → `x_0 = 1; x_1 = 2`
 - If with divergent assignments → add return_vars and YieldStmt in both branches
 - For loops with loop-carried dependencies → add iter_args/return_vars/YieldStmt
+- Loop-escaping variables → promoted to iter_args with matching Out parameter as initial value
 
 ## Example
 
@@ -117,6 +119,30 @@ for i in range(10):
     sum_2 = sum_1 + i
     yield (sum_2,)
 return_vars = (sum_3,)
+```
+
+### Loop-Escaping Variable
+
+**Before** (variable `out` first defined inside loop, used after):
+
+```python
+for i in range(4):
+    tile_c = tile.add(tile_a, tile_b)
+    out = tile.store(tile_c, [offset, 0], c)  # first assignment inside loop
+return out  # used after loop
+```
+
+**After** (promoted to iter_arg + return_var):
+
+```python
+for i in range(4):
+    iter_args = (out_iter_0,)
+    init_values = (c_0,)  # Out parameter as initial value
+    tile_c_0 = tile.add(tile_a_0, tile_b_0)
+    out_0 = tile.store(tile_c_0, [offset_0, 0], out_iter_0)
+    yield (out_0,)
+return_vars = (out_1,)
+return out_1
 ```
 
 ## Implementation

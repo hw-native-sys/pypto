@@ -160,6 +160,23 @@ class StoreEvalToAssignMutator : public IRMutator {
     return std::make_shared<AssignStmt>(it->second, call, op->span_);
   }
 
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    // Handle SSA-converted stores: AssignStmt(buf_1, Call(tile.store, ..., buf_0))
+    // The _store_ret var needs to be assigned the store result too.
+    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+    if (!call) return IRMutator::VisitStmt_(op);
+    auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+    if (!opnode || opnode->name_ != "tile.store") return IRMutator::VisitStmt_(op);
+    if (call->args_.size() < 3) return IRMutator::VisitStmt_(op);
+    auto var = As<Var>(call->args_[2]);
+    if (!var) return IRMutator::VisitStmt_(op);
+    auto it = target_vars_.find(var.get());
+    if (it == target_vars_.end()) return IRMutator::VisitStmt_(op);
+    // Keep original assignment (buf_1 = store(...)) and add _store_ret = buf_1
+    auto store_ret_assign = std::make_shared<AssignStmt>(it->second, op->var_, op->span_);
+    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{op, store_ret_assign}, op->span_);
+  }
+
  private:
   std::unordered_map<const Var*, VarPtr> target_vars_;
 };
@@ -171,10 +188,13 @@ class VarCollector : public IRVisitor {
   std::unordered_map<std::string, VarPtr> var_objects;
 
  protected:
-  void VisitExpr_(const VarPtr& op) override {
+  // Use VisitVarLike_ to collect both Var and IterArg references.
+  // VisitExpr_(IterArgPtr) calls VisitVarLike_ then visits initValue_,
+  // so IterArgs from outer loops are included in the symbol table.
+  void VisitVarLike_(const VarPtr& op) override {
     var_types.try_emplace(op->name_hint_, op->GetType());
     var_objects.try_emplace(op->name_hint_, op);
-    IRVisitor::VisitExpr_(op);
+    IRVisitor::VisitVarLike_(op);
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -416,16 +436,27 @@ class ScopeOutliner : public IRMutator {
     std::sort(output_vars.begin(), output_vars.end(),
               [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
-    // Recursively transform the scope body (handles nested scopes)
+    // Recursively transform the scope body (handles nested scopes).
     // Save/restore state so nested scopes get their own hierarchical names and counters.
+    // Also overlay the current scope's symbol table while recursing so nested
+    // outlining resolves names to the lexically-nearest Var, not to an unrelated
+    // same-named Var elsewhere in the function.
     // store_target_renames_ must be cleared so parent renames don't leak into the scope
     // body — the scope's own parameter substitution handles variable mapping instead.
     std::string saved_func_name = func_name_;
     int saved_scope_counter = scope_counter_;
+    auto saved_var_types = var_types_;
+    auto saved_var_objects = var_objects_;
     auto saved_required_outputs = required_outputs_;
     auto saved_renames = store_target_renames_;
     func_name_ = outlined_func_name;
     scope_counter_ = 0;
+    for (const auto& [name, type] : scope_var_collector.var_types) {
+      var_types_[name] = type;
+    }
+    for (const auto& [name, var] : scope_var_collector.var_objects) {
+      var_objects_[name] = var;
+    }
     store_target_renames_.clear();
     // Propagate output requirements so nested scopes know what's needed
     required_outputs_.clear();
@@ -435,6 +466,8 @@ class ScopeOutliner : public IRMutator {
     auto recursed_body = VisitStmt(op->body_);
     func_name_ = saved_func_name;
     scope_counter_ = saved_scope_counter;
+    var_types_ = saved_var_types;
+    var_objects_ = saved_var_objects;
     required_outputs_ = saved_required_outputs;
     store_target_renames_ = saved_renames;
 
@@ -496,15 +529,10 @@ class ScopeOutliner : public IRMutator {
       }
     }
 
-    // Apply pointer-based variable substitution to the (already recursively transformed) body
-    auto transformed_body = SubstituteVars(recursed_body, var_substitution_map);
-
-    // Convert EvalStmt(tile.store) to AssignStmt for store targets
-    // so the return value is captured with a fresh SSA name (e.g. oi_0_store_ret).
+    // Convert EvalStmt/AssignStmt(tile.store) to assign _store_ret vars BEFORE
+    // SubstituteVars, since store_body_ptrs uses the original body Var pointers.
+    auto pre_sub_body = recursed_body;
     if (!store_output_set.empty()) {
-      // Map: body Var* (from scope body's tile.store args) -> new _store_ret Var.
-      // Must use body pointers as keys because store targets are excluded from
-      // SubstituteVars and retain their original body pointers in transformed_body.
       std::unordered_map<const Var*, VarPtr> store_target_vars;
       for (size_t idx = 0; idx < output_vars.size(); ++idx) {
         auto body_it = store_body_ptrs.find(output_vars[idx].get());
@@ -513,8 +541,11 @@ class ScopeOutliner : public IRMutator {
         }
       }
       StoreEvalToAssignMutator store_mutator(store_target_vars);
-      transformed_body = store_mutator.VisitStmt(transformed_body);
+      pre_sub_body = store_mutator.VisitStmt(pre_sub_body);
     }
+
+    // Apply pointer-based substitution after store results are materialized.
+    auto transformed_body = SubstituteVars(pre_sub_body, var_substitution_map);
 
     // Build outlined function body (transformed body + return statement)
     StmtPtr outlined_body;
@@ -613,7 +644,7 @@ class ScopeOutliner : public IRMutator {
    *
    * E.g. "buf_0" -> "buf_1", "x_2" -> "x_3".  Falls back to appending "_1".
    */
-  std::string GenerateFreshSSAName(const std::string& original_name) const {
+  [[nodiscard]] std::string GenerateFreshSSAName(const std::string& original_name) const {
     std::string base = original_name;
     int version = 0;
 

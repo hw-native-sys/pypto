@@ -89,8 +89,9 @@ def test_type_check_tensor_shape_mismatch():
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
     iter_arg = ir.IterArg("tensor", tensor_type1, a, span)
-    yield_value = ir.Var("temp", tensor_type2, span)
-    body = ir.YieldStmt([yield_value], span)
+    temp = ir.Var("temp", tensor_type2, span)
+    assign_temp = ir.AssignStmt(temp, iter_arg, span)  # defined from iter_arg (type mismatch intended)
+    body = ir.SeqStmts([assign_temp, ir.YieldStmt([temp], span)], span)
     result_var = ir.Var("result", tensor_type1, span)
 
     for_stmt = ir.ForStmt(
@@ -195,8 +196,7 @@ def test_type_check_valid_types():
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
     iter_arg = ir.IterArg("tensor", tensor_type, a, span)
-    yield_value = ir.Var("temp", tensor_type, span)
-    body = ir.YieldStmt([yield_value], span)
+    body = ir.YieldStmt([iter_arg], span)
     result_var = ir.Var("result", tensor_type, span)
 
     for_stmt = ir.ForStmt(

@@ -113,9 +113,10 @@ def test_nested_calls_in_control_flow():
                     result = pl.add(temp, 1.0)
             return result
 
-    # Apply flatten pass
+    # Apply SSA conversion then flatten pass
+    ssa_program = passes.convert_to_ssa()(NestedCallsInControlFlow)
     flatten_pass = passes.flatten_call_expr()
-    flattened_program = flatten_pass(NestedCallsInControlFlow)
+    flattened_program = flatten_pass(ssa_program)
 
     # Verify the result
     assert flattened_program is not None

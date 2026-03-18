@@ -24,14 +24,15 @@ from pypto import ir, passes
 
 
 def _expand(program):
-    """Run infer_tile_memory_space then expand_mixed_kernel."""
-    return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(program))
+    """Run convert_to_ssa, infer_tile_memory_space then expand_mixed_kernel."""
+    return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
 
 
 def _assert_function_equal(actual_program, expected_program, func_name):
     """Assert that a named function matches between two programs."""
     actual = actual_program.get_function(func_name)
-    expected = expected_program.get_function(func_name)
+    expected_program_ssa = passes.convert_to_ssa()(expected_program)
+    expected = expected_program_ssa.get_function(func_name)
     assert actual is not None, f"Function '{func_name}' not found in actual program"
     assert expected is not None, f"Function '{func_name}' not found in expected program"
     ir.assert_structural_equal(actual, expected)
@@ -192,7 +193,7 @@ class TestPassthrough:
                     out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
 
 
 # ---------------------------------------------------------------------------
@@ -1601,6 +1602,46 @@ class TestEdgeCases:
 
 class TestDCERegression:
     """Regression tests for DCE and loop-state cleanup in mixed loops."""
+
+    def test_nested_loop_store_result_remapped_to_param(self):
+        """Regression for nested AIC-side stores not seen by top-level remap logic.
+
+        The loop-local cube store stays on AIC, while the trailing cast+store stays on
+        AIV. The AIV body must treat the loop store result as the updated output tensor
+        parameter rather than leaving a dangling Var reference from inside the loop.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                for i in pl.range(2):
+                    x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                    z_tile = pl.matmul(x_left, y_right)
+                    out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
+                return out_0
+
+        After = _expand(Before)
+
+        # Regression check: the transformed program must verify successfully.
+        passes.run_verifier()(After)
+
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+        assert "pl.tile.store" in aiv_str
+        assert "return" in aiv_str
 
     def test_loop_accumulation_preserves_yield_and_init_values(self):
         """Regression for bugs 1+2: mixed loop with iter_args.

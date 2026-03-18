@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -1092,6 +1093,82 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::string aiv_name = func->name_ + "_aiv";
   auto [aiv_params, aiv_map] = make_param_map();
   seed_tpop_remap(aiv_map, aiv_tpop_remap);
+
+  // Map dangling tile.store result vars to the store destination's fresh param.
+  // When a tile.store is on the AIC side, its result var is stripped from the AIV body,
+  // but the var may still be referenced (e.g., in a ReturnStmt). Remap those dangling
+  // references to the fresh parameter corresponding to the store's output tensor.
+  {
+    // Collect all vars defined in the AIV body
+    outline_utils::VarDefCollector aiv_def_collector;
+    auto aiv_body_stmt = MakeBody(aiv_final, func->span_);
+    aiv_def_collector.VisitStmt(aiv_body_stmt);
+
+    // Scan original body recursively for tile.store AssignStmts
+    std::vector<std::shared_ptr<const AssignStmt>> original_assigns;
+    CollectAllAssignStmts(stmts, original_assigns);
+    for (const auto& assign : original_assigns) {
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (!call || !call->op_) continue;
+      auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+      if (!opnode || opnode->name_ != "tile.store") continue;
+      if (call->args_.size() < 3) continue;
+
+      // Check if the result var is NOT defined in the AIV body
+      const Var* result_ptr = assign->var_.get();
+      if (aiv_def_collector.var_defs.count(result_ptr)) continue;
+
+      // Map the dangling result var to the fresh param for the store destination
+      auto dest_var = std::dynamic_pointer_cast<const Var>(call->args_[2]);
+      if (!dest_var) continue;
+
+      // Find the fresh param that corresponds to the destination tensor
+      auto param_it = aiv_map.find(dest_var.get());
+      if (param_it != aiv_map.end()) {
+        aiv_map[result_ptr] = param_it->second;
+      }
+    }
+
+    // Also remap any undefined SSA versions of output parameters that survive in
+    // the AIV body after AIC-side stores inside nested control flow are stripped.
+    auto canonicalize_name = [](const std::string& name) {
+      auto last_underscore = name.rfind('_');
+      if (last_underscore == std::string::npos || last_underscore + 1 >= name.size()) {
+        return name;
+      }
+      const auto suffix = name.substr(last_underscore + 1);
+      const bool numeric_suffix = std::all_of(
+          suffix.begin(), suffix.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+      if (!numeric_suffix) {
+        return name;
+      }
+      return name.substr(0, last_underscore);
+    };
+
+    outline_utils::VarRefCollector aiv_ref_collector;
+    aiv_ref_collector.VisitStmt(aiv_body_stmt);
+    for (const Var* ref_ptr : aiv_ref_collector.var_refs) {
+      if (!ref_ptr || aiv_def_collector.var_defs.count(ref_ptr) || aiv_map.count(ref_ptr)) {
+        continue;
+      }
+      const auto ref_name = canonicalize_name(ref_ptr->name_hint_);
+      for (size_t idx = 0; idx < func->params_.size() && idx < func->param_directions_.size(); ++idx) {
+        if (func->param_directions_[idx] == ParamDirection::In) {
+          continue;
+        }
+        const auto& param = func->params_[idx];
+        if (!param || canonicalize_name(param->name_hint_) != ref_name) {
+          continue;
+        }
+        auto param_it = aiv_map.find(param.get());
+        if (param_it != aiv_map.end()) {
+          aiv_map[ref_ptr] = param_it->second;
+        }
+        break;
+      }
+    }
+  }
+
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(MakeBody(aiv_final, func->span_), aiv_map);
   (void)aiv_clone_map_unused;
   auto aiv_func =

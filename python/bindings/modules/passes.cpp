@@ -191,7 +191,12 @@ void BindPass(nb::module_& m) {
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
       .value("MULTIPLE_ASSIGNMENT", ssa::ErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")
       .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
-      .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
+      .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt")
+      .value("ITER_ARGS_RETURN_VARS_MISMATCH", ssa::ErrorType::ITER_ARGS_RETURN_VARS_MISMATCH,
+             "iter_args count != return_vars count in ForStmt/WhileStmt")
+      .value("YIELD_COUNT_MISMATCH", ssa::ErrorType::YIELD_COUNT_MISMATCH,
+             "YieldStmt value count != iter_args/return_vars count")
+      .value("SCOPE_VIOLATION", ssa::ErrorType::SCOPE_VIOLATION, "Variable used outside its defining scope");
 
   // Bind TypeCheckErrorType enum
   nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
