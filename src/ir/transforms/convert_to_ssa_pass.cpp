@@ -69,6 +69,26 @@ class AssignmentCollector : public IRVisitor {
   }
 };
 
+class TypeCollector : public IRVisitor {
+ public:
+  std::unordered_map<std::string, TypePtr> types;
+  void Collect(const StmtPtr& stmt) {
+    if (stmt) VisitStmt(stmt);
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override { types[op->var_->name_hint_] = op->var_->GetType(); }
+  void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+  }
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    for (const auto& s : op->stmts_) VisitStmt(s);
+  }
+};
+
 class UseCollector : public IRVisitor {
  public:
   std::set<std::string> used;
@@ -308,6 +328,30 @@ class SSAConverter {
       if (before.count(n)) carried.push_back(n);
     }
 
+    // Pre-detect escaping vars: assigned in body AND NOT existed before AND used after loop
+    // AND NOT locally redefined in future statements.
+    // Must be detected BEFORE body conversion so the IfStmt handler can see them
+    // in current_version_ (needed for single-branch phi creation, issue #600).
+    TypeCollector tc;
+    tc.Collect(op->body_);
+    std::vector<std::string> escaping;
+    for (const auto& n : ac.assigned) {
+      if (n == lv_name) continue;
+      if (before.count(n)) continue;
+      if (!saved_future.count(n)) continue;
+      if (saved_future_assigns.count(n)) continue;
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      escaping.push_back(n);
+    }
+    std::sort(escaping.begin(), escaping.end());
+
     // Create iter_args + return_vars for carried variables
     std::vector<VarPtr> carried_rvs;
     for (const auto& n : carried) {
@@ -319,38 +363,41 @@ class SSAConverter {
       carried_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), init->GetType(), op->span_));
     }
 
-    // Version loop variable and register iter_args
+    // Create iter_args + return_vars for escaping variables (pre-registered)
+    std::vector<VarPtr> esc_rvs;
+    for (const auto& n : escaping) {
+      auto type_it = tc.types.find(n);
+      if (type_it == tc.types.end()) continue;
+      auto type = type_it->second;
+      auto init = FindInitValue(type, before);
+      if (!init) {
+        // Last resort: create a placeholder using any variable with matching type
+        // This covers zero-trip loop cases
+        init = std::make_shared<Var>(n, type, op->span_);
+      }
+      int iv = NextVersion(n);
+      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
+      int rv = NextVersion(n);
+      auto rv_var = std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_);
+      esc_rvs.push_back(rv_var);
+    }
+
+    // Version loop variable and register iter_args (including escaping)
     int lvv = NextVersion(lv_name);
     auto new_lv = std::make_shared<Var>(lv_name + "_" + std::to_string(lvv), op->loop_var_->GetType(),
                                         op->loop_var_->span_);
     cur_[lv_name] = new_lv;
     RegisterIterArgs(ias);
 
-    // Convert body
+    // Convert body — IfStmt handler now sees escaping vars in cur_ via iter_args
     auto new_body = ConvertStmt(op->body_);
     auto after = cur_;
 
-    // Restore outer scope, register carried return_vars
+    // Restore outer scope, register return_vars
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
+    for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
     RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
-
-    // Escaping: new in body, used after loop, not already an iter_arg
-    auto escaping =
-        FindEscapingVars(after, before, ac.assigned, lv_name, ias, saved_future, saved_future_assigns);
-
-    std::vector<VarPtr> esc_rvs;
-    for (const auto& n : escaping) {
-      auto type = after.at(n)->GetType();
-      auto init = FindInitValue(type, before);
-      if (!init) init = after.at(n);
-      int iv = NextVersion(n);
-      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
-      int rv = NextVersion(n);
-      auto rv_var = std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_);
-      esc_rvs.push_back(rv_var);
-      cur_[n] = rv_var;
-    }
 
     // Build return_vars in iter_arg order: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
@@ -362,7 +409,12 @@ class SSAConverter {
     std::vector<ExprPtr> yields;
     if (auto y = ExtractYield(new_body)) yields = y->value_;
     for (const auto& n : carried) yields.push_back(after.at(n));
-    for (const auto& n : escaping) yields.push_back(after.at(n));
+    for (const auto& n : escaping) {
+      auto it = after.find(n);
+      if (it != after.end()) {
+        yields.push_back(it->second);
+      }
+    }
 
     StmtPtr body = new_body;
     if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
@@ -402,6 +454,26 @@ class SSAConverter {
       if (before.count(n)) carried.push_back(n);
     }
 
+    // Pre-detect escaping vars (same logic as ForStmt — see issue #600 comment there)
+    TypeCollector tc;
+    tc.Collect(op->body_);
+    std::vector<std::string> escaping;
+    for (const auto& n : ac.assigned) {
+      if (before.count(n)) continue;
+      if (!saved_future.count(n)) continue;
+      if (saved_future_assigns.count(n)) continue;
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      escaping.push_back(n);
+    }
+    std::sort(escaping.begin(), escaping.end());
+
     // Create iter_args + return_vars for carried
     std::vector<VarPtr> carried_rvs;
     for (const auto& n : carried) {
@@ -413,7 +485,21 @@ class SSAConverter {
       carried_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), init->GetType(), op->span_));
     }
 
-    // Register iter_args, substitute condition in loop scope, convert body
+    // Create iter_args + return_vars for escaping variables (pre-registered)
+    std::vector<VarPtr> esc_rvs;
+    for (const auto& n : escaping) {
+      auto type_it = tc.types.find(n);
+      if (type_it == tc.types.end()) continue;
+      auto type = type_it->second;
+      auto init = FindInitValue(type, before);
+      if (!init) init = std::make_shared<Var>(n, type, op->span_);
+      int iv = NextVersion(n);
+      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
+      int rv = NextVersion(n);
+      esc_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_));
+    }
+
+    // Register iter_args (including escaping), substitute condition, convert body
     RegisterIterArgs(ias);
     auto new_cond = SubstExpr(op->condition_);
     auto new_body = ConvertStmt(op->body_);
@@ -421,35 +507,24 @@ class SSAConverter {
 
     // Restore outer scope
     cur_ = before;
+    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
+    for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
+    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
 
-    // Build return_vars: existing + carried (+ escaping, added below)
+    // Build return_vars: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
     for (const auto& rv : op->return_vars_) all_rvs.push_back(rv);
     for (const auto& rv : carried_rvs) all_rvs.push_back(rv);
-
-    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
-
-    // Escaping variables
-    auto escaping = FindEscapingVars(after, before, ac.assigned, "", ias, saved_future, saved_future_assigns);
-
-    for (const auto& n : escaping) {
-      auto type = after.at(n)->GetType();
-      auto init = FindInitValue(type, before);
-      if (!init) init = after.at(n);
-      int iv = NextVersion(n);
-      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
-      int rv = NextVersion(n);
-      auto rv_var = std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_);
-      all_rvs.push_back(rv_var);
-      cur_[n] = rv_var;
-    }
+    for (const auto& rv : esc_rvs) all_rvs.push_back(rv);
 
     // Build yields
     std::vector<ExprPtr> yields;
     if (auto y = ExtractYield(new_body)) yields = y->value_;
     for (const auto& n : carried) yields.push_back(after.at(n));
-    for (const auto& n : escaping) yields.push_back(after.at(n));
+    for (const auto& n : escaping) {
+      auto it = after.find(n);
+      if (it != after.end()) yields.push_back(it->second);
+    }
 
     StmtPtr body = new_body;
     if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
