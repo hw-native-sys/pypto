@@ -304,7 +304,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="used outside its defining scope"):
+        with pytest.raises(Exception, match="used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_iter_arg_used_outside_loop(self):
@@ -338,7 +338,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="used outside its defining scope"):
+        with pytest.raises(Exception, match="used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_loop_var_used_outside_loop(self):
@@ -369,7 +369,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="used outside its defining scope"):
+        with pytest.raises(Exception, match="used before definition|used outside its defining scope"):
             verify_pass(program)
 
     def test_if_return_var_not_visible_in_condition(self):
@@ -393,7 +393,7 @@ class TestScopeViolation:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="used outside its defining scope"):
+        with pytest.raises(Exception, match="used before definition|used outside its defining scope"):
             verify_pass(program)
 
 

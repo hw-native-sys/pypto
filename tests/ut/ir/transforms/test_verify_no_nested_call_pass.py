@@ -104,13 +104,13 @@ def test_nested_calls_in_control_flow():
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             result: pl.Tensor[[64], pl.FP32] = x
-            for i, (result,) in pl.range(5, init_values=(result,)):
+            for i in pl.range(5):
                 # Nested call in loop
                 temp: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(result, 2.0), pl.exp(x))
                 if i > 2:
-                    pl.yield_(temp)
+                    result = temp
                 else:
-                    pl.yield_(pl.add(temp, 1.0))
+                    result = pl.add(temp, 1.0)
             return result
 
     # Apply SSA conversion then flatten pass

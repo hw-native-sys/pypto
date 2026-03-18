@@ -173,6 +173,10 @@ class TestPassManagerDumpIR:
         func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
         program = ir.Program([func], "dump_test", span)
 
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        output_dir = str(tmp_path / "dump_output")
+        result = pm.run_passes(program, dump_ir=True, output_dir=output_dir)
+
         assert result is not None
         # Frontend + one file per pass
         expected_files = ["00_frontend.py"] + [

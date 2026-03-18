@@ -154,23 +154,35 @@ class UseAfterDefChecker : public IRVisitor {
 
     if (op->condition_) VisitExpr(op->condition_);
 
-    // Each branch is visited with a snapshot of the pre-branch scope so that
-    // definitions in one branch do not bleed into the other or outer scope.
     auto saved_scope = in_scope_;
 
     if (op->then_body_) VisitStmt(op->then_body_);
+    auto then_scope = in_scope_;
 
     in_scope_ = saved_scope;
     if (op->else_body_.has_value() && *op->else_body_) {
       VisitStmt(*op->else_body_);
     }
+    auto else_scope = in_scope_;
 
-    // Restore: branch-local defs do not propagate outward.
-    in_scope_ = saved_scope;
-
-    // return_vars are defined in the enclosing scope after the if.
-    for (const auto& rv : op->return_vars_) {
-      if (rv) in_scope_.insert(rv.get());
+    if (!op->return_vars_.empty()) {
+      // Phi-node mode: restore pre-branch scope, then add return_vars.
+      in_scope_ = saved_scope;
+      for (const auto& rv : op->return_vars_) {
+        if (rv) in_scope_.insert(rv.get());
+      }
+    } else {
+      // Leak mode: the DSL leaks branch-local variables into the enclosing
+      // scope. Both branches may define different Var pointers for the same
+      // logical variable, so we conservatively admit everything that was
+      // newly defined in either branch (union). The SSA verifier separately
+      // enforces that variables are not used across branches incorrectly.
+      // When there is no else branch, nothing is guaranteed to be defined.
+      in_scope_ = saved_scope;
+      if (op->else_body_.has_value()) {
+        in_scope_.insert(then_scope.begin(), then_scope.end());
+        in_scope_.insert(else_scope.begin(), else_scope.end());
+      }
     }
   }
 
