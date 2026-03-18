@@ -203,9 +203,9 @@ def BuildBatchPagedAttentionProgram(
                 pij_tile = pl.cast(pij_tile_f16, target_type=pl.FP32)
                 li_tile = pl.row_sum(pij_tile, tmp_tile)
 
-                pij_batch = pl.store(pij_tile_f16, [b * q_tile, 0], [q_tile, block_size], pij_batch)
-                mij_batch = pl.store(mi_tile, [b * q_tile, 0], [q_tile, 1], mij_batch)
-                lij_batch = pl.store(li_tile, [b * q_tile, 0], [q_tile, 1], lij_batch)
+                pij_batch = pl.store(pij_tile_f16, [b * q_tile, 0], pij_batch, [q_tile, block_size])
+                mij_batch = pl.store(mi_tile, [b * q_tile, 0], mij_batch, [q_tile, 1])
+                lij_batch = pl.store(li_tile, [b * q_tile, 0], lij_batch, [q_tile, 1])
             return pij_batch, mij_batch, lij_batch
 
         # ── CUBE kernel: PV matmul ──────────────────────────────────────
@@ -303,13 +303,13 @@ def BuildBatchPagedAttentionProgram(
                         target_memory=pl.MemorySpace.Vec,
                     )
 
-                    mi_batch = pl.store(mij_tile, [b * q_tile, 0], [q_tile, 1], mi_batch)
-                    li_batch = pl.store(lij_tile, [b * q_tile, 0], [q_tile, 1], li_batch)
-                    oi_batch = pl.store(oi_new_tile, [b * q_tile, 0], [q_tile, head_dim], oi_batch)
+                    mi_batch = pl.store(mij_tile, [b * q_tile, 0], mi_batch, [q_tile, 1])
+                    li_batch = pl.store(lij_tile, [b * q_tile, 0], li_batch, [q_tile, 1])
+                    oi_batch = pl.store(oi_new_tile, [b * q_tile, 0], oi_batch, [q_tile, head_dim])
 
                     if is_last:
                         dst_tile = pl.row_expand_div(oi_new_tile, lij_tile)
-                        out_tensor = pl.store(dst_tile, [dst_row, 0], [q_tile, head_dim], out_tensor)
+                        out_tensor = pl.store(dst_tile, [dst_row, 0], out_tensor, [q_tile, head_dim])
                 else:
                     mij_tile = pl.load(
                         mij_batch,
@@ -363,8 +363,8 @@ def BuildBatchPagedAttentionProgram(
                     mi_new_dn = pl.reshape(mi_new, [q_tile, 1])
                     li_updated_dn = pl.reshape(li_updated, [q_tile, 1])
 
-                    mi_batch = pl.store(mi_new_dn, [b * q_tile, 0], [q_tile, 1], mi_batch)
-                    li_batch = pl.store(li_updated_dn, [b * q_tile, 0], [q_tile, 1], li_batch)
+                    mi_batch = pl.store(mi_new_dn, [b * q_tile, 0], mi_batch, [q_tile, 1])
+                    li_batch = pl.store(li_updated_dn, [b * q_tile, 0], li_batch, [q_tile, 1])
 
                     # Reshape ND [1,q_tile] -> DN [q_tile,1] for row_expand_mul
                     alpha_dn = pl.reshape(alpha, [q_tile, 1])
@@ -375,13 +375,13 @@ def BuildBatchPagedAttentionProgram(
 
                     if is_last:
                         dst_tile = pl.row_expand_div(oi_updated, li_updated_dn)
-                        out_tensor = pl.store(dst_tile, [dst_row, 0], [q_tile, head_dim], out_tensor)
+                        out_tensor = pl.store(dst_tile, [dst_row, 0], out_tensor, [q_tile, head_dim])
                     else:
                         oi_batch = pl.store(
                             oi_updated,
                             [b * q_tile, 0],
-                            [q_tile, head_dim],
                             oi_batch,
+                            [q_tile, head_dim],
                         )
 
             return mi_batch, li_batch, oi_batch, out_tensor

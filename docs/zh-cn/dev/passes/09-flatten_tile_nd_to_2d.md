@@ -42,8 +42,9 @@ program_2d = flatten_pass(program)
 
 | Tile 操作 | 变换方式 |
 | --------- | -------- |
-| `tile.load`（>2D） | 保持加载原样，之后插入 `tile.reshape` 为 2D |
-| `tile.store`（>2D） | 在存储前插入 `tile.reshape` 恢复为 ND |
+| `tile.load`（>2D） | 直接将结果类型改为 2D（load 从 ND 张量产生 2D tile） |
+| `tile.store`（ND 张量，>2D） | 在转换后 IR 中注入原始 ND 分区 `shapes` 作为额外的第 4 个操作数，供后端 codegen 重建 `partition_view`；DSL 源码不变 |
+| `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.sum`/`tile.max`/`tile.min`（>2D） | 将 axis 映射为 1（2D 的最后轴） |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
@@ -73,15 +74,13 @@ class After:
     @pl.function(type=pl.FunctionType.InCore)
     def main_incore_0(self, x: pl.Tensor[[2, 3, 4], pl.FP32],
                       out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-        x_tile_nd: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-        x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.reshape(x_tile_nd, [6, 4])
+        x_tile: pl.Tile[[6, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
         y_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-        y_tile_nd: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.reshape(y_tile, [2, 3, 4])
-        out_0 = pl.store(y_tile_nd, [0, 0, 0], out_0)
+        out_0 = pl.store(y_tile, [0, 0, 0], out_0)
         return out_0
 ```
 
-3D Tile `[2, 3, 4]` 被展平为 `[6, 4]`。`tile.load` 保持 ND 形状（与张量对接），`tile.reshape` 在 ND 与 2D 之间转换。`tile.store` 之前，Tile 被恢复为 ND 形状。
+3D Tile `[2, 3, 4]` 被展平为 `[6, 4]`。`tile.load` 直接产生 2D tile，无需插入 `tile.reshape`。`tile.store` 接受 2D tile 并写入 ND 张量。对于 ND 张量（>2D），Pass 会在转换后 IR 中将原始分区 `shapes` 注入为额外的第 4 个操作数（例如 `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`）；该操作数仅存在于转换后的 IR 中，不属于 DSL 源码。
 
 ## 实现
 
