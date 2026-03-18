@@ -348,6 +348,9 @@ class SSAConverter : public IRMutator {
 
   // Override ForStmt to handle loop-carried and escaping variables
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    // Save future_uses_ before visiting children — nested SeqStmts will overwrite it
+    auto saved_future_uses = future_uses_;
+
     // Visit range expressions in outer scope
     auto new_start = VisitExpr(op->start_);
     auto new_stop = VisitExpr(op->stop_);
@@ -445,7 +448,7 @@ class SSAConverter : public IRMutator {
     // followed by "return out" after the loop). These need iter_args + return_vars
     // to properly escape the loop scope in SSA form.
     auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars,
-                                          loop_var_base, new_iter_args, future_uses_);
+                                          loop_var_base, new_iter_args, saved_future_uses);
 
     for (const auto& base_name : escaping_vars) {
       const auto& final_var = versions_after_body.at(base_name);
@@ -511,6 +514,9 @@ class SSAConverter : public IRMutator {
 
   // Override WhileStmt to handle loop-carried and escaping variables
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    // Save future_uses_ before visiting children — nested SeqStmts will overwrite it
+    auto saved_future_uses = future_uses_;
+
     // Save outer scope versions
     auto versions_before = current_version_;
 
@@ -603,7 +609,7 @@ class SSAConverter : public IRMutator {
     // Handle escaping variables (same as ForStmt — see comment there)
     // WhileStmt has no loop_var, so pass empty string
     auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars, "",
-                                          new_iter_args, future_uses_);
+                                          new_iter_args, saved_future_uses);
 
     for (const auto& base_name : escaping_vars) {
       const auto& final_var = versions_after_body.at(base_name);
