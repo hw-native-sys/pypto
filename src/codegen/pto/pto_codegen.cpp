@@ -353,7 +353,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
           GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
         }
         GetOrEmitIndexConstant(1);
-      } else if (tensor_type->shape_.size() == 1) {
+      } else {
+        // 1-D and N-D (N>2): pre-emit constant 1 (innermost stride). For N>2,
+        // other strides are computed dynamically via arith.muli in
+        // EmitMakeTensorViews to support dynamic dims.
         GetOrEmitIndexConstant(1);
       }
     }
@@ -423,6 +426,28 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
 
+      // For N-D (N > 2): pre-compute row-major strides as SSA values using arith.muli
+      // so that dynamic dimensions (ir::Var) are handled correctly. Emit any needed
+      // multiply instructions BEFORE the make_tensor_view line.
+      std::vector<std::string> nd_stride_names;
+      if (tensor_type->shape_.size() > 2) {
+        const size_t rank = tensor_type->shape_.size();
+        nd_stride_names.resize(rank);
+        nd_stride_names[rank - 1] = GetOrEmitIndexConstant(1);
+        for (int j = static_cast<int>(rank) - 2; j >= 0; j--) {
+          std::string dim_mlir;
+          if (auto var = As<ir::Var>(tensor_type->shape_[j + 1])) {
+            dim_mlir = var_to_mlir_.at(var->name_hint_);
+          } else {
+            dim_mlir = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j + 1]));
+          }
+          std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(j));
+          stream_ << GetIndent() << mul_name << " = arith.muli " << nd_stride_names[j + 1] << ", " << dim_mlir
+                  << " : index\n";
+          nd_stride_names[j] = mul_name;
+        }
+      }
+
       stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
       stream_ << "%arg" << i;
 
@@ -453,6 +478,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       } else if (tensor_type->shape_.size() == 1) {
         stream_ << GetOrEmitIndexConstant(1);
+      } else {
+        // Use pre-computed SSA stride names (built above via arith.muli)
+        for (size_t j = 0; j < nd_stride_names.size(); j++) {
+          if (j > 0) stream_ << ", ";
+          stream_ << nd_stride_names[j];
+        }
       }
       stream_ << "]";
 

@@ -146,6 +146,7 @@ def store(
     tile: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
     output_tensor: Expr,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
@@ -154,21 +155,21 @@ def store(
         tile: Source tile (TileType)
         offsets: Offsets in each dimension (sequence of scalars), or a MakeTuple
         output_tensor: Output tensor (TensorType)
+        shapes: ND partition shape (sequence of ints), or None for 2D tiles. Normally
+            injected automatically by FlattenTileNdTo2D for ND tensors.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the output tensor
-
-    Example:
-        >>> # 2D store
-        >>> result = store(tile, offsets=[0, 0], output_tensor=tensor)
-        >>> # 3D store
-        >>> result = store(tile, offsets=[0, 0, 0], output_tensor=tensor)
     """
     actual_span = _get_span_or_capture(span)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
+    if shapes is not None:
+        args: list[Expr] = [tile, offsets_tuple, output_tensor, _to_make_tuple(shapes, actual_span)]
+    else:
+        args = [tile, offsets_tuple, output_tensor]
 
-    return _ir_core.create_op_call("tile.store", [tile, offsets_tuple, output_tensor], {}, actual_span)
+    return _ir_core.create_op_call("tile.store", args, {}, actual_span)
 
 
 def assemble(

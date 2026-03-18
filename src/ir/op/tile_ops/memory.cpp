@@ -147,9 +147,12 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name) {
-  // store signature: (tile, offsets_tuple, output_tensor)
-  CHECK(args.size() == 3) << "The operator " << op_name
-                          << " requires 3 arguments (tile, offsets, output_tensor), but got " << args.size();
+  // store signature: (tile, offsets_tuple, output_tensor[, shapes_tuple])
+  // shapes_tuple is an optional 4th argument injected by FlattenTileNdTo2D
+  // for ND tensors to carry the original partition shape for codegen.
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "The operator " << op_name
+      << " requires 3 or 4 arguments (tile, offsets, output_tensor[, shapes]), but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -167,6 +170,19 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   CHECK(output_tensor_type) << "The operator " << op_name
                             << " requires third argument to be a TensorType, but got "
                             << args[2]->GetType()->TypeName();
+
+  // Optional fourth argument (when 4 args total) must be a shapes tuple
+  if (args.size() == 4) {
+    auto shapes_tuple = As<MakeTuple>(args[3]);
+    CHECK(shapes_tuple) << "The operator " << op_name
+                        << " requires optional 4th argument to be a shapes tuple (MakeTuple)";
+    CHECK(!shapes_tuple->elements_.empty())
+        << "The operator " << op_name << " requires non-empty shapes tuple when provided";
+    CHECK(shapes_tuple->elements_.size() == offsets_tuple->elements_.size())
+        << "The operator " << op_name
+        << " requires shapes and offsets to have the same number of dimensions, but got "
+        << shapes_tuple->elements_.size() << " shapes and " << offsets_tuple->elements_.size() << " offsets";
+  }
 
   // store returns the output tensor (same type)
   return output_tensor_type;
@@ -467,6 +483,9 @@ REGISTER_OP("tile.store")
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
     .add_argument("output_tensor", "Output tensor (TensorType)")
+    .add_argument("shapes",
+                  "Optional ND partition shape (TupleType). "
+                  "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

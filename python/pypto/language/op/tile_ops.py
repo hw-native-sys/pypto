@@ -232,6 +232,7 @@ def store(
     tile: Tile,
     offsets: Sequence[IntLike],
     output_tensor: Tensor,
+    shapes: Sequence[IntLike] | None = None,
 ) -> Tensor:
     """Copy data from tile back to tensor.
 
@@ -239,17 +240,20 @@ def store(
         tile: Source tile
         offsets: Offsets in each dimension
         output_tensor: Output tensor
+        shapes: Optional ND partition shape. Injected by FlattenTileNdTo2D for ND tensors.
 
     Returns:
         Tensor wrapping the store operation
 
     Example:
         >>> # 2D store
-        >>> result = store(tile, offsets=[0, 0], output_tensor=tensor)
+        >>> result = store(tile, [0, 0], tensor)
         >>> # 3D store
-        >>> result = store(tile, offsets=[0, 0, 0], output_tensor=tensor)
+        >>> result = store(tile, [0, 0, 0], tensor)
     """
-    call_expr = _ir_ops.store(tile.unwrap(), _normalize_intlike(offsets), output_tensor.unwrap())
+    normalized_offsets = _normalize_intlike(offsets)
+    normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
+    call_expr = _ir_ops.store(tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes)
     return Tensor(expr=call_expr)
 
 
