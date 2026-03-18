@@ -2217,6 +2217,103 @@ class TestDCERegression:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_conditional_branch_references_source_tile_of_boundary_move(self):
+        """Regression for issue #584: source tile of boundary move becomes dangling.
+
+        When a conditional branch on the AIV (pop) side references the source tile
+        of a C→V boundary move (the pre-move variable), that reference must be
+        remapped to the tpop result. Without the fix, only dest_var was mapped in
+        tpop_var_remap, leaving the source_tile reference dangling after the split.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0 = pl.tile.create([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                acc_1 = pl.tile.muls(acc_0, 0.0)
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                    z = pl.matmul(x_left, w_right)
+                    z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+                    # Conditional branch references z (source tile), not z_vec (dest)
+                    if i == 0:
+                        acc_then = pl.tile.add(acc_iter, z)
+                        branch_out = pl.yield_(acc_then)
+                    else:
+                        acc_else = pl.tile.add(acc_iter, z_vec)
+                        branch_out = pl.yield_(acc_else)
+                    acc_out = pl.yield_(branch_out)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+        After = _expand(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ):
+                for i in pl.range(4):
+                    x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                    w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                    z = pl.matmul(x_left, w_right)
+                    pl.tpush_to_aiv(z, aiv_idx=0)
+                    pl.tpush_to_aiv(z, aiv_idx=0)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                acc_0 = pl.tile.create([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                acc_1 = pl.tile.muls(acc_0, 0.0)
+                for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
+                    z_pop_a: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[16, 128], dtype=pl.FP32, aiv_idx=0
+                    )
+                    z_pop_b: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                        shape=[16, 128], dtype=pl.FP32, aiv_idx=0
+                    )
+                    if i == 0:
+                        acc_then = pl.tile.add(acc_iter, z_pop_a)
+                        branch_out = pl.yield_(acc_then)
+                    else:
+                        acc_else = pl.tile.add(acc_iter, z_pop_b)
+                        branch_out = pl.yield_(acc_else)
+                    acc_out = pl.yield_(branch_out)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                self.main_incore_0_aic(x, w, out_0)
+                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
+                return result
+
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
