@@ -214,6 +214,16 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Outline Hierarchy scopes into separate functions with level/role
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque functions containing Hierarchy scopes
+ * - Should run before OutlineIncoreScopes and OutlineClusterScopes
+ */
+Pass OutlineHierarchyScopes();
+
+/**
  * @brief Outline Cluster scopes into separate Group functions
  *
  * Requirements:
@@ -279,6 +289,16 @@ Pass InferTileMemorySpace();
  * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
  */
 Pass ResolveTransposeLayout();
+
+/**
+ * @brief Repair backend-required layouts for constrained elementwise tile ops
+ *
+ * For current layout-constrained elementwise ops, rewrites `[N, 1]`
+ * col-major vector inputs into `[1, N]` row-major reshapes at the use-site,
+ * executes the consumer in row-major form, and reshapes the result back when
+ * the original output is a col-major column vector.
+ */
+Pass ResolveBackendOpLayouts();
 
 /**
  * @brief Expand mixed InCore functions into AIC + AIV + Group

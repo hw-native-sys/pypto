@@ -73,6 +73,7 @@ Phase 2 — Expand each InCore function F:
      - Strip dead iter_args whose carried values are unused on this side
      - Pull back missing init-value definitions for surviving iter_args
      - Rewrite dangling yields to identity yields when a branch-local value was stripped
+     - Remap dangling tile.store result vars (SSA versions stripped by AIC-side splitting) to the corresponding output parameter
   7. Run dead code elimination on both bodies (recursive into loops)
   8. Normalize loop-carried state again, because DCE may remove a SHARED-only
      post-loop use that temporarily kept an iter_arg alive

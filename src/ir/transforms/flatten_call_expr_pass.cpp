@@ -401,7 +401,7 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   auto new_body = mutator.VisitStmt(normalized->body_);
   return std::make_shared<Function>(normalized->name_, normalized->params_, normalized->param_directions_,
                                     normalized->return_types_, new_body, normalized->span_,
-                                    normalized->func_type_);
+                                    normalized->func_type_, normalized->level_, normalized->role_);
 }
 
 }  // namespace

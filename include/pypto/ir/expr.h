@@ -101,7 +101,8 @@ class Op {
    * Defines that this operator accepts a kwarg with the given key and type.
    * This is used for validation when creating Call expressions.
    *
-   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace
+   * Only specific types are allowed: bool, int, std::string, double, DataType, MemorySpace,
+   * and TensorLayout
    * This is enforced at compile-time via static_assert.
    *
    * @tparam T Expected type of the kwarg value (must be one of the allowed types)

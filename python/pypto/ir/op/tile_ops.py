@@ -1624,7 +1624,11 @@ def slice(
     return _ir_core.create_op_call("tile.slice", args, {}, actual_span)
 
 
-def reshape(tile: Expr, shape: Sequence[int | Expr] | _ir_core.MakeTuple, span: Span | None = None) -> Call:
+def reshape(
+    tile: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    span: Span | None = None,
+) -> Call:
     """Reshape tile to new shape.
 
     Args:

@@ -12,6 +12,7 @@
 #include "pypto/backend/common/backend.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <ios>
@@ -378,10 +379,12 @@ BackendOpRegistryEntry Backend::RegisterOp(const std::string& op_name) {
 }
 
 void Backend::FinalizeOpRegistration(const std::string& op_name, BackendCodegenFunc func,
-                                     std::optional<BackendPipeInferFunc> infer_pipe_func) {
+                                     std::optional<BackendPipeInferFunc> infer_pipe_func,
+                                     std::optional<BackendTileLayoutSpec> tile_layout_spec) {
   CHECK(backend_op_registry_.find(op_name) == backend_op_registry_.end())
       << "Operator '" << op_name << "' is already registered in this backend";
-  backend_op_registry_[op_name] = BackendOpInfo{std::move(func), std::move(infer_pipe_func)};
+  backend_op_registry_[op_name] =
+      BackendOpInfo{std::move(func), std::move(infer_pipe_func), std::move(tile_layout_spec)};
 }
 
 const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) const {
@@ -390,6 +393,14 @@ const Backend::BackendOpInfo* Backend::GetOpInfo(const std::string& op_name) con
     return &it->second;
   }
   return nullptr;
+}
+
+const BackendTileLayoutSpec* Backend::GetTileLayoutSpec(const std::string& op_name) const {
+  const auto* info = GetOpInfo(op_name);
+  if (!info || !info->tile_layout_spec.has_value()) {
+    return nullptr;
+  }
+  return &*info->tile_layout_spec;
 }
 
 ir::PipeType Backend::InferPipe(const ir::CallPtr& call) const {
@@ -429,9 +440,29 @@ BackendOpRegistryEntry& BackendOpRegistryEntry::f_infer_pipe(BackendPipeInferFun
   return *this;
 }
 
+BackendOpRegistryEntry& BackendOpRegistryEntry::set_input_layout(size_t input_index, ir::TileLayout layout) {
+  if (!tile_layout_spec_.has_value()) {
+    tile_layout_spec_.emplace();
+  }
+  if (tile_layout_spec_->input_layouts.size() <= input_index) {
+    tile_layout_spec_->input_layouts.resize(input_index + 1);
+  }
+  tile_layout_spec_->input_layouts[input_index] = layout;
+  return *this;
+}
+
+BackendOpRegistryEntry& BackendOpRegistryEntry::set_output_layout(ir::TileLayout layout) {
+  if (!tile_layout_spec_.has_value()) {
+    tile_layout_spec_.emplace();
+  }
+  tile_layout_spec_->output_layout = layout;
+  return *this;
+}
+
 BackendOpRegistryEntry::~BackendOpRegistryEntry() {
   if (backend_ && codegen_func_.has_value()) {
-    backend_->FinalizeOpRegistration(op_name_, std::move(*codegen_func_), std::move(infer_pipe_func_));
+    backend_->FinalizeOpRegistration(op_name_, std::move(*codegen_func_), std::move(infer_pipe_func_),
+                                     std::move(tile_layout_spec_));
   }
 }
 

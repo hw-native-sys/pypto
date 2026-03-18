@@ -181,6 +181,7 @@ class TestCrossCoreTpushTpopCodegen:
             passes.flatten_tile_nd_to_2d,
             passes.infer_tile_memory_space,
             passes.resolve_transpose_layout,
+            passes.resolve_backend_op_layouts,
             passes.init_mem_ref,
             passes.basic_memory_reuse,
             passes.allocate_memory_addr,

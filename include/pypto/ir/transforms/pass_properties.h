@@ -63,6 +63,11 @@ inline const PassProperties kOutlineIncoreScopesProperties{
 inline const PassProperties kOutlineClusterScopesProperties{
     .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
 
+// -- Hierarchy outlining pass -------------------------------------------------
+
+inline const PassProperties kOutlineHierarchyScopesProperties{
+    .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::HierarchyOutlined}};
+
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
 inline const PassProperties kConvertTensorToTileOpsProperties{
@@ -88,6 +93,15 @@ inline const PassProperties kResolveTransposeLayoutProperties{
                  IRProperty::TileOps2D},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D}};
+
+// -- Resolve backend op layouts pass ------------------------------------------
+
+inline const PassProperties kResolveBackendOpLayoutsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
+    .invalidated = {IRProperty::NormalizedStmtStructure}};
 
 // -- Mixed kernel expansion pass ----------------------------------------------
 

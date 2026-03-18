@@ -28,6 +28,7 @@ class IRProperty(Enum):
     AllocatedMemoryAddr = ...
     MixedKernelExpanded = ...
     ClusterOutlined = ...
+    HierarchyOutlined = ...
     TileOps2D = ...
     TileMemoryInferred = ...
     BreakContinueValid = ...
@@ -223,6 +224,9 @@ class SSAErrorType(Enum):
     MULTIPLE_ASSIGNMENT = ...
     NAME_SHADOWING = ...
     MISSING_YIELD = ...
+    ITER_ARGS_RETURN_VARS_MISMATCH = ...
+    YIELD_COUNT_MISMATCH = ...
+    SCOPE_VIOLATION = ...
 
 class TypeCheckErrorType(Enum):
     """Type checking error types."""
@@ -251,6 +255,9 @@ def outline_incore_scopes() -> Pass:
 def outline_cluster_scopes() -> Pass:
     """Create a pass that outlines Cluster scopes into Group functions."""
 
+def outline_hierarchy_scopes() -> Pass:
+    """Create a pass that outlines Hierarchy scopes into level/role functions."""
+
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
@@ -262,6 +269,9 @@ def infer_tile_memory_space() -> Pass:
 
 def resolve_transpose_layout() -> Pass:
     """Create a pass that resolves transpose layout for tile.load with transpose=True."""
+
+def resolve_backend_op_layouts() -> Pass:
+    """Create a pass that repairs backend-required layouts for constrained tile ops."""
 
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
@@ -346,6 +356,7 @@ __all__ = [
     "convert_to_ssa",
     "outline_incore_scopes",
     "outline_cluster_scopes",
+    "outline_hierarchy_scopes",
     "convert_tensor_to_tile_ops",
     "flatten_tile_nd_to_2d",
     "infer_tile_memory_space",

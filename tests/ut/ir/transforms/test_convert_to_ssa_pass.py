@@ -15,7 +15,7 @@ Uses assert_structural_equal with enable_auto_mapping=True to compare.
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 from pypto.language.parser.diagnostics import SSAViolationError
 
 # =============================================================================
@@ -1230,6 +1230,108 @@ class TestPlainSyntax:
 
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestEscapingVariables:
+    """Tests for variables first defined inside a loop but used after.
+
+    The escaping-variable pattern occurs when a pass (e.g., ConvertTensorToTileOps)
+    creates assignments inside a loop body for variables that are used after the loop.
+    The DSL parser prevents this pattern, so tests build IR directly.
+    """
+
+    @staticmethod
+    def _build_for_loop_escaping_program():
+        """Build IR: for loop with `out` assigned inside, used in return after."""
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([64], DataType.FP32)
+
+        # Function params: a (In), c (Out)
+        a = ir.Var("a", tensor_type, span)
+        c = ir.Var("c", tensor_type, span)
+
+        # Loop variable and range
+        i = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        start = ir.ConstInt(0, DataType.INDEX, span)
+        stop = ir.ConstInt(4, DataType.INDEX, span)
+        step = ir.ConstInt(1, DataType.INDEX, span)
+
+        # Body: out = add(a, c)  — 'out' is first defined HERE, inside the loop
+        out = ir.Var("out", tensor_type, span)
+        add_op = ir.Op("tensor.add")
+        add_call = ir.Call(add_op, [a, c], span)
+        body = ir.AssignStmt(out, add_call, span)
+
+        # ForStmt with NO iter_args/return_vars (pre-SSA form)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span)
+
+        # return out — references variable defined inside loop
+        ret = ir.ReturnStmt([out], span)
+
+        func_body = ir.SeqStmts([for_stmt, ret], span)
+        func = ir.Function(
+            "main",
+            [(a, ir.ParamDirection.In), (c, ir.ParamDirection.Out)],
+            [tensor_type],
+            func_body,
+            span,
+        )
+        return ir.Program([func], "test", span)
+
+    def test_for_loop_escaping_var(self):
+        """Variable first assigned inside for loop, used after loop."""
+        program = self._build_for_loop_escaping_program()
+        after = passes.convert_to_ssa()(program)
+        passes.run_verifier()(after)
+
+    def test_for_loop_non_escaping_var_not_promoted(self):
+        """Variable defined inside loop but NOT used after should not be promoted."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = x
+                for i in pl.range(4):
+                    tmp: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
+                    result = pl.add(tmp, 1.0)
+                return result
+
+        After = passes.convert_to_ssa()(Before)
+        passes.run_verifier()(After)
+
+    def test_dynamic_shape_vars_in_orchestrator(self):
+        """Dynamic shape vars (M, N) from InCore return type don't cause scope violation."""
+        M = pl.dynamic("M")
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                a_tile = pl.load(a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [128, 128])
+                result = pl.add(a_tile, b_tile)
+                out = pl.store(result, [0, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
+                c = self.add_kernel(a, b, c)
+                return c
+
+        After = passes.convert_to_ssa()(Before)
+        passes.run_verifier()(After)
 
 
 if __name__ == "__main__":

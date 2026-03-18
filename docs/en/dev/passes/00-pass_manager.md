@@ -68,6 +68,7 @@ struct PassProperties {
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
+| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -309,6 +310,26 @@ result = pm.run_passes(program)
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = pm.run_passes(program)
 ```
+
+### Default Strategy Notes
+
+The late InCore part of the default PTO-oriented pipeline is:
+
+1. `FlattenTileNdTo2D`
+2. `InferTileMemorySpace`
+3. `ResolveTransposeLayout`
+4. `ResolveBackendOpLayouts`
+5. `ExpandMixedKernel`
+6. `InitMemRef`
+7. `BasicMemoryReuse`
+8. `AllocateMemoryAddr`
+
+`ResolveBackendOpLayouts` repairs backend-constrained elementwise tile ops using
+registered layout metadata. For the current PTO row-major elementwise ops, it
+rewrites `[N, 1]` vector operands into `[1, N] row_major` `tile.reshape`
+operations at the constrained use site, where row-major is inferred from the
+target shape. It then reshapes the result back to the original vector shape
+when needed.
 
 ### Using PassPipeline Directly
 

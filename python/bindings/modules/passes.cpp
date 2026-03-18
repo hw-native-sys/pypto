@@ -55,6 +55,8 @@ void BindPass(nb::module_& m) {
       .value("MixedKernelExpanded", IRProperty::MixedKernelExpanded,
              "Mixed InCore functions split into AIC+AIV")
       .value("ClusterOutlined", IRProperty::ClusterOutlined, "Cluster scopes outlined into Group functions")
+      .value("HierarchyOutlined", IRProperty::HierarchyOutlined,
+             "Hierarchy scopes outlined into level/role functions")
       .value("TileOps2D", IRProperty::TileOps2D, "All tile ops use ≤2D tiles")
       .value("TileMemoryInferred", IRProperty::TileMemoryInferred,
              "TileType memory_space populated in InCore functions")
@@ -192,7 +194,12 @@ void BindPass(nb::module_& m) {
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
       .value("MULTIPLE_ASSIGNMENT", ssa::ErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")
       .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
-      .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
+      .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt")
+      .value("ITER_ARGS_RETURN_VARS_MISMATCH", ssa::ErrorType::ITER_ARGS_RETURN_VARS_MISMATCH,
+             "iter_args count != return_vars count in ForStmt/WhileStmt")
+      .value("YIELD_COUNT_MISMATCH", ssa::ErrorType::YIELD_COUNT_MISMATCH,
+             "YieldStmt value count != iter_args/return_vars count")
+      .value("SCOPE_VIOLATION", ssa::ErrorType::SCOPE_VIOLATION, "Variable used outside its defining scope");
 
   // Bind TypeCheckErrorType enum
   nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
@@ -233,6 +240,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines InCore scopes into separate functions");
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
              "Create a pass that outlines Cluster scopes into separate Group functions");
+  passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
+             "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
@@ -246,6 +255,10 @@ void BindPass(nb::module_& m) {
              "Detects tile.load(..., transpose=True) in InCore functions and transforms\n"
              "the source tensor parameter type to the logical transposed shape with DN layout.\n"
              "Propagates the type change to corresponding Orchestration function parameters.");
+  passes.def("resolve_backend_op_layouts", &pass::ResolveBackendOpLayouts,
+             "Create a pass that repairs backend-required layouts for constrained elementwise tile ops\n\n"
+             "Repairs `[N,1]` col-major vector inputs at constrained use-sites by reshaping them\n"
+             "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,

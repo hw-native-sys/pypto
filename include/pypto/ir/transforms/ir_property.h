@@ -45,6 +45,7 @@ enum class IRProperty : uint64_t {
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   UseAfterDef,              ///< All variable uses are dominated by a definition
+  HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
   kCount                    ///< Sentinel (must be last)
 };
 

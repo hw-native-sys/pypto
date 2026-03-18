@@ -19,9 +19,9 @@ def _make_simple_program():
     span = ir.Span.unknown()
     dtype = DataType.INT64
     x = ir.Var("x", ir.ScalarType(dtype), span)
-    y = ir.Var("y", ir.ScalarType(dtype), span)
-    assign = ir.AssignStmt(x, y, span)
-    func = ir.Function("test_func", [x, y], [ir.ScalarType(dtype)], assign, span)
+    z = ir.Var("z", ir.ScalarType(dtype), span)
+    assign = ir.AssignStmt(z, x, span)
+    func = ir.Function("test_func", [x], [ir.ScalarType(dtype)], assign, span)
     return ir.Program([func], "test_program", span)
 
 

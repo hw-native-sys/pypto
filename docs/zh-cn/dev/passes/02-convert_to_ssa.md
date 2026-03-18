@@ -39,16 +39,18 @@ program_ssa = ssa_pass(program)
 ## 算法
 
 1. **变量重命名**：为每次赋值添加版本后缀（x -> x_0, x_1, x_2）
-2. **If 的 Phi 节点**：为在 if 分支中修改的变量添加 phi 节点（return_vars + YieldStmt）
+2. **If 的 Phi 节点**：为在 if 分支中修改的变量添加 phi 节点（return_vars + YieldStmt），包括在两个分支中独立定义的变量
 3. **循环的 Iter_args**：将循环中修改的变量转换为 iter_args + return_vars 模式，带有 YieldStmt
-4. **作用域跟踪**：跨嵌套作用域跟踪变量定义
-5. **保留**：保持现有 SSA 构造不变
+4. **逃逸变量提升**：通过前向使用分析，将首次在循环体内定义但在循环后使用的变量提升为 iter_args + return_vars
+5. **作用域跟踪**：跨嵌套作用域跟踪变量定义
+6. **保留**：保持现有 SSA 构造不变
 
 **关键变换**：
 
 - `x = 1; x = 2` -> `x_0 = 1; x_1 = 2`
 - 具有分歧赋值的 If -> 在两个分支中添加 return_vars 和 YieldStmt
 - 具有循环携带依赖的 For 循环 -> 添加 iter_args/return_vars/YieldStmt
+- 循环逃逸变量 -> 提升为 iter_args，以匹配的 Out 参数作为初始值
 
 ## 示例
 
@@ -117,6 +119,30 @@ for i in range(10):
     sum_2 = sum_1 + i
     yield (sum_2,)
 return_vars = (sum_3,)
+```
+
+### 循环逃逸变量
+
+**变换前**（变量 `out` 首次在循环内定义，在循环后使用）：
+
+```python
+for i in range(4):
+    tile_c = tile.add(tile_a, tile_b)
+    out = tile.store(tile_c, [offset, 0], c)  # first assignment inside loop
+return out  # used after loop
+```
+
+**变换后**（提升为 iter_arg + return_var）：
+
+```python
+for i in range(4):
+    iter_args = (out_iter_0,)
+    init_values = (c_0,)  # Out parameter as initial value
+    tile_c_0 = tile.add(tile_a_0, tile_b_0)
+    out_0 = tile.store(tile_c_0, [offset_0, 0], out_iter_0)
+    yield (out_0,)
+return_vars = (out_1,)
+return out_1
 ```
 
 ## 实现

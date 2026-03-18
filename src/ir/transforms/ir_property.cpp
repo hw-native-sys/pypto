@@ -53,6 +53,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "BreakContinueValid";
     case IRProperty::UseAfterDef:
       return "UseAfterDef";
+    case IRProperty::HierarchyOutlined:
+      return "HierarchyOutlined";
     default:
       return "Unknown";
   }
