@@ -448,7 +448,7 @@ class SSAConverter : public IRMutator {
                                           loop_var_base, new_iter_args, future_uses_);
 
     for (const auto& base_name : escaping_vars) {
-      auto final_var = versions_after_body.at(base_name);
+      const auto& final_var = versions_after_body.at(base_name);
       auto type = final_var->GetType();
 
       // Find initial value: prefer Out parameter with matching type, fall back to any match
@@ -606,7 +606,7 @@ class SSAConverter : public IRMutator {
                                           new_iter_args, future_uses_);
 
     for (const auto& base_name : escaping_vars) {
-      auto final_var = versions_after_body.at(base_name);
+      const auto& final_var = versions_after_body.at(base_name);
       auto type = final_var->GetType();
 
       auto init_value = FindInitValueForEscapingVar(type, versions_before);
