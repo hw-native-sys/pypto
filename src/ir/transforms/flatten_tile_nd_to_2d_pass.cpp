@@ -721,7 +721,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   // return_types_ are unchanged: InCore functions return tensors (not tiles),
   // and this pass only flattens tile ops. Tensor types are never modified.
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, span, func->func_type_);
+                                    new_body, span, func->func_type_, func->level_, func->role_);
 }
 
 // ============================================================================

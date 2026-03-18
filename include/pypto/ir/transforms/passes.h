@@ -214,6 +214,16 @@ Pass ConvertToSSA();
 Pass OutlineIncoreScopes();
 
 /**
+ * @brief Outline Hierarchy scopes into separate functions with level/role
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Only processes Opaque functions containing Hierarchy scopes
+ * - Should run before OutlineIncoreScopes and OutlineClusterScopes
+ */
+Pass OutlineHierarchyScopes();
+
+/**
  * @brief Outline Cluster scopes into separate Group functions
  *
  * Requirements:

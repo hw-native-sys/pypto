@@ -168,8 +168,9 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
   VarSubstitutionMutator mutator(std::move(substitutions));
   auto new_body = mutator.VisitStmt(func->body_);
 
-  auto new_func = std::make_shared<Function>(func->name_, new_params, func->param_directions_,
-                                             func->return_types_, new_body, func->span_, func->func_type_);
+  auto new_func =
+      std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                 new_body, func->span_, func->func_type_, func->level_, func->role_);
 
   return {new_func, std::move(modified_params)};
 }
@@ -254,7 +255,7 @@ FunctionPtr UpdateCallerFunction(
   auto new_body = mutator.VisitStmt(func->body_);
 
   return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_);
+                                    new_body, func->span_, func->func_type_, func->level_, func->role_);
 }
 
 }  // namespace
