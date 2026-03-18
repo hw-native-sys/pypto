@@ -53,7 +53,7 @@ class AssignmentCollector : public IRVisitor {
     VisitExpr(op->value_);
   }
   void VisitStmt_(const ForStmtPtr& op) override {
-    assigned.insert(op->loop_var_->name_hint_);
+    // Don't record loop_var — it's scoped to the loop body, not an outer assignment
     VisitStmt(op->body_);
   }
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -95,6 +95,9 @@ class UseCollector : public IRVisitor {
   void Collect(const StmtPtr& stmt) {
     if (stmt) VisitStmt(stmt);
   }
+  void CollectExpr(const ExprPtr& expr) {
+    if (expr) VisitExpr(expr);
+  }
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
@@ -102,6 +105,109 @@ class UseCollector : public IRVisitor {
     IRVisitor::VisitVarLike_(op);
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Live-in analysis — computes variables needed from the outer scope
+//
+// Order-aware: a variable defined before use within a compound statement
+// is NOT counted as live-in. This prevents false escaping-var promotion
+// for loop-local temporaries (issue #592) while correctly detecting
+// variables used before reassignment (CodeRabbit review concern).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Forward declaration for mutual recursion
+static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts);
+
+static std::set<std::string> ComputeStmtLiveIn(const StmtPtr& stmt) {
+  if (!stmt) return {};
+  switch (stmt->GetKind()) {
+    case ObjectKind::AssignStmt: {
+      auto op = As<AssignStmt>(stmt);
+      UseCollector uc;
+      uc.CollectExpr(op->value_);
+      return uc.used;
+    }
+    case ObjectKind::EvalStmt: {
+      auto op = As<EvalStmt>(stmt);
+      UseCollector uc;
+      uc.CollectExpr(op->expr_);
+      return uc.used;
+    }
+    case ObjectKind::ReturnStmt: {
+      auto op = As<ReturnStmt>(stmt);
+      UseCollector uc;
+      for (const auto& v : op->value_) uc.CollectExpr(v);
+      return uc.used;
+    }
+    case ObjectKind::YieldStmt: {
+      auto op = As<YieldStmt>(stmt);
+      UseCollector uc;
+      for (const auto& v : op->value_) uc.CollectExpr(v);
+      return uc.used;
+    }
+    case ObjectKind::SeqStmts: {
+      return ComputeSeqLiveIn(As<SeqStmts>(stmt)->stmts_);
+    }
+    case ObjectKind::ForStmt: {
+      auto op = As<ForStmt>(stmt);
+      UseCollector uc;
+      uc.CollectExpr(op->start_);
+      uc.CollectExpr(op->stop_);
+      uc.CollectExpr(op->step_);
+      for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+      if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
+      // Body live-in minus locally-defined loop_var and iter_arg names
+      auto body_li = ComputeStmtLiveIn(op->body_);
+      body_li.erase(op->loop_var_->name_hint_);
+      for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+      uc.used.insert(body_li.begin(), body_li.end());
+      return uc.used;
+    }
+    case ObjectKind::WhileStmt: {
+      auto op = As<WhileStmt>(stmt);
+      UseCollector uc;
+      uc.CollectExpr(op->condition_);
+      for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+      auto body_li = ComputeStmtLiveIn(op->body_);
+      for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+      uc.used.insert(body_li.begin(), body_li.end());
+      return uc.used;
+    }
+    case ObjectKind::IfStmt: {
+      auto op = As<IfStmt>(stmt);
+      UseCollector uc;
+      uc.CollectExpr(op->condition_);
+      auto then_li = ComputeStmtLiveIn(op->then_body_);
+      uc.used.insert(then_li.begin(), then_li.end());
+      if (op->else_body_.has_value()) {
+        auto else_li = ComputeStmtLiveIn(*op->else_body_);
+        uc.used.insert(else_li.begin(), else_li.end());
+      }
+      return uc.used;
+    }
+    case ObjectKind::ScopeStmt:
+      return ComputeStmtLiveIn(As<ScopeStmt>(stmt)->body_);
+    case ObjectKind::OpStmts:
+      return ComputeSeqLiveIn(As<OpStmts>(stmt)->stmts_);
+    default:
+      return {};
+  }
+}
+
+static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts) {
+  std::set<std::string> defined;
+  std::set<std::string> live_in;
+  for (const auto& s : stmts) {
+    auto stmt_li = ComputeStmtLiveIn(s);
+    for (const auto& n : stmt_li) {
+      if (!defined.count(n)) live_in.insert(n);
+    }
+    AssignmentCollector ac;
+    ac.Collect(s);
+    defined.insert(ac.assigned.begin(), ac.assigned.end());
+  }
+  return live_in;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SSA Converter — Transforms non-SSA IR to SSA form
@@ -270,21 +376,28 @@ class SSAConverter {
   // ── SeqStmts — computes future uses per-statement for escaping detection
 
   StmtPtr ConvertSeq(const SeqStmtsPtr& op) {
-    std::vector<StmtPtr> out;
-    for (size_t i = 0; i < op->stmts_.size(); ++i) {
-      if (i + 1 < op->stmts_.size()) {
-        UseCollector uc;
-        AssignmentCollector ac;
-        for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
-          uc.Collect(op->stmts_[j]);
-          ac.Collect(op->stmts_[j]);
+    size_t n = op->stmts_.size();
+
+    // Precompute suffix_needs[i] = variables needed from the outer scope by stmts[i..N-1].
+    // Uses order-aware live-in analysis: a variable defined before use within a compound
+    // statement is NOT counted as needed. Single backward pass, O(N * stmt_size).
+    std::vector<std::set<std::string>> suffix_needs(n + 1);
+    for (size_t j = n; j > 0; --j) {
+      auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1]);
+      AssignmentCollector ac;
+      ac.Collect(op->stmts_[j - 1]);
+      suffix_needs[j - 1] = live_in;
+      for (const auto& name : suffix_needs[j]) {
+        if (!ac.assigned.count(name)) {
+          suffix_needs[j - 1].insert(name);
         }
-        future_uses_ = uc.used;
-        future_assigns_ = ac.assigned;
-      } else {
-        future_uses_.clear();
-        future_assigns_.clear();
       }
+    }
+
+    // Forward pass: convert each statement with correct future_needs_
+    std::vector<StmtPtr> out;
+    for (size_t i = 0; i < n; ++i) {
+      future_needs_ = (i + 1 < n) ? suffix_needs[i + 1] : std::set<std::string>{};
       out.push_back(ConvertStmt(op->stmts_[i]));
     }
     return SeqStmts::Flatten(std::move(out), op->span_);
@@ -293,8 +406,7 @@ class SSAConverter {
   // ── ForStmt ────────────────────────────────────────────────────────
 
   StmtPtr ConvertFor(const ForStmtPtr& op) {
-    auto saved_future = future_uses_;
-    auto saved_future_assigns = future_assigns_;
+    auto saved_future_needs = future_needs_;
 
     // Substitute range in outer scope
     auto new_start = SubstExpr(op->start_);
@@ -328,8 +440,8 @@ class SSAConverter {
       if (before.count(n)) carried.push_back(n);
     }
 
-    // Pre-detect escaping vars: assigned in body AND NOT existed before AND used after loop
-    // AND NOT locally redefined in future statements.
+    // Pre-detect escaping vars: assigned in body AND NOT existed before AND needed
+    // by future code (order-aware: used before redefined in the future sequence).
     // Must be detected BEFORE body conversion so the IfStmt handler can see them
     // in current_version_ (needed for single-branch phi creation, issue #600).
     TypeCollector tc;
@@ -338,8 +450,7 @@ class SSAConverter {
     for (const auto& n : ac.assigned) {
       if (n == lv_name) continue;
       if (before.count(n)) continue;
-      if (!saved_future.count(n)) continue;
-      if (saved_future_assigns.count(n)) continue;
+      if (!saved_future_needs.count(n)) continue;
       bool is_existing_ia = false;
       for (const auto& ia : op->iter_args_) {
         if (ia->name_hint_ == n) {
@@ -426,8 +537,7 @@ class SSAConverter {
   // ── WhileStmt ──────────────────────────────────────────────────────
 
   StmtPtr ConvertWhile(const WhileStmtPtr& op) {
-    auto saved_future = future_uses_;
-    auto saved_future_assigns = future_assigns_;
+    auto saved_future_needs = future_needs_;
     auto before = cur_;
 
     // Process existing iter_args
@@ -460,8 +570,7 @@ class SSAConverter {
     std::vector<std::string> escaping;
     for (const auto& n : ac.assigned) {
       if (before.count(n)) continue;
-      if (!saved_future.count(n)) continue;
-      if (saved_future_assigns.count(n)) continue;
+      if (!saved_future_needs.count(n)) continue;
       bool is_existing_ia = false;
       for (const auto& ia : op->iter_args_) {
         if (ia->name_hint_ == n) {
@@ -681,37 +790,6 @@ class SSAConverter {
 
   // ── Helpers ────────────────────────────────────────────────────────
 
-  std::vector<std::string> FindEscapingVars(const std::unordered_map<std::string, VarPtr>& after,
-                                            const std::unordered_map<std::string, VarPtr>& before,
-                                            const std::set<std::string>& assigned,
-                                            const std::string& loop_var_name,
-                                            const std::vector<IterArgPtr>& ias,
-                                            const std::set<std::string>& future_uses,
-                                            const std::set<std::string>& future_assigns) {
-    std::vector<std::string> result;
-    for (const auto& [n, v] : after) {
-      if (before.count(n)) continue;
-      if (n == loop_var_name) continue;
-      if (!assigned.count(n)) continue;
-      if (!future_uses.count(n)) continue;
-      // Skip loop-local temporaries that are redefined in future statements.
-      // If a variable is also assigned in subsequent code, the subsequent code
-      // redefines it locally and does not need the loop's final value.
-      if (future_assigns.count(n)) continue;
-      bool is_ia = false;
-      for (const auto& ia : ias) {
-        if (StripIterSuffix(ia->name_hint_) == n) {
-          is_ia = true;
-          break;
-        }
-      }
-      if (is_ia) continue;
-      result.push_back(n);
-    }
-    std::sort(result.begin(), result.end());
-    return result;
-  }
-
   VarPtr FindInitValue(const TypePtr& type, const std::unordered_map<std::string, VarPtr>& pre) {
     // Prefer Out/InOut parameter with matching type
     for (size_t i = 0; i < orig_params_.size(); ++i) {
@@ -763,8 +841,7 @@ class SSAConverter {
 
   std::unordered_map<std::string, VarPtr> cur_;  // name → latest version
   std::unordered_map<std::string, int> ver_;     // name → next version number
-  std::set<std::string> future_uses_;            // vars used in subsequent statements
-  std::set<std::string> future_assigns_;         // vars assigned in subsequent statements
+  std::set<std::string> future_needs_;           // vars needed (used-before-defined) in subsequent stmts
   std::vector<VarPtr> orig_params_;              // original function params
   std::vector<ParamDirection> orig_param_directions_;
 };
