@@ -29,7 +29,7 @@ Follow the complete review guidelines in the **code-review skill** at `.claude/s
 ## Key Focus Areas
 
 1. **Code Quality**: Style, error handling (`CHECK` vs `INTERNAL_CHECK`), PyPTO exceptions (not C++), no debug code, error messages with context
-2. **Pass Complexity**: All passes must be O(N log N) or better — no nested IR node iteration, all lookups via maps/sets (not linear scans). See `pass-complexity.md`
+2. **Pass Complexity**: All passes must be O(N log N) or better — no nested full scans over IR node collections, no linear scans for lookups (use indexed structures). See [`pass-complexity.md`](../../rules/pass-complexity.md)
 3. **Python Style**: `@overload` for multiple signatures (not `Union`), modern type syntax (`list[int]` not `List[int]`), f-strings, Google-style docstrings, type hints on public APIs
 4. **Testing Standards**: pytest only (no `unittest`), `assert` for verification (no `print`), `pytest.raises()` for exceptions, tests only in `tests/`
 5. **Documentation**: Alignment with code changes, examples still work, file lengths (≤500 for docs, ≤200 for rules/skills/agents), pass doc numbering matches pass manager execution order
