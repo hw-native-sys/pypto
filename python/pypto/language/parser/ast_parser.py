@@ -123,6 +123,7 @@ class ASTParser:
 
         # Track loop kinds for break/continue validation
         self._loop_kind_stack: list[str] = []
+        self._scope_kind_stack: list[ir.ScopeKind] = []
 
         # Inline function expansion state
         self._inline_mode = False
@@ -177,6 +178,19 @@ class ASTParser:
         if self._current_yield_types is not None:
             if len(yield_exprs) == 1:
                 self._current_yield_types.setdefault(var_name, yield_exprs[0].type)
+
+    @contextmanager
+    def _scope_kind_context(self, scope_kind: ir.ScopeKind) -> Iterator[None]:
+        """Track scope nesting during parsing for context-sensitive validation."""
+        self._scope_kind_stack.append(scope_kind)
+        try:
+            yield
+        finally:
+            self._scope_kind_stack.pop()
+
+    def _is_inside_scope(self, scope_kind: ir.ScopeKind) -> bool:
+        """Return whether parsing is currently nested inside the given scope kind."""
+        return scope_kind in self._scope_kind_stack
 
     def parse_function(
         self,
@@ -725,6 +739,12 @@ class ASTParser:
 
     def _validate_chunk_args(self, chunk_expr: Any, init_values: list[Any], iter_call: ast.Call) -> None:
         """Validate chunk arguments for range/parallel/unroll loops."""
+        if not self._is_inside_scope(ir.ScopeKind.AutoInCore):
+            raise ParserSyntaxError(
+                "chunk=... loops are only valid inside with pl.auto_incore():",
+                span=self.span_tracker.get_span(iter_call),
+                hint="Wrap the loop in 'with pl.auto_incore():' or remove the chunk= argument.",
+            )
         if not _is_const_int(chunk_expr):
             raise ParserSyntaxError(
                 "chunk must be a compile-time constant positive integer",
@@ -1379,10 +1399,11 @@ class ASTParser:
                     span = self.span_tracker.get_span(stmt)
 
                     with self.builder.scope(scope_kind, span):
-                        self.scope_manager.enter_scope("scope")
-                        for body_stmt in stmt.body:
-                            self.parse_statement(body_stmt)
-                        self.scope_manager.exit_scope(leak_vars=True)
+                        with self._scope_kind_context(scope_kind):
+                            self.scope_manager.enter_scope("scope")
+                            for body_stmt in stmt.body:
+                                self.parse_statement(body_stmt)
+                            self.scope_manager.exit_scope(leak_vars=True)
                     return
 
                 # NEW: pl.at(level=..., role=...)
@@ -1391,10 +1412,11 @@ class ASTParser:
                     span = self.span_tracker.get_span(stmt)
 
                     with self.builder.scope(ir.ScopeKind.Hierarchy, span, level=level, role=role):
-                        self.scope_manager.enter_scope("scope")
-                        for body_stmt in stmt.body:
-                            self.parse_statement(body_stmt)
-                        self.scope_manager.exit_scope(leak_vars=True)
+                        with self._scope_kind_context(ir.ScopeKind.Hierarchy):
+                            self.scope_manager.enter_scope("scope")
+                            for body_stmt in stmt.body:
+                                self.parse_statement(body_stmt)
+                            self.scope_manager.exit_scope(leak_vars=True)
                     return
 
         # Unsupported context manager

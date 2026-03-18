@@ -467,26 +467,6 @@ class TestAutoIncoreConsumed:
 
         assert "auto_incore" not in after_str
 
-    def test_loops_outside_auto_incore_not_interchanged(self):
-        """Loops outside auto_incore are not interchanged."""
-
-        @pl.program
-        class Input:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.parallel(0, 8, 1, chunk=4):
-                    x = pl.add(x, 1.0)
-                return x
-
-        # Without auto_incore, split_chunked_loops won't split, so
-        # interchange also has nothing to do
-        Before = _prepare_for_interchange(Input)
-        before_str = python_print(Before)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
-
-        assert before_str == after_str
-
 
 class TestPassProperties:
     """Tests for pass properties and factory."""
