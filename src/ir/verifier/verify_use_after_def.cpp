@@ -101,6 +101,8 @@ class UseAfterDefChecker : public IRVisitor {
       }
     }
 
+    auto saved_scope = in_scope_;
+
     // loop_var and iter_args are in scope only inside the body.
     if (op->loop_var_) in_scope_.insert(op->loop_var_.get());
     for (const auto& iter_arg : op->iter_args_) {
@@ -115,9 +117,17 @@ class UseAfterDefChecker : public IRVisitor {
       if (iter_arg) in_scope_.erase(iter_arg.get());
     }
 
-    // return_vars are defined in the enclosing scope after the loop.
-    for (const auto& rv : op->return_vars_) {
-      if (rv) in_scope_.insert(rv.get());
+    if (!op->return_vars_.empty()) {
+      // SSA mode: only return_vars are visible after the loop.
+      in_scope_ = saved_scope;
+      for (const auto& rv : op->return_vars_) {
+        if (rv) in_scope_.insert(rv.get());
+      }
+    } else {
+      // Leak mode: body-local definitions (excluding loop_var and iter_args)
+      // are visible after the loop. loop_var and iter_args were already removed
+      // above. in_scope_ now contains saved_scope + body-leaked vars.
+      // UseAfterDef does not check leak validity — that is SSAVerify's job.
     }
   }
 
@@ -166,23 +176,17 @@ class UseAfterDefChecker : public IRVisitor {
     auto else_scope = in_scope_;
 
     if (!op->return_vars_.empty()) {
-      // Phi-node mode: restore pre-branch scope, then add return_vars.
+      // SSA phi-node mode: only return_vars are visible after the if.
       in_scope_ = saved_scope;
       for (const auto& rv : op->return_vars_) {
         if (rv) in_scope_.insert(rv.get());
       }
     } else {
-      // Leak mode: the DSL leaks branch-local variables into the enclosing
-      // scope. Both branches may define different Var pointers for the same
-      // logical variable, so we conservatively admit everything that was
-      // newly defined in either branch (union). The SSA verifier separately
-      // enforces that variables are not used across branches incorrectly.
-      // When there is no else branch, nothing is guaranteed to be defined.
+      // Leak mode: branch-local definitions are visible after the if.
+      // UseAfterDef does not check leak validity — that is SSAVerify's job.
       in_scope_ = saved_scope;
-      if (op->else_body_.has_value()) {
-        in_scope_.insert(then_scope.begin(), then_scope.end());
-        in_scope_.insert(else_scope.begin(), else_scope.end());
-      }
+      in_scope_.insert(then_scope.begin(), then_scope.end());
+      in_scope_.insert(else_scope.begin(), else_scope.end());
     }
   }
 

@@ -386,7 +386,7 @@ def _build_program_with_allocs(tile_specs, op_specs):
     for name, mid in tile_specs:
         mr = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(-1, idx, span), tile_size, mid)
         memref_map[name] = mr
-        tt = ir.TileType(shape, fp32, mr)
+        tt = ir.TileType(shape, fp32, mr, None, ir.MemorySpace.Vec)
         var_map[name] = ir.Var(name, tt, span)
 
         alloc_call = ir.Call(

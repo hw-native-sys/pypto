@@ -1253,6 +1253,10 @@ class ASTParser:
                 # Determine if we should leak variables (no explicit yields)
                 should_leak = not bool(then_yield_vars)
 
+                # Snapshot parent scope before then branch so else branch
+                # does not see variables leaked from then branch.
+                pre_if_parent_scope = dict(self.scope_manager.scopes[-1]) if should_leak else None
+
                 # Parse then branch (yield types captured via _current_yield_types)
                 self.scope_manager.enter_scope("if")
                 for then_stmt in stmt.body:
@@ -1261,6 +1265,10 @@ class ASTParser:
 
                 # Parse else branch if present
                 if stmt.orelse:
+                    # Restore parent scope to pre-then state so else branch
+                    # resolves variables against the original outer scope.
+                    if should_leak and pre_if_parent_scope is not None:
+                        self.scope_manager.scopes[-1] = dict(pre_if_parent_scope)
                     if_builder.else_()
                     self.scope_manager.enter_scope("else")
                     for else_stmt in stmt.orelse:

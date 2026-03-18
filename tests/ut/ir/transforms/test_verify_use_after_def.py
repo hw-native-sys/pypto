@@ -160,30 +160,6 @@ def test_invalid_loop_var_used_after_loop():
     assert any("i" in d.message for d in errors)
 
 
-def test_invalid_branch_def_not_visible_outside():
-    """A variable defined only inside an if-branch must not be visible outside."""
-    span = ir.Span.unknown()
-    cond_var = ir.Var("cond", ir.ScalarType(DataType.BOOL), span)
-    x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
-    y = ir.Var("y", ir.ScalarType(DataType.INT64), span)
-
-    # x is defined only in then_body
-    then_body = ir.AssignStmt(x, ir.ConstInt(1, DataType.INT64, span), span)
-    if_stmt = ir.IfStmt(cond_var, then_body, None, [], span)
-
-    # x is used after the if — but it may not have been defined (else branch missing)
-    use_x = ir.AssignStmt(y, x, span)
-    ret = ir.ReturnStmt([cond_var], span)
-
-    body = ir.SeqStmts([if_stmt, use_x, ret], span)
-    func = ir.Function("branch_escape", [cond_var], [ir.ScalarType(DataType.BOOL)], body, span)
-    program = ir.Program([func], "prog", span)
-
-    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
-    assert len(errors) >= 1
-    assert any("x" in d.message for d in errors)
-
-
 def test_error_code():
     """UseAfterDef errors carry error code 401."""
     span = ir.Span.unknown()
@@ -207,6 +183,31 @@ def test_use_after_def_is_structural_property():
     """UseAfterDef must be present in GetStructuralProperties()."""
     structural = passes.get_structural_properties()
     assert structural.contains(passes.IRProperty.UseAfterDef)
+
+
+def test_valid_then_only_leak_visible_after_if():
+    """Variable defined only in then-branch (no else, no return_vars) is visible after if.
+
+    UseAfterDef verifier permits this — SSAVerify is responsible for checking
+    whether the leak is valid SSA form.
+    """
+    span = ir.Span.unknown()
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    cond = ir.Var("cond", ir.ScalarType(DataType.BOOL), span)
+    x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+    y = ir.Var("y", ir.ScalarType(DataType.INT64), span)
+
+    # x is defined only in the then-branch, no else branch, no return_vars
+    def_x = ir.AssignStmt(x, a, span)
+    if_stmt = ir.IfStmt(cond, def_x, None, [], span)
+    # use x after the if — UseAfterDef should NOT flag this
+    use_x = ir.AssignStmt(y, x, span)
+    ret = ir.ReturnStmt([a], span)
+    body = ir.SeqStmts([if_stmt, use_x, ret], span)
+    func = ir.Function("then_leak_func", [a, cond], [ir.ScalarType(DataType.INT64)], body, span)
+    program = ir.Program([func], "prog", span)
+
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
 
 
 if __name__ == "__main__":

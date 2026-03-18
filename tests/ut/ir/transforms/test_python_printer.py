@@ -282,7 +282,9 @@ class TestTileViewTensorViewPrinting:
         tile_view = ir.TileView()
         tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
-        tile_type = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+        tile_type = ir.TileType(
+            [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.Vec
+        )
 
         printed = ir.python_print_type(tile_type)
 
@@ -294,7 +296,9 @@ class TestTileViewTensorViewPrinting:
         tile_view = ir.TileView()
         tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
-        tile_type = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+        tile_type = ir.TileType(
+            [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.Vec
+        )
 
         printed = "import pypto.language as pl\nresult = " + ir.python_print_type(tile_type)
         compile(printed, "<string>", "exec")  # must not raise SyntaxError
@@ -311,7 +315,9 @@ class TestTileViewTensorViewPrinting:
         tile_view = ir.TileView()
         tile_view.valid_shape = [ir.ConstInt(32, DataType.INT64, span)]
         memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 256, 0)
-        original = ir.TileType([64], DataType.FP32, memref=memref, tile_view=tile_view)
+        original = ir.TileType(
+            [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.DDR
+        )
 
         printed = ir.python_print_type(original)
         node = ast.parse(printed, mode="eval").body

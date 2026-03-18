@@ -717,6 +717,7 @@ class IRBuilder:
         dtype: DataType,
         memref: ir.MemRef | None = None,
         tile_view: ir.TileView | None = None,
+        memory_space: ir.MemorySpace | None = None,
         span: ir.Span | None = None,
     ) -> ir.TileType:
         """Create a TileType with normalized shape, optional memref and tile_view.
@@ -726,6 +727,7 @@ class IRBuilder:
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
+            memory_space: Optional memory space for the tile type; required when memref is provided
             span: Optional explicit span. If None, captured from call site.
 
         Returns:
@@ -741,7 +743,7 @@ class IRBuilder:
         """
         actual_span = span if span is not None else self._capture_call_span()
         shape_exprs = [_normalize_expr(dim, actual_span) for dim in shape]
-        return ir.TileType(shape_exprs, dtype, memref, tile_view)
+        return ir.TileType(shape_exprs, dtype, memref, tile_view, memory_space)
 
     # ========== Private Span Tracking Helpers ==========
 
