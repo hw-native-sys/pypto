@@ -43,7 +43,7 @@ with pl.auto_incore():
         x = pl.add(x, 1.0)
 ```
 
-`auto_incore` 之外的分块循环保持原样（不被拆分）。
+`auto_incore` 之外的分块循环会在 DSL parser 阶段被提前拒绝，因此该 Pass 只会看到已经位于 `auto_incore` 内的合法分块循环。
 
 ## 约束
 

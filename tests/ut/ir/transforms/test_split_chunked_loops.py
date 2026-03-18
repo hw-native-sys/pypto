@@ -321,9 +321,10 @@ class TestParserErrors:
         class Good:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
-                    s = pl.add(s, 1.0)  # noqa: PLW2901
-                    s = pl.yield_(s)  # noqa: PLW2901
+                with pl.auto_incore():
+                    for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
+                        s = pl.add(s, 1.0)  # noqa: PLW2901
+                        s = pl.yield_(s)  # noqa: PLW2901
                 return x
 
     def test_chunk_zero_error(self):
@@ -334,8 +335,9 @@ class TestParserErrors:
             class Bad:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i in pl.range(0, 10, 1, chunk=0):
-                        x = pl.add(x, 1.0)
+                    with pl.auto_incore():
+                        for i in pl.range(0, 10, 1, chunk=0):
+                            x = pl.add(x, 1.0)
                     return x
 
     def test_chunk_negative_error(self):
@@ -346,8 +348,9 @@ class TestParserErrors:
             class Bad:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i in pl.range(0, 10, 1, chunk=-1):
-                        x = pl.add(x, 1.0)
+                    with pl.auto_incore():
+                        for i in pl.range(0, 10, 1, chunk=-1):
+                            x = pl.add(x, 1.0)
                     return x
 
 
@@ -571,29 +574,6 @@ class TestNestedChunking:
             assert ref != "x_iter_3", (
                 "Found bare 'x_iter_3' in init_values; should be x_iter_3_inner or x_iter_3_rem etc."
             )
-
-
-class TestAutoIncoreGating:
-    """Tests for auto_incore scope gating behavior."""
-
-    def test_chunked_loop_without_auto_incore_not_split(self):
-        """Chunked loop outside auto_incore scope is NOT split."""
-
-        @pl.program
-        class Input:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 10, 1, chunk=5):
-                    x = pl.add(x, 1.0)
-                return x
-
-        Before = _prepare_for_split(Input)
-        before_str = python_print(Before)
-        After = passes.split_chunked_loops()(Before)
-        after_str = python_print(After)
-
-        # Should be unchanged — no splitting without auto_incore
-        assert before_str == after_str
 
 
 if __name__ == "__main__":

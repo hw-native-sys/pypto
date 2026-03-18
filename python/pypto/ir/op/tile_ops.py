@@ -1602,14 +1602,17 @@ def slice(
     tile: Expr,
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Create a slice of a tile with new shape and offset.
+    """Create a slice of a tile with static shape and optional valid shape.
 
     Args:
         tile: Input tile expression
-        shape: New shape dimensions, or a MakeTuple
+        shape: Static shape dimensions, or a MakeTuple
         offset: Offset dimensions for the slice, or a MakeTuple
+        valid_shape: Valid shape dimensions, or a MakeTuple. When omitted, shape
+            is reused as the valid shape.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1619,8 +1622,19 @@ def slice(
 
     shape_tuple = _to_make_tuple(shape, actual_span)
     offset_tuple = _to_make_tuple(offset, actual_span)
-
     args = [tile, shape_tuple, offset_tuple]
+
+    if valid_shape is not None:
+        valid_shape_tuple = _to_make_tuple(valid_shape, actual_span)
+        if len(valid_shape_tuple.elements) != len(shape_tuple.elements):
+            raise ValueError(
+                f"valid_shape and shape must have same number of dimensions, "
+                "got "
+                f"{len(valid_shape_tuple.elements)} valid_shape dims and "
+                f"{len(shape_tuple.elements)} shape dims"
+            )
+        args.append(valid_shape_tuple)
+
     return _ir_core.create_op_call("tile.slice", args, {}, actual_span)
 
 

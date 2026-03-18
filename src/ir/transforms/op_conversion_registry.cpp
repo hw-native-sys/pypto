@@ -192,7 +192,11 @@ OpConversionRegistry::OpConversionRegistry() {
 
         if (tile_type) {
           // local_tensor: created via tensor.create (now tile) → tile.slice
-          auto slice_call = op_reg.Create("tile.slice", {input, shape, offset}, span);
+          std::vector<ExprPtr> slice_args = {input, shape, offset};
+          if (args.size() == 4) {
+            slice_args.push_back(args[3]);
+          }
+          auto slice_call = op_reg.Create("tile.slice", slice_args, span);
           return ConversionResult{slice_call};
         }
 

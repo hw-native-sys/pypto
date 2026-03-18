@@ -317,12 +317,17 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def slice(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T:
+def slice(
+    input: T,
+    shape: Sequence[IntLike],
+    offset: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+) -> T:
     """Slice operation, dispatched by input type."""
     if isinstance(input, Tensor):
-        return _tensor.slice(input, shape, offset)
+        return _tensor.slice(input, shape, offset, valid_shape)
     if isinstance(input, Tile):
-        return _tile.slice(input, shape, offset)
+        return _tile.slice(input, shape, offset, valid_shape)
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
 
 

@@ -871,6 +871,40 @@ class TestTileSliceReshapeOps:
         assert result_type.dtype == DataType.FP16
         assert len(result_type.shape) == 2
 
+    def test_tile_slice_with_dynamic_valid_shape(self):
+        """tile.slice keeps static allocation shape and stores dynamic valid_shape in TileView."""
+        span = ir.Span.unknown()
+
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        valid_n = ir.Var("valid_n", ir.ScalarType(DataType.INDEX), span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, valid_n])
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.slice"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert len(result_type.shape) == 2
+        assert isinstance(result_type.shape[1], ir.ConstInt)
+        assert result_type.tile_view.valid_shape[1] is valid_n
+
+    def test_tile_slice_rejects_dynamic_shape(self):
+        """tile.slice shape must stay static so InitMemRef can allocate memory."""
+        span = ir.Span.unknown()
+
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        valid_n = ir.Var("valid_n", ir.ScalarType(DataType.INDEX), span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        with pytest.raises(Exception, match="compile-time constant"):
+            tile.slice(tile_var, [8, valid_n], [0, 0])
+
     def test_tile_reshape(self):
         """Test tile.reshape operation."""
         span = ir.Span.unknown()

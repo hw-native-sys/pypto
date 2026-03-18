@@ -1055,6 +1055,32 @@ class TestOrchestration:
         # kernel_add task submitted inside loop
         assert "pto2_rt_submit_aiv_task" in code
 
+    def test_tensor_slice_with_valid_shape(self):
+        """tensor.slice(valid_shape=...) should still emit a runtime tensor view."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class ValidShapeSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[64, 16], pl.FP32],
+                valid_rows: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                chunk: pl.Tensor[[16, 16], pl.FP32] = pl.slice(
+                    data, [16, 16], [0, 0], valid_shape=[valid_rows, 16]
+                )
+                return chunk
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(ValidShapeSliceProgram)
+        code = files["orchestration/orch_slice.cpp"]
+
+        assert "uint64_t chunk_shapes[2] = {16, 16};" in code
+        assert "uint64_t chunk_offsets[2] = {0, 0};" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()

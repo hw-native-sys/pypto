@@ -126,9 +126,10 @@ void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::strin
 
 TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.slice requires exactly 3 arguments: input tile, shape tuple, and offset tuple
-  CHECK(args.size() == 3) << "tile.slice requires exactly 3 arguments (input, shape, offset), but got "
-                          << args.size();
+  // tile.slice requires 3 arguments (input, shape, offset) with optional 4th (valid_shape)
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tile.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape]), but got "
+      << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -143,6 +144,9 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   // Validate all shape elements are ScalarType(INT64, UINT64, or INDEX)
   ValidateIndexTupleElements(shape_tuple_type, "tile.slice", "shape");
 
+  auto shape_tuple = As<MakeTuple>(args[1]);
+  CHECK(shape_tuple) << "tile.slice shape must be a MakeTuple with static compile-time dimensions";
+
   // Third argument must be TupleType (offset)
   auto offset_tuple_type = As<TupleType>(args[2]->GetType());
   CHECK(offset_tuple_type) << "tile.slice requires offset to be TupleType, but got "
@@ -150,27 +154,46 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
 
   // Validate all offset elements are ScalarType(INT64, UINT64, or INDEX)
   ValidateIndexTupleElements(offset_tuple_type, "tile.slice", "offset");
+  CHECK(offset_tuple_type->types_.size() == shape_tuple_type->types_.size())
+      << "tile.slice requires offset and shape to have the same rank, but got offset rank "
+      << offset_tuple_type->types_.size() << " and shape rank " << shape_tuple_type->types_.size();
 
-  // Extract shape dimensions
-  // If args[1] is MakeTuple, extract elements directly to preserve constants
-  // Otherwise use TupleGetItemExpr for runtime tuples
   std::vector<ExprPtr> new_shape;
-  new_shape.reserve(shape_tuple_type->types_.size());
+  new_shape.reserve(shape_tuple->elements_.size());
+  for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
+    auto static_dim = As<ConstInt>(shape_tuple->elements_[i]);
+    CHECK(static_dim) << "tile.slice shape element " << i
+                      << " must be a compile-time constant so InitMemRef can allocate storage";
+    CHECK(static_dim->value_ > 0) << "tile.slice shape element " << i << " must be positive, got "
+                                  << static_dim->value_;
+    new_shape.push_back(shape_tuple->elements_[i]);
+  }
 
-  if (auto make_tuple = As<MakeTuple>(args[1])) {
-    // MakeTuple: extract elements directly to preserve ConstInt
-    new_shape = make_tuple->elements_;
-  } else {
-    // Runtime tuple: use TupleGetItemExpr
-    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
-      new_shape.emplace_back(
-          std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
+  std::vector<ExprPtr> valid_shape = new_shape;
+  if (args.size() == 4) {
+    auto valid_shape_tuple_type = As<TupleType>(args[3]->GetType());
+    CHECK(valid_shape_tuple_type) << "tile.slice requires valid_shape to be TupleType, but got "
+                                  << args[3]->GetType()->TypeName();
+    ValidateIndexTupleElements(valid_shape_tuple_type, "tile.slice", "valid_shape");
+    CHECK(valid_shape_tuple_type->types_.size() == shape_tuple_type->types_.size())
+        << "tile.slice requires valid_shape and shape to have the same rank, but got valid_shape rank "
+        << valid_shape_tuple_type->types_.size() << " and shape rank " << shape_tuple_type->types_.size();
+
+    valid_shape.clear();
+    valid_shape.reserve(valid_shape_tuple_type->types_.size());
+    if (auto valid_shape_tuple = As<MakeTuple>(args[3])) {
+      valid_shape = valid_shape_tuple->elements_;
+    } else {
+      for (size_t i = 0; i < valid_shape_tuple_type->types_.size(); ++i) {
+        valid_shape.emplace_back(
+            std::make_shared<TupleGetItemExpr>(args[3], static_cast<int>(i), args[3]->span_));
+      }
     }
   }
 
-  // View preserves dtype but has new shape (which can have different rank than input)
+  // Slice preserves dtype but uses static shape for allocation and valid_shape for logical extent.
   TileView tile_view;
-  tile_view.valid_shape = new_shape;
+  tile_view.valid_shape = valid_shape;
 
   tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
@@ -278,10 +301,11 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.slice")
     .set_op_category("TileOp")
-    .set_description("Create a slice of a tile with new shape and offset")
+    .set_description("Create a slice of a tile with static shape and optional dynamic valid_shape")
     .add_argument("input", "Input tile (TileType)")
-    .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .add_argument("shape", "Static shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .add_argument("valid_shape", "Optional logical valid shape (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

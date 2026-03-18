@@ -211,6 +211,9 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     // Allocate sequential aligned addresses
     uint64_t current_addr = 0;
     for (const auto& old_memref : refs) {
+      CHECK(old_memref->size_ > 0)
+          << "AllocateMemoryAddr encountered zero-sized MemRef '" << old_memref->name_hint_
+          << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
       // Create new MemRef with allocated address
       auto addr_expr =
           std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());

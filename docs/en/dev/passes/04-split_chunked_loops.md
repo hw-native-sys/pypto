@@ -43,7 +43,7 @@ with pl.auto_incore():
         x = pl.add(x, 1.0)
 ```
 
-Chunked loops outside `auto_incore` are left as-is (not split).
+Chunked loops outside `auto_incore` are rejected earlier by the DSL parser, so this pass only sees valid chunked loops that are already inside `auto_incore`.
 
 ## Constraints
 

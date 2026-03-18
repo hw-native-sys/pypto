@@ -299,11 +299,10 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                         sij_batch,
                         [b * q_tile, 0],
                         [q_tile, block_size],
+                        valid_shapes=[q_tile, valid_len],
                         target_memory=pl.MemorySpace.Vec,
                     )
-
-                    sij_dyn = pl.tile.slice(s_tile, [q_tile, valid_len], [0, 0])
-                    s_tile = pl.tile.fillpad(sij_dyn)
+                    s_tile = pl.tile.fillpad(s_tile)
 
                     scaled = pl.mul(s_tile, scale_value)
                     tmp_tile = pl.create_tile(
