@@ -14,6 +14,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -21,7 +23,6 @@
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -36,278 +37,563 @@ namespace ir {
 
 namespace {
 
-class BreakContinueDetector : public IRVisitor {
- public:
-  bool has_break = false;
-  bool has_continue = false;
+// ============================================================================
+// Helpers
+// ============================================================================
 
-  void VisitStmt_(const BreakStmtPtr& /*op*/) override { has_break = true; }
-  void VisitStmt_(const ContinueStmtPtr& /*op*/) override { has_continue = true; }
-
-  // Don't recurse into nested loops — break/continue in nested loops
-  // belong to that inner loop, not the current one.
-  void VisitStmt_(const ForStmtPtr& /*op*/) override {}
-  void VisitStmt_(const WhileStmtPtr& /*op*/) override {}
-};
-
-BreakContinueDetector DetectBreakContinue(const StmtPtr& stmt) {
-  BreakContinueDetector detector;
-  detector.VisitStmt(stmt);
-  return detector;
+static ExprPtr MakeConstBool(bool value, const Span& span) {
+  return std::make_shared<ConstBool>(value, span);
 }
 
-// ============================================================================
-// Helpers: flatten / unflatten statement lists
-// ============================================================================
+static ExprPtr MakeAndExpr(const ExprPtr& left, const ExprPtr& right, const Span& span) {
+  return std::make_shared<And>(left, right, DataType::BOOL, span);
+}
 
-/// Flatten a stmt into a vector. If it's a SeqStmts, extract its children;
-/// otherwise return a single-element vector.
-std::vector<StmtPtr> FlattenToVector(const StmtPtr& stmt) {
+static StmtPtr MakeSeq(std::vector<StmtPtr> stmts, const Span& span) {
+  if (stmts.size() == 1) {
+    return stmts[0];
+  }
+  return std::make_shared<SeqStmts>(std::move(stmts), span);
+}
+
+static std::vector<StmtPtr> FlattenToVec(const StmtPtr& stmt) {
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
     return seq->stmts_;
   }
   return {stmt};
 }
 
-/// Convert a vector of statements into a single StmtPtr.
-StmtPtr MakeStmt(const std::vector<StmtPtr>& stmts, const Span& span) {
-  INTERNAL_CHECK(!stmts.empty()) << "Internal error: cannot make statement from empty list";
-  if (stmts.size() == 1) {
-    return stmts[0];
+/// Simple mutator that substitutes one Var (or IterArg) for another by unique_id.
+class VarSubstituter : public IRMutator {
+ public:
+  VarSubstituter(uint64_t old_id, ExprPtr replacement)
+      : old_id_(old_id), replacement_(std::move(replacement)) {}
+
+  ExprPtr VisitExpr_(const VarPtr& op) override { return MaybeReplace(op); }
+  ExprPtr VisitExpr_(const IterArgPtr& op) override { return MaybeReplace(op); }
+
+ private:
+  uint64_t old_id_;
+  ExprPtr replacement_;
+
+  template <typename T>
+  ExprPtr MaybeReplace(const T& op) {
+    return op->UniqueId() == old_id_ ? replacement_ : static_cast<ExprPtr>(op);
   }
-  return std::make_shared<SeqStmts>(stmts, span);
+};
+
+// ============================================================================
+// Scanner: detect break/continue without entering nested loops
+// ============================================================================
+
+struct ScanResult {
+  bool has_break = false;
+  bool has_continue = false;
+};
+
+class BreakContinueScanner : public IRVisitor {
+ public:
+  ScanResult Scan(const StmtPtr& stmt) {
+    result_ = {};
+    VisitStmt(stmt);
+    return result_;
+  }
+
+ protected:
+  void VisitStmt_(const BreakStmtPtr& /*op*/) override { result_.has_break = true; }
+  void VisitStmt_(const ContinueStmtPtr& /*op*/) override { result_.has_continue = true; }
+  void VisitStmt_(const ForStmtPtr& /*op*/) override {}
+  void VisitStmt_(const WhileStmtPtr& /*op*/) override {}
+
+ private:
+  ScanResult result_;
+};
+
+// ============================================================================
+// Backward Resolution: compute yield values at escape point
+// ============================================================================
+
+/// Given the original yield values and the statements that precede the escape
+/// point, compute what values to yield. For each yield value, if the variable
+/// is defined before the escape point, use it; otherwise use the iter_arg.
+static std::vector<ExprPtr> ResolveYieldAtEscape(const std::vector<ExprPtr>& original_yield_values,
+                                                 const std::vector<StmtPtr>& pre_escape_stmts,
+                                                 const std::vector<IterArgPtr>& iter_args) {
+  std::unordered_set<uint64_t> available_vars;
+  for (const auto& stmt : pre_escape_stmts) {
+    auto flat = FlattenToVec(stmt);
+    for (const auto& s : flat) {
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+        available_vars.insert(assign->var_->UniqueId());
+      }
+    }
+  }
+
+  for (const auto& ia : iter_args) {
+    available_vars.insert(ia->UniqueId());
+  }
+
+  std::vector<ExprPtr> resolved;
+  resolved.reserve(original_yield_values.size());
+
+  for (size_t j = 0; j < original_yield_values.size(); ++j) {
+    const auto& val = original_yield_values[j];
+    auto var = std::dynamic_pointer_cast<const Var>(val);
+    if (!var) {
+      resolved.push_back(val);
+      continue;
+    }
+
+    if (available_vars.count(var->UniqueId())) {
+      resolved.push_back(val);
+      continue;
+    }
+
+    if (j < iter_args.size()) {
+      resolved.push_back(iter_args[j]);
+    } else {
+      resolved.push_back(val);
+    }
+  }
+
+  return resolved;
 }
 
 // ============================================================================
-// Helpers: check if a statement list ends with Break or Continue
+// Body processing with phi-node approach
 // ============================================================================
 
-/// Check if the last statement in a list IS the target kind (not nested).
-bool DirectlyEndsWith(const std::vector<StmtPtr>& stmts, ObjectKind target) {
-  if (stmts.empty()) return false;
-  return stmts.back()->GetKind() == target;
+struct BodyResult {
+  std::vector<StmtPtr> stmts;
+  std::vector<ExprPtr> yield_values;
+};
+
+struct SplitAt {
+  std::vector<StmtPtr> pre;
+  std::vector<StmtPtr> post;
+
+  SplitAt(const std::vector<StmtPtr>& stmts, size_t i)
+      : pre(stmts.begin(), stmts.begin() + static_cast<ptrdiff_t>(i)),
+        post(stmts.begin() + static_cast<ptrdiff_t>(i) + 1, stmts.end()) {}
+};
+
+static std::shared_ptr<const YieldStmt> FindTrailingYield(const StmtPtr& body) {
+  if (auto yield = std::dynamic_pointer_cast<const YieldStmt>(body)) {
+    return yield;
+  }
+  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(body)) {
+    if (!seq->stmts_.empty()) {
+      return FindTrailingYield(seq->stmts_.back());
+    }
+  }
+  return nullptr;
 }
 
-/// Check if a branch (as a stmt) ends with the target.
-/// Flattens SeqStmts to check the last element.
-bool BranchEndsWith(const StmtPtr& branch, ObjectKind target) {
-  auto stmts = FlattenToVector(branch);
-  return DirectlyEndsWith(stmts, target);
+static std::vector<StmtPtr> RemoveTrailingYieldToVec(const StmtPtr& body) {
+  auto flat = FlattenToVec(body);
+  if (!flat.empty()) {
+    if (std::dynamic_pointer_cast<const YieldStmt>(flat.back())) {
+      flat.pop_back();
+    }
+  }
+  return flat;
 }
 
-/// Strip trailing target from a stmt list. Returns the list without the last element.
-std::vector<StmtPtr> StripTrailingTarget(const std::vector<StmtPtr>& stmts) {
-  INTERNAL_CHECK(!stmts.empty()) << "Internal error: cannot strip from empty list";
-  return {stmts.begin(), stmts.end() - 1};
+struct DecomposedBody {
+  std::vector<StmtPtr> stmts;
+  std::vector<ExprPtr> yield_values;
+  bool had_yield;
+};
+
+static DecomposedBody DecomposeBody(const StmtPtr& body) {
+  auto trailing = FindTrailingYield(body);
+  auto stmts = RemoveTrailingYieldToVec(body);
+  auto values = trailing ? trailing->value_ : std::vector<ExprPtr>{};
+  return {std::move(stmts), std::move(values), trailing != nullptr};
+}
+
+static StmtPtr BuildFinalBody(BodyResult result, bool had_yield, const Span& span) {
+  if (!result.yield_values.empty() || had_yield) {
+    result.stmts.push_back(std::make_shared<YieldStmt>(std::move(result.yield_values), span));
+  }
+  return MakeSeq(std::move(result.stmts), span);
+}
+
+/// Check if a branch ends directly with the given target kind (break or continue).
+static bool BranchEndsWith(const StmtPtr& branch, ObjectKind target) {
+  auto flat = FlattenToVec(branch);
+  return !flat.empty() && flat.back()->GetKind() == target;
+}
+
+static std::vector<VarPtr> CreatePhiVars(const std::vector<ExprPtr>& values, int& counter, const Span& span) {
+  std::vector<VarPtr> phis;
+  phis.reserve(values.size());
+  for (const auto& val : values) {
+    auto type = val->GetType();
+    auto name = "__phi_" + std::to_string(counter++);
+    phis.push_back(std::make_shared<Var>(name, type, span));
+  }
+  return phis;
+}
+
+static std::vector<ExprPtr> VarsToExprs(const std::vector<VarPtr>& vars) {
+  std::vector<ExprPtr> exprs;
+  exprs.reserve(vars.size());
+  for (const auto& v : vars) {
+    exprs.push_back(v);
+  }
+  return exprs;
+}
+
+/// Collect the statements from the "normal" (non-escape) branch of an IfStmt,
+/// followed by the statements after the IfStmt.
+static std::vector<StmtPtr> CollectNormalPath(const std::shared_ptr<const IfStmt>& if_stmt,
+                                              bool escape_in_then, const std::vector<StmtPtr>& post) {
+  std::vector<StmtPtr> normal_stmts;
+  if (escape_in_then) {
+    if (if_stmt->else_body_.has_value()) {
+      auto flat = FlattenToVec(*if_stmt->else_body_);
+      normal_stmts.insert(normal_stmts.end(), flat.begin(), flat.end());
+    }
+  } else {
+    auto flat = FlattenToVec(if_stmt->then_body_);
+    normal_stmts.insert(normal_stmts.end(), flat.begin(), flat.end());
+  }
+  normal_stmts.insert(normal_stmts.end(), post.begin(), post.end());
+  return normal_stmts;
+}
+
+/// Build an IfStmt that routes the escape branch to yield escape_values,
+/// and the normal branch to yield normal_result values.
+/// escape_prefix_stmts are prepended to the escape branch (e.g., AssignStmt for break flag).
+static BodyResult BuildEscapeIfStmt(const std::shared_ptr<const IfStmt>& if_stmt, bool escape_in_then,
+                                    const std::vector<StmtPtr>& pre,
+                                    const std::vector<StmtPtr>& escape_prefix_stmts,
+                                    const std::vector<ExprPtr>& escape_values, BodyResult normal_result,
+                                    int& name_counter, const Span& span) {
+  auto phi_vars = CreatePhiVars(escape_values, name_counter, span);
+  auto phi_exprs = VarsToExprs(phi_vars);
+
+  // Build escape branch: prefix stmts + yield
+  std::vector<StmtPtr> escape_parts(escape_prefix_stmts.begin(), escape_prefix_stmts.end());
+  escape_parts.push_back(std::make_shared<YieldStmt>(escape_values, if_stmt->span_));
+  auto escape_body = MakeSeq(std::move(escape_parts), if_stmt->span_);
+
+  // Build normal branch: stmts + yield
+  std::vector<StmtPtr> normal_parts(normal_result.stmts.begin(), normal_result.stmts.end());
+  normal_parts.push_back(std::make_shared<YieldStmt>(std::move(normal_result.yield_values), if_stmt->span_));
+  auto normal_body = MakeSeq(std::move(normal_parts), if_stmt->span_);
+
+  StmtPtr then_body = escape_in_then ? escape_body : normal_body;
+  StmtPtr else_body = escape_in_then ? normal_body : escape_body;
+
+  auto new_if = std::make_shared<IfStmt>(if_stmt->condition_, then_body, std::make_optional(else_body),
+                                         phi_vars, if_stmt->span_);
+
+  std::vector<StmtPtr> result(pre.begin(), pre.end());
+  result.push_back(new_if);
+  return BodyResult{std::move(result), std::move(phi_exprs)};
 }
 
 // ============================================================================
-// Core: EliminateTarget
+// ProcessBodyForContinue
 // ============================================================================
 
-/// Append early-exit statements: set break flag (if break) and yield (if iter_args).
-void AppendEarlyExit(std::vector<StmtPtr>& stmts, ObjectKind target, const VarPtr& break_var,
-                     const std::vector<ExprPtr>& yield_vars, const Span& span) {
-  if (target == ObjectKind::BreakStmt) {
-    stmts.push_back(std::make_shared<AssignStmt>(break_var, std::make_shared<ConstBool>(true, span), span));
-  }
-  if (!yield_vars.empty()) {
-    stmts.push_back(std::make_shared<YieldStmt>(yield_vars, span));
-  }
-}
-
-/// Convert a statement vector to a single StmtPtr, using an empty SeqStmts for empty lists.
-StmtPtr MakeBranchBody(const std::vector<StmtPtr>& stmts, const Span& span) {
-  if (stmts.empty()) {
-    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
-  }
-  return MakeStmt(stmts, span);
-}
-
-/// Eliminate all occurrences of a target (BreakStmt or ContinueStmt) from a
-/// statement list by restructuring into if-else.
-///
-/// @param stmts      Flat list of statements (loop body)
-/// @param target     ObjectKind::BreakStmt or ObjectKind::ContinueStmt
-/// @param break_var  For Break: the __break flag variable. nullptr for Continue.
-/// @param yield_vars For loops with iter_args: expressions to yield on early exit.
-///                   Empty if the loop has no iter_args.
-/// @param span       Span to use for synthesized nodes
-std::vector<StmtPtr> EliminateTarget(const std::vector<StmtPtr>& stmts, ObjectKind target,
-                                     const VarPtr& break_var, const std::vector<ExprPtr>& yield_vars,
-                                     const Span& span) {
-  std::vector<StmtPtr> result;
+static BodyResult ProcessBodyForContinue(const std::vector<StmtPtr>& stmts,
+                                         const std::vector<IterArgPtr>& iter_args,
+                                         const std::vector<ExprPtr>& original_yield_values, int& name_counter,
+                                         const Span& span) {
+  BreakContinueScanner scanner;
 
   for (size_t i = 0; i < stmts.size(); ++i) {
-    const auto& s = stmts[i];
-    std::vector<StmtPtr> remaining(stmts.begin() + static_cast<int64_t>(i) + 1, stmts.end());
+    const auto& stmt = stmts[i];
 
-    // CASE 1: Statement IS the target directly
-    if (s->GetKind() == target) {
-      AppendEarlyExit(result, target, break_var, yield_vars, span);
-      return result;
+    // Case 1: bare ContinueStmt
+    if (std::dynamic_pointer_cast<const ContinueStmt>(stmt)) {
+      std::vector<StmtPtr> pre(stmts.begin(), stmts.begin() + static_cast<ptrdiff_t>(i));
+      auto continue_values = ResolveYieldAtEscape(original_yield_values, pre, iter_args);
+      return BodyResult{std::move(pre), std::move(continue_values)};
     }
 
-    // CASE 2-4: Statement is IfStmt with target in a branch
-    auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(s);
-    if (if_stmt) {
-      bool then_ends = BranchEndsWith(if_stmt->then_body_, target);
-      bool else_ends = if_stmt->else_body_.has_value() && BranchEndsWith(*if_stmt->else_body_, target);
+    // Case 2: IfStmt containing continue
+    auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt);
+    if (!if_stmt) continue;
 
-      // CASE 4: Both branches end with target
-      if (then_ends && else_ends) {
-        auto then_stmts = StripTrailingTarget(FlattenToVector(if_stmt->then_body_));
-        auto else_stmts = StripTrailingTarget(FlattenToVector(*if_stmt->else_body_));
+    auto then_scan = scanner.Scan(if_stmt->then_body_);
+    bool else_has_continue = false;
+    if (if_stmt->else_body_.has_value()) {
+      else_has_continue = scanner.Scan(*if_stmt->else_body_).has_continue;
+    }
 
-        AppendEarlyExit(then_stmts, target, break_var, yield_vars, span);
-        AppendEarlyExit(else_stmts, target, break_var, yield_vars, span);
+    if (!then_scan.has_continue && !else_has_continue) continue;
 
-        result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBranchBody(then_stmts, span),
-                                                  std::optional<StmtPtr>(MakeBranchBody(else_stmts, span)),
-                                                  if_stmt->return_vars_, span));
-        // Remaining is dead code (both branches exit)
-        return result;
+    bool then_ends = BranchEndsWith(if_stmt->then_body_, ObjectKind::ContinueStmt);
+    bool else_ends =
+        if_stmt->else_body_.has_value() && BranchEndsWith(*if_stmt->else_body_, ObjectKind::ContinueStmt);
+
+    SplitAt split(stmts, i);
+
+    // CASE A: continue at end of a branch → use CollectNormalPath
+    if (then_ends || else_ends) {
+      bool escape_in_then = then_ends;
+
+      auto continue_values = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
+      auto normal_stmts = CollectNormalPath(if_stmt, escape_in_then, split.post);
+      auto normal_result =
+          ProcessBodyForContinue(normal_stmts, iter_args, original_yield_values, name_counter, span);
+
+      if (original_yield_values.empty()) {
+        auto empty_body = std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, if_stmt->span_);
+        auto filled_body = MakeSeq(std::move(normal_result.stmts), if_stmt->span_);
+        StmtPtr then_body = escape_in_then ? static_cast<StmtPtr>(empty_body) : filled_body;
+        StmtPtr else_body = escape_in_then ? filled_body : static_cast<StmtPtr>(empty_body);
+        auto new_if = std::make_shared<IfStmt>(if_stmt->condition_, then_body, std::make_optional(else_body),
+                                               std::vector<VarPtr>{}, if_stmt->span_);
+        split.pre.push_back(new_if);
+        return BodyResult{std::move(split.pre), {}};
       }
 
-      // CASE 2: then_body ends with target
-      if (then_ends) {
-        auto then_stmts = StripTrailingTarget(FlattenToVector(if_stmt->then_body_));
-        AppendEarlyExit(then_stmts, target, break_var, yield_vars, span);
+      return BuildEscapeIfStmt(if_stmt, escape_in_then, split.pre, {}, continue_values,
+                               std::move(normal_result), name_counter, span);
+    }
 
-        // Absorb remaining into else branch
-        std::vector<StmtPtr> else_content;
-        if (if_stmt->else_body_.has_value()) {
-          auto existing_else = FlattenToVector(*if_stmt->else_body_);
-          else_content.insert(else_content.end(), existing_else.begin(), existing_else.end());
+    // CASE B: continue nested inside a branch (not at end)
+    {
+      auto process_branch = [&](const StmtPtr& branch, bool has_target) -> BodyResult {
+        auto decomposed = DecomposeBody(branch);
+        auto& vals = decomposed.had_yield ? decomposed.yield_values : original_yield_values;
+        if (!has_target) return {std::move(decomposed.stmts), vals};
+        return ProcessBodyForContinue(decomposed.stmts, iter_args, vals, name_counter, span);
+      };
+
+      auto then_result = process_branch(if_stmt->then_body_, then_scan.has_continue);
+
+      BodyResult else_result;
+      if (if_stmt->else_body_.has_value()) {
+        else_result = process_branch(*if_stmt->else_body_, else_has_continue);
+      } else {
+        else_result = {{}, original_yield_values};
+      }
+
+      // Rebuild IfStmt with phi nodes
+      if (!then_result.yield_values.empty() || !else_result.yield_values.empty()) {
+        auto& ref_values =
+            then_result.yield_values.empty() ? else_result.yield_values : then_result.yield_values;
+        auto phi_vars = CreatePhiVars(ref_values, name_counter, span);
+        auto phi_exprs = VarsToExprs(phi_vars);
+
+        then_result.stmts.push_back(std::make_shared<YieldStmt>(std::move(then_result.yield_values), span));
+        auto new_then = MakeSeq(std::move(then_result.stmts), span);
+
+        else_result.stmts.push_back(std::make_shared<YieldStmt>(std::move(else_result.yield_values), span));
+        auto new_else = MakeSeq(std::move(else_result.stmts), span);
+
+        auto new_if = std::make_shared<IfStmt>(if_stmt->condition_, new_then, std::make_optional(new_else),
+                                               phi_vars, if_stmt->span_);
+        split.pre.push_back(new_if);
+
+        if (!split.post.empty()) {
+          auto post_result = ProcessBodyForContinue(split.post, iter_args, phi_exprs, name_counter, span);
+          split.pre.insert(split.pre.end(), post_result.stmts.begin(), post_result.stmts.end());
+          return BodyResult{std::move(split.pre), std::move(post_result.yield_values)};
         }
-        else_content.insert(else_content.end(), remaining.begin(), remaining.end());
-
-        // Recursively eliminate target in the new else content
-        auto new_else_stmts = EliminateTarget(else_content, target, break_var, yield_vars, span);
-
-        result.push_back(std::make_shared<IfStmt>(
-            if_stmt->condition_, MakeBranchBody(then_stmts, span),
-            std::optional<StmtPtr>(MakeBranchBody(new_else_stmts, span)), if_stmt->return_vars_, span));
-        return result;
+        return BodyResult{std::move(split.pre), std::move(phi_exprs)};
       }
 
-      // CASE 3: else_body ends with target
-      if (else_ends) {
-        auto else_stmts = StripTrailingTarget(FlattenToVector(*if_stmt->else_body_));
-        AppendEarlyExit(else_stmts, target, break_var, yield_vars, span);
-
-        // Absorb remaining into then branch
-        auto then_stmts = FlattenToVector(if_stmt->then_body_);
-        then_stmts.insert(then_stmts.end(), remaining.begin(), remaining.end());
-
-        // Recursively eliminate target in the new then content
-        auto new_then_stmts = EliminateTarget(then_stmts, target, break_var, yield_vars, span);
-
-        result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBranchBody(new_then_stmts, span),
-                                                  std::optional<StmtPtr>(MakeBranchBody(else_stmts, span)),
-                                                  if_stmt->return_vars_, span));
-        return result;
+      // No yield values — just restructure
+      auto new_then = MakeSeq(std::move(then_result.stmts), span);
+      std::optional<StmtPtr> new_else;
+      if (if_stmt->else_body_.has_value()) {
+        new_else = MakeSeq(std::move(else_result.stmts), span);
       }
+      auto new_if = std::make_shared<IfStmt>(if_stmt->condition_, new_then, new_else, std::vector<VarPtr>{},
+                                             if_stmt->span_);
+      split.pre.push_back(new_if);
+      if (!split.post.empty()) {
+        auto post_result =
+            ProcessBodyForContinue(split.post, iter_args, original_yield_values, name_counter, span);
+        split.pre.insert(split.pre.end(), post_result.stmts.begin(), post_result.stmts.end());
+        return BodyResult{std::move(split.pre), std::move(post_result.yield_values)};
+      }
+      return BodyResult{std::move(split.pre), original_yield_values};
     }
-
-    // DEFAULT: Statement doesn't contain target at top level → keep it
-    result.push_back(s);
   }
 
-  return result;
+  return BodyResult{std::vector<StmtPtr>(stmts.begin(), stmts.end()), original_yield_values};
 }
 
 // ============================================================================
-// Mutator: CtrlFlowTransformMutator
+// ProcessBodyForBreak
+// ============================================================================
+
+static BodyResult ProcessBodyForBreak(const std::vector<StmtPtr>& stmts, const VarPtr& break_var,
+                                      const std::vector<IterArgPtr>& iter_args,
+                                      const std::vector<ExprPtr>& original_yield_values, int& name_counter,
+                                      const Span& span) {
+  BreakContinueScanner scanner;
+
+  // Helper: build the break escape values (current iter_arg values at break point)
+  auto build_break_values = [&](const std::vector<StmtPtr>& pre_stmts) -> std::vector<ExprPtr> {
+    auto resolved = ResolveYieldAtEscape(original_yield_values, pre_stmts, iter_args);
+    // For break: non-Var expressions (e.g. i+1) are "next-iteration" computations
+    // that should not execute at break. Fall back to current iter_arg value.
+    for (size_t j = 0; j < resolved.size() && j < iter_args.size(); ++j) {
+      if (!std::dynamic_pointer_cast<const Var>(resolved[j])) {
+        resolved[j] = iter_args[j];
+      }
+    }
+    return resolved;
+  };
+
+  // Helper: build break escape prefix stmts (AssignStmt setting __break = true)
+  auto break_prefix = [&]() -> std::vector<StmtPtr> {
+    return {std::make_shared<AssignStmt>(break_var, MakeConstBool(true, span), span)};
+  };
+
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    const auto& stmt = stmts[i];
+
+    // Case 1: bare BreakStmt
+    if (std::dynamic_pointer_cast<const BreakStmt>(stmt)) {
+      std::vector<StmtPtr> pre(stmts.begin(), stmts.begin() + static_cast<ptrdiff_t>(i));
+      pre.push_back(std::make_shared<AssignStmt>(break_var, MakeConstBool(true, span), span));
+      auto break_values = build_break_values(pre);
+      return BodyResult{std::move(pre), std::move(break_values)};
+    }
+
+    // Case 2: IfStmt containing break
+    auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt);
+    if (!if_stmt) continue;
+
+    auto then_scan = scanner.Scan(if_stmt->then_body_);
+    bool else_has_break = false;
+    if (if_stmt->else_body_.has_value()) {
+      else_has_break = scanner.Scan(*if_stmt->else_body_).has_break;
+    }
+
+    if (!then_scan.has_break && !else_has_break) continue;
+
+    bool then_ends = BranchEndsWith(if_stmt->then_body_, ObjectKind::BreakStmt);
+    bool else_ends =
+        if_stmt->else_body_.has_value() && BranchEndsWith(*if_stmt->else_body_, ObjectKind::BreakStmt);
+
+    // CASE A: break at end of a branch → use CollectNormalPath
+    if (then_ends || else_ends) {
+      bool escape_in_then = then_ends;
+      SplitAt split(stmts, i);
+
+      auto break_values = build_break_values(split.pre);
+      auto normal_stmts = CollectNormalPath(if_stmt, escape_in_then, split.post);
+      auto normal_result =
+          ProcessBodyForBreak(normal_stmts, break_var, iter_args, original_yield_values, name_counter, span);
+
+      return BuildEscapeIfStmt(if_stmt, escape_in_then, split.pre, break_prefix(), break_values,
+                               std::move(normal_result), name_counter, span);
+    }
+
+    // CASE B: break nested inside a branch (not at end)
+    {
+      SplitAt split(stmts, i);
+
+      auto process_branch = [&](const StmtPtr& branch, bool has_target) -> BodyResult {
+        auto decomposed = DecomposeBody(branch);
+        auto& vals = decomposed.had_yield ? decomposed.yield_values : original_yield_values;
+        if (!has_target) return {std::move(decomposed.stmts), vals};
+        return ProcessBodyForBreak(decomposed.stmts, break_var, iter_args, vals, name_counter, span);
+      };
+
+      auto then_result = process_branch(if_stmt->then_body_, then_scan.has_break);
+
+      BodyResult else_result;
+      if (if_stmt->else_body_.has_value()) {
+        else_result = process_branch(*if_stmt->else_body_, else_has_break);
+      } else {
+        else_result = {{}, original_yield_values};
+      }
+
+      // Rebuild IfStmt with phi nodes
+      auto& ref_values =
+          then_result.yield_values.empty() ? else_result.yield_values : then_result.yield_values;
+      auto phi_vars = CreatePhiVars(ref_values, name_counter, span);
+      auto phi_exprs = VarsToExprs(phi_vars);
+
+      if (!then_result.yield_values.empty()) {
+        then_result.stmts.push_back(std::make_shared<YieldStmt>(std::move(then_result.yield_values), span));
+      }
+      auto new_then = MakeSeq(std::move(then_result.stmts), span);
+
+      if (!else_result.yield_values.empty()) {
+        else_result.stmts.push_back(std::make_shared<YieldStmt>(std::move(else_result.yield_values), span));
+      }
+      auto new_else = MakeSeq(std::move(else_result.stmts), span);
+
+      auto new_if = std::make_shared<IfStmt>(if_stmt->condition_, new_then, std::make_optional(new_else),
+                                             phi_vars, if_stmt->span_);
+
+      split.pre.push_back(new_if);
+
+      // Guard remaining stmts with if (!__break)
+      if (!split.post.empty()) {
+        auto post_result =
+            ProcessBodyForBreak(split.post, break_var, iter_args, phi_exprs, name_counter, span);
+        post_result.stmts.push_back(std::make_shared<YieldStmt>(std::move(post_result.yield_values), span));
+        auto guarded_body = MakeSeq(std::move(post_result.stmts), span);
+
+        auto guard_else =
+            std::make_shared<YieldStmt>(std::vector<ExprPtr>(phi_exprs.begin(), phi_exprs.end()), span);
+
+        auto guard_phi_vars = CreatePhiVars(phi_exprs, name_counter, span);
+        auto guard_phi_exprs = VarsToExprs(guard_phi_vars);
+
+        auto guard_if =
+            std::make_shared<IfStmt>(MakeNot(break_var, span), guarded_body,
+                                     std::make_optional<StmtPtr>(guard_else), guard_phi_vars, span);
+        split.pre.push_back(guard_if);
+        return BodyResult{std::move(split.pre), std::move(guard_phi_exprs)};
+      }
+
+      return BodyResult{std::move(split.pre), std::move(phi_exprs)};
+    }
+  }
+
+  return BodyResult{std::vector<StmtPtr>(stmts.begin(), stmts.end()), original_yield_values};
+}
+
+// ============================================================================
+// Main Mutator
 // ============================================================================
 
 class CtrlFlowTransformMutator : public IRMutator {
  public:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // First recurse into body to handle nested loops
     auto new_body = VisitStmt(op->body_);
 
     // Only process sequential for loops
     if (op->kind_ != ForKind::Sequential) {
-      if (new_body.get() != op->body_.get()) {
-        return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                         new_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                         op->chunk_policy_, op->loop_origin_);
-      }
-      return op;
+      return RebuildForIfChanged(op, new_body);
     }
 
-    auto detected = DetectBreakContinue(new_body);
+    BreakContinueScanner scanner;
+    auto scan = scanner.Scan(new_body);
 
-    if (!detected.has_break && !detected.has_continue) {
-      if (new_body.get() != op->body_.get()) {
-        return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                         new_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                         op->chunk_policy_, op->loop_origin_);
-      }
-      return op;
+    if (!scan.has_break && !scan.has_continue) {
+      return RebuildForIfChanged(op, new_body);
     }
 
-    const Span& span = op->span_;
-    auto stmts = FlattenToVector(new_body);
-
-    // Collect current iter_arg exprs for yield insertion on early exit
-    std::vector<ExprPtr> yield_vars(op->iter_args_.begin(), op->iter_args_.end());
-
-    // Phase 1: Eliminate continue
-    if (detected.has_continue) {
-      stmts = EliminateTarget(stmts, ObjectKind::ContinueStmt, nullptr, yield_vars, span);
+    if (scan.has_break) {
+      return LowerForWithBreak(op, new_body, scan.has_continue);
     }
 
-    // Phase 2: Eliminate break (convert ForStmt to WhileStmt)
-    if (detected.has_break) {
-      auto break_var = MakeBreakVar(span);
-
-      stmts = EliminateTarget(stmts, ObjectKind::BreakStmt, break_var, yield_vars, span);
-
-      // Append iter_adv guarded by if (!__break)
-      auto not_break = std::make_shared<Not>(break_var, DataType::BOOL, span);
-      auto loop_var_type = As<ScalarType>(op->loop_var_->GetType());
-      auto add_dtype = loop_var_type ? loop_var_type->dtype_ : DataType::INDEX;
-      auto iter_adv = std::make_shared<AssignStmt>(
-          op->loop_var_, std::make_shared<Add>(op->loop_var_, op->step_, add_dtype, span), span);
-      auto guarded_adv =
-          std::make_shared<IfStmt>(not_break, iter_adv, std::nullopt, std::vector<VarPtr>{}, span);
-      stmts.push_back(guarded_adv);
-
-      StmtPtr while_body = MakeStmt(stmts, span);
-
-      // While condition: Lt(loop_var, stop) && !__break
-      auto loop_cond = std::make_shared<Lt>(op->loop_var_, op->stop_, DataType::BOOL, span);
-      auto while_cond = std::make_shared<And>(
-          loop_cond, std::make_shared<Not>(break_var, DataType::BOOL, span), DataType::BOOL, span);
-
-      auto while_stmt =
-          std::make_shared<WhileStmt>(while_cond, op->iter_args_, while_body, op->return_vars_, span);
-
-      // Build init statements: loop_var = start, __break = false
-      std::vector<StmtPtr> init_stmts;
-      init_stmts.push_back(std::make_shared<AssignStmt>(op->loop_var_, op->start_, span));
-      init_stmts.push_back(
-          std::make_shared<AssignStmt>(break_var, std::make_shared<ConstBool>(false, span), span));
-      init_stmts.push_back(while_stmt);
-
-      return std::make_shared<SeqStmts>(init_stmts, span);
-    }
-
-    // Continue-only: return modified ForStmt with transformed body
-    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     MakeStmt(stmts, span), op->return_vars_, span, op->kind_,
-                                     op->chunk_size_, op->chunk_policy_, op->loop_origin_);
+    return LowerForWithContinue(op, new_body);
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    // First recurse into body to handle nested loops
     auto new_body = VisitStmt(op->body_);
 
-    auto detected = DetectBreakContinue(new_body);
+    BreakContinueScanner scanner;
+    auto scan = scanner.Scan(new_body);
 
-    if (!detected.has_break && !detected.has_continue) {
+    if (!scan.has_break && !scan.has_continue) {
       if (new_body.get() != op->body_.get()) {
         return std::make_shared<WhileStmt>(op->condition_, op->iter_args_, new_body, op->return_vars_,
                                            op->span_);
@@ -315,58 +601,140 @@ class CtrlFlowTransformMutator : public IRMutator {
       return op;
     }
 
-    const Span& span = op->span_;
-    auto stmts = FlattenToVector(new_body);
-
-    // Collect current iter_arg exprs for yield insertion
-    std::vector<ExprPtr> yield_vars(op->iter_args_.begin(), op->iter_args_.end());
-
-    // Phase 1: Eliminate continue
-    if (detected.has_continue) {
-      stmts = EliminateTarget(stmts, ObjectKind::ContinueStmt, nullptr, yield_vars, span);
+    if (scan.has_break) {
+      return LowerWhileWithBreak(op, new_body, scan.has_continue);
     }
 
-    // Phase 2: Eliminate break
-    if (detected.has_break) {
-      auto break_var = MakeBreakVar(span);
-
-      stmts = EliminateTarget(stmts, ObjectKind::BreakStmt, break_var, yield_vars, span);
-
-      StmtPtr while_body = MakeStmt(stmts, span);
-
-      // Augment while condition: original_cond && !__break
-      auto while_cond = std::make_shared<And>(
-          op->condition_, std::make_shared<Not>(break_var, DataType::BOOL, span), DataType::BOOL, span);
-
-      // Build: __break = false; while (cond && !__break) { body }
-      std::vector<StmtPtr> init_stmts;
-      init_stmts.push_back(
-          std::make_shared<AssignStmt>(break_var, std::make_shared<ConstBool>(false, span), span));
-      init_stmts.push_back(
-          std::make_shared<WhileStmt>(while_cond, op->iter_args_, while_body, op->return_vars_, span));
-      return std::make_shared<SeqStmts>(init_stmts, span);
-    }
-
-    // Continue-only: return modified WhileStmt
-    return std::make_shared<WhileStmt>(op->condition_, op->iter_args_, MakeStmt(stmts, span),
-                                       op->return_vars_, span);
+    return LowerWhileWithContinue(op, new_body);
   }
 
  private:
-  int break_var_counter_ = 0;
+  int name_counter_ = 0;
 
-  VarPtr MakeBreakVar(const Span& span) {
-    std::string name = "__break_" + std::to_string(break_var_counter_++);
-    return std::make_shared<Var>(name, std::make_shared<ScalarType>(DataType::BOOL), span);
+  std::string FreshName(const std::string& prefix) { return prefix + "_" + std::to_string(name_counter_++); }
+
+  static StmtPtr RebuildForIfChanged(const ForStmtPtr& op, const StmtPtr& new_body) {
+    if (new_body.get() == op->body_.get()) {
+      return op;
+    }
+    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
+                                     new_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
+                                     op->chunk_policy_, op->loop_origin_);
+  }
+
+  BodyResult ProcessBodyForBreakAndContinue(const DecomposedBody& decomposed,
+                                            const std::vector<IterArgPtr>& iter_args, const VarPtr& break_var,
+                                            bool also_has_continue, const Span& span) {
+    if (also_has_continue) {
+      auto continue_result =
+          ProcessBodyForContinue(decomposed.stmts, iter_args, decomposed.yield_values, name_counter_, span);
+      return ProcessBodyForBreak(continue_result.stmts, break_var, iter_args, continue_result.yield_values,
+                                 name_counter_, span);
+    }
+    return ProcessBodyForBreak(decomposed.stmts, break_var, iter_args, decomposed.yield_values, name_counter_,
+                               span);
+  }
+
+  // --------------------------------------------------------------------------
+  // ForStmt with only continue
+  // --------------------------------------------------------------------------
+  StmtPtr LowerForWithContinue(const ForStmtPtr& op, const StmtPtr& body) {
+    auto decomposed = DecomposeBody(body);
+    auto result = ProcessBodyForContinue(decomposed.stmts, op->iter_args_, decomposed.yield_values,
+                                         name_counter_, op->span_);
+    auto final_body = BuildFinalBody(std::move(result), decomposed.had_yield, op->span_);
+
+    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
+                                     final_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
+                                     op->chunk_policy_, op->loop_origin_);
+  }
+
+  // --------------------------------------------------------------------------
+  // ForStmt with break (and possibly continue)
+  // --------------------------------------------------------------------------
+  StmtPtr LowerForWithBreak(const ForStmtPtr& op, const StmtPtr& body, bool also_has_continue) {
+    Span span = op->span_;
+
+    auto bool_type = std::make_shared<ScalarType>(DataType::BOOL);
+    auto break_var = std::make_shared<Var>(FreshName("__break"), bool_type, span);
+
+    auto loop_var_type = op->loop_var_->GetType();
+    auto loop_var = std::make_shared<Var>(FreshName("__lv"), loop_var_type, span);
+
+    VarSubstituter sub(op->loop_var_->UniqueId(), loop_var);
+    auto substituted_body = sub.VisitStmt(body);
+
+    ExprPtr while_cond = MakeAndExpr(MakeLt(loop_var, op->stop_, span), MakeNot(break_var, span), span);
+
+    auto decomposed = DecomposeBody(substituted_body);
+    auto processed =
+        ProcessBodyForBreakAndContinue(decomposed, op->iter_args_, break_var, also_has_continue, span);
+
+    // Build final body with loop advancement guarded by if (!__break)
+    if (!processed.yield_values.empty() || decomposed.had_yield) {
+      processed.stmts.push_back(std::make_shared<YieldStmt>(std::move(processed.yield_values), span));
+    }
+
+    auto iter_adv = std::make_shared<AssignStmt>(loop_var, MakeAdd(loop_var, op->step_, span), span);
+    auto guarded_adv = std::make_shared<IfStmt>(MakeNot(break_var, span), iter_adv, std::nullopt,
+                                                std::vector<VarPtr>{}, span);
+    processed.stmts.push_back(guarded_adv);
+
+    auto final_body = MakeSeq(std::move(processed.stmts), span);
+
+    std::vector<StmtPtr> init_stmts;
+    init_stmts.push_back(std::make_shared<AssignStmt>(loop_var, op->start_, span));
+    init_stmts.push_back(std::make_shared<AssignStmt>(break_var, MakeConstBool(false, span), span));
+    init_stmts.push_back(
+        std::make_shared<WhileStmt>(while_cond, op->iter_args_, final_body, op->return_vars_, span));
+
+    return std::make_shared<SeqStmts>(init_stmts, span);
+  }
+
+  // --------------------------------------------------------------------------
+  // WhileStmt with only continue
+  // --------------------------------------------------------------------------
+  StmtPtr LowerWhileWithContinue(const WhileStmtPtr& op, const StmtPtr& body) {
+    auto decomposed = DecomposeBody(body);
+    auto result = ProcessBodyForContinue(decomposed.stmts, op->iter_args_, decomposed.yield_values,
+                                         name_counter_, op->span_);
+    auto final_body = BuildFinalBody(std::move(result), decomposed.had_yield, op->span_);
+
+    return std::make_shared<WhileStmt>(op->condition_, op->iter_args_, final_body, op->return_vars_,
+                                       op->span_);
+  }
+
+  // --------------------------------------------------------------------------
+  // WhileStmt with break (and possibly continue)
+  // --------------------------------------------------------------------------
+  StmtPtr LowerWhileWithBreak(const WhileStmtPtr& op, const StmtPtr& body, bool also_has_continue) {
+    Span span = op->span_;
+
+    auto bool_type = std::make_shared<ScalarType>(DataType::BOOL);
+    auto break_var = std::make_shared<Var>(FreshName("__break"), bool_type, span);
+
+    ExprPtr new_condition = MakeAndExpr(op->condition_, MakeNot(break_var, span), span);
+
+    auto decomposed = DecomposeBody(body);
+    auto processed =
+        ProcessBodyForBreakAndContinue(decomposed, op->iter_args_, break_var, also_has_continue, span);
+    auto final_body = BuildFinalBody(std::move(processed), decomposed.had_yield, span);
+
+    std::vector<StmtPtr> init_stmts;
+    init_stmts.push_back(std::make_shared<AssignStmt>(break_var, MakeConstBool(false, span), span));
+    init_stmts.push_back(
+        std::make_shared<WhileStmt>(new_condition, op->iter_args_, final_body, op->return_vars_, span));
+    return std::make_shared<SeqStmts>(init_stmts, span);
   }
 };
 
-/// Transform a function by eliminating break/continue.
+// ============================================================================
+// Pass entry point
+// ============================================================================
+
 FunctionPtr TransformCtrlFlow(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "CtrlFlowTransform cannot run on null function";
 
-  // Only transform InCore-type functions (InCore, AIC, AIV).
-  // Host/Orchestration code can use break/continue natively.
   if (!IsInCoreType(func->func_type_)) {
     return func;
   }
@@ -375,7 +743,7 @@ FunctionPtr TransformCtrlFlow(const FunctionPtr& func) {
   auto new_body = mutator.VisitStmt(func->body_);
 
   if (new_body.get() == func->body_.get()) {
-    return func;  // No changes
+    return func;
   }
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
@@ -384,7 +752,6 @@ FunctionPtr TransformCtrlFlow(const FunctionPtr& func) {
 
 }  // namespace
 
-// Factory function
 namespace pass {
 Pass CtrlFlowTransform() {
   return CreateFunctionPass(TransformCtrlFlow, "CtrlFlowTransform", kCtrlFlowTransformProperties);
