@@ -20,9 +20,6 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -120,78 +117,70 @@ static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts)
 
 static std::set<std::string> ComputeStmtLiveIn(const StmtPtr& stmt) {
   if (!stmt) return {};
-  switch (stmt->GetKind()) {
-    case ObjectKind::AssignStmt: {
-      auto op = As<AssignStmt>(stmt);
-      UseCollector uc;
-      uc.CollectExpr(op->value_);
-      return uc.used;
-    }
-    case ObjectKind::EvalStmt: {
-      auto op = As<EvalStmt>(stmt);
-      UseCollector uc;
-      uc.CollectExpr(op->expr_);
-      return uc.used;
-    }
-    case ObjectKind::ReturnStmt: {
-      auto op = As<ReturnStmt>(stmt);
-      UseCollector uc;
-      for (const auto& v : op->value_) uc.CollectExpr(v);
-      return uc.used;
-    }
-    case ObjectKind::YieldStmt: {
-      auto op = As<YieldStmt>(stmt);
-      UseCollector uc;
-      for (const auto& v : op->value_) uc.CollectExpr(v);
-      return uc.used;
-    }
-    case ObjectKind::SeqStmts: {
-      return ComputeSeqLiveIn(As<SeqStmts>(stmt)->stmts_);
-    }
-    case ObjectKind::ForStmt: {
-      auto op = As<ForStmt>(stmt);
-      UseCollector uc;
-      uc.CollectExpr(op->start_);
-      uc.CollectExpr(op->stop_);
-      uc.CollectExpr(op->step_);
-      for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
-      if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
-      // Body live-in minus locally-defined loop_var and iter_arg names
-      auto body_li = ComputeStmtLiveIn(op->body_);
-      body_li.erase(op->loop_var_->name_hint_);
-      for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
-      uc.used.insert(body_li.begin(), body_li.end());
-      return uc.used;
-    }
-    case ObjectKind::WhileStmt: {
-      auto op = As<WhileStmt>(stmt);
-      UseCollector uc;
-      uc.CollectExpr(op->condition_);
-      for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
-      auto body_li = ComputeStmtLiveIn(op->body_);
-      for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
-      uc.used.insert(body_li.begin(), body_li.end());
-      return uc.used;
-    }
-    case ObjectKind::IfStmt: {
-      auto op = As<IfStmt>(stmt);
-      UseCollector uc;
-      uc.CollectExpr(op->condition_);
-      auto then_li = ComputeStmtLiveIn(op->then_body_);
-      uc.used.insert(then_li.begin(), then_li.end());
-      if (op->else_body_.has_value()) {
-        auto else_li = ComputeStmtLiveIn(*op->else_body_);
-        uc.used.insert(else_li.begin(), else_li.end());
-      }
-      return uc.used;
-    }
-    case ObjectKind::ScopeStmt:
-      return ComputeStmtLiveIn(As<ScopeStmt>(stmt)->body_);
-    case ObjectKind::OpStmts:
-      return ComputeSeqLiveIn(As<OpStmts>(stmt)->stmts_);
-    default:
-      return {};
+
+  if (auto op = As<AssignStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->value_);
+    return uc.used;
   }
+  if (auto op = As<EvalStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->expr_);
+    return uc.used;
+  }
+  if (auto op = As<ReturnStmt>(stmt)) {
+    UseCollector uc;
+    for (const auto& v : op->value_) uc.CollectExpr(v);
+    return uc.used;
+  }
+  if (auto op = As<YieldStmt>(stmt)) {
+    UseCollector uc;
+    for (const auto& v : op->value_) uc.CollectExpr(v);
+    return uc.used;
+  }
+  if (auto op = As<SeqStmts>(stmt)) {
+    return ComputeSeqLiveIn(op->stmts_);
+  }
+  if (auto op = As<ForStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->start_);
+    uc.CollectExpr(op->stop_);
+    uc.CollectExpr(op->step_);
+    for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+    if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    body_li.erase(op->loop_var_->name_hint_);
+    for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+    uc.used.insert(body_li.begin(), body_li.end());
+    return uc.used;
+  }
+  if (auto op = As<WhileStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->condition_);
+    for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+    uc.used.insert(body_li.begin(), body_li.end());
+    return uc.used;
+  }
+  if (auto op = As<IfStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->condition_);
+    auto then_li = ComputeStmtLiveIn(op->then_body_);
+    uc.used.insert(then_li.begin(), then_li.end());
+    if (op->else_body_.has_value()) {
+      auto else_li = ComputeStmtLiveIn(*op->else_body_);
+      uc.used.insert(else_li.begin(), else_li.end());
+    }
+    return uc.used;
+  }
+  if (auto op = As<ScopeStmt>(stmt)) {
+    return ComputeStmtLiveIn(op->body_);
+  }
+  if (auto op = As<OpStmts>(stmt)) {
+    return ComputeSeqLiveIn(op->stmts_);
+  }
+  return {};
 }
 
 static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts) {
@@ -339,30 +328,18 @@ class SSAConverter {
 
   StmtPtr ConvertStmt(const StmtPtr& s) {
     if (!s) return s;
-    switch (s->GetKind()) {
-      case ObjectKind::AssignStmt:
-        return ConvertAssign(As<AssignStmt>(s));
-      case ObjectKind::SeqStmts:
-        return ConvertSeq(As<SeqStmts>(s));
-      case ObjectKind::ForStmt:
-        return ConvertFor(As<ForStmt>(s));
-      case ObjectKind::WhileStmt:
-        return ConvertWhile(As<WhileStmt>(s));
-      case ObjectKind::IfStmt:
-        return ConvertIf(As<IfStmt>(s));
-      case ObjectKind::ReturnStmt:
-        return ConvertReturn(As<ReturnStmt>(s));
-      case ObjectKind::YieldStmt:
-        return ConvertYield(As<YieldStmt>(s));
-      case ObjectKind::EvalStmt:
-        return ConvertEval(As<EvalStmt>(s));
-      case ObjectKind::ScopeStmt:
-        return ConvertScope(As<ScopeStmt>(s));
-      case ObjectKind::OpStmts:
-        return ConvertOps(As<OpStmts>(s));
-      default:
-        return s;
-    }
+    auto kind = s->GetKind();
+    if (kind == ObjectKind::AssignStmt) return ConvertAssign(As<AssignStmt>(s));
+    if (kind == ObjectKind::SeqStmts) return ConvertSeq(As<SeqStmts>(s));
+    if (kind == ObjectKind::ForStmt) return ConvertFor(As<ForStmt>(s));
+    if (kind == ObjectKind::WhileStmt) return ConvertWhile(As<WhileStmt>(s));
+    if (kind == ObjectKind::IfStmt) return ConvertIf(As<IfStmt>(s));
+    if (kind == ObjectKind::ReturnStmt) return ConvertReturn(As<ReturnStmt>(s));
+    if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
+    if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
+    if (kind == ObjectKind::ScopeStmt) return ConvertScope(As<ScopeStmt>(s));
+    if (kind == ObjectKind::OpStmts) return ConvertOps(As<OpStmts>(s));
+    return s;
   }
 
   // ── AssignStmt ─────────────────────────────────────────────────────
@@ -654,13 +631,10 @@ class SSAConverter {
     // Restore and convert else branch
     cur_ = before;
     std::optional<StmtPtr> new_else;
-    std::unordered_map<std::string, VarPtr> else_ver;
     if (op->else_body_.has_value()) {
       new_else = ConvertStmt(*op->else_body_);
-      else_ver = cur_;
-    } else {
-      else_ver = before;
     }
+    auto else_ver = op->else_body_.has_value() ? cur_ : before;
 
     // Find variables that diverged between branches
     std::vector<std::string> phis;
@@ -826,14 +800,16 @@ class SSAConverter {
     auto yield = std::make_shared<YieldStmt>(vals, span);
     if (auto seq = As<SeqStmts>(s)) {
       std::vector<StmtPtr> stmts = seq->stmts_;
-      if (!stmts.empty() && As<YieldStmt>(stmts.back())) {
-        stmts.back() = yield;  // replace existing yield
-      } else {
-        stmts.push_back(yield);  // append new yield
+      bool has_trailing_yield = !stmts.empty() && As<YieldStmt>(stmts.back());
+      if (has_trailing_yield) {
+        stmts.pop_back();
       }
+      stmts.push_back(yield);
       return SeqStmts::Flatten(std::move(stmts), seq->span_);
     }
-    if (As<YieldStmt>(s)) return yield;
+    if (As<YieldStmt>(s)) {
+      return yield;
+    }
     return SeqStmts::Flatten({s, yield}, span);
   }
 
