@@ -133,6 +133,9 @@ class HierarchyOutlinedPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
+      // Only check Opaque functions — the pass only processes Opaque functions,
+      // so Hierarchy scopes in other function types are not expected to be outlined.
+      if (func->func_type_ != FunctionType::Opaque) continue;
       HierarchyOutlinedVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
     }

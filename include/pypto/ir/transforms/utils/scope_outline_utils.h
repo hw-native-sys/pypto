@@ -16,6 +16,7 @@
 #include <climits>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -676,21 +677,39 @@ class ScopeOutliner : public IRMutator {
    * Produces lowercase suffixes like "_host_worker_", "_global_orch_", "_chip_".
    */
   static std::string GenerateHierarchySuffix(Level level, const std::optional<Role>& role) {
-    // Lowercase level name
-    static const std::unordered_map<Level, std::string> kLevelNames = {
-        {Level::AIV, "aiv"},
-        {Level::AIC, "aic"},
-        {Level::CORE_GROUP, "core_group"},
-        {Level::CHIP_DIE, "chip_die"},
-        {Level::CHIP, "chip"},
-        {Level::HOST, "host"},
-        {Level::CLUSTER_0, "cluster0"},
-        {Level::CLUSTER_1, "cluster1"},
-        {Level::CLUSTER_2, "cluster2"},
-        {Level::GLOBAL, "global"},
-    };
-    auto it = kLevelNames.find(level);
-    std::string name = "_" + (it != kLevelNames.end() ? it->second : "level");
+    std::string name = "_";
+    switch (level) {
+      case Level::AIV:
+        name += "aiv";
+        break;
+      case Level::AIC:
+        name += "aic";
+        break;
+      case Level::CORE_GROUP:
+        name += "core_group";
+        break;
+      case Level::CHIP_DIE:
+        name += "chip_die";
+        break;
+      case Level::CHIP:
+        name += "chip";
+        break;
+      case Level::HOST:
+        name += "host";
+        break;
+      case Level::CLUSTER_0:
+        name += "cluster0";
+        break;
+      case Level::CLUSTER_1:
+        name += "cluster1";
+        break;
+      case Level::CLUSTER_2:
+        name += "cluster2";
+        break;
+      case Level::GLOBAL:
+        name += "global";
+        break;
+    }
     if (role.has_value()) {
       name += (role.value() == Role::Orchestrator) ? "_orch" : "_worker";
     }
