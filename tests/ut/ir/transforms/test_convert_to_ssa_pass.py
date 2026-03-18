@@ -1333,6 +1333,50 @@ class TestEscapingVariables:
         After = passes.convert_to_ssa()(Before)
         passes.run_verifier()(After)
 
+    def test_nested_loop_local_temporaries_not_promoted(self):
+        """Loop-local temporaries redefined in a subsequent loop must not escape.
+
+        Regression test for issue #592: ConvertToSSA promoted loop-local
+        temporaries (k0, x_chunk) into iter_args when the same names appeared
+        in a subsequent loop, because UseCollector counted all recursive
+        references without checking that the name was locally redefined.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = x
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                for i in pl.range(4):
+                    tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    a = pl.add(a, tmp)
+                for j in pl.range(4):
+                    tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 2.0)
+                    b = pl.add(b, tmp)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a_0: pl.Tensor[[64], pl.FP32] = x_0
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                for i_0, (a_iter_1,) in pl.range(0, 4, 1, init_values=(a_0,)):
+                    tmp_0: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                    a_2: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, tmp_0)
+                    a_1 = pl.yield_(a_2)
+                for j_0, (b_iter_1,) in pl.range(0, 4, 1, init_values=(b_0,)):
+                    tmp_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 2.0)
+                    b_2: pl.Tensor[[64], pl.FP32] = pl.add(b_iter_1, tmp_1)
+                    b_1 = pl.yield_(b_2)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_1, b_1)
+                return result_0
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
