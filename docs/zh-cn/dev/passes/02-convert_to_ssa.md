@@ -153,9 +153,9 @@ return out_1
 Pass ConvertToSSA();
 ```
 
-**实现文件**：`src/ir/transforms/convert_to_ssa.cpp`
+**实现文件**：`src/ir/transforms/convert_to_ssa_pass.cpp`
 
-- 使用 IRMutator 模式遍历和变换 IR
+- 使用手动语句分派和显式作用域管理
 - 维护变量重命名的版本映射
 - 插入 YieldStmt 并管理 return_vars/iter_args
 
