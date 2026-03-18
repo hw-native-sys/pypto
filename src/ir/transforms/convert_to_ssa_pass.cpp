@@ -806,13 +806,34 @@ class SSAConverter : public IRMutator {
   }
 
   /**
-   * @brief Substitute Vars in a type's tile_view.valid_shape using current_version_
+   * @brief Substitute Var references in a type using current_version_.
    *
-   * When ConvertToSSA renames parameters (e.g., M → M_0), the Var references
-   * embedded in TileType::tile_view.valid_shape must also be updated to keep
-   * the IR consistent.
+   * Handles:
+   * - TensorType::shape_ (e.g., Tensor[[M, N], FP32] → Tensor[[M_0, N_0], FP32])
+   * - TileType::tile_view.valid_shape
+   *
+   * This ensures all type-embedded Var references stay consistent after SSA renaming.
    */
   TypePtr SubstituteVarsInType(const TypePtr& type) {
+    if (!type) return type;
+
+    // Handle TensorType shapes
+    if (auto tensor_type = As<TensorType>(type)) {
+      std::vector<ExprPtr> new_shape;
+      bool changed = false;
+      for (const auto& dim : tensor_type->shape_) {
+        auto new_dim = VisitExpr(dim);
+        if (new_dim != dim) changed = true;
+        new_shape.push_back(new_dim);
+      }
+      if (changed) {
+        return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, tensor_type->memref_,
+                                            tensor_type->tensor_view_);
+      }
+      return type;
+    }
+
+    // Handle TileType tile_view.valid_shape
     auto tile_type = As<TileType>(type);
     if (!tile_type || !tile_type->tile_view_.has_value()) return type;
 
