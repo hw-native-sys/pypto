@@ -431,7 +431,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="(iter_args count.*return_vars count|size mismatch)"):
+        with pytest.raises(Exception, match=r"(iter_args count.*return_vars count|size mismatch)"):
             verify_pass(program)
 
     def test_for_yield_count_mismatch(self):
@@ -466,7 +466,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="(YieldStmt value count.*iter_args count|size mismatch)"):
+        with pytest.raises(Exception, match=r"(YieldStmt value count.*iter_args count|size mismatch)"):
             verify_pass(program)
 
     def test_if_yield_count_mismatch(self):
@@ -490,7 +490,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="(YieldStmt value count.*return_vars count|size mismatch)"):
+        with pytest.raises(Exception, match=r"(YieldStmt value count.*return_vars count|size mismatch)"):
             verify_pass(program)
 
 

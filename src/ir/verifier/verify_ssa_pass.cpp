@@ -18,11 +18,16 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -318,6 +323,11 @@ void SSAVerifier::VisitStmt_(const AssignStmtPtr& op) {
 
   // Define the LHS variable in current scope
   DefineVar(op->var_);
+
+  // Visit type-embedded Var references (e.g., dynamic shape vars in TensorType/TileType)
+  // so they participate in scope validation. Must come after DefineVar to avoid
+  // flagging the var's own type references before the var is in scope.
+  IRVisitor::VisitVarLike_(op->var_);
 }
 
 void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -20,6 +21,9 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -87,12 +91,35 @@ class AssignmentCollector : public IRVisitor {
 };
 
 /**
+ * @brief Collects all variable names *used* (referenced) in a statement subtree.
+ *
+ * Used to determine which variables from a loop body are referenced in
+ * subsequent statements, enabling precise escaping-variable detection.
+ */
+class UseCollector : public IRVisitor {
+ public:
+  std::set<std::string> used_vars;
+
+  void Collect(const StmtPtr& stmt) {
+    if (stmt) VisitStmt(stmt);
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    if (op) used_vars.insert(op->name_hint_);
+    IRVisitor::VisitVarLike_(op);
+  }
+};
+
+/**
  * @brief SSA Converter - Transforms non-SSA IR to SSA form
  *
  * This mutator converts IR with multiple assignments per variable to SSA form by:
  * 1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)
  * 2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow
  * 3. Converting loop-modified variables to iter_args + return_vars pattern
+ * 4. Promoting variables first defined inside loops to iter_args + return_vars
+ *    so they are accessible after the loop (escaping variables)
  */
 class SSAConverter : public IRMutator {
  public:
@@ -102,6 +129,10 @@ class SSAConverter : public IRMutator {
    * @brief Convert a function to SSA form
    */
   FunctionPtr Convert(const FunctionPtr& func) {
+    // Store original function parameter info for Out-parameter matching
+    orig_params_ = func->params_;
+    orig_param_directions_ = func->param_directions_;
+
     // Initialize version counters for parameters
     for (size_t i = 0; i < func->params_.size(); ++i) {
       const auto& var = func->params_[i];
@@ -315,7 +346,7 @@ class SSAConverter : public IRMutator {
                                     return_vars, op->span_);
   }
 
-  // Override ForStmt to handle loop-carried variables
+  // Override ForStmt to handle loop-carried and escaping variables
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Visit range expressions in outer scope
     auto new_start = VisitExpr(op->start_);
@@ -409,7 +440,39 @@ class SSAConverter : public IRMutator {
 
     RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
 
-    // Collect yield values: first existing iter_args, then new loop-carried
+    // Handle escaping variables: variables first defined inside the loop body
+    // that may be used after the loop (e.g., out = tile.store(...) inside a loop
+    // followed by "return out" after the loop). These need iter_args + return_vars
+    // to properly escape the loop scope in SSA form.
+    auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars,
+                                          loop_var_base, new_iter_args, future_uses_);
+
+    for (const auto& base_name : escaping_vars) {
+      auto final_var = versions_after_body.at(base_name);
+      auto type = final_var->GetType();
+
+      // Find initial value: prefer Out parameter with matching type, fall back to any match
+      auto init_value = FindInitValueForEscapingVar(type, versions_before);
+      if (!init_value) {
+        // Last resort: use the final_var itself (may cause issues for zero-trip loops,
+        // but preserves correctness for non-zero-trip loops which is the common case)
+        init_value = final_var;
+      }
+
+      int ia_version = NextVersion(base_name);
+      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version), type,
+                                                init_value, op->span_);
+      new_iter_args.push_back(iter_arg);
+
+      int rv_version = NextVersion(base_name);
+      auto rv = std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), type, op->span_);
+      return_vars.push_back(rv);
+
+      // Register return_var in outer scope so post-loop references resolve correctly
+      current_version_[base_name] = rv;
+    }
+
+    // Collect yield values: first existing iter_args, then loop-carried, then escaping
     std::vector<ExprPtr> yield_values;
 
     // First, collect yields for existing (original) iter_args
@@ -420,6 +483,12 @@ class SSAConverter : public IRMutator {
     // Then add yield values for new loop-carried variables
     for (const auto& base_name : loop_carried_vars) {
       // Get the final version from within the loop
+      const auto& final_var = versions_after_body.at(base_name);
+      yield_values.push_back(final_var);
+    }
+
+    // Then add yield values for escaping variables
+    for (const auto& base_name : escaping_vars) {
       const auto& final_var = versions_after_body.at(base_name);
       yield_values.push_back(final_var);
     }
@@ -440,7 +509,7 @@ class SSAConverter : public IRMutator {
                                      op->loop_origin_);
   }
 
-  // Override WhileStmt to handle loop-carried variables
+  // Override WhileStmt to handle loop-carried and escaping variables
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
     // Save outer scope versions
     auto versions_before = current_version_;
@@ -531,7 +600,33 @@ class SSAConverter : public IRMutator {
 
     RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
 
-    // Collect yield values: first existing iter_args, then new loop-carried
+    // Handle escaping variables (same as ForStmt — see comment there)
+    // WhileStmt has no loop_var, so pass empty string
+    auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars, "",
+                                          new_iter_args, future_uses_);
+
+    for (const auto& base_name : escaping_vars) {
+      auto final_var = versions_after_body.at(base_name);
+      auto type = final_var->GetType();
+
+      auto init_value = FindInitValueForEscapingVar(type, versions_before);
+      if (!init_value) {
+        init_value = final_var;
+      }
+
+      int ia_version = NextVersion(base_name);
+      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version), type,
+                                                init_value, op->span_);
+      new_iter_args.push_back(iter_arg);
+
+      int rv_version = NextVersion(base_name);
+      auto rv = std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), type, op->span_);
+      return_vars.push_back(rv);
+
+      current_version_[base_name] = rv;
+    }
+
+    // Collect yield values: first existing iter_args, then loop-carried, then escaping
     std::vector<ExprPtr> yield_values;
 
     // First, collect yields for existing (original) iter_args
@@ -546,6 +641,12 @@ class SSAConverter : public IRMutator {
       yield_values.push_back(final_var);
     }
 
+    // Then add yield values for escaping variables
+    for (const auto& base_name : escaping_vars) {
+      const auto& final_var = versions_after_body.at(base_name);
+      yield_values.push_back(final_var);
+    }
+
     // Update body with new yield
     StmtPtr final_body = new_body;
     if (!yield_values.empty()) {
@@ -553,6 +654,28 @@ class SSAConverter : public IRMutator {
     }
 
     return std::make_shared<WhileStmt>(new_condition, new_iter_args, final_body, return_vars, op->span_);
+  }
+
+  // Override SeqStmts to compute future variable uses before processing each statement.
+  // This enables precise detection of escaping variables in loop handlers.
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    std::vector<StmtPtr> new_stmts;
+    for (size_t i = 0; i < op->stmts_.size(); ++i) {
+      // Before processing a loop statement, compute which variables are
+      // referenced in all subsequent statements (future uses).
+      if (i + 1 < op->stmts_.size()) {
+        future_uses_.clear();
+        UseCollector use_collector;
+        for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
+          use_collector.Collect(op->stmts_[j]);
+        }
+        future_uses_ = use_collector.used_vars;
+      } else {
+        future_uses_.clear();
+      }
+      new_stmts.push_back(VisitStmt(op->stmts_[i]));
+    }
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
  private:
@@ -569,6 +692,34 @@ class SSAConverter : public IRMutator {
   std::vector<VarPtr> new_params_;
   std::vector<ParamDirection> new_param_directions_;
 
+  // Original function parameter info (for Out-parameter matching)
+  std::vector<VarPtr> orig_params_;
+  std::vector<ParamDirection> orig_param_directions_;
+
+  // Variable names used in statements after the current one (computed by SeqStmts override)
+  std::set<std::string> future_uses_;
+
+  /**
+   * @brief Strip a generated "_iter_<digits>" suffix from an iter_arg name to recover
+   * the base variable name (e.g., "acc_iter_1" → "acc").
+   *
+   * Only strips if the name ends with "_iter_" followed by one or more digits.
+   * Names that merely contain "iter" as part of a word (e.g., "filter_data",
+   * "writer_iter_count") are left unchanged.
+   */
+  static std::string StripIterSuffix(const std::string& name) {
+    // Look for "_iter_" followed by digits at the end
+    size_t pos = name.rfind("_iter_");
+    if (pos == std::string::npos) return name;
+    // Verify everything after "_iter_" is digits
+    size_t after = pos + 6;  // length of "_iter_"
+    if (after >= name.size()) return name;
+    for (size_t i = after; i < name.size(); ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) return name;
+    }
+    return name.substr(0, pos);
+  }
+
   /**
    * @brief Get next version number for a base name
    */
@@ -576,6 +727,76 @@ class SSAConverter : public IRMutator {
     int version = version_counter_[base_name];
     version_counter_[base_name] = version + 1;
     return version;
+  }
+
+  /**
+   * @brief Find an initial value for an escaping variable's iter_arg.
+   *
+   * Searches the pre-loop variable versions for an Out/InOut parameter whose
+   * type matches the escaping variable's type. Falls back to any variable with
+   * a matching type.
+   */
+  VarPtr FindInitValueForEscapingVar(const TypePtr& target_type,
+                                     const std::unordered_map<std::string, VarPtr>& versions_before) {
+    // First pass: look for an Out/InOut parameter with matching type
+    for (size_t i = 0; i < orig_params_.size(); ++i) {
+      if (orig_param_directions_[i] == ParamDirection::Out ||
+          orig_param_directions_[i] == ParamDirection::InOut) {
+        auto it = versions_before.find(orig_params_[i]->name_hint_);
+        if (it != versions_before.end() && it->second->GetType() == target_type) {
+          return it->second;
+        }
+      }
+    }
+    // Second pass: look for any pre-loop variable with matching type.
+    // Collect and sort by name for deterministic results across runs.
+    std::vector<std::pair<std::string, VarPtr>> candidates;
+    for (const auto& [name, var] : versions_before) {
+      if (var->GetType() == target_type) {
+        candidates.emplace_back(name, var);
+      }
+    }
+    if (!candidates.empty()) {
+      std::sort(candidates.begin(), candidates.end());
+      return candidates.front().second;
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief Identify variables first defined inside a loop body that escape to outer scope.
+   *
+   * A variable escapes if it is:
+   * 1. Present in versions_after_body but not in versions_before
+   * 2. Assigned inside the body (not inherited from nested constructs)
+   * 3. Actually referenced in subsequent statements (future_uses)
+   * 4. Not the loop variable or an already-handled iter_arg
+   */
+  std::vector<std::string> FindEscapingVars(
+      const std::unordered_map<std::string, VarPtr>& versions_after_body,
+      const std::unordered_map<std::string, VarPtr>& versions_before,
+      const std::set<std::string>& assigned_in_body, const std::string& loop_var_base,
+      const std::vector<IterArgPtr>& iter_args, const std::set<std::string>& future_uses) {
+    std::vector<std::string> escaping_vars;
+    for (const auto& [name, var] : versions_after_body) {
+      if (versions_before.count(name)) continue;
+      if (name == loop_var_base) continue;
+      if (!assigned_in_body.count(name)) continue;
+      // Only escape if actually used after the loop
+      if (!future_uses.count(name)) continue;
+      // Skip variables already handled as iter_args
+      bool is_iter_arg = false;
+      for (const auto& ia : iter_args) {
+        if (StripIterSuffix(ia->name_hint_) == name) {
+          is_iter_arg = true;
+          break;
+        }
+      }
+      if (is_iter_arg) continue;
+      escaping_vars.push_back(name);
+    }
+    std::sort(escaping_vars.begin(), escaping_vars.end());
+    return escaping_vars;
   }
 
   /**
@@ -626,11 +847,7 @@ class SSAConverter : public IRMutator {
   void RegisterIterArgs(const std::vector<IterArgPtr>& iter_args) {
     for (const auto& iter_arg : iter_args) {
       std::string full_name = iter_arg->name_hint_;
-      std::string stripped_name = full_name;
-      size_t iter_pos = stripped_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        stripped_name = stripped_name.substr(0, iter_pos);
-      }
+      std::string stripped_name = StripIterSuffix(full_name);
       current_version_[stripped_name] = iter_arg;
       if (full_name != stripped_name) {
         current_version_[full_name] = iter_arg;
@@ -645,11 +862,7 @@ class SSAConverter : public IRMutator {
   void RegisterExistingReturnVars(const std::vector<IterArgPtr>& iter_args,
                                   const std::vector<VarPtr>& return_vars) {
     for (size_t i = 0; i < iter_args.size() && i < return_vars.size(); ++i) {
-      std::string base_name = iter_args[i]->name_hint_;
-      size_t iter_pos = base_name.find("_iter");
-      if (iter_pos != std::string::npos) {
-        base_name = base_name.substr(0, iter_pos);
-      }
+      std::string base_name = StripIterSuffix(iter_args[i]->name_hint_);
       current_version_[base_name] = return_vars[i];
     }
   }

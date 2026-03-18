@@ -13,6 +13,7 @@
 
 #include <unordered_map>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 

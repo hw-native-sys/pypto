@@ -21,9 +21,13 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -31,6 +35,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
