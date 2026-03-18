@@ -63,6 +63,7 @@ class PassManager:
                 ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
                 ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
                 ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
+                ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
                 ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
                 ("MemoryReuse", lambda: passes.basic_memory_reuse()),

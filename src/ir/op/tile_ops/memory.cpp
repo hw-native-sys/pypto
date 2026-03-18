@@ -262,6 +262,13 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
 
   // Return TileType with the static shape and dtype
   TileView tile_view;
+  if (tile_shape.size() == 2) {
+    auto rows_const = As<ConstInt>(tile_shape[0]);
+    auto cols_const = As<ConstInt>(tile_shape[1]);
+    if (rows_const && cols_const && rows_const->value_ > 1 && cols_const->value_ == 1) {
+      tile_view.blayout = TileLayout::col_major;
+    }
+  }
   tile_view.valid_shape = tile_shape;
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }

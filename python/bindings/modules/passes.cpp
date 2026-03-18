@@ -239,6 +239,10 @@ void BindPass(nb::module_& m) {
              "Detects tile.load(..., transpose=True) in InCore functions and transforms\n"
              "the source tensor parameter type to the logical transposed shape with DN layout.\n"
              "Propagates the type change to corresponding Orchestration function parameters.");
+  passes.def("resolve_backend_op_layouts", &pass::ResolveBackendOpLayouts,
+             "Create a pass that repairs backend-required layouts for constrained elementwise tile ops\n\n"
+             "Repairs `[N,1]` col-major vector inputs at constrained use-sites by reshaping them\n"
+             "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,

@@ -89,6 +89,15 @@ inline const PassProperties kResolveTransposeLayoutProperties{
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D}};
 
+// -- Resolve backend op layouts pass ------------------------------------------
+
+inline const PassProperties kResolveBackendOpLayoutsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::TileOps2D},
+    .invalidated = {IRProperty::NormalizedStmtStructure}};
+
 // -- Mixed kernel expansion pass ----------------------------------------------
 
 inline const PassProperties kExpandMixedKernelProperties{

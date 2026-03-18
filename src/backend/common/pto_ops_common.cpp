@@ -26,6 +26,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -47,6 +48,14 @@ using ir::AsVarLike;
 using ir::CallPtr;
 using ir::TensorType;
 using ir::Var;
+
+static bool RequiresRowMajorElementwiseLayout(std::string_view op_name) {
+  static const std::unordered_set<std::string_view> kRowMajorElementwiseOps = {
+      "tile.add", "tile.and", "tile.div", "tile.maximum", "tile.minimum", "tile.mul", "tile.or",
+      "tile.rem", "tile.sel", "tile.shl", "tile.shr",     "tile.sub",     "tile.xor",
+  };
+  return kRowMajorElementwiseOps.count(op_name) > 0;
+}
 
 // Validate that a string is a safe MLIR identifier (alphanumeric + underscores).
 // Prevents injection of arbitrary MLIR via crafted buffer/function names.
@@ -889,10 +898,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     if (exclude_ops.count(entry.op_name) > 0) continue;
     std::string pto_op = entry.pto_op_name;
     size_t arity = entry.arity;
-    backend.RegisterOp(entry.op_name)
-        .f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
-        });
+    auto reg_entry = backend.RegisterOp(entry.op_name);
+    reg_entry.f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
+    });
+    if (RequiresRowMajorElementwiseLayout(entry.op_name)) {
+      for (size_t i = 0; i < arity; ++i) {
+        reg_entry.set_input_layout(i, ir::TileLayout::row_major);
+      }
+      reg_entry.set_output_layout(ir::TileLayout::row_major);
+    }
   }
 
   // Register ops with custom codegen logic
@@ -1147,9 +1162,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         }
       }
     }
-    // PTO bytecode requires distinct tile buffers for reshape input/output.
-    // When both resolve to the same buffer (shared MemRef), allocate a new result variable.
-    if (src == result_target && !result_type.empty()) {
+    // tile.reshape is a view-like op that produces a new SSA value, not an in-place write.
+    // If the target variable already has a preallocated tile buffer name, emitting
+    // `result_target = pto.treshape ...` would redefine the same SSA value after
+    // the earlier `pto.alloc_tile`. Always materialize reshape results with a fresh
+    // SSA name when codegen assigned a MemRef-backed result target.
+    if (!result_type.empty()) {
       result_target = codegen.NewNamedTemp("reshape_buf");
       codegen.SetCurrentResultBuf(result_target);
     }

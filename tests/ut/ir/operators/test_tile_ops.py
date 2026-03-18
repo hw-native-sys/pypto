@@ -896,6 +896,16 @@ class TestTileSliceReshapeOps:
         result_type2 = call2.type
         assert isinstance(result_type2, ir.TileType)
         assert len(result_type2.shape) == 2
+        assert result_type2.tile_view is not None
+        assert result_type2.tile_view.blayout == ir.TileLayout.col_major
+
+        # Layout is inferred from target shape for vector repair
+        call3 = tile.reshape(tile_var, [1, 32])
+        result_type3 = call3.type
+        assert isinstance(result_type3, ir.TileType)
+        assert result_type3.tile_view is not None
+        assert result_type3.tile_view.blayout == ir.TileLayout.row_major
+        assert call3.kwargs == {}
 
     def test_tile_transpose(self):
         """Test tile.transpose operation."""
@@ -1727,6 +1737,29 @@ class TestTileLoadOp:
 
         # Just verifying it builds without error
         assert Prog is not None
+
+
+class TestTileCreateOp:
+    """Tests for tile.create layout inference."""
+
+    def test_create_column_vector_uses_col_major_layout(self):
+        """Static `[N, 1]` Vec tiles should infer col-major block layout."""
+        call = tile.create([32, 1], DataType.FP32, ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert tile_type.tile_view.blayout == ir.TileLayout.col_major
+        assert len(tile_type.tile_view.valid_shape) == 2
+
+    def test_create_row_vector_keeps_row_major_layout(self):
+        """Non-column-vector shapes should keep the default row-major layout."""
+        call = tile.create([1, 32], DataType.FP32, ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.tile_view is not None
+        assert tile_type.tile_view.blayout == ir.TileLayout.row_major
 
 
 class TestTileScalarOps:

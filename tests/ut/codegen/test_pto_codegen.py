@@ -948,6 +948,54 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
     )
 
 
+def test_pto_codegen_repairs_row_sum_add_layout_mismatch():
+    """`row_sum -> add` should lower through row-major reshape repair."""
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class LayoutRepairProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            data: pl.Tensor[[16, 256], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_tile, 0.0)
+            chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, 0], [16, 256])
+            tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+            updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(init_tile, partial)
+            final: pl.Tensor[[16, 1], pl.FP32] = pl.store(updated, [0, 0], out)
+            return final
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed_program = pm.run_passes(LayoutRepairProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    lines = [line.strip() for line in mlir_code.split("\n")]
+
+    reshape_lines = [line for line in lines if "pto.treshape" in line]
+    assert len(reshape_lines) == 3, f"Expected 3 reshape ops for layout repair, got: {reshape_lines}"
+    assert any("rows=16, cols=1" in line and "rows=1, cols=16" in line for line in reshape_lines), (
+        f"Expected column-vector to row-vector repair reshape, got: {reshape_lines}"
+    )
+
+    tadd_lines = [line for line in lines if "pto.tadd" in line]
+    assert len(tadd_lines) == 1, f"Expected exactly one pto.tadd, got: {tadd_lines}"
+    assert tadd_lines[0].count("blayout=row_major") >= 3, (
+        f"Expected row-major operands/results after repair, got: {tadd_lines[0]}"
+    )
+    assert "rows=1, cols=16" in tadd_lines[0], f"Expected repaired row-vector add, got: {tadd_lines[0]}"
+
+
 def test_pto_codegen_mixed_scalar_and_tile_iter_args():
     """Test that mixed iter_args (tile + scalar) emit only scalar iter_args in PTO.
 

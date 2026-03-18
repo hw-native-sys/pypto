@@ -262,6 +262,9 @@ def infer_tile_memory_space() -> Pass:
 def resolve_transpose_layout() -> Pass:
     """Create a pass that resolves transpose layout for tile.load with transpose=True."""
 
+def resolve_backend_op_layouts() -> Pass:
+    """Create a pass that repairs backend-required layouts for constrained tile ops."""
+
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 

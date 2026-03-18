@@ -12,6 +12,7 @@
 #ifndef PYPTO_BACKEND_COMMON_BACKEND_H_
 #define PYPTO_BACKEND_COMMON_BACKEND_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -25,6 +26,7 @@
 #include "pypto/core/common.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 
@@ -66,6 +68,11 @@ using BackendCodegenFunc = std::function<std::string(const ir::CallPtr& op, code
 // Backend per-call pipe inference function type
 using BackendPipeInferFunc = std::function<ir::PipeType(const ir::CallPtr& call)>;
 
+struct BackendTileLayoutSpec {
+  std::vector<std::optional<ir::TileLayout>> input_layouts;
+  std::optional<ir::TileLayout> output_layout;
+};
+
 /**
  * @brief Backend op registration entry for fluent interface
  *
@@ -101,6 +108,23 @@ class BackendOpRegistryEntry {
   BackendOpRegistryEntry& f_infer_pipe(BackendPipeInferFunc func);
 
   /**
+   * @brief Constrain a specific input tile layout for this backend op
+   *
+   * @param input_index Positional argument index in the op call
+   * @param layout Required tile block layout
+   * @return Reference to this entry for method chaining
+   */
+  BackendOpRegistryEntry& set_input_layout(size_t input_index, ir::TileLayout layout);
+
+  /**
+   * @brief Constrain the output tile layout for this backend op
+   *
+   * @param layout Required output tile block layout
+   * @return Reference to this entry for method chaining
+   */
+  BackendOpRegistryEntry& set_output_layout(ir::TileLayout layout);
+
+  /**
    * @brief Finalize registration in destructor
    *
    * Automatically registers the operator with the backend if
@@ -119,6 +143,7 @@ class BackendOpRegistryEntry {
   std::string op_name_;
   std::optional<BackendCodegenFunc> codegen_func_;
   std::optional<BackendPipeInferFunc> infer_pipe_func_;
+  std::optional<BackendTileLayoutSpec> tile_layout_spec_;
 };
 
 // Macro for registering backend operators with fluent interface
@@ -144,6 +169,7 @@ class Backend {
   struct BackendOpInfo {
     BackendCodegenFunc codegen_func;
     std::optional<BackendPipeInferFunc> infer_pipe_func;
+    std::optional<BackendTileLayoutSpec> tile_layout_spec;
   };
 
   virtual ~Backend() = default;
@@ -174,7 +200,8 @@ class Backend {
    * @param infer_pipe_func Optional per-call pipe inference function
    */
   void FinalizeOpRegistration(const std::string& op_name, BackendCodegenFunc func,
-                              std::optional<BackendPipeInferFunc> infer_pipe_func = std::nullopt);
+                              std::optional<BackendPipeInferFunc> infer_pipe_func = std::nullopt,
+                              std::optional<BackendTileLayoutSpec> tile_layout_spec = std::nullopt);
 
   /**
    * @brief Infer pipeline type for a specific call
@@ -195,6 +222,14 @@ class Backend {
    * @return Pointer to operator info, or nullptr if not registered
    */
   [[nodiscard]] const BackendOpInfo* GetOpInfo(const std::string& op_name) const;
+
+  /**
+   * @brief Get backend-specific tile layout constraints for an operator
+   *
+   * @param op_name Operator name
+   * @return Pointer to tile layout spec, or nullptr if none is registered
+   */
+  [[nodiscard]] const BackendTileLayoutSpec* GetTileLayoutSpec(const std::string& op_name) const;
 
   /**
    * @brief Export backend to msgpack file

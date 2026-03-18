@@ -86,6 +86,19 @@ bool IsIndexLikeDtype(DataType dtype) {
   return dtype == DataType::INT64 || dtype == DataType::UINT64 || dtype == DataType::INDEX;
 }
 
+TileLayout InferTileLayoutFromShape(const std::vector<ExprPtr>& shape) {
+  if (shape.size() != 2) {
+    return TileLayout::row_major;
+  }
+
+  auto rows_const = As<ConstInt>(shape[0]);
+  auto cols_const = As<ConstInt>(shape[1]);
+  if (!rows_const || !cols_const) {
+    return TileLayout::row_major;
+  }
+  return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
+}
+
 /**
  * @brief Validate that all elements of a TupleType are ScalarType with an index-like dtype
  *
@@ -159,21 +172,7 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.valid_shape = new_shape;
 
-  // Infer blayout from new shape: column vectors [N, 1] use col_major
-  if (new_shape.size() == 2) {
-    auto rows_const = As<ConstInt>(new_shape[0]);
-    auto cols_const = As<ConstInt>(new_shape[1]);
-    if (rows_const && cols_const) {
-      if (cols_const->value_ == 1 && rows_const->value_ > 1) {
-        tile_view.blayout = TileLayout::col_major;
-      } else {
-        tile_view.blayout = TileLayout::row_major;
-      }
-    } else {
-      // Dynamic shape: default to row_major
-      tile_view.blayout = TileLayout::row_major;
-    }
-  }
+  tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -227,21 +226,7 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.valid_shape = new_shape;
 
-  // Infer blayout from new shape: column vectors [N, 1] use col_major
-  if (new_shape.size() == 2) {
-    auto rows_const = As<ConstInt>(new_shape[0]);
-    auto cols_const = As<ConstInt>(new_shape[1]);
-    if (rows_const && cols_const) {
-      if (cols_const->value_ == 1 && rows_const->value_ > 1) {
-        tile_view.blayout = TileLayout::col_major;
-      } else {
-        tile_view.blayout = TileLayout::row_major;
-      }
-    } else {
-      // Dynamic shape: default to row_major
-      tile_view.blayout = TileLayout::row_major;
-    }
-  }
+  tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }

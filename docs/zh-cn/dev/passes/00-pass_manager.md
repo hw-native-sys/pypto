@@ -68,6 +68,7 @@ struct PassProperties {
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
+| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -309,6 +310,25 @@ result = pm.run_passes(program)
 with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
     result = pm.run_passes(program)
 ```
+
+### Default 策略补充说明
+
+Default 策略中，InCore 后半段流水线顺序为：
+
+1. `FlattenTileNdTo2D`
+2. `InferTileMemorySpace`
+3. `ResolveTransposeLayout`
+4. `ResolveBackendOpLayouts`
+5. `ExpandMixedKernel`
+6. `InitMemRef`
+7. `BasicMemoryReuse`
+8. `AllocateMemoryAddr`
+
+`ResolveBackendOpLayouts` 会根据 backend 注册的 layout 元数据修复受约束
+的逐元素 tile 操作。对于当前 PTO 上要求 `row_major` 的逐元素算子，它会
+在受约束 use-site 把 `[N, 1]` 向量操作数改写成 `[1, N]` 的
+`tile.reshape`，其 layout 由目标 shape 自动推导为 `row_major`，并在需要
+时把结果 reshape 回原始向量 shape。
 
 ### 直接使用 PassPipeline
 
