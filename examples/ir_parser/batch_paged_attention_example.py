@@ -186,8 +186,8 @@ def BuildBatchPagedAttentionProgram(
                     target_memory=pl.MemorySpace.Vec,
                 )
 
-                # Mask invalid columns with -inf via dynamic view + fillpad
-                sij_dyn = pl.tile.slice(s_tile, [q_tile, valid_len], [0, 0])
+                # Keep the allocated tile static and narrow only the logical valid columns.
+                sij_dyn = pl.tile.slice(s_tile, [q_tile, block_size], [0, 0], valid_shape=[q_tile, valid_len])
                 s_tile = pl.tile.fillpad(sij_dyn)
 
                 scaled = pl.mul(s_tile, scale_value)

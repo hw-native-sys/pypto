@@ -190,8 +190,10 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
-  // tensor.slice(input, shape_tuple, offset_tuple) -> Generate array variables and call .view()
-  CHECK(op->args_.size() == 3) << "tensor.slice requires 3 arguments (input, shape, offset)";
+  // tensor.slice(input, shape_tuple, offset_tuple[, valid_shape_tuple]) -> Generate array variables and call
+  // .view()
+  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape])";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must be a variable";
@@ -226,7 +228,14 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   }
   oss << "};\n";
 
-  // Call .view() with array pointers
+  if (op->args_.size() == 4) {
+    auto valid_shape_tuple = As<MakeTuple>(op->args_[3]);
+    CHECK(valid_shape_tuple) << "tensor.slice valid_shape must be MakeTuple";
+    CHECK(valid_shape_tuple->elements_.size() == ndim)
+        << "tensor.slice valid_shape must have same rank as shape";
+  }
+
+  // Runtime tensor views use shape+offset; valid_shape only affects IR metadata.
   oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
       << result_var << "_offsets);";
   return oss.str();

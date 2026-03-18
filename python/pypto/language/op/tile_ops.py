@@ -987,19 +987,32 @@ def min(tile: Tile | Scalar | int, axis: int | Scalar = 0, keepdim: bool = False
     return Tile(expr=call_expr)
 
 
-def slice(tile: Tile, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tile:
-    """Create a slice of a tile with new shape and offset.
+def slice(
+    tile: Tile,
+    shape: Sequence[IntLike],
+    offset: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+) -> Tile:
+    """Create a slice of a tile with static shape and optional valid shape.
 
     Args:
         tile: Input tile
-        shape: New shape dimensions (at most 2 for TileType)
+        shape: Static shape dimensions (at most 2 for TileType)
         offset: Offset dimensions for the slice
+        valid_shape: Valid shape dimensions. When omitted, shape is reused as the
+            logical valid shape.
 
     Returns:
         Tile wrapping the slice operation
     """
     tile_expr = tile.unwrap()
-    call_expr = _ir_ops.slice(tile_expr, _normalize_intlike(shape), _normalize_intlike(offset))
+    normalized_valid_shape = None if valid_shape is None else _normalize_intlike(valid_shape)
+    call_expr = _ir_ops.slice(
+        tile_expr,
+        _normalize_intlike(shape),
+        _normalize_intlike(offset),
+        normalized_valid_shape,
+    )
     return Tile(expr=call_expr)
 
 

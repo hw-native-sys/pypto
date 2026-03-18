@@ -141,19 +141,31 @@ def dim(tensor: Tensor, axis: int) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def slice(tensor: Tensor, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> Tensor:
-    """Create a slice of a tensor with new shape and offset.
+def slice(
+    tensor: Tensor,
+    shape: Sequence[IntLike],
+    offset: Sequence[IntLike],
+    valid_shape: Sequence[IntLike] | None = None,
+) -> Tensor:
+    """Create a slice of a tensor with new shape and optional valid shape.
 
     Args:
         tensor: Input tensor
         shape: New shape dimensions
         offset: Offset dimensions for the slice
+        valid_shape: Valid shape dimensions. When omitted, the full shape is valid.
 
     Returns:
         Tensor wrapping the slice operation
     """
     tensor_expr = tensor.unwrap()
-    call_expr = _ir_ops.slice(tensor_expr, _normalize_intlike(shape), _normalize_intlike(offset))
+    normalized_valid_shape = None if valid_shape is None else _normalize_intlike(valid_shape)
+    call_expr = _ir_ops.slice(
+        tensor_expr,
+        _normalize_intlike(shape),
+        _normalize_intlike(offset),
+        normalized_valid_shape,
+    )
     return Tensor(expr=call_expr)
 
 

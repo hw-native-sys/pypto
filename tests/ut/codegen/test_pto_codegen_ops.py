@@ -689,6 +689,29 @@ class TestTileSliceCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.textract" in mlir, f"tile.slice should generate pto.textract, got:\n{mlir}"
 
+    def test_tile_slice_codegen_with_valid_shape(self):
+        """tile.slice(..., valid_shape=...) should still generate pto.textract."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                valid_cols: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                sliced: pl.Tile[[16, 16], pl.FP32] = pl.tile.slice(
+                    src_tile, [16, 16], [0, 0], valid_shape=[16, valid_cols]
+                )
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.textract" in mlir, (
+            f"tile.slice with valid_shape should generate pto.textract, got:\n{mlir}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

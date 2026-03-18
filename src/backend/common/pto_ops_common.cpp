@@ -1104,8 +1104,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.slice", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-    CHECK(op->args_.size() == 3)
-        << "Operation:[tile.slice] requires 3 arguments (tile, shape, offset), but got " << op->args_.size();
+    CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+        << "Operation:[tile.slice] requires 3 or 4 arguments (tile, shape, offset[, valid_shape]), but got "
+        << op->args_.size();
 
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);

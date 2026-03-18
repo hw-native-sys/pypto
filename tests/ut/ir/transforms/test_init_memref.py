@@ -211,6 +211,29 @@ def _ci(value: int) -> ir.ConstInt:
     return ir.ConstInt(value, ir.DataType.INDEX, ir.Span.unknown())
 
 
+def test_init_memref_rejects_dynamic_tile_shape():
+    """InitMemRef must fail fast when allocation shape is still dynamic."""
+    span = ir.Span.unknown()
+
+    dynamic_len = ir.Var("dynamic_len", ir.ScalarType(ir.DataType.INDEX), span)
+    dynamic_tile_type = ir.TileType([_ci(1), dynamic_len], ir.DataType.FP32, memory_space=MemorySpace.Vec)
+    dynamic_tile = ir.Var("dynamic_tile", dynamic_tile_type, span)
+
+    tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"aiv_idx": 0}, dynamic_tile_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.OpStmts([ir.AssignStmt(dynamic_tile, tpop_call, span)], span),
+            ir.ReturnStmt([dynamic_tile], span),
+        ],
+        span,
+    )
+    func = ir.Function("test_func", [], [dynamic_tile_type], body, span)
+    program = ir.Program([func], "test_program", span)
+
+    with pytest.raises(Exception, match="InitMemRef requires static shape"):
+        passes.init_mem_ref()(program)
+
+
 def test_init_memref_tile_with_preset_memory_space():
     """Regression: tile.tpop ops with preset memory_space must get matching MemRef space.
 

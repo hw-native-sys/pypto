@@ -217,24 +217,41 @@ class InitMemRefMutator : public IRMutator {
 
   // Helper to calculate size and create MemRef
   std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const VarPtr& var) {
+    const std::string var_name = var ? var->name_hint_ : "<anonymous>";
     uint64_t size_bytes = 0;
-    bool is_static = true;
-    uint64_t num_elements = 1;
-
-    for (const auto& dim : type->shape_) {
-      if (auto const_dim = As<ConstInt>(dim)) {
-        num_elements *= const_dim->value_;
-      } else {
-        is_static = false;
-        break;
+    if (As<TileType>(type)) {
+      uint64_t num_elements = 1;
+      for (size_t i = 0; i < type->shape_.size(); ++i) {
+        auto const_dim = As<ConstInt>(type->shape_[i]);
+        CHECK(const_dim) << "InitMemRef requires static shape for variable '" << var_name
+                         << "', but shape element " << i
+                         << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
+                            "extent in TileView.valid_shape instead.";
+        CHECK(const_dim->value_ > 0) << "InitMemRef requires positive shape for variable '" << var_name
+                                     << "', but shape element " << i << " is " << const_dim->value_;
+        num_elements *= static_cast<uint64_t>(const_dim->value_);
       }
-    }
 
-    if (is_static) {
       size_t bits = type->dtype_.GetBit();
       // Round up to bytes
       size_t bytes = (bits + 7) / 8;
       size_bytes = num_elements * bytes;
+    } else {
+      bool is_static = true;
+      uint64_t num_elements = 1;
+      for (const auto& dim : type->shape_) {
+        if (auto const_dim = As<ConstInt>(dim)) {
+          num_elements *= static_cast<uint64_t>(const_dim->value_);
+        } else {
+          is_static = false;
+          break;
+        }
+      }
+      if (is_static) {
+        size_t bits = type->dtype_.GetBit();
+        size_t bytes = (bits + 7) / 8;
+        size_bytes = num_elements * bytes;
+      }
     }
 
     // Query memory space: var_memory_spaces_ map > TileType's own memory_space > DDR default

@@ -1284,6 +1284,62 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_local_tensor_slice_preserves_valid_shape(self):
+        """local_tensor.slice should forward valid_shape to tile.slice."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                valid_n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                t: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                s: pl.Tensor[[8, 32], pl.FP32] = pl.tensor.slice(t, [8, 32], [0, 0], valid_shape=[8, valid_n])
+                y: pl.Tensor[[8, 32], pl.FP32] = pl.add(s, x)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                valid_n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x, valid_n)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                valid_n: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                x_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
+                t_tile: pl.Tile[[16, 64], pl.FP32] = pl.tile.create([16, 64], dtype=pl.FP32)
+                s_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.slice(
+                    t_tile, [8, 32], [0, 0], valid_shape=[8, valid_n]
+                )
+                y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, x_tile)
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                valid_n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.create_tensor([8, 32], dtype=pl.FP32)
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x, valid_n, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_consecutive_slice_converts_to_tile_slice(self):
         """Consecutive tensor.slice: first becomes tile.load, second becomes tile.slice."""
 

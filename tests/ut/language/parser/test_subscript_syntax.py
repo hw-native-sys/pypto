@@ -9,6 +9,8 @@
 
 """Unit tests for subscript syntax on Tensor and Tile types."""
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -140,6 +142,114 @@ class TestTileSubscript:
         printed = slice_tile.as_python()
         assert "tile.slice" in printed
 
+    def test_tile_slice_dynamic_upper_uses_valid_shape(self):
+        """t[:, :valid_cols] keeps static shape and lowers valid_cols into valid_shape."""
+
+        @pl.function
+        def slice_tile_dynamic(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            valid_cols: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            sliced: pl.Tile[[64, 128], pl.FP32] = t[:, :valid_cols]
+            return pl.store(sliced, [0, 0], x)
+
+        assert isinstance(slice_tile_dynamic, ir.Function)
+        assert isinstance(slice_tile_dynamic.body, ir.SeqStmts)
+
+        slice_stmt = slice_tile_dynamic.body.stmts[1]
+        assert isinstance(slice_stmt, ir.AssignStmt)
+        assert isinstance(slice_stmt.value, ir.Call)
+        assert slice_stmt.value.op.name == "tile.slice"
+        assert len(slice_stmt.value.args) == 4
+
+        shape_tuple = slice_stmt.value.args[1]
+        valid_shape_tuple = slice_stmt.value.args[3]
+        assert isinstance(shape_tuple, ir.MakeTuple)
+        assert isinstance(valid_shape_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, dim).value for dim in shape_tuple.elements] == [64, 128]
+        assert cast(ir.ConstInt, valid_shape_tuple.elements[0]).value == 64
+        assert isinstance(valid_shape_tuple.elements[1], ir.Min)
+
+    def test_tile_full_slice_preserves_input_valid_shape(self):
+        """t[:, :] preserves the source tile's logical valid_shape."""
+
+        @pl.function
+        def slice_tile_full(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            valid_cols: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shapes=[64, valid_cols])
+            sliced: pl.Tile[[64, 128], pl.FP32] = t[:, :]
+            return pl.store(sliced, [0, 0], x)
+
+        assert isinstance(slice_tile_full, ir.Function)
+        assert isinstance(slice_tile_full.body, ir.SeqStmts)
+
+        slice_stmt = slice_tile_full.body.stmts[1]
+        assert isinstance(slice_stmt, ir.AssignStmt)
+        assert isinstance(slice_stmt.value, ir.Call)
+        assert slice_stmt.value.op.name == "tile.slice"
+        assert len(slice_stmt.value.args) == 4
+
+        valid_shape_tuple = slice_stmt.value.args[3]
+        assert isinstance(valid_shape_tuple, ir.MakeTuple)
+        assert cast(ir.ConstInt, valid_shape_tuple.elements[0]).value == 64
+        assert cast(ir.Var, valid_shape_tuple.elements[1]).name_hint == "valid_cols"
+
+    def test_tile_slice_upper_intersects_input_valid_shape(self):
+        """t[:, :16] should not widen a source tile that already has narrower valid_shape."""
+
+        @pl.function
+        def slice_tile_capped(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            valid_cols: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128], valid_shapes=[64, valid_cols])
+            sliced: pl.Tile[[64, 16], pl.FP32] = t[:, :16]
+            return pl.store(sliced, [0, 0], x)
+
+        assert isinstance(slice_tile_capped, ir.Function)
+        assert isinstance(slice_tile_capped.body, ir.SeqStmts)
+
+        slice_stmt = slice_tile_capped.body.stmts[1]
+        assert isinstance(slice_stmt, ir.AssignStmt)
+        assert isinstance(slice_stmt.value, ir.Call)
+        assert slice_stmt.value.op.name == "tile.slice"
+        assert len(slice_stmt.value.args) == 4
+
+        shape_tuple = slice_stmt.value.args[1]
+        valid_shape_tuple = slice_stmt.value.args[3]
+        assert isinstance(shape_tuple, ir.MakeTuple)
+        assert isinstance(valid_shape_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, dim).value for dim in shape_tuple.elements] == [64, 16]
+        assert cast(ir.ConstInt, valid_shape_tuple.elements[0]).value == 64
+        assert isinstance(valid_shape_tuple.elements[1], ir.Min)
+
+    def test_tile_slice_static_upper_clamps_to_source_shape(self):
+        """t[:, :256] should clamp its static shape to the source tile extent."""
+
+        @pl.function
+        def slice_tile_clamped(
+            x: pl.Tensor[[64, 128], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            sliced: pl.Tile[[64, 128], pl.FP32] = t[:, :256]
+            return pl.store(sliced, [0, 0], x)
+
+        assert isinstance(slice_tile_clamped, ir.Function)
+        assert isinstance(slice_tile_clamped.body, ir.SeqStmts)
+
+        slice_stmt = slice_tile_clamped.body.stmts[1]
+        assert isinstance(slice_stmt, ir.AssignStmt)
+        assert isinstance(slice_stmt.value, ir.Call)
+        assert slice_stmt.value.op.name == "tile.slice"
+        assert len(slice_stmt.value.args) == 3
+
+        shape_tuple = slice_stmt.value.args[1]
+        assert isinstance(shape_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, dim).value for dim in shape_tuple.elements] == [64, 128]
+
     def test_tile_read_via_subscript(self):
         """A[0, 0] with literal integer indices on Tile -> tile.read."""
 
@@ -194,6 +304,31 @@ class TestTileSubscript:
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
                 sliced: pl.Tile[[8, 128], pl.FP32] = t[0:16:2, :]
+                return pl.store(sliced, [0, 0], x)
+
+    def test_tile_subscript_dynamic_lower_error(self):
+        """A[:, start:] on Tile should reject dynamic lower bounds."""
+        with pytest.raises(UnsupportedFeatureError, match="Dynamic lower bounds"):
+
+            @pl.function
+            def bad_dynamic_lower(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                start: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+                sliced: pl.Tile[[64, 128], pl.FP32] = t[:, start:]
+                return pl.store(sliced, [0, 0], x)
+
+    def test_tile_subscript_empty_static_slice_error(self):
+        """A[:, 10:5] on Tile should reject empty static slices."""
+        with pytest.raises(UnsupportedFeatureError, match="positive static extent"):
+
+            @pl.function
+            def bad_empty_static_slice(
+                x: pl.Tensor[[64, 128], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+                sliced: pl.Tile[[64, 128], pl.FP32] = t[:, 10:5]
                 return pl.store(sliced, [0, 0], x)
 
 
