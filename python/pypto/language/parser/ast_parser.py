@@ -59,6 +59,15 @@ def _const_int_value(value: object) -> int | None:
     return None
 
 
+def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
+    """Fold a slice extent when both bounds are compile-time constants."""
+    upper_value = _const_int_value(upper)
+    lower_value = _const_int_value(lower)
+    if upper_value is None or lower_value is None:
+        return None
+    return upper_value - lower_value
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -2579,6 +2588,66 @@ class ASTParser:
             return list(slc.elts)
         return [slc]
 
+    def _build_slice_shape_expr(
+        self,
+        upper_expr: int | ir.Expr,
+        lower_expr: int | ir.Expr,
+    ) -> int | ir.Expr:
+        """Build a slice extent, folding compile-time constants when possible."""
+        folded_extent = _fold_const_slice_extent(upper_expr, lower_expr)
+        if folded_extent is not None:
+            return folded_extent
+        lhs = (
+            upper_expr
+            if isinstance(upper_expr, ir.Expr)
+            else ir.ConstInt(upper_expr, DataType.INDEX, ir.Span.unknown())
+        )
+        rhs = (
+            lower_expr
+            if isinstance(lower_expr, ir.Expr)
+            else ir.ConstInt(lower_expr, DataType.INDEX, ir.Span.unknown())
+        )
+        return ir.sub(lhs, rhs)
+
+    def _build_subscript_slice_args(
+        self,
+        indices: list[ast.expr],
+        full_shape: list[ir.Expr],
+        span: ir.Span,
+        kind_name: str,
+    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr]]:
+        """Convert mixed subscript indices into slice shape/offset args."""
+        shape_exprs: list[int | ir.Expr] = []
+        offset_exprs: list[int | ir.Expr] = []
+
+        for dim_idx, idx in enumerate(indices):
+            if not isinstance(idx, ast.Slice):
+                offset_exprs.append(self.parse_expression(idx))
+                shape_exprs.append(1)
+                continue
+
+            if idx.step is not None:
+                raise UnsupportedFeatureError(
+                    f"Slice step is not supported in {kind_name} subscript",
+                    span=span,
+                    hint="Use A[start:stop] without step",
+                )
+
+            if idx.lower is None:
+                offset_exprs.append(0)
+                shape_exprs.append(
+                    full_shape[dim_idx] if idx.upper is None else self.parse_expression(idx.upper)
+                )
+                continue
+
+            lower_expr = self.parse_expression(idx.lower)
+            offset_exprs.append(lower_expr)
+
+            upper_expr = full_shape[dim_idx] if idx.upper is None else self.parse_expression(idx.upper)
+            shape_exprs.append(self._build_slice_shape_expr(upper_expr, lower_expr))
+
+        return shape_exprs, offset_exprs
+
     def _parse_tensor_subscript(
         self,
         subscript: ast.Subscript,
@@ -2603,37 +2672,9 @@ class ASTParser:
             idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
             return ir_op.tensor.read(value_expr, idx_exprs, span=span)
 
-        # At least one slice -> tensor.slice(tensor, shape, offset)
-        shape_exprs: list[int | ir.Expr] = []
-        offset_exprs: list[int | ir.Expr] = []
-        for dim_idx, idx in enumerate(indices):
-            if isinstance(idx, ast.Slice):
-                if idx.step is not None:
-                    raise UnsupportedFeatureError(
-                        "Slice step is not supported in tensor subscript",
-                        span=span,
-                        hint="Use A[start:stop] without step",
-                    )
-                if idx.lower is not None:
-                    lower_expr = self.parse_expression(idx.lower)
-                    offset_exprs.append(lower_expr)
-                    if idx.upper is not None:
-                        upper_expr = self.parse_expression(idx.upper)
-                        shape_exprs.append(ir.sub(upper_expr, lower_expr))
-                    else:
-                        shape_exprs.append(ir.sub(tensor_type.shape[dim_idx], lower_expr))
-                else:
-                    offset_exprs.append(0)
-                    if idx.upper is not None:
-                        shape_exprs.append(self.parse_expression(idx.upper))
-                    else:
-                        # Unbounded: use full dimension
-                        shape_exprs.append(tensor_type.shape[dim_idx])
-            else:
-                # Integer index in a mixed subscript -> size=1, offset=idx
-                offset_exprs.append(self.parse_expression(idx))
-                shape_exprs.append(1)
-
+        shape_exprs, offset_exprs = self._build_subscript_slice_args(
+            indices, list(tensor_type.shape), span, "tensor"
+        )
         return ir_op.tensor.slice(value_expr, shape_exprs, offset_exprs, span=span)
 
     def _parse_tile_subscript(
@@ -2660,35 +2701,9 @@ class ASTParser:
             idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
             return ir_op.tile.read(value_expr, idx_exprs, span=span)
 
-        shape_exprs: list[int | ir.Expr] = []
-        offset_exprs: list[int | ir.Expr] = []
-        for dim_idx, idx in enumerate(indices):
-            if isinstance(idx, ast.Slice):
-                if idx.step is not None:
-                    raise UnsupportedFeatureError(
-                        "Slice step is not supported in tile subscript",
-                        span=span,
-                        hint="Use A[start:stop] without step",
-                    )
-                if idx.lower is not None:
-                    lower_expr = self.parse_expression(idx.lower)
-                    offset_exprs.append(lower_expr)
-                    if idx.upper is not None:
-                        upper_expr = self.parse_expression(idx.upper)
-                        shape_exprs.append(ir.sub(upper_expr, lower_expr))
-                    else:
-                        shape_exprs.append(ir.sub(tile_type.shape[dim_idx], lower_expr))
-                else:
-                    offset_exprs.append(0)
-                    if idx.upper is not None:
-                        shape_exprs.append(self.parse_expression(idx.upper))
-                    else:
-                        shape_exprs.append(tile_type.shape[dim_idx])
-            else:
-                # Integer index in a mixed subscript -> size=1, offset=idx
-                offset_exprs.append(self.parse_expression(idx))
-                shape_exprs.append(1)
-
+        shape_exprs, offset_exprs = self._build_subscript_slice_args(
+            indices, list(tile_type.shape), span, "tile"
+        )
         return ir_op.tile.slice(value_expr, shape_exprs, offset_exprs, span=span)
 
     def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
