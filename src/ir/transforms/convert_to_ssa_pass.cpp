@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,9 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -263,8 +267,9 @@ class SSAConverter {
         if (nd != d) changed = true;
         shape.push_back(nd);
       }
-      if (changed)
+      if (changed) {
         return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, t->tensor_view_);
+      }
       return type;
     }
     if (auto t = As<TileType>(type)) {
@@ -291,7 +296,7 @@ class SSAConverter {
 
   int NextVersion(const std::string& name) { return ver_[name]++; }
 
-  VarPtr AllocVersion(const std::string& name, TypePtr type, Span span) {
+  VarPtr AllocVersion(const std::string& name, const TypePtr& type, const Span& span) {
     int v = NextVersion(name);
     auto var = std::make_shared<Var>(name + "_" + std::to_string(v), SubstType(type), span);
     cur_[name] = var;
@@ -320,8 +325,9 @@ class SSAConverter {
   }
 
   void RegisterExistingReturnVars(const std::vector<IterArgPtr>& ias, const std::vector<VarPtr>& rvs) {
-    for (size_t i = 0; i < ias.size() && i < rvs.size(); ++i)
+    for (size_t i = 0; i < ias.size() && i < rvs.size(); ++i) {
       cur_[StripIterSuffix(ias[i]->name_hint_)] = rvs[i];
+    }
   }
 
   // ── Statement dispatch ─────────────────────────────────────────────
@@ -393,9 +399,10 @@ class SSAConverter {
 
     // Process existing iter_args (substitute init values in outer scope)
     std::vector<IterArgPtr> ias;
-    for (const auto& ia : op->iter_args_)
+    for (const auto& ia : op->iter_args_) {
       ias.push_back(
           std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_));
+    }
 
     // Pre-analysis: classify assigned variables
     AssignmentCollector ac;
@@ -519,9 +526,10 @@ class SSAConverter {
 
     // Process existing iter_args
     std::vector<IterArgPtr> ias;
-    for (const auto& ia : op->iter_args_)
+    for (const auto& ia : op->iter_args_) {
       ias.push_back(
           std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_));
+    }
 
     // Pre-analysis
     AssignmentCollector ac;
@@ -775,8 +783,11 @@ class SSAConverter {
     }
     // Fall back to any pre-loop variable with matching type (deterministic ordering)
     std::vector<std::pair<std::string, VarPtr>> candidates;
-    for (const auto& [n, v] : pre)
-      if (v->GetType() == type) candidates.emplace_back(n, v);
+    for (const auto& [n, v] : pre) {
+      if (v->GetType() == type) {
+        candidates.emplace_back(n, v);
+      }
+    }
     if (!candidates.empty()) {
       std::sort(candidates.begin(), candidates.end());
       return candidates.front().second;
