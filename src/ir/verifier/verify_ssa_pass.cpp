@@ -324,10 +324,11 @@ void SSAVerifier::VisitStmt_(const AssignStmtPtr& op) {
   // Define the LHS variable in current scope
   DefineVar(op->var_);
 
-  // Visit type-embedded Var references (e.g., dynamic shape vars in TensorType/TileType)
-  // so they participate in scope validation. Must come after DefineVar to avoid
-  // flagging the var's own type references before the var is in scope.
-  IRVisitor::VisitVarLike_(op->var_);
+  // Register type-embedded Var references (e.g., dynamic shape vars in TensorType)
+  // as defined in the current scope. These are external/global references (like
+  // pl.dynamic vars) that may not be function parameters but appear in types
+  // propagated from other functions (e.g., InCore return types used in Orchestration).
+  RegisterTypeVars(op->var_->GetType());
 }
 
 void SSAVerifier::VisitStmt_(const ForStmtPtr& op) {

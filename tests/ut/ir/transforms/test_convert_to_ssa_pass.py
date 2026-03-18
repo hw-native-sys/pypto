@@ -1300,6 +1300,39 @@ class TestEscapingVariables:
         After = passes.convert_to_ssa()(Before)
         passes.run_verifier()(After)
 
+    def test_dynamic_shape_vars_in_orchestrator(self):
+        """Dynamic shape vars (M, N) from InCore return type don't cause scope violation."""
+        M = pl.dynamic("M")
+        N = pl.dynamic("N")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                a_tile = pl.load(a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [128, 128])
+                result = pl.add(a_tile, b_tile)
+                out = pl.store(result, [0, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
+                c = self.add_kernel(a, b, c)
+                return c
+
+        After = passes.convert_to_ssa()(Before)
+        passes.run_verifier()(After)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
