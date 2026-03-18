@@ -922,9 +922,9 @@ enum class CoreSide { AIC, AIV };
 
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
-/// tpop_var_remap collects original dest_var and source_tile Var pointers -> clean-typed
-/// new_var mappings, so downstream references to either the pre-move or post-move variable
-/// can be updated via pointer-based substitution.
+/// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
+/// -> clean-typed new_var mappings, so downstream references to either the pre-move or
+/// post-move variable can be updated via pointer-based substitution.
 std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                    const std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves,
