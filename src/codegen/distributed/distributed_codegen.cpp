@@ -661,9 +661,10 @@ void DistributedCodegen::CollectNeededRuntimes(const ir::FunctionPtr& func, std:
 
   for (const auto& name : collector.called_names_) {
     auto it = all_funcs_.find(name);
-    if (it != all_funcs_.end() && it->second->level_.has_value()) {
-      ir::Level level = it->second->level_.value();
-      needed.insert(ir::LevelToLinquLevel(level));
+    if (it == all_funcs_.end()) continue;
+    const auto& callee = it->second;
+    if (callee->level_.has_value()) {
+      needed.insert(ir::LevelToLinquLevel(callee->level_.value()));
     }
   }
 }
