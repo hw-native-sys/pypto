@@ -554,5 +554,78 @@ class TestResolveTransposeLayoutMixed:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestResolveTransposeLayoutPartialLoad:
+    """Test cases where tile.load reads a subset of the tensor (partial load)."""
+
+    def test_partial_load_square_tensor(self):
+        """Tensor [128, 128] with partial tile.load [128, 64] transpose -> shape stays [128, 128] + DN.
+
+        Regression test for #606: paged attention key_cache tensor shape was incorrectly
+        changed from [128, 128] to [128, 64] because the pass used the tile load shape
+        instead of transposing the original tensor shape.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 128], pl.BF16],
+                key_cache: pl.Tensor[[128, 128], pl.BF16],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
+                tile_k = pl.load(
+                    key_cache, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0, tile_k_l0)
+                out = pl.store(tile_c, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.BF16],
+                key_cache: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+                out = self.kernel(a, key_cache, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 128], pl.BF16],
+                key_cache: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
+                tile_k = pl.load(
+                    key_cache, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0, tile_k_l0)
+                out = pl.store(tile_c, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.BF16],
+                key_cache: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+                out = self.kernel(a, key_cache, out)
+                return out
+
+        After = passes.resolve_transpose_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
