@@ -140,13 +140,9 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
   return (*func_name_to_id)[func_name];
 }
 
-// Collect metadata from IR (output_tensors, tuple info) for memory allocation
+// Collect metadata from IR (tuple info) for orchestration codegen
 class OrchestrationInfoCollector : public IRVisitor {
  public:
-  std::set<std::string> output_tensors;
-  std::map<const Call*, std::string> call_to_result_var;
-  std::map<std::string, AssignStmtPtr> output_tensor_assigns;            // Store AssignStmt for type info
-  std::map<std::string, std::pair<std::string, int>> tuple_element_map;  // var -> (tuple_var, index)
   // Per-call tuple elements: key = unique call key, value = [(index, element_base_name), ...]
   std::map<std::string, std::vector<std::pair<int, std::string>>> call_tuple_elements;
   // Maps Call* to unique key for cross-phase coordination with StmtCodegen
@@ -154,27 +150,13 @@ class OrchestrationInfoCollector : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
     if (auto call = As<Call>(assign->value_)) {
-      if (call->op_->name_ == "tensor.create") {
-        // tensor.create produces a local tensor that needs make_tensor allocation
-        std::string var_name = GetSSABaseName(assign->var_->name_hint_);
-        output_tensors.insert(var_name);
-        output_tensor_assigns[var_name] = assign;
-      } else if (!IsBuiltinOp(call->op_->name_)) {
-        std::string var_name = GetSSABaseName(assign->var_->name_hint_);
-
+      if (!IsBuiltinOp(call->op_->name_) && call->op_->name_ != "tensor.create") {
         // Check if this call returns a TupleType
         if (As<TupleType>(call->GetType())) {
           // Generate unique key per tuple-returning call (works with/without SSA)
           std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
           current_tuple_key_[assign->var_->name_hint_] = unique_key;
           call_to_tuple_key[call.get()] = unique_key;
-          call_to_result_var[call.get()] = var_name;
-          output_tensor_assigns[var_name] = assign;
-        } else {
-          // Single tensor return (existing behavior)
-          output_tensors.insert(var_name);
-          call_to_result_var[call.get()] = var_name;
-          output_tensor_assigns[var_name] = assign;
         }
       }
     } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
@@ -191,11 +173,6 @@ class OrchestrationInfoCollector : public IRVisitor {
       auto it = current_tuple_key_.find(tuple_ref_name);
       if (it != current_tuple_key_.end()) {
         call_tuple_elements[it->second].emplace_back(tuple_get->index_, var_name);
-        // Track tuple element mapping for downstream consumers
-        std::string tuple_base = GetSSABaseName(tuple_ref_name);
-        tuple_element_map[var_name] = {tuple_base, tuple_get->index_};
-        output_tensors.insert(var_name);
-        output_tensor_assigns[var_name] = assign;
       }
     }
     IRVisitor::VisitStmt_(assign);
@@ -403,11 +380,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
         func_name_to_core_type_(core_types),
         next_func_id_(next_id),
         param_names_(param_names) {}
-
-  void SetTupleElementMap(const std::map<std::string, std::pair<std::string, int>>& map) {
-    // Retained for compatibility; actual element lookup now uses SetCallTupleElements
-    (void)map;
-  }
 
   // Set per-call tuple elements using unique keys (avoids cross-call collision)
   void SetCallTupleElements(const std::map<std::string, std::vector<std::pair<int, std::string>>>& elements) {
@@ -981,7 +953,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // Create statement codegen (used for both external tensor generation and task submission)
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
                                         param_names);
-  stmt_codegen.SetTupleElementMap(info_collector.tuple_element_map);
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
 
