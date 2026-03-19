@@ -1010,14 +1010,6 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
         return extra_it->second;
       }
     }
-    // Compatibility fallback for passes that rebuild equivalent Vars by name.
-    auto name_mlir_it = var_name_to_mlir_.find(var->name_hint_);
-    if (name_mlir_it != var_name_to_mlir_.end()) {
-      auto extra_it = extra_tile_buf_types_.find(name_mlir_it->second);
-      if (extra_it != extra_tile_buf_types_.end()) {
-        return extra_it->second;
-      }
-    }
     // Check if this variable maps to a tile buffer via memref
     auto memref_it = var_to_memref_.find(key);
     if (memref_it != var_to_memref_.end()) {
