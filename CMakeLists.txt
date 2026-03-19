@@ -180,6 +180,7 @@ set(PYPTO_SOURCES
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
+    src/codegen/distributed/distributed_codegen.cpp
     src/codegen/tensor_op_codegen.cpp
 
     # Backend
