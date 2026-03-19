@@ -308,15 +308,9 @@ class PTOCodegen : public CodegenBase {
 
   // Variable mappings keyed by Var identity in the final IR snapshot.
   std::map<const ir::Var*, std::string> var_to_mlir_;
-  // Compatibility fallback for passes that rebuild equivalent Vars by name.
-  std::map<std::string, std::string> var_name_to_mlir_;
   std::map<const ir::Var*, std::string> tensor_to_view_;
-  // Compatibility fallback for passes that preserve names but not Var identity.
-  std::map<std::string, std::string> tensor_name_to_view_;
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
   std::map<const ir::Var*, const ir::MemRef*> var_to_memref_;
-  // Compatibility fallback for name-based substitutions in upstream passes.
-  std::map<std::string, const ir::MemRef*> var_name_to_memref_;
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
   std::map<int64_t, std::string> emitted_constants_;
   std::set<double> emitted_float_constants_;

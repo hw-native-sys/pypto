@@ -271,7 +271,9 @@ class InitMemRefMutator : public IRMutator {
     auto memref = GetTypeMemRef(new_init->GetType());
     auto old_var_expr = std::static_pointer_cast<const Expr>(old_var);
     auto source_memory_space = ExtractMemorySpaceFromType(new_init->GetType());
-    TypePtr new_type = CloneTypeWithMemRef(old_var_expr->GetType(), memref, source_memory_space);
+    TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+        old_var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+        source_memory_space);
 
     return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
   }
@@ -284,9 +286,9 @@ class InitMemRefMutator : public IRMutator {
     // Process Type if it is ShapedType (TensorType or TileType)
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
       auto memref = CreateMemRef(shaped_type, var);
-      new_type =
-          CloneTypeWithMemRef(var_expr->GetType(), memref,
-                              ResolveTileMemorySpace(var_expr->GetType(), var, /*default_to_ddr=*/true));
+      new_type = CloneTypeWithMemRefAndRemapExprs(
+          var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+          ResolveTileMemorySpace(var_expr->GetType(), var, /*default_to_ddr=*/true));
     }
 
     return std::make_shared<Var>(var->name_hint_, new_type, var->span_);
@@ -348,7 +350,9 @@ class InitMemRefMutator : public IRMutator {
           if (shared_memref.has_value()) {
             LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
             auto source_memory_space = ExtractMemorySpaceFromType(input_tile_arg->GetType());
-            TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref, source_memory_space);
+            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+                source_memory_space);
             VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
 
@@ -371,8 +375,9 @@ class InitMemRefMutator : public IRMutator {
 
           // Create new variable with the shared MemRef
           if (shared_memref.has_value()) {
-            TypePtr new_type = CloneTypeWithMemRef(op->var_->GetType(), shared_memref,
-                                                   ResolveTileMemorySpace(op->var_->GetType(), op->var_));
+            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+                ResolveTileMemorySpace(op->var_->GetType(), op->var_));
 
             VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
@@ -468,8 +473,9 @@ class InitMemRefMutator : public IRMutator {
       auto yield_var = As<Var>(yield_stmt->value_[i]);
       auto yield_tile = yield_var ? As<TileType>(yield_var->GetType()) : nullptr;
       if (rv_tile && yield_tile && yield_tile->memref_.has_value()) {
-        auto new_type = CloneTypeWithMemRef(new_for->return_vars_[i]->GetType(), yield_tile->memref_,
-                                            yield_tile->GetMemorySpace());
+        auto new_type = CloneTypeWithMemRefAndRemapExprs(
+            new_for->return_vars_[i]->GetType(), yield_tile->memref_,
+            [this](const ExprPtr& expr) { return VisitExpr(expr); }, yield_tile->GetMemorySpace());
         auto new_rv = std::make_shared<Var>(new_for->return_vars_[i]->name_hint_, new_type,
                                             new_for->return_vars_[i]->span_);
         var_map_[op->return_vars_[i]] = new_rv;

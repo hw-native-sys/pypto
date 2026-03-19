@@ -233,12 +233,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   used_ssa_names_.clear();
   memref_to_var_name_.clear();
   var_to_mlir_.clear();
-  var_name_to_mlir_.clear();
   tensor_to_view_.clear();
-  tensor_name_to_view_.clear();
   memref_to_mlir_.clear();
   var_to_memref_.clear();
-  var_name_to_memref_.clear();
   memref_to_tile_type_.clear();
   emitted_constants_.clear();
   emitted_float_constants_.clear();
@@ -416,26 +413,6 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
-  }
-  class NameCompatMemRefMapper : public ir::IRVisitor {
-   public:
-    explicit NameCompatMemRefMapper(std::map<std::string, const ir::MemRef*>& mapping)
-        : var_name_to_memref(mapping) {}
-
-    void VisitStmt_(const AssignStmtPtr& op) override {
-      if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-        // Compatibility path for passes that rebuild equivalent Vars by name.
-        var_name_to_memref[op->var_->name_hint_] = ir::GetDefinedMemRef(tile_type).get();
-      }
-      ir::IRVisitor::VisitStmt_(op);
-    }
-
-   private:
-    std::map<std::string, const ir::MemRef*>& var_name_to_memref;
-  };
-  NameCompatMemRefMapper compat_mapper(var_name_to_memref_);
-  if (func->body_) {
-    compat_mapper.VisitStmt(func->body_);
   }
 }
 
@@ -714,20 +691,14 @@ const ir::Var* PTOCodegen::GetVarKey(const VarPtr& var) const {
 
 void PTOCodegen::BindVarToMlir(const VarPtr& var, const std::string& mlir_name) {
   var_to_mlir_[GetVarKey(var)] = mlir_name;
-  // Compatibility fallback for passes that rebuild an equivalent Var by name before codegen lookup.
-  var_name_to_mlir_[var->name_hint_] = mlir_name;
 }
 
 void PTOCodegen::BindTensorView(const VarPtr& var, const std::string& tensor_view_name) {
   tensor_to_view_[GetVarKey(var)] = tensor_view_name;
-  // Compatibility fallback for passes that preserve tensor names but not Var identity.
-  tensor_name_to_view_[var->name_hint_] = tensor_view_name;
 }
 
 void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::MemRef* memref) {
   var_to_memref_[GetVarKey(var)] = memref;
-  // Compatibility fallback for name-based rewrites that still refer to the same logical buffer.
-  var_name_to_memref_[var->name_hint_] = memref;
 }
 
 std::string PTOCodegen::GetVarName(const VarPtr& var) {
@@ -736,22 +707,9 @@ std::string PTOCodegen::GetVarName(const VarPtr& var) {
   if (it != var_to_mlir_.end()) {
     return it->second;
   }
-  // Compatibility fallback for passes that reconstructed the Var but preserved the source-level name.
-  auto name_it = var_name_to_mlir_.find(var->name_hint_);
-  if (name_it != var_name_to_mlir_.end()) {
-    return name_it->second;
-  }
   auto memref_it = var_to_memref_.find(key);
   if (memref_it != var_to_memref_.end()) {
     auto mlir_it = memref_to_mlir_.find(memref_it->second);
-    if (mlir_it != memref_to_mlir_.end()) {
-      return mlir_it->second;
-    }
-  }
-  // Compatibility fallback for name-based rewrites that still resolve to the same MemRef.
-  auto name_memref_it = var_name_to_memref_.find(var->name_hint_);
-  if (name_memref_it != var_name_to_memref_.end()) {
-    auto mlir_it = memref_to_mlir_.find(name_memref_it->second);
     if (mlir_it != memref_to_mlir_.end()) {
       return mlir_it->second;
     }
@@ -812,9 +770,6 @@ int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) {
 std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
   auto it = tensor_to_view_.find(GetVarKey(tensor_var));
   if (it != tensor_to_view_.end()) return it->second;
-  // Compatibility fallback for passes that rebuild equivalent tensor Vars by name.
-  auto name_it = tensor_name_to_view_.find(tensor_var->name_hint_);
-  if (name_it != tensor_name_to_view_.end()) return name_it->second;
   // For IterArg, follow initValue_ chain to the original tensor parameter
   if (auto iter_arg = As<ir::IterArg>(tensor_var)) {
     if (auto init_var = As<ir::Var>(iter_arg->initValue_)) {
@@ -1010,23 +965,10 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
         return extra_it->second;
       }
     }
-    // Compatibility fallback for passes that rebuild equivalent Vars by name.
-    auto name_mlir_it = var_name_to_mlir_.find(var->name_hint_);
-    if (name_mlir_it != var_name_to_mlir_.end()) {
-      auto extra_it = extra_tile_buf_types_.find(name_mlir_it->second);
-      if (extra_it != extra_tile_buf_types_.end()) {
-        return extra_it->second;
-      }
-    }
     // Check if this variable maps to a tile buffer via memref
     auto memref_it = var_to_memref_.find(key);
     if (memref_it != var_to_memref_.end()) {
       return GetTileBufTypeString(memref_it->second);
-    }
-    // Compatibility fallback for name-based rewrites that still point at the same buffer.
-    auto name_memref_it = var_name_to_memref_.find(var->name_hint_);
-    if (name_memref_it != var_name_to_memref_.end()) {
-      return GetTileBufTypeString(name_memref_it->second);
     }
     // Check if this is a scalar parameter
     if (auto scalar_type = As<ScalarType>(var->GetType())) {
