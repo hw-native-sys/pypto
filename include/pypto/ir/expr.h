@@ -503,6 +503,16 @@ class TupleGetItemExpr : public Expr {
 
 using TupleGetItemExprPtr = std::shared_ptr<const TupleGetItemExpr>;
 
+/**
+ * @brief Compare two ExprPtr values: ConstInt by value, otherwise by pointer identity
+ */
+bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2);
+
+/**
+ * @brief Compare two ExprPtr vectors element-wise
+ */
+bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2);
+
 }  // namespace ir
 }  // namespace pypto
 

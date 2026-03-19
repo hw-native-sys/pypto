@@ -26,7 +26,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -258,19 +257,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
 }
 
 /**
- * @brief Compare two ExprPtr vectors element-wise by ConstInt value
- */
-bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
-  if (v1.size() != v2.size()) return false;
-  for (size_t i = 0; i < v1.size(); i++) {
-    auto c1 = As<ConstInt>(v1[i]);
-    auto c2 = As<ConstInt>(v2[i]);
-    if (!c1 || !c2 || c1->value_ != c2->value_) return false;
-  }
-  return true;
-}
-
-/**
  * @brief Check if two TileType variables have fully compatible tile attributes
  *
  * PTO codegen binds a single alloc_tile declaration (shape, dtype, blayout, pad, etc.)
@@ -278,7 +264,7 @@ bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprP
  * Reuse between tiles with different attributes would cause attribute mismatches in
  * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
  *
- * Checked attributes: shape, dtype, and TileView (valid_shape, pad, blayout, slayout, fractal).
+ * Checked attributes: shape, dtype, and TileView (all fields via TileView::operator==).
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   auto t1 = As<TileType>(var1->GetType());
@@ -291,16 +277,7 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   bool has_view1 = t1->tile_view_.has_value();
   bool has_view2 = t2->tile_view_.has_value();
   if (has_view1 != has_view2) return false;
-
-  if (has_view1) {
-    const auto& v1 = t1->tile_view_.value();
-    const auto& v2 = t2->tile_view_.value();
-    if (!AreExprVectorsEqual(v1.valid_shape, v2.valid_shape)) return false;
-    if (v1.pad != v2.pad) return false;
-    if (v1.blayout != v2.blayout) return false;
-    if (v1.slayout != v2.slayout) return false;
-    if (v1.fractal != v2.fractal) return false;
-  }
+  if (has_view1 && t1->tile_view_.value() != t2->tile_view_.value()) return false;
   return true;
 }
 

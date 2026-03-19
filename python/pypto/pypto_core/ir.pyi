@@ -521,6 +521,12 @@ class TileView:
             pad: Pad mode (default: null)
         """
 
+    def __eq__(self, other: object) -> bool:
+        """Structural equality comparison."""
+
+    def __ne__(self, other: object) -> bool:
+        """Structural inequality comparison."""
+
 class TileType(ShapedType):
     """Tile type representation (multi-dimensional tensor)."""
 

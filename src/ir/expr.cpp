@@ -10,12 +10,14 @@
  */
 #include "pypto/ir/expr.h"
 
+#include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -49,6 +51,23 @@ TupleGetItemExpr::TupleGetItemExpr(ExprPtr tuple, int index, Span span)
 
   // Set result type to the accessed element's type
   type_ = tuple_type->types_[index];
+}
+
+bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
+  if (e1 == e2) return true;
+  if (!e1 || !e2) return false;
+  auto c1 = As<ConstInt>(e1);
+  auto c2 = As<ConstInt>(e2);
+  if (c1 && c2) return c1->value_ == c2->value_;
+  return false;
+}
+
+bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
+  if (v1.size() != v2.size()) return false;
+  for (size_t i = 0; i < v1.size(); ++i) {
+    if (!AreExprsEqual(v1[i], v2[i])) return false;
+  }
+  return true;
 }
 
 }  // namespace ir

@@ -283,6 +283,9 @@ struct TileView {
   }
 };
 
+bool operator==(const TileView& lhs, const TileView& rhs);
+bool operator!=(const TileView& lhs, const TileView& rhs);
+
 /**
  * @brief Base class for shaped types (tensors and tiles)
  *

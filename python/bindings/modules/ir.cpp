@@ -358,7 +358,13 @@ void BindIR(nb::module_& m) {
       .def_rw("blayout", &TileView::blayout, "Block layout")
       .def_rw("slayout", &TileView::slayout, "Scatter layout")
       .def_rw("fractal", &TileView::fractal, "Fractal size")
-      .def_rw("pad", &TileView::pad, "Pad mode");
+      .def_rw("pad", &TileView::pad, "Pad mode")
+      .def(
+          "__eq__", [](const TileView& self, const TileView& other) { return self == other; },
+          nb::arg("other"), "Structural equality comparison")
+      .def(
+          "__ne__", [](const TileView& self, const TileView& other) { return self != other; },
+          nb::arg("other"), "Structural inequality comparison");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
