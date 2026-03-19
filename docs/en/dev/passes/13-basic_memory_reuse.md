@@ -44,7 +44,8 @@ program_optimized = reuse_pass(program)
 2. **Lifetime Analysis**: Compute def-use chains and live ranges for each variable
 3. **Interference Check**: Identify variables with overlapping lifetimes
 4. **MemRef Sharing**: Assign same MemRef pointer to non-interfering variables in the same memory space
-5. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
+5. **ForStmt yield fixup**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. InitMemRef guarantees initValue==iter_arg and yield==return_var. This step ensures iter_arg==yield by inserting `tile.move` before yield if their MemRefs differ, then patches all 4 variables to use the same MemRef (initValue's)
+6. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
 
 **Reuse conditions**:
 
@@ -136,6 +137,7 @@ Pass BasicMemoryReuse();
 - `ComputeLifetimesFromDependencies` calculates live ranges
 - `IdentifyReuseOpportunities` finds reuse candidates
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
+- `ForStmtYieldFixupMutator` inserts `tile.move` when yield/iter_arg MemRefs diverge after reuse
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
 - `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from OpStmts
 

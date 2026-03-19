@@ -44,7 +44,8 @@ program_optimized = reuse_pass(program)
 2. **生命周期分析**：计算每个变量的 def-use 链和活跃区间
 3. **干涉检查**：识别生命周期重叠的变量
 4. **MemRef 共享**：为同一内存空间中不干涉的变量分配相同的 MemRef 指针
-5. **移除冗余 alloc**：收集仍被 TileType 变量引用的所有 MemRef，然后移除不再使用的 `tile.alloc` 语句
+5. **ForStmt yield 修复**：确保 4 个循环携带变量（initValue、iter_arg、yield value、return_var）共享同一个 MemRef。InitMemRef 已保证 initValue==iter_arg 且 yield==return_var。此步骤确保 iter_arg==yield：若两者 MemRef 不同则在 yield 前插入 `tile.move`，然后将 4 个变量统一到同一个 MemRef（initValue 的）
+6. **移除冗余 alloc**：收集仍被 TileType 变量引用的所有 MemRef，然后移除不再使用的 `tile.alloc` 语句
 
 **复用条件**：
 
@@ -121,6 +122,7 @@ Pass BasicMemoryReuse();
 - `ComputeLifetimesFromDependencies` 计算活跃区间
 - `IdentifyReuseOpportunities` 查找复用候选
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
+- `ForStmtYieldFixupMutator` 在复用后 yield/iter_arg MemRef 不一致时插入 `tile.move`
 - `UsedMemRefCollector` 收集共享后仍被引用的 MemRef 指针
 - `RemoveUnusedAllocStatements` 从 OpStmts 中过滤掉冗余的 `tile.alloc` 语句
 

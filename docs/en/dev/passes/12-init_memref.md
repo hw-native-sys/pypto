@@ -93,6 +93,24 @@ Key observations:
 - `tile.store` result shares MemRef with the output tensor parameter
 - Alloc statements are placed at the beginning of the first OpStmts
 
+## ForStmt Loop-Carry Variables
+
+ForStmt has four loop-carry related variables with specific MemRef sharing rules:
+
+| Role | Description | MemRef Source |
+| ---- | ----------- | ------------- |
+| initValue | Initial value before first iteration | From producing operation |
+| iter_arg | Loop body variable | Inherited from initValue |
+| yield value | Produced at end of each iteration | From producing operation (independent) |
+| return_var | Captures final yield value after loop | Inherited from yield value |
+
+**Sharing groups**:
+
+- Group A: initValue + iter_arg (same MemRef)
+- Group B: yield value + return_var (same MemRef)
+
+Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by BasicMemoryReuse (which inserts `tile.move` if needed).
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -122,3 +140,4 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - Tests tile.alloc statements are created for non-DDR MemRefs
 - Tests normalized SeqStmts/OpStmts structure
 - Tests tile.store result shares MemRef with output param
+- Tests ForStmt loop-carry MemRef relationships (initValue/iter_arg sharing, yield/return_var sharing)

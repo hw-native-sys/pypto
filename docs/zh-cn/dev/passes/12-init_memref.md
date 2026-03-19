@@ -93,6 +93,24 @@ def main(
 - `tile.store` 结果与输出张量参数共享 MemRef
 - Alloc 语句放置在第一个 OpStmts 的开头
 
+## ForStmt 循环携带变量
+
+ForStmt 有四个循环携带相关变量，遵循特定的 MemRef 共享规则：
+
+| 角色 | 描述 | MemRef 来源 |
+| ---- | ---- | ----------- |
+| initValue | 首次迭代前的初始值 | 来自产生该值的操作 |
+| iter_arg | 循环体内变量 | 继承自 initValue |
+| yield value | 每次迭代结束时产出的值 | 来自产生该值的操作（独立分配） |
+| return_var | 循环结束后接收最终 yield 值 | 继承自 yield value |
+
+**共享组**：
+
+- 组 A：initValue + iter_arg（共享同一 MemRef）
+- 组 B：yield value + return_var（共享同一 MemRef）
+
+组 A 和组 B 可能有不同的 MemRef。yield 与 iter_arg 之间的 MemRef 不一致由后续的 BasicMemoryReuse 解决（必要时插入 `tile.move`）。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -122,3 +140,4 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - 测试为非 DDR MemRef 创建 tile.alloc 语句
 - 测试规范化的 SeqStmts/OpStmts 结构
 - 测试 tile.store 结果与输出参数共享 MemRef
+- 测试 ForStmt 循环携带变量的 MemRef 关系（initValue/iter_arg 共享，yield/return_var 共享）

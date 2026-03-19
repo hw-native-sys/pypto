@@ -400,8 +400,27 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
     assert cast(ir.ConstInt, external_tile_type.memref.addr_).value == -1
 
 
-def test_init_memref_for_return_var_inherits_iter_arg_memory_space():
-    """Regression: ForStmt return vars must override stale DDR with iter_arg memory space."""
+def _find_yield_stmt(stmt):
+    """Recursively find YieldStmt in a statement tree."""
+    if isinstance(stmt, ir.YieldStmt):
+        return stmt
+    if isinstance(stmt, (ir.SeqStmts, ir.OpStmts)):
+        for child in stmt.stmts:
+            result = _find_yield_stmt(child)
+            if result:
+                return result
+    return None
+
+
+def test_init_memref_for_stmt_loop_carry_memref_relationships():
+    """ForStmt loop-carry variables have two MemRef sharing groups after InitMemRef.
+
+    Group A: initValue + iter_arg (iter_arg inherits from initValue)
+    Group B: yield value + return_var (return_var inherits from yield value)
+
+    Group A and B may have different MemRefs — the yield-to-iter_arg mismatch
+    is resolved later by MemoryReuse (which inserts tile.move if needed).
+    """
     span = ir.Span.unknown()
 
     input_tensor = ir.Var("input_tensor", ir.TensorType([64, 64], ir.DataType.FP32), span)
@@ -412,11 +431,18 @@ def test_init_memref_for_return_var_inherits_iter_arg_memory_space():
         init_tile, ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span), span
     )
 
+    other_tile = ir.Var(
+        "other_tile", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+    other_stmt = ir.AssignStmt(
+        other_tile, ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span), span
+    )
+
     iter_arg = ir.IterArg("acc_iter", ir.TileType([64, 64], ir.DataType.FP32), init_tile, span)
     next_tile = ir.Var(
         "acc_next", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
     )
-    next_stmt = ir.AssignStmt(next_tile, ir.Call(ir.Op("tile.add"), [iter_arg, init_tile], span), span)
+    next_stmt = ir.AssignStmt(next_tile, ir.Call(ir.Op("tile.add"), [iter_arg, other_tile], span), span)
     return_var = ir.Var("acc_out", ir.TileType([64, 64], ir.DataType.FP32), span)
 
     loop_body = ir.SeqStmts([ir.OpStmts([next_stmt], span), ir.YieldStmt([next_tile], span)], span)
@@ -430,7 +456,9 @@ def test_init_memref_for_return_var_inherits_iter_arg_memory_space():
         [return_var],
         span,
     )
-    body = ir.SeqStmts([ir.OpStmts([init_stmt], span), loop_stmt, ir.ReturnStmt([return_var], span)], span)
+    body = ir.SeqStmts(
+        [ir.OpStmts([init_stmt, other_stmt], span), loop_stmt, ir.ReturnStmt([return_var], span)], span
+    )
     func = ir.Function(
         "test_func",
         [(input_tensor, ir.ParamDirection.In)],
@@ -443,18 +471,46 @@ def test_init_memref_for_return_var_inherits_iter_arg_memory_space():
     after = passes.init_mem_ref()(program)
     result_func = list(after.functions.values())[0]
 
-    assert isinstance(result_func.body, ir.SeqStmts)
     loop_after = cast(
-        ir.ForStmt, next(stmt for stmt in result_func.body.stmts if isinstance(stmt, ir.ForStmt))
+        ir.ForStmt,
+        next(stmt for stmt in cast(ir.SeqStmts, result_func.body).stmts if isinstance(stmt, ir.ForStmt)),
     )
     loop_iter_arg = loop_after.iter_args[0]
     loop_return_var = loop_after.return_vars[0]
+    yield_stmt = _find_yield_stmt(loop_after.body)
+    assert yield_stmt is not None
+    yield_var = yield_stmt.value[0]
 
-    assert isinstance(loop_iter_arg.type, ir.TileType)
-    assert isinstance(loop_return_var.type, ir.TileType)
-    assert loop_iter_arg.type.memory_space == MemorySpace.Vec
-    assert loop_return_var.type.memory_space == MemorySpace.Vec
-    assert loop_iter_arg.type.shares_memref_with(loop_return_var.type)
+    # Find initValue after transformation (iter_arg.init_value)
+    init_value = loop_iter_arg.initValue
+    assert isinstance(init_value, ir.Var)
+
+    # All 4 variables must have TileType with MemRef in Vec space
+    for name, var_type in [
+        ("initValue", init_value.type),
+        ("iter_arg", loop_iter_arg.type),
+        ("yield_value", yield_var.type),
+        ("return_var", loop_return_var.type),
+    ]:
+        assert isinstance(var_type, ir.TileType), f"{name} should be TileType"
+        assert var_type.memref is not None, f"{name} should have MemRef"
+        assert var_type.memory_space == MemorySpace.Vec, f"{name} should be Vec"
+
+    # Group A: initValue and iter_arg share the same MemRef
+    init_tile = cast(ir.TileType, init_value.type)
+    iter_arg_tile = cast(ir.TileType, loop_iter_arg.type)
+    yield_tile = cast(ir.TileType, yield_var.type)
+    return_var_tile = cast(ir.TileType, loop_return_var.type)
+
+    assert init_tile.shares_memref_with(iter_arg_tile), "initValue and iter_arg must share MemRef"
+
+    # Group B: yield value and return_var share the same MemRef
+    assert yield_tile.shares_memref_with(return_var_tile), "yield value and return_var must share MemRef"
+
+    # Group A and B have different MemRefs (yield gets independent MemRef from tile.add)
+    assert not yield_tile.shares_memref_with(iter_arg_tile), (
+        "yield value should get its own MemRef from tile.add, not share with iter_arg"
+    )
 
 
 if __name__ == "__main__":
