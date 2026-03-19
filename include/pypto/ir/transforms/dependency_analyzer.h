@@ -31,6 +31,10 @@ namespace ir {
  * It is NOT a pass - it's a pure analysis tool that can be called by
  * any pass that needs dependency information.
  *
+ * Precondition: input IR must be in SSA form (or at least have unique Var
+ * pointers per definition). Variable identity is determined by pointer
+ * identity (const Var*), not by name_hint_.
+ *
  * Inherits from IRMutator to leverage function information retrieval capabilities.
  *
  * Usage:
