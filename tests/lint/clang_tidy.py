@@ -423,7 +423,7 @@ def _get_system_include_paths() -> list[str]:
 
     try:
         result = subprocess.run(
-            [compiler, "-E", "-x", "c++", "-v", "/dev/null"],
+            [compiler, "-E", "-x", "c++", "-v", os.devnull],
             capture_output=True,
             text=True,
             check=False,
