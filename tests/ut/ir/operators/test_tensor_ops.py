@@ -1383,5 +1383,56 @@ def test_tensor_expands():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_concat():
+    """Test tensor.concat - column-wise concatenation."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    call = tensor.concat(t0_var, t1_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.concat"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 32
+
+
+def test_tensor_concat_dtype_mismatch():
+    """Test tensor.concat rejects mismatched dtypes."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim32, dim16], DataType.FP16)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    with pytest.raises(ValueError, match="same dtype"):
+        tensor.concat(t0_var, t1_var)
+
+
+def test_tensor_concat_row_mismatch():
+    """Test tensor.concat rejects mismatched row counts."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim8, dim16], DataType.FP32)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    with pytest.raises(ValueError, match="row count must match"):
+        tensor.concat(t0_var, t1_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
