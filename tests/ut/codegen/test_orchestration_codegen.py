@@ -63,10 +63,10 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 c = self.kernel_add(a, b, c)
-                d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 d = self.kernel_add(c, b, d)
                 return d
 
@@ -290,10 +290,10 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
-                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 c = self.kernel_add(a, b, c)
-                d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 d = self.kernel_add(a, b, d)
                 return c, d
 
@@ -371,6 +371,7 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                f: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 c = self.kernel_add(a, b, c)
@@ -380,7 +381,6 @@ class TestOrchestration:
                 e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
                 g: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 g = self.kernel_mul(d, e, g)
-                f: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 f = self.kernel_add(g, c, f)
                 return f
 
@@ -571,11 +571,11 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                result: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 x: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 y: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 x, y = self.kernel_pair(a, b, x, y)
-                result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 result = self.kernel_add(x, y, result)
                 return result
 
@@ -625,9 +625,9 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                x: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                y: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
-                x: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                y: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 x, y = self.kernel_pair(a, b, x, y)
                 return x, y
 
@@ -703,11 +703,11 @@ class TestOrchestration:
                 li_in: pl.Tensor[[16, 1], pl.FP32],
                 oi_in: pl.Tensor[[16, 16], pl.FP32],
                 dst_in: pl.Tensor[[16, 16], pl.FP32],
+                final: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 mi_in, li_in, oi_in, dst_in = self.online_update(
                     mij, lij, oi_new, mi_in, li_in, oi_in, dst_in
                 )
-                final: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 final = self.kernel_add(oi_in, dst_in, final)
                 return final
 
@@ -818,16 +818,16 @@ class TestOrchestration:
                 mij: pl.Tensor[[16, 1], pl.FP32],
                 lij: pl.Tensor[[16, 1], pl.FP32],
                 oi_new: pl.Tensor[[16, 16], pl.FP32],
-                mi: pl.Tensor[[16, 1], pl.FP32],
-                li: pl.Tensor[[16, 1], pl.FP32],
-                oi: pl.Tensor[[16, 16], pl.FP32],
+                mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+                li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+                oi: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                dst: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 1], pl.FP32],
                 pl.Tensor[[16, 1], pl.FP32],
                 pl.Tensor[[16, 16], pl.FP32],
                 pl.Tensor[[16, 16], pl.FP32],
             ]:
-                dst: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 mi, li, oi, dst = self.online_update(mij, lij, oi_new, mi, li, oi, dst)
                 return mi, li, oi, dst
 
@@ -1270,8 +1270,8 @@ class TestOrchestration:
             def orch_tuple_loop(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
+                a_acc: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                a_acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 b_acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 # Tuple call BEFORE the loop — makes _tuple_tmp/a_acc/b_acc loop-carried
                 a_acc, b_acc = self.kernel_init(a_acc, b_acc)

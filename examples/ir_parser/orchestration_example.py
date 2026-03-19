@@ -77,6 +77,7 @@ class ExampleOrchProgram:
         self,
         a: pl.Tensor[[16, 16], pl.FP32],
         b: pl.Tensor[[16, 16], pl.FP32],
+        f_result: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Build BuildExampleGraph orchestration function.
 
@@ -87,11 +88,12 @@ class ExampleOrchProgram:
           - task0: c = a + b (kernel_add writes to c)
           - task1: d = c + 1 (kernel_add_scalar writes to d)
           - task2: e = c + 2 (kernel_add_scalar writes to e)
-          - task3: f = d * e (kernel_mul writes to f)
+          - task3: f = d * e (kernel_mul writes to f_result)
 
         Args:
             a: Input tensor A
             b: Input tensor B
+            f_result: Output tensor for final result
 
         Returns:
             Final result tensor
@@ -109,7 +111,6 @@ class ExampleOrchProgram:
         e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
 
         # Task 3: f = d * e (call kernel_mul with output buffer)
-        f_result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
         f_result = self.kernel_mul(d, e, f_result)
         return f_result
 

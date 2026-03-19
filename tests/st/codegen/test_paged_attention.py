@@ -85,9 +85,11 @@ class QKMatmulTestCase(PTOTestCase):
         class QKMatmulProgram:
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, qi: pl.Tensor[[16, 128], pl.BF16], kj_t: pl.Tensor[[128, 128], pl.BF16, pl.DN]
+                self,
+                qi: pl.Tensor[[16, 128], pl.BF16],
+                kj_t: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                out_sij: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_sij: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_sij = kernel_qk_matmul(qi, kj_t, out_sij)
                 return out_sij
 
@@ -146,14 +148,14 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 self,
                 sij: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[1], pl.FP32],
+                pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
-                pij_out: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
-                mij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
-                lij_out: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
                 pij_out, mij_out, lij_out = kernel_softmax_prepare(sij, scale, pij_out, mij_out, lij_out)
                 return pij_out, mij_out, lij_out
 
@@ -211,9 +213,11 @@ class PVMatmulTestCase(PTOTestCase):
         class PVMatmulProgram:
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, pij: pl.Tensor[[16, 128], pl.BF16], vj: pl.Tensor[[128, 128], pl.BF16]
+                self,
+                pij: pl.Tensor[[16, 128], pl.BF16],
+                vj: pl.Tensor[[128, 128], pl.BF16],
+                out_oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_oi: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 out_oi = kernel_pv_matmul(pij, vj, out_oi)
                 return out_oi
 
@@ -295,9 +299,10 @@ class OnlineUpdateTestCase(PTOTestCase):
                 lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 oi_new: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
-                mi: pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                li: pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                oi: pl.Tensor[[16, 128], pl.FP32],
+                mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                li: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+                dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 1], pl.FP32, pl.DN],
                 pl.Tensor[[16, 1], pl.FP32, pl.DN],
@@ -307,7 +312,6 @@ class OnlineUpdateTestCase(PTOTestCase):
                 # Read is_first and is_last from config tensor
                 is_first: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 is_last: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                dst: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 mi, li, oi, dst = kernel_online_update(mij, lij, oi_new, mi, li, oi, dst, is_first, is_last)
                 return mi, li, oi, dst
 
@@ -426,21 +430,6 @@ class PagedAttentionTestCase(PTOTestCase):
             TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
             TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
             TensorSpec("config", [7], DataType.INT64, init_value=config),
-            TensorSpec(
-                "size_query", [1], DataType.INT64, init_value=torch.tensor([B * H * D * 2], dtype=torch.int64)
-            ),
-            TensorSpec(
-                "size_key_cache",
-                [1],
-                DataType.INT64,
-                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
-            ),
-            TensorSpec(
-                "size_value_cache",
-                [1],
-                DataType.INT64,
-                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
-            ),
         ]
 
     def get_program(self) -> Any:
