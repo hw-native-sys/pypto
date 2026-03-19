@@ -588,7 +588,7 @@ class TestFillpadCompatibility:
                 output: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.TilePad.max)
+                padded: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded, [0, 0], output)
                 return result
 
@@ -615,11 +615,11 @@ class TestFillpadCompatibility:
                 output_b: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_max: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.TilePad.max)
+                padded_max: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_max, [0, 0], output_a)
 
                 tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_min: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.TilePad.min)
+                padded_min: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.PadValue.min)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_min, [0, 0], output_b)
                 return result
 
@@ -647,11 +647,11 @@ class TestFillpadCompatibility:
                 output_b: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_a: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.TilePad.max)
+                padded_a: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_a, [0, 0], output_a)
 
                 tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_b: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.TilePad.max)
+                padded_b: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.PadValue.max)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_b, [0, 0], output_b)
                 return result
 

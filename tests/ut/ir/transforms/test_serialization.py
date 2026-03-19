@@ -682,6 +682,19 @@ class TestEdgeCases:
 
         ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
 
+    def test_serialize_call_with_padvalue_kwarg(self):
+        """Test serialization of Call kwargs containing PadValue."""
+        span = ir.Span.unknown()
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        tile_type = ir.TileType([dim8, dim8], DataType.FP32)
+        tile = ir.Var("tile", tile_type, span)
+        call = ir.Call(ir.get_op("tile.fillpad"), [tile], {"pad_value": ir.PadValue.min}, tile_type, span)
+
+        data = ir.serialize(call)
+        restored = ir.deserialize(data)
+
+        ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
+
 
 class TestRobustness:
     """Tests for error handling and robustness."""

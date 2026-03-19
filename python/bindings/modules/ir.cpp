@@ -101,7 +101,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     std::string key = nb::cast<std::string>(item.first);
 
     // Try to cast to common types
-    // NOTE: Check DataType/MemorySpace/PipeType/CoreType/TilePad BEFORE int, and bool BEFORE int
+    // NOTE: Check DataType/MemorySpace/PipeType/CoreType/PadValue BEFORE int, and bool BEFORE int
     if (nb::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, nb::cast<DataType>(item.second));
     } else if (nb::isinstance<MemorySpace>(item.second)) {
@@ -114,8 +114,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<CoreType>(item.second)) {
       // Cast enum to int for storage
       kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
-    } else if (nb::isinstance<TilePad>(item.second)) {
-      kwargs.emplace_back(key, nb::cast<TilePad>(item.second));
+    } else if (nb::isinstance<PadValue>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -333,12 +333,12 @@ void BindIR(nb::module_& m) {
       .value("col_major", TileLayout::col_major, "Column-major layout")
       .export_values();
 
-  // TilePad enum - must be before TileView
-  nb::enum_<TilePad>(ir, "TilePad", "Tile pad mode enumeration")
-      .value("null", TilePad::null, "No padding")
-      .value("zero", TilePad::zero, "Zero padding")
-      .value("max", TilePad::max, "Max value padding")
-      .value("min", TilePad::min, "Min value padding")
+  // PadValue enum - must be before TileView
+  nb::enum_<PadValue>(ir, "PadValue", "Tile pad mode enumeration")
+      .value("null", PadValue::null, "No padding")
+      .value("zero", PadValue::zero, "Zero padding")
+      .value("max", PadValue::max, "Max value padding")
+      .value("min", PadValue::min, "Min value padding")
       .export_values();
 
   // TileView - struct for tile view information
@@ -347,10 +347,10 @@ void BindIR(nb::module_& m) {
       "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad")
       .def(nb::init<>(), "Create an empty tile view")
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
-                    uint64_t, TilePad>(),
+                    uint64_t, PadValue>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
-           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = TilePad::null,
+           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            "Create a tile view with valid_shape, stride, start_offset, blayout, slayout, fractal, and pad")
       .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
       .def_rw("stride", &TileView::stride, "Stride for each dimension")
@@ -532,8 +532,8 @@ void BindIR(nb::module_& m) {
             result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(TensorLayout)) {
             result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(TilePad)) {
-            result[key.c_str()] = AnyCast<TilePad>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(PadValue)) {
+            result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
           }
         }
         return result;
@@ -1093,7 +1093,7 @@ void BindIR(nb::module_& m) {
 
   ir.def(
       "register_op_conversion_custom",
-      [](const std::string& from_op, nb::object func) {
+      [](const std::string& from_op, const nb::object& func) {
         // Capture Python callable in a C++ ConversionFunc
         nb::object py_func = nb::borrow(func);
         OpConversionRegistry::GetInstance().RegisterCustom(
@@ -1105,9 +1105,8 @@ void BindIR(nb::module_& m) {
               // Convert kwargs to Python list of (key, value) tuples
               nb::list py_kwargs_list;
               for (const auto& [key, val] : kwargs) {
-                nb::object py_val =
-                    AnyToPyObject<DataType, MemorySpace, TensorLayout, bool, int, std::string, double>(val,
-                                                                                                       key);
+                nb::object py_val = AnyToPyObject<DataType, MemorySpace, TensorLayout, PadValue, bool, int,
+                                                  std::string, double>(val, key);
                 nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
                 py_kwargs_list.append(pair);
               }
@@ -1141,6 +1140,7 @@ void BindIR(nb::module_& m) {
         auto result = DeepClone(body);
         // Convert raw-pointer-keyed map to shared_ptr-keyed map for Python
         std::vector<std::pair<VarPtr, VarPtr>> var_map_pairs;
+        var_map_pairs.reserve(result.var_map.size());
         for (const auto& [raw_ptr, new_var] : result.var_map) {
           // Find the original VarPtr from the raw pointer — wrap as non-owning shared_ptr
           // Since Python holds the original IR tree alive, the raw pointer is valid
