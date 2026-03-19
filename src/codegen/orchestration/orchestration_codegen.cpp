@@ -52,7 +52,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
  * be accepted for compatibility. This helper normalizes both formats so codegen
  * can match input args with output vars for inout parameter detection.
  */
-std::string GetSSABaseName(const std::string& name) { return auto_name::GetCompatibleBaseName(name); }
+std::string GetSSABaseName(const std::string& name) { return auto_name::GetLegacyCompatibleBaseName(name); }
 
 /**
  * @brief Check if an operation is a built-in IR operation (not a user-defined function)

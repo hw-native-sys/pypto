@@ -121,6 +121,64 @@ static void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
   }
 }
 
+static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::string>& result) {
+  if (!stmt) return;
+
+  auto kind = stmt->GetKind();
+  switch (kind) {
+    case ObjectKind::AssignStmt: {
+      auto assign = std::static_pointer_cast<const AssignStmt>(stmt);
+      result.insert(assign->var_->name_hint_);
+      break;
+    }
+    case ObjectKind::ForStmt: {
+      auto for_stmt = std::static_pointer_cast<const ForStmt>(stmt);
+      result.insert(for_stmt->loop_var_->name_hint_);
+      for (const auto& ia : for_stmt->iter_args_) result.insert(ia->name_hint_);
+      for (const auto& rv : for_stmt->return_vars_) result.insert(rv->name_hint_);
+      CollectDeclaredNames(for_stmt->body_, result);
+      break;
+    }
+    case ObjectKind::WhileStmt: {
+      auto while_stmt = std::static_pointer_cast<const WhileStmt>(stmt);
+      for (const auto& ia : while_stmt->iter_args_) result.insert(ia->name_hint_);
+      for (const auto& rv : while_stmt->return_vars_) result.insert(rv->name_hint_);
+      CollectDeclaredNames(while_stmt->body_, result);
+      break;
+    }
+    case ObjectKind::IfStmt: {
+      auto if_stmt = std::static_pointer_cast<const IfStmt>(stmt);
+      for (const auto& rv : if_stmt->return_vars_) result.insert(rv->name_hint_);
+      CollectDeclaredNames(if_stmt->then_body_, result);
+      if (if_stmt->else_body_.has_value()) {
+        CollectDeclaredNames(*if_stmt->else_body_, result);
+      }
+      break;
+    }
+    case ObjectKind::SeqStmts: {
+      auto seq = std::static_pointer_cast<const SeqStmts>(stmt);
+      for (const auto& s : seq->stmts_) {
+        CollectDeclaredNames(s, result);
+      }
+      break;
+    }
+    case ObjectKind::ScopeStmt: {
+      auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
+      CollectDeclaredNames(scope->body_, result);
+      break;
+    }
+    case ObjectKind::OpStmts: {
+      auto ops = std::static_pointer_cast<const OpStmts>(stmt);
+      for (const auto& s : ops->stmts_) {
+        CollectDeclaredNames(s, result);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 /**
  * @brief Convert a vector of statements into a single StmtPtr.
  *
@@ -161,6 +219,16 @@ static StmtPtr MakeResultStmt(const std::vector<StmtPtr>& stmts, const Span& spa
  */
 class ChunkedLoopSplitter : public IRMutator {
  public:
+  void SeedUsedNames(const FunctionPtr& func) {
+    function_used_names_.clear();
+    for (const auto& param : func->params_) {
+      if (param) {
+        function_used_names_.insert(param->name_hint_);
+      }
+    }
+    CollectDeclaredNames(func->body_, function_used_names_);
+  }
+
   StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
     if (op->scope_kind_ == ScopeKind::AutoInCore) {
       bool prev = inside_auto_incore_;
@@ -371,7 +439,7 @@ class ChunkedLoopSplitter : public IRMutator {
       if (num_full_chunks > 0) {
         std::vector<VarPtr> body_def_vars;
         CollectDefVars(op->body_, body_def_vars);
-        std::unordered_set<std::string> used_names;
+        std::unordered_set<std::string> used_names = function_used_names_;
         for (const auto& var : body_def_vars) {
           used_names.insert(var->name_hint_);
         }
@@ -379,6 +447,7 @@ class ChunkedLoopSplitter : public IRMutator {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
           auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
           used_names.insert(fresh_name);
+          function_used_names_.insert(fresh_name);
           auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
@@ -440,6 +509,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
  private:
   bool inside_auto_incore_ = false;
+  std::unordered_set<std::string> function_used_names_;
   std::unordered_map<const Var*, ExprPtr> substitution_map_;
 
   using SavedSubstitution = std::pair<const Var*, ExprPtr>;
@@ -527,7 +597,7 @@ class ChunkedLoopSplitter : public IRMutator {
       if (num_full_chunks > 0) {
         std::vector<VarPtr> body_def_vars;
         CollectDefVars(op->body_, body_def_vars);
-        std::unordered_set<std::string> used_names;
+        std::unordered_set<std::string> used_names = function_used_names_;
         for (const auto& var : body_def_vars) {
           used_names.insert(var->name_hint_);
         }
@@ -535,6 +605,7 @@ class ChunkedLoopSplitter : public IRMutator {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
           auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
           used_names.insert(fresh_name);
+          function_used_names_.insert(fresh_name);
           auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
@@ -564,6 +635,7 @@ FunctionPtr TransformSplitChunkedLoops(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "SplitChunkedLoops cannot run on null function";
 
   ChunkedLoopSplitter splitter;
+  splitter.SeedUsedNames(func);
   auto new_body = splitter.VisitStmt(func->body_);
 
   if (new_body.get() == func->body_.get()) {

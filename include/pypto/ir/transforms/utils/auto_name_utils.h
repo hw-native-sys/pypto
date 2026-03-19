@@ -124,7 +124,8 @@ inline std::string BuildName(const ParsedName& parsed) {
 }
 
 inline ParsedName Parse(const std::string& name) {
-  ParsedName parsed{.base_name = name};
+  ParsedName parsed;
+  parsed.base_name = name;
 
   size_t boundary = name.find("__");
   if (boundary == std::string::npos) {
@@ -228,6 +229,14 @@ inline std::string StripLegacyBaseName(const std::string& name) {
 }
 
 inline std::string GetCompatibleBaseName(const std::string& name) {
+  ParsedName parsed = Parse(name);
+  if (parsed.has_auto_suffix) {
+    return parsed.base_name;
+  }
+  return parsed.base_name;
+}
+
+inline std::string GetLegacyCompatibleBaseName(const std::string& name) {
   ParsedName parsed = Parse(name);
   if (parsed.has_auto_suffix) {
     return parsed.base_name;
