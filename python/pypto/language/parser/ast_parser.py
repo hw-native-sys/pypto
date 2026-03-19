@@ -1215,6 +1215,28 @@ class ASTParser:
             self._loop_kind_stack.pop()
             self.current_loop_builder = None
 
+    def _parse_if_else_branch(
+        self,
+        stmt: ast.If,
+        if_builder: Any,
+        should_leak: bool,
+        pre_if_parent_scope: dict | None,
+        post_then_parent_scope: dict | None,
+    ) -> None:
+        """Parse the else branch of an if statement and restore then-branch leaks."""
+        if should_leak and pre_if_parent_scope is not None:
+            self.scope_manager.scopes[-1] = dict(pre_if_parent_scope)
+        if_builder.else_()
+        self.scope_manager.enter_scope("else")
+        for else_stmt in stmt.orelse:
+            self.parse_statement(else_stmt)
+        self.scope_manager.exit_scope(leak_vars=should_leak)
+        # Re-apply then-branch leaks so they are visible after the if.
+        if should_leak and post_then_parent_scope is not None:
+            for name, val in post_then_parent_scope.items():
+                if name not in (pre_if_parent_scope or {}):
+                    self.scope_manager.scopes[-1][name] = val
+
     def parse_if_statement(self, stmt: ast.If) -> None:
         """Parse if statement with phi nodes.
 
@@ -1253,19 +1275,24 @@ class ASTParser:
                 # Determine if we should leak variables (no explicit yields)
                 should_leak = not bool(then_yield_vars)
 
+                # Snapshot parent scope before then branch so else branch
+                # does not see variables leaked from then branch.
+                pre_if_parent_scope = dict(self.scope_manager.scopes[-1]) if should_leak else None
+
                 # Parse then branch (yield types captured via _current_yield_types)
                 self.scope_manager.enter_scope("if")
                 for then_stmt in stmt.body:
                     self.parse_statement(then_stmt)
                 self.scope_manager.exit_scope(leak_vars=should_leak)
 
+                # Capture what then branch leaked into parent scope before restoring.
+                post_then_parent_scope = dict(self.scope_manager.scopes[-1]) if should_leak else None
+
                 # Parse else branch if present
                 if stmt.orelse:
-                    if_builder.else_()
-                    self.scope_manager.enter_scope("else")
-                    for else_stmt in stmt.orelse:
-                        self.parse_statement(else_stmt)
-                    self.scope_manager.exit_scope(leak_vars=should_leak)
+                    self._parse_if_else_branch(
+                        stmt, if_builder, should_leak, pre_if_parent_scope, post_then_parent_scope
+                    )
 
                 # Declare return vars AFTER parsing branches so captured yield types
                 # are available for unannotated yields (fixes issue #233 / #234)

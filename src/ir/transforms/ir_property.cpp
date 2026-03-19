@@ -51,8 +51,12 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileMemoryInferred";
     case IRProperty::BreakContinueValid:
       return "BreakContinueValid";
+    case IRProperty::UseAfterDef:
+      return "UseAfterDef";
     case IRProperty::HierarchyOutlined:
       return "HierarchyOutlined";
+    case IRProperty::StructuredCtrlFlow:
+      return "StructuredCtrlFlow";
     default:
       return "Unknown";
   }
@@ -112,13 +116,14 @@ VerificationLevel GetDefaultVerificationLevel() {
 
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked, IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks};
+                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
   return props;
 }
 
 const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked, IRProperty::NoNestedCalls,
-                                   IRProperty::BreakContinueValid, IRProperty::NoRedundantBlocks};
+  static const IRPropertySet props{IRProperty::SSAForm,           IRProperty::TypeChecked,
+                                   IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
   return props;
 }
 

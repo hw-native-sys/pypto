@@ -114,6 +114,25 @@ std::string ErrorTypeToString(ErrorType type);
 
 }  // namespace break_continue
 
+/**
+ * @brief Use-after-def verification error types and utilities
+ */
+namespace use_after_def {
+
+/**
+ * @brief Error types for use-after-def verification
+ */
+enum class ErrorType : int {
+  USE_BEFORE_DEF = 401,  ///< Variable used before any definition in scope
+};
+
+/**
+ * @brief Convert use-after-def error type to string
+ */
+std::string ErrorTypeToString(ErrorType type);
+
+}  // namespace use_after_def
+
 }  // namespace ir
 }  // namespace pypto
 

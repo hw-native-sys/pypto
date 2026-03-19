@@ -21,6 +21,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
@@ -45,6 +46,15 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
 }
 
 }  // namespace
+
+bool operator==(const TileView& lhs, const TileView& rhs) {
+  return AreExprVectorsEqual(lhs.valid_shape, rhs.valid_shape) &&
+         AreExprVectorsEqual(lhs.stride, rhs.stride) && AreExprsEqual(lhs.start_offset, rhs.start_offset) &&
+         lhs.blayout == rhs.blayout && lhs.slayout == rhs.slayout && lhs.fractal == rhs.fractal &&
+         lhs.pad == rhs.pad;
+}
+
+bool operator!=(const TileView& lhs, const TileView& rhs) { return !(lhs == rhs); }
 
 std::string TensorLayoutToString(TensorLayout layout) {
   switch (layout) {

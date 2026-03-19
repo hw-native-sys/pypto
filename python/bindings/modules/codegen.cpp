@@ -19,6 +19,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/cce/cce_codegen.h"
 #include "pypto/codegen/cce/type_converter.h"
+#include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 
@@ -114,6 +115,17 @@ void BindCodegen(nb::module_& m) {
                      "    func: The orchestration function to generate code for\n\n"
                      "Returns:\n"
                      "    OrchestrationResult with generated code and function metadata");
+
+  // DistributedCodegen - Distributed C++ code generator for Linqu runtime
+  nb::class_<DistributedCodegen>(codegen_module, "DistributedCodegen",
+                                 "Distributed codegen for Linqu hierarchy runtime C++ code")
+      .def(nb::init<>(), "Create a distributed code generator")
+      .def("generate", &DistributedCodegen::Generate, nb::arg("program"),
+           "Generate distributed C++ code from IR Program.\n\n"
+           "Args:\n"
+           "    program: The IR Program (after OutlineHierarchyScopes)\n\n"
+           "Returns:\n"
+           "    Complete C++ source code as a string");
 
   codegen_module.def("infer_function_core_type", &InferFunctionCoreType, nb::arg("func"),
                      "Infer the core type (CUBE or VECTOR) of a function from its operations.\n\n"

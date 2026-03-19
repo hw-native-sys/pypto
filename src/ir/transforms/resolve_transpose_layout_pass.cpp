@@ -41,7 +41,6 @@ namespace {
 
 struct TransposeParamInfo {
   size_t param_index;
-  std::vector<ExprPtr> new_shape;
 };
 
 /**
@@ -71,15 +70,7 @@ class TransposeLoadScanner : public IRVisitor {
             size_t param_idx = it->second;
             if (visited_params_.count(param_idx) == 0) {
               visited_params_.insert(param_idx);
-
-              // args_[2] is the shapes tuple (MakeTuple)
-              CHECK(call->args_.size() >= 3) << "tile.load must have at least 3 positional args";
-              auto shapes_tuple = As<MakeTuple>(call->args_[2]);
-              CHECK(shapes_tuple) << "tile.load shapes arg must be a MakeTuple";
-              CHECK(shapes_tuple->elements_.size() == 2)
-                  << "transpose=true only supports 2D shapes, got " << shapes_tuple->elements_.size();
-
-              results_.push_back({param_idx, shapes_tuple->elements_});
+              results_.push_back({param_idx});
             }
           }
         }
@@ -151,9 +142,12 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
       continue;
     }
 
-    auto new_tensor_type =
-        std::make_shared<TensorType>(info.new_shape, old_tensor_type->dtype_, old_tensor_type->memref_,
-                                     std::optional<TensorView>(TensorView({}, TensorLayout::DN)));
+    CHECK(old_tensor_type->shape_.size() == 2) << "transpose layout resolution only supports 2D tensors, got "
+                                               << old_tensor_type->shape_.size() << "D";
+
+    auto new_tensor_type = std::make_shared<TensorType>(
+        std::vector<ExprPtr>{old_tensor_type->shape_[1], old_tensor_type->shape_[0]}, old_tensor_type->dtype_,
+        old_tensor_type->memref_, std::optional<TensorView>(TensorView({}, TensorLayout::DN)));
 
     auto new_var = std::make_shared<Var>(old_param->name_hint_, new_tensor_type, old_param->span_);
     new_params[info.param_index] = new_var;

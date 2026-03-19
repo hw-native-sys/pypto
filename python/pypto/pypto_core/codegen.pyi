@@ -129,6 +129,22 @@ class OrchestrationResult:
         """Kernel function name to core type mapping."""
         ...
 
+class DistributedCodegen:
+    """Distributed codegen for Linqu hierarchy runtime C++ code."""
+
+    def __init__(self) -> None:
+        """Create a distributed code generator."""
+
+    def generate(self, program: Program) -> str:
+        """Generate distributed C++ code from IR Program.
+
+        Args:
+            program: The IR Program (after OutlineHierarchyScopes)
+
+        Returns:
+            Complete C++ source code as a string
+        """
+
 def generate_orchestration(program: Program, func: Function) -> OrchestrationResult:
     """Generate C++ orchestration code for a function.
 
@@ -156,6 +172,7 @@ __all__ = [
     "TypeConverter",
     "PTOCodegen",
     "CCECodegen",
+    "DistributedCodegen",
     "OrchestrationResult",
     "generate_orchestration",
     "infer_function_core_type",

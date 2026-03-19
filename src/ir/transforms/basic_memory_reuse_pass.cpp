@@ -26,7 +26,6 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -82,13 +81,116 @@ struct LifetimeAnalysisResult {
 };
 
 /**
+ * @brief Collect all Var nodes referenced in an expression.
+ */
+class VarUseCollector : public IRVisitor {
+ public:
+  std::set<VarPtr> used_vars;
+
+  void VisitExpr_(const VarPtr& var) override {
+    used_vars.insert(var);
+    IRVisitor::VisitExpr_(var);
+  }
+};
+
+/**
+ * @brief Collect variable uses from a list of expressions into var_use_stmts.
+ */
+void CollectVarUsesFromExprs(const std::vector<ExprPtr>& exprs, const StmtPtr& stmt,
+                             std::map<VarPtr, std::vector<StmtPtr>>& var_use_stmts) {
+  VarUseCollector collector;
+  for (const auto& expr : exprs) {
+    collector.VisitExpr(expr);
+  }
+  for (const auto& used_var : collector.used_vars) {
+    var_use_stmts[used_var].push_back(stmt);
+  }
+}
+
+/**
+ * @brief Find the first leaf statement in a statement subtree.
+ *
+ * Mirrors CollectStmtsInBlock logic: unwraps SeqStmts/OpStmts, skips
+ * IfStmt/ForStmt/WhileStmt. Returns nullptr if no leaf is found.
+ */
+StmtPtr FindFirstLeafStmt(const StmtPtr& stmt) {
+  if (!stmt) return nullptr;
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (const auto& sub : seq->stmts_) {
+      auto leaf = FindFirstLeafStmt(sub);
+      if (leaf) return leaf;
+    }
+    return nullptr;
+  }
+  if (auto op_stmts = As<OpStmts>(stmt)) {
+    for (const auto& sub : op_stmts->stmts_) {
+      auto leaf = FindFirstLeafStmt(sub);
+      if (leaf) return leaf;
+    }
+    return nullptr;
+  }
+  if (IsA<IfStmt>(stmt) || IsA<ForStmt>(stmt) || IsA<WhileStmt>(stmt)) {
+    return nullptr;  // Control flow nodes are not leaf statements
+  }
+  return stmt;  // AssignStmt, EvalStmt, YieldStmt, ReturnStmt, etc.
+}
+
+/**
+ * @brief Collect variables used as init_values in ForStmt/WhileStmt iter_args.
+ *
+ * ForStmt/WhileStmt nodes are not flattened into basic blocks, so variables
+ * used as IterArg::initValue_ are invisible to the block-based lifetime
+ * analysis. This visitor walks the IR tree and associates each init_value
+ * variable use with the first leaf statement in the loop body, ensuring
+ * the variable's lifetime extends to the loop entry point.
+ */
+class LoopInitValueCollector : public IRVisitor {
+ public:
+  /// Map from variable to list of statements where it is used as init_value
+  std::map<VarPtr, std::vector<StmtPtr>> init_value_uses;
+
+ protected:
+  void VisitStmt_(const ForStmtPtr& op) override {
+    CollectIterArgUses(op->iter_args_, op->body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    CollectIterArgUses(op->iter_args_, op->body_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void CollectIterArgUses(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
+    if (iter_args.empty()) return;
+
+    // Find the first leaf statement in the loop body to use as the anchor point
+    StmtPtr anchor = FindFirstLeafStmt(body);
+    if (!anchor) {
+      LOG_DEBUG << "No leaf statement found in loop body, init_value uses not anchored";
+      return;
+    }
+
+    for (const auto& iter_arg : iter_args) {
+      if (!iter_arg->initValue_) continue;
+      VarUseCollector collector;
+      collector.VisitExpr(iter_arg->initValue_);
+      for (const auto& used_var : collector.used_vars) {
+        init_value_uses[used_var].push_back(anchor);
+      }
+    }
+  }
+};
+
+/**
  * @brief Compute lifetime intervals from dependencies
  *
  * This function identifies memory reuse opportunities using ONLY dependency
  * relationships (topological ordering), NOT execution timing simulation.
  */
 LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicBlock>& blocks,
-                                                        const std::vector<DependencyEdge>& dependencies) {
+                                                        const std::vector<DependencyEdge>& dependencies,
+                                                        const StmtPtr& func_body) {
   std::vector<LifetimeInterval> lifetimes;
 
   // Step 1: Assign topological order to all statements
@@ -104,16 +206,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
   std::vector<VarPtr> ordered_vars;  // Variables in definition order
   std::map<VarPtr, StmtPtr> var_def_stmt;
   std::map<VarPtr, std::vector<StmtPtr>> var_use_stmts;
-  // Helper to collect variable uses from an expression
-  class VarUseCollector : public IRVisitor {
-   public:
-    std::set<VarPtr> used_vars;
-
-    void VisitExpr_(const VarPtr& var) override {
-      used_vars.insert(var);
-      IRVisitor::VisitExpr_(var);
-    }
-  };
 
   for (const auto& block : blocks) {
     for (const auto& stmt : block.statements) {
@@ -127,20 +219,27 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
 
         // Collect variables used in the value expression (for ALL AssignStmt, not just TileType)
         // This ensures we capture uses in statements like: result = store(tile_e, ...)
-        VarUseCollector collector;
-        collector.VisitExpr(assign->value_);
-
-        for (const auto& used_var : collector.used_vars) {
-          var_use_stmts[used_var].push_back(stmt);
-        }
+        CollectVarUsesFromExprs({assign->value_}, stmt, var_use_stmts);
       } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
-        // Collect variable uses
-        VarUseCollector collector;
-        collector.VisitExpr(eval_stmt->expr_);
+        CollectVarUsesFromExprs({eval_stmt->expr_}, stmt, var_use_stmts);
+      } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
+        // Tiles yielded across loop iterations must remain live until the yield point
+        CollectVarUsesFromExprs(yield_stmt->value_, stmt, var_use_stmts);
+      } else if (auto return_stmt = As<ReturnStmt>(stmt)) {
+        // Tiles returned from the function must remain live until the return point
+        CollectVarUsesFromExprs(return_stmt->value_, stmt, var_use_stmts);
+      }
+    }
+  }
 
-        for (const auto& used_var : collector.used_vars) {
-          var_use_stmts[used_var].push_back(stmt);
-        }
+  // Step 2a: Collect init_value uses from ForStmt/WhileStmt iter_args
+  // These are not flattened into basic blocks, so we walk the function body
+  if (func_body) {
+    LoopInitValueCollector init_collector;
+    init_collector.VisitStmt(func_body);
+    for (const auto& [used_var, stmts] : init_collector.init_value_uses) {
+      for (const auto& anchor_stmt : stmts) {
+        var_use_stmts[used_var].push_back(anchor_stmt);
       }
     }
   }
@@ -258,19 +357,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
 }
 
 /**
- * @brief Compare two ExprPtr vectors element-wise by ConstInt value
- */
-bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
-  if (v1.size() != v2.size()) return false;
-  for (size_t i = 0; i < v1.size(); i++) {
-    auto c1 = As<ConstInt>(v1[i]);
-    auto c2 = As<ConstInt>(v2[i]);
-    if (!c1 || !c2 || c1->value_ != c2->value_) return false;
-  }
-  return true;
-}
-
-/**
  * @brief Check if two TileType variables have fully compatible tile attributes
  *
  * PTO codegen binds a single alloc_tile declaration (shape, dtype, blayout, pad, etc.)
@@ -278,7 +364,7 @@ bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprP
  * Reuse between tiles with different attributes would cause attribute mismatches in
  * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
  *
- * Checked attributes: shape, dtype, and TileView (valid_shape, pad, blayout, slayout, fractal).
+ * Checked attributes: shape, dtype, and TileView (all fields via TileView::operator==).
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   auto t1 = As<TileType>(var1->GetType());
@@ -291,16 +377,7 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   bool has_view1 = t1->tile_view_.has_value();
   bool has_view2 = t2->tile_view_.has_value();
   if (has_view1 != has_view2) return false;
-
-  if (has_view1) {
-    const auto& v1 = t1->tile_view_.value();
-    const auto& v2 = t2->tile_view_.value();
-    if (!AreExprVectorsEqual(v1.valid_shape, v2.valid_shape)) return false;
-    if (v1.pad != v2.pad) return false;
-    if (v1.blayout != v2.blayout) return false;
-    if (v1.slayout != v2.slayout) return false;
-    if (v1.fractal != v2.fractal) return false;
-  }
+  if (has_view1 && t1->tile_view_.value() != t2->tile_view_.value()) return false;
   return true;
 }
 
@@ -651,7 +728,7 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
   }
 
   // Step 2: Compute lifetimes based on dependency graph
-  auto analysis_result = ComputeLifetimesFromDependencies(graph.blocks, graph.dependencies);
+  auto analysis_result = ComputeLifetimesFromDependencies(graph.blocks, graph.dependencies, func->body_);
 
   if (analysis_result.lifetimes.empty()) {
     LOG_WARN << "No TileType variables found, skipping memory reuse";

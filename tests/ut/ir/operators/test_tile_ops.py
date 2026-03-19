@@ -1882,5 +1882,82 @@ class TestTileAssembleOp:
             tile.assemble(target_var, source_var, [0, 0])
 
 
+class TestTileConcatOps:
+    """Test suite for tile.concat operation."""
+
+    def test_tile_concat(self):
+        """Test tile.concat operator - concatenate two tiles along columns."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a: pl.Tile[[32, 16], pl.FP32] = pl.load(a, [0, 0], [32, 16])
+                tile_b: pl.Tile[[32, 16], pl.FP32] = pl.load(b, [0, 0], [32, 16])
+                tile_out: pl.Tile[[32, 32], pl.FP32] = pl.concat(tile_a, tile_b)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.concat" in ir_str
+
+    def test_tile_concat_ir_level(self):
+        """Test tile.concat at IR level with type deduction."""
+        span = ir.Span.unknown()
+
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        t0_type = ir.TileType([dim32, dim16], DataType.FP32)
+        t1_type = ir.TileType([dim32, dim16], DataType.FP32)
+        t0_var = ir.Var("src0", t0_type, span)
+        t1_var = ir.Var("src1", t1_type, span)
+
+        call = tile.concat(t0_var, t1_var)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.concat"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+        # Output cols = 16 + 16 = 32
+        assert isinstance(result_type.shape[1], ir.ConstInt)
+        assert result_type.shape[1].value == 32
+
+    def test_tile_concat_dtype_mismatch(self):
+        """Test tile.concat rejects mismatched dtypes."""
+        span = ir.Span.unknown()
+
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        t0_type = ir.TileType([dim32, dim16], DataType.FP32)
+        t1_type = ir.TileType([dim32, dim16], DataType.FP16)
+        t0_var = ir.Var("src0", t0_type, span)
+        t1_var = ir.Var("src1", t1_type, span)
+
+        with pytest.raises(ValueError, match="same dtype"):
+            tile.concat(t0_var, t1_var)
+
+    def test_tile_concat_row_mismatch(self):
+        """Test tile.concat rejects mismatched row counts."""
+        span = ir.Span.unknown()
+
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        t0_type = ir.TileType([dim32, dim16], DataType.FP32)
+        t1_type = ir.TileType([dim8, dim16], DataType.FP32)
+        t0_var = ir.Var("src0", t0_type, span)
+        t1_var = ir.Var("src1", t1_type, span)
+
+        with pytest.raises(ValueError, match="row count must match"):
+            tile.concat(t0_var, t1_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

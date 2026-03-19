@@ -905,6 +905,7 @@ REGISTER_OP("tile.fillpad")
     .add_argument("tile", "Input tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.fillpad requires exactly 1 argument, but got "
@@ -915,12 +916,13 @@ REGISTER_OP("tile.fillpad")
       CHECK(tile_type) << "The operator tile.fillpad requires first argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
 
-      // Get pad_value from kwargs, default to TilePad::zero
-      TilePad pad_value = TilePad::zero;
+      // Get pad_value from kwargs, default to PadValue::zero
+      PadValue pad_value = PadValue::zero;
       for (const auto& kv : kwargs) {
         if (kv.first == "pad_value") {
-          pad_value = std::any_cast<TilePad>(kv.second);
-          CHECK(pad_value != TilePad::null) << "tile.fillpad requires pad_value to be zero/max/min, not null";
+          pad_value = std::any_cast<PadValue>(kv.second);
+          CHECK(pad_value != PadValue::null)
+              << "tile.fillpad requires pad_value to be zero/max/min, not null";
         }
       }
 

@@ -24,62 +24,6 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-# --- Programs ---
-
-
-@pl.program
-class Tile4DMulProgram:
-    """Element-wise square of a [2, 3, 8, 64] tensor via a 4D tile."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 3, 8, 64], pl.FP32]],
-    ) -> pl.Tensor[[2, 3, 8, 64], pl.FP32]:
-        a_tile = pl.load(a, [0, 0, 0, 0], [2, 3, 8, 64])
-        c_tile = pl.tile.mul(a_tile, a_tile)
-        out = pl.store(c_tile, [0, 0, 0, 0], out)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-    ) -> pl.Tensor[[2, 3, 8, 64], pl.FP32]:
-        out = pl.create_tensor([2, 3, 8, 64], dtype=pl.FP32)
-        out = self.kernel(a, out)
-        return out
-
-
-@pl.program
-class Tile4DAddProgram:
-    """Element-wise addition of two [2, 3, 8, 64] tensors via a 4D tile."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        a: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-        b: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-        out: pl.Out[pl.Tensor[[2, 3, 8, 64], pl.FP32]],
-    ) -> pl.Tensor[[2, 3, 8, 64], pl.FP32]:
-        a_tile = pl.load(a, [0, 0, 0, 0], [2, 3, 8, 64])
-        b_tile = pl.load(b, [0, 0, 0, 0], [2, 3, 8, 64])
-        c_tile = pl.tile.add(a_tile, b_tile)
-        out = pl.store(c_tile, [0, 0, 0, 0], out)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-        b: pl.Tensor[[2, 3, 8, 64], pl.FP32],
-    ) -> pl.Tensor[[2, 3, 8, 64], pl.FP32]:
-        out = pl.create_tensor([2, 3, 8, 64], dtype=pl.FP32)
-        out = self.kernel(a, b, out)
-        return out
-
-
 # --- Programs (partial coverage) ---
 
 
@@ -193,32 +137,42 @@ class Tile4DTopToBottomProgram:
         return out
 
 
+@pl.program
+class Tile2DStoreTo3DProgram:
+    """2D tile [1, 16] mul then stored into a 3D tensor [2, 4, 16].
+
+    The tile is natively 2D — no ND tile involved, so FlattenTileNdTo2D
+    would previously skip injecting the shapes tuple (it only checked tile rank).
+    This test verifies the fix: shapes are injected based on tensor rank.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[4, 16], pl.FP32],
+        b: pl.Tensor[[4, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
+    ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
+        # Load row 0 from each input: natively 2D tiles [1, 16]
+        a_tile = pl.load(a, [0, 0], [1, 16])
+        b_tile = pl.load(b, [0, 0], [1, 16])
+        c_tile = pl.tile.mul(a_tile, b_tile)
+        # Store into slot [1, 2, 0] of the 3D tensor
+        out = pl.store(c_tile, [1, 2, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[4, 16], pl.FP32],
+        b: pl.Tensor[[4, 16], pl.FP32],
+    ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
+        out = pl.create_tensor([2, 4, 16], dtype=pl.FP32)
+        out = self.kernel(a, b, out)
+        return out
+
+
 # --- Test Cases ---
-
-
-class Tile4DMulTestCase(PTOTestCase):
-    """4D tile [2,3,8,64] element-wise mul (self-square); flattens to [48,64]."""
-
-    def get_name(self) -> str:
-        return "tile_4d_mul"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [2, 3, 8, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [2, 3, 8, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return Tile4DMulProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["out"][:] = tensors["a"] * tensors["a"]
 
 
 class Tile4DMulPartialTestCase(PTOTestCase):
@@ -301,11 +255,17 @@ class Tile4DQuadrantTestCase(PTOTestCase):
         tensors["out"][1, 0] = tensors["a"][0, 1] ** 2
 
 
-class Tile4DAddTestCase(PTOTestCase):
-    """4D tile [2,3,8,64] element-wise add; flattens to [48,64]."""
+class Tile2DStoreTo3DTestCase(PTOTestCase):
+    """2D tile [1, 16] mul then stored into a 3D tensor [2, 4, 16].
+
+    Verifies that FlattenTileNdTo2D injects the correct shapes tuple [1, 1, 16]
+    (tile coverage left-padded to tensor rank) rather than the full tensor shape
+    [2, 4, 16]. Before the fix, this would crash with
+    'tile.store on ND tensor requires shapes tuple (args[3])'.
+    """
 
     def get_name(self) -> str:
-        return "tile_4d_add"
+        return "tile_2d_store_to_3d"
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
@@ -315,16 +275,16 @@ class Tile4DAddTestCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [2, 3, 8, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [2, 3, 8, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [2, 3, 8, 64], DataType.FP32, is_output=True),
+            TensorSpec("a", [4, 16], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [4, 16], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [2, 4, 16], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return Tile4DAddProgram
+        return Tile2DStoreTo3DProgram
 
     def compute_expected(self, tensors, params=None):
-        tensors["out"][:] = tensors["a"] + tensors["b"]
+        tensors["out"][1, 2, :] = tensors["a"][0, :] * tensors["b"][0, :]
 
 
 # --- Tests ---
@@ -368,15 +328,14 @@ class TestElementwise4D:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_4d_mul(self, test_runner):
-        """4D tile mul: [2,3,8,64] flattened to [48,64] by FlattenTileNdTo2D."""
-        test_case = Tile4DMulTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+    def test_tile_2d_store_to_3d(self, test_runner):
+        """2D tile [1, 16] stored into a 3D tensor [2, 4, 16].
 
-    def test_tile_4d_add(self, test_runner):
-        """4D tile add: [2,3,8,64] flattened to [48,64] by FlattenTileNdTo2D."""
-        test_case = Tile4DAddTestCase()
+        Regression test for the bug where FlattenTileNdTo2D only injected the
+        shapes tuple when the *tile* was ND, missing the case where the tile is
+        natively 2D but the output tensor is ND (rank > 2).
+        """
+        test_case = Tile2DStoreTo3DTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 

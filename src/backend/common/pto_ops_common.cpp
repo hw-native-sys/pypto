@@ -916,6 +916,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     // tile.gemv_acc has custom codegen (in-place accumulation)
     {"tile.gemv_bias",       "pto.tgemv.bias",       3},
     // Data movement/layout operations
+    {"tile.concat",          "pto.tconcat",          2},
     {"tile.move",            "pto.tmov",             1},
     {"tile.move_fp",         "pto.tmov.fp",          2},
     {"tile.transpose",       "pto.ttrans",           3},

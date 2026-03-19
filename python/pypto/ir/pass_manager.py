@@ -53,6 +53,7 @@ class PassManager:
         cls._strategy_passes = {
             OptimizationStrategy.Default: [
                 ("UnrollLoops", lambda: passes.unroll_loops()),
+                ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
                 ("ConvertToSSA", lambda: passes.convert_to_ssa()),
                 ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
                 ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),

@@ -14,7 +14,7 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, ScalarType, Span, TensorLayout
+from pypto.pypto_core.ir import Call, ConstInt, Expr, PadValue, ScalarType, Span, TensorLayout
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -150,6 +150,21 @@ def slice(
     if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
     return _ir_core.create_op_call("tensor.slice", args, {}, actual_span)
+
+
+def fillpad(tensor: Expr, pad_value: PadValue = PadValue.zero, span: Span | None = None) -> Call:
+    """Fill invalid tensor view elements with the specified padding value.
+
+    Args:
+        tensor: Input tensor expression
+        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression creating a padded tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.fillpad", [tensor], {"pad_value": pad_value}, actual_span)
 
 
 def matmul(
@@ -734,6 +749,25 @@ def assemble(
 
     args = [target, source, offset_tuple]
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
+
+
+def concat(
+    src0: Expr,
+    src1: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Concatenate two tensors along the column dimension.
+
+    Args:
+        src0: First source tensor (TensorType)
+        src1: Second source tensor (TensorType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise concatenation
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.concat", [src0, src1], {}, actual_span)
 
 
 def reshape(

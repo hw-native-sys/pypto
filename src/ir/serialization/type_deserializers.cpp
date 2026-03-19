@@ -169,6 +169,21 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
           throw TypeError("Missing 'value' field for MemorySpace kwarg: " + key);
         }
         kwargs.emplace_back(key, StringToMemorySpace(value_str));
+      } else if (type_name == "PadValue") {
+        if (value_str.empty()) {
+          throw TypeError("Missing 'value' field for PadValue kwarg: " + key);
+        }
+        if (value_str == "null") {
+          kwargs.emplace_back(key, PadValue::null);
+        } else if (value_str == "zero") {
+          kwargs.emplace_back(key, PadValue::zero);
+        } else if (value_str == "max") {
+          kwargs.emplace_back(key, PadValue::max);
+        } else if (value_str == "min") {
+          kwargs.emplace_back(key, PadValue::min);
+        } else {
+          throw TypeError("Unknown PadValue: " + value_str + " for kwarg: " + key);
+        }
       } else {
         // Try to deserialize as DataType
         try {

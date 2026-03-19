@@ -1340,6 +1340,43 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_tensor_fillpad_converts_to_tile_fillpad(self):
+        """tensor.fillpad should lower to tile.fillpad after loading the tensor."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                y: pl.Tensor[[8, 32], pl.FP32] = pl.fillpad(x, pad_value=pl.PadValue.min)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                x_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
+                y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.fillpad(x_tile, pad_value=pl.PadValue.min)
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.create_tensor([8, 32], dtype=pl.FP32)
+                y: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_consecutive_slice_converts_to_tile_slice(self):
         """Consecutive tensor.slice: first becomes tile.load, second becomes tile.slice."""
 

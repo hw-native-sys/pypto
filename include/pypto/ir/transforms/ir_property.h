@@ -44,7 +44,9 @@ enum class IRProperty : uint64_t {
   TileOps2D,                ///< All tile ops in InCore functions use ≤2D tiles
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
+  UseAfterDef,              ///< All variable uses are dominated by a definition
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   kCount                    ///< Sentinel (must be last)
 };
 
@@ -183,7 +185,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks}.
+ * NoRedundantBlocks, UseAfterDef}.
  */
 const IRPropertySet& GetStructuralProperties();
 
@@ -191,7 +193,7 @@ const IRPropertySet& GetStructuralProperties();
  * @brief Default property set for explicit verification
  *
  * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks} — the properties checked by run_verifier() when no explicit set is given.
+ * NoRedundantBlocks, UseAfterDef} — the properties checked by run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

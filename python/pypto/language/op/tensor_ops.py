@@ -22,6 +22,7 @@ __all__ = [
     "write",
     "dim",
     "slice",
+    "fillpad",
     "matmul",
     "mul",
     "muls",
@@ -52,13 +53,14 @@ __all__ = [
     "rsqrt",
     "cast",
     "assemble",
+    "concat",
     "reshape",
     "transpose",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, TensorLayout
+from pypto.pypto_core.ir import Expr, PadValue, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
 
@@ -166,6 +168,20 @@ def slice(
         _normalize_intlike(offset),
         normalized_valid_shape,
     )
+    return Tensor(expr=call_expr)
+
+
+def fillpad(tensor: Tensor, pad_value: PadValue = PadValue.zero) -> Tensor:
+    """Fill invalid tensor view elements with the specified padding value.
+
+    Args:
+        tensor: Input tensor
+        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min)
+
+    Returns:
+        Tensor wrapping the fillpad operation
+    """
+    call_expr = _ir_ops.fillpad(tensor.unwrap(), pad_value=pad_value)
     return Tensor(expr=call_expr)
 
 
@@ -654,6 +670,22 @@ def assemble(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tenso
     target_expr = target.unwrap()
     source_expr = source.unwrap()
     call_expr = _ir_ops.assemble(target_expr, source_expr, _normalize_intlike(offset))
+    return Tensor(expr=call_expr)
+
+
+def concat(src0: Tensor, src1: Tensor) -> Tensor:
+    """Concatenate two tensors along the column dimension.
+
+    Args:
+        src0: First source tensor
+        src1: Second source tensor
+
+    Returns:
+        Tensor with concatenated columns
+    """
+    src0_expr = src0.unwrap()
+    src1_expr = src1.unwrap()
+    call_expr = _ir_ops.concat(src0_expr, src1_expr)
     return Tensor(expr=call_expr)
 
 

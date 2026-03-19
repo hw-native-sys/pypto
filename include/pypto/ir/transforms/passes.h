@@ -200,6 +200,16 @@ Pass InterchangeChunkLoops();
 Pass UnrollLoops();
 
 /**
+ * @brief Transform break/continue into structured control flow
+ *
+ * Converts BreakStmt/ContinueStmt into equivalent if-else and while constructs.
+ * For loops with break: ForStmt is converted to WhileStmt with a break flag.
+ * For loops with continue: remaining body is wrapped in else branches.
+ * Must run before ConvertToSSA and after UnrollLoops.
+ */
+Pass CtrlFlowTransform();
+
+/**
  * @brief Create an SSA conversion pass
  */
 Pass ConvertToSSA();

@@ -188,7 +188,7 @@ class TestTileView:
         assert tile_view.blayout == ir.TileLayout.row_major
         assert tile_view.slayout == ir.TileLayout.none_box
         assert tile_view.fractal == 512
-        assert tile_view.pad == ir.TilePad.null
+        assert tile_view.pad == ir.PadValue.null
 
     def test_tileview_set_new_fields(self):
         """Test setting blayout, slayout, fractal, and pad on TileView."""
@@ -201,12 +201,12 @@ class TestTileView:
         tile_view.blayout = ir.TileLayout.col_major
         tile_view.slayout = ir.TileLayout.row_major
         tile_view.fractal = 1024
-        tile_view.pad = ir.TilePad.zero
+        tile_view.pad = ir.PadValue.zero
 
         assert tile_view.blayout == ir.TileLayout.col_major
         assert tile_view.slayout == ir.TileLayout.row_major
         assert tile_view.fractal == 1024
-        assert tile_view.pad == ir.TilePad.zero
+        assert tile_view.pad == ir.PadValue.zero
 
 
 class TestTensorTypeWithMemRef:
@@ -300,7 +300,7 @@ class TestTileTypeWithMemRef:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16 * 16 * 4, 12)
 
-        tile_type = ir.TileType(shape, DataType.FP32, memref)
+        tile_type = ir.TileType(shape, DataType.FP32, memref, None, ir.MemorySpace.Vec)
         assert tile_type.memref is not None
         assert tile_type.memory_space == ir.MemorySpace.Vec
 
@@ -356,7 +356,7 @@ class TestTileTypeWithMemRef:
         ]
         tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.MemorySpace.Vec)
         assert tile_type.memref is not None
         assert tile_type.tile_view is not None
         assert len(tile_type.tile_view.valid_shape) == 2
@@ -368,7 +368,7 @@ class TestTileTypeWithMemRef:
 
         memref = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 128, 14)
 
-        tile_type = ir.TileType(shape, DataType.FP32, memref)
+        tile_type = ir.TileType(shape, DataType.FP32, memref, None, ir.MemorySpace.Left)
         assert len(tile_type.shape) == 1
         assert tile_type.memref is not None
         assert tile_type.memory_space == ir.MemorySpace.Left
@@ -426,7 +426,7 @@ class TestTileTypeWithMemRef:
         ]
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 4 * 16 * 16 * 2, 50)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, None, ir.MemorySpace.Vec)
         assert len(tile_type.shape) == 3
         assert tile_type.memref is not None
         assert tile_type.memory_space == ir.MemorySpace.Vec
@@ -441,7 +441,7 @@ class TestTileTypeWithMemRef:
 
         memref = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0, DataType.INT64, span), 512, 15)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, None, ir.MemorySpace.Acc)
         tile_var = ir.Var("output_tile", tile_type, span)
 
         assert isinstance(tile_var.type, ir.TileType)
@@ -494,7 +494,7 @@ class TestMemRefSerialization:
         ]
         tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.MemorySpace.Vec)
         tile_var = ir.Var("tile", tile_type, span)
 
         # Serialize
@@ -762,8 +762,8 @@ class TestMemRefStructuralComparison:
         memref1 = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 23)
         memref2 = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 24)
 
-        tile_type1 = ir.TileType(shape, DataType.FP16, memref1)
-        tile_type2 = ir.TileType(shape, DataType.FP16, memref2)
+        tile_type1 = ir.TileType(shape, DataType.FP16, memref1, None, ir.MemorySpace.Vec)
+        tile_type2 = ir.TileType(shape, DataType.FP16, memref2, None, ir.MemorySpace.Vec)
 
         var1 = ir.Var("tile1", tile_type1, span)
         var2 = ir.Var("tile2", tile_type2, span)
@@ -802,7 +802,7 @@ class TestMemRefPythonPrinter:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 26)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, None, ir.MemorySpace.Vec)
         tile_var = ir.Var("tile", tile_type, span)
         stmt = ir.AssignStmt(tile_var, ir.ConstInt(0, DataType.INT64, span), span)
 
@@ -854,19 +854,19 @@ class TestMemRefIntegration:
         # Create tile with Left MemRef
         memref_a = ir.MemRef(ir.MemorySpace.Left, ir.ConstInt(0, DataType.INT64, span), 512, 29)
 
-        tile_type_a = ir.TileType(shape, DataType.FP16, memref_a)
+        tile_type_a = ir.TileType(shape, DataType.FP16, memref_a, None, ir.MemorySpace.Left)
         tile_a = ir.Var("tile_a", tile_type_a, span)
 
         # Create tile with Right MemRef
         memref_b = ir.MemRef(ir.MemorySpace.Right, ir.ConstInt(0x200, DataType.INT64, span), 512, 30)
 
-        tile_type_b = ir.TileType(shape, DataType.FP16, memref_b)
+        tile_type_b = ir.TileType(shape, DataType.FP16, memref_b, None, ir.MemorySpace.Right)
         tile_b = ir.Var("tile_b", tile_type_b, span)
 
         # Create tile with Acc MemRef for output
         memref_c = ir.MemRef(ir.MemorySpace.Acc, ir.ConstInt(0x400, DataType.INT64, span), 512, 31)
 
-        tile_type_c = ir.TileType(shape, DataType.FP32, memref_c)
+        tile_type_c = ir.TileType(shape, DataType.FP32, memref_c, None, ir.MemorySpace.Acc)
 
         # Create matmul op
         op = ir.Op("matmul")
@@ -971,7 +971,7 @@ class TestTileViewConstructor:
             ir.TileLayout.col_major,
             ir.TileLayout.row_major,
             256,
-            ir.TilePad.max,
+            ir.PadValue.max,
         )
 
         assert len(tv.valid_shape) == 2
@@ -979,7 +979,7 @@ class TestTileViewConstructor:
         assert tv.blayout == ir.TileLayout.col_major
         assert tv.slayout == ir.TileLayout.row_major
         assert tv.fractal == 256
-        assert tv.pad == ir.TilePad.max
+        assert tv.pad == ir.PadValue.max
 
     def test_tileview_constructor_default_new_fields(self):
         """Test TileView constructor uses correct defaults for new fields."""
@@ -993,16 +993,16 @@ class TestTileViewConstructor:
         assert tv.blayout == ir.TileLayout.row_major
         assert tv.slayout == ir.TileLayout.none_box
         assert tv.fractal == 512
-        assert tv.pad == ir.TilePad.null
+        assert tv.pad == ir.PadValue.null
 
     def test_tileview_all_pad_modes(self):
-        """Test TileView with all TilePad values."""
+        """Test TileView with all PadValue values."""
         span = ir.Span.unknown()
         valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
         stride = [ir.ConstInt(1, DataType.INT64, span)]
         start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-        for pad in [ir.TilePad.null, ir.TilePad.zero, ir.TilePad.max, ir.TilePad.min]:
+        for pad in [ir.PadValue.null, ir.PadValue.zero, ir.PadValue.max, ir.PadValue.min]:
             tv = ir.TileView(valid_shape, stride, start_offset, pad=pad)
             assert tv.pad == pad
 
@@ -1051,38 +1051,38 @@ class TestTileLayout:
         assert layout_map[ir.TileLayout.col_major] == "col_major"
 
 
-class TestTilePad:
-    """Tests for TilePad enum."""
+class TestPadValue:
+    """Tests for PadValue enum."""
 
     def test_pad_values(self):
-        """Test all TilePad enum values exist."""
-        assert ir.TilePad.null is not None
-        assert ir.TilePad.zero is not None
-        assert ir.TilePad.max is not None
-        assert ir.TilePad.min is not None
+        """Test all PadValue enum values exist."""
+        assert ir.PadValue.null is not None
+        assert ir.PadValue.zero is not None
+        assert ir.PadValue.max is not None
+        assert ir.PadValue.min is not None
 
     def test_pad_equality(self):
-        """Test TilePad enum equality and inequality."""
-        assert ir.TilePad.null == ir.TilePad.null
-        assert ir.TilePad.zero == ir.TilePad.zero
-        assert ir.TilePad.max == ir.TilePad.max
-        assert ir.TilePad.min == ir.TilePad.min
-        assert ir.TilePad.null != ir.TilePad.zero
-        assert ir.TilePad.zero != ir.TilePad.max
-        assert ir.TilePad.max != ir.TilePad.min
+        """Test PadValue enum equality and inequality."""
+        assert ir.PadValue.null == ir.PadValue.null
+        assert ir.PadValue.zero == ir.PadValue.zero
+        assert ir.PadValue.max == ir.PadValue.max
+        assert ir.PadValue.min == ir.PadValue.min
+        assert ir.PadValue.null != ir.PadValue.zero
+        assert ir.PadValue.zero != ir.PadValue.max
+        assert ir.PadValue.max != ir.PadValue.min
 
     def test_pad_in_dict(self):
-        """Test using TilePad as dictionary keys."""
+        """Test using PadValue as dictionary keys."""
         pad_map = {
-            ir.TilePad.null: "null",
-            ir.TilePad.zero: "zero",
-            ir.TilePad.max: "max",
-            ir.TilePad.min: "min",
+            ir.PadValue.null: "null",
+            ir.PadValue.zero: "zero",
+            ir.PadValue.max: "max",
+            ir.PadValue.min: "min",
         }
-        assert pad_map[ir.TilePad.null] == "null"
-        assert pad_map[ir.TilePad.zero] == "zero"
-        assert pad_map[ir.TilePad.max] == "max"
-        assert pad_map[ir.TilePad.min] == "min"
+        assert pad_map[ir.PadValue.null] == "null"
+        assert pad_map[ir.PadValue.zero] == "zero"
+        assert pad_map[ir.PadValue.max] == "max"
+        assert pad_map[ir.PadValue.min] == "min"
 
 
 class TestPythonSyntaxPrinting:
@@ -1129,7 +1129,7 @@ class TestPythonSyntaxPrinting:
         start_offset = ir.ConstInt(0, DataType.INT64, span)
         tv = ir.TileView(valid_shape, stride, start_offset)
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Left)
         printed = ir.python_print_type(tile_type)
 
         assert "pl.Tile" in printed
@@ -1171,10 +1171,10 @@ class TestPythonSyntaxPrinting:
             ir.TileLayout.col_major,
             ir.TileLayout.row_major,
             1024,
-            ir.TilePad.zero,
+            ir.PadValue.zero,
         )
 
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Left)
         printed = ir.python_print_type(tile_type)
 
         assert "pl.TileView" in printed
@@ -1184,7 +1184,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.TileLayout.row_major" in printed
         assert "fractal=1024" in printed
         assert "pad=" in printed
-        assert "pl.TilePad.zero" in printed
+        assert "pl.PadValue.zero" in printed
 
     def test_tile_type_with_tileview_default_fields_print(self):
         """Test printing TileView omits default field values."""
@@ -1196,7 +1196,7 @@ class TestPythonSyntaxPrinting:
         tv = ir.TileView(valid_shape, stride, start_offset)
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Vec)
         printed = ir.python_print_type(tile_type)
 
         # Default fields should be omitted
@@ -1217,7 +1217,7 @@ class TestPythonSyntaxPrinting:
         tv.valid_shape = [ir.ConstInt(64, DataType.INT64, span)]
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
-        tile_type = ir.TileType(shape, DataType.FP32, memref, tv)
+        tile_type = ir.TileType(shape, DataType.FP32, memref, tv, ir.MemorySpace.Vec)
         printed = ir.python_print_type(tile_type)
 
         # All TileView fields are at defaults — entire tile_view= should be omitted
@@ -1236,7 +1236,7 @@ class TestPythonSyntaxPrinting:
         tv.valid_shape = shape  # Same ExprPtr objects
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
-        tile_type = ir.TileType(shape, DataType.FP16, memref, tv)
+        tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Vec)
         printed = ir.python_print_type(tile_type)
 
         # valid_shape matches tile shape via pointer equality — tile_view= omitted entirely
@@ -1387,7 +1387,9 @@ class TestIRBuilderHelpers:
         tv = ib.tile_view([16, 16], [1, 16], 0)
 
         # Tile type with memref and tile_view
-        tile_t = ib.tile_type([16, 16], DataType.FP16, memref=memref, tile_view=tv)
+        tile_t = ib.tile_type(
+            [16, 16], DataType.FP16, memref=memref, tile_view=tv, memory_space=ir.MemorySpace.Left
+        )
 
         assert isinstance(tile_t, ir.TileType)
         assert tile_t.memref is not None
@@ -1401,7 +1403,9 @@ class TestIRBuilderHelpers:
         # Create complex tile type with builder
         memref = ib.memref(ir.MemorySpace.Right, 0x200, 1024, 36)
         tv = ib.tile_view([32, 32], [1, 32], 0)
-        tile_t = ib.tile_type([32, 32], DataType.FP32, memref=memref, tile_view=tv)
+        tile_t = ib.tile_type(
+            [32, 32], DataType.FP32, memref=memref, tile_view=tv, memory_space=ir.MemorySpace.Right
+        )
 
         # Print to Python syntax
         printed = ir.python_print_type(tile_t)
@@ -1646,7 +1650,7 @@ class TestMemRefRoundTrip:
         tensor_type = ir.TensorType(shape, DataType.FP32)
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
-        tile_type = ir.TileType(shape, DataType.FP32, memref)
+        tile_type = ir.TileType(shape, DataType.FP32, memref, None, ir.MemorySpace.Vec)
 
         input_var = ir.Var("x", tensor_type, span)
         tile_var = ir.Var("tile_a", tile_type, span)

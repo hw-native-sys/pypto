@@ -505,13 +505,17 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     }
 
     // ---- tile.store: pass through, injecting shapes for ND tensors ----
-    // tile.store semantics: 2D tile → ND tensor. No reshape needed.
-    // For ND tiles, inject the original ND shape as an explicit 4th argument
-    // (shapes tuple) after output_tensor, so that tile.store codegen knows
-    // the correct partition sizes for pto.partition_view.
+    // tile.store semantics: (flattened-)2D tile → ND tensor. No reshape needed.
+    // When the output tensor is ND (rank > 2), inject an explicit shapes tuple as
+    // args[3] so that the codegen can reconstruct the correct pto.partition_view.
+    // The shapes tuple is the tile's original shape left-padded with 1s to reach
+    // the tensor rank.  Examples:
+    //   tile [A,B,C] (ND, rank 3) → tensor rank 3: shapes = (A,B,C)       [no pad]
+    //   tile [A,B,C] (ND, rank 3) → tensor rank 4: shapes = (1,A,B,C)     [1 pad]
+    //   tile [H,W]   (2D, rank 2) → tensor rank 3: shapes = (1,H,W)       [1 pad]
+    // The original tile type is read BEFORE substitution so it still carries the
+    // pre-flatten ND shape.
     // Signature: (tile, offsets, output_tensor[, shapes])
-    // The original tile type is read BEFORE substitution, when it still
-    // carries the ND shape.
     if (op_name == "tile.store") {
       auto orig_tile_type = As<TileType>(call->args_[0]->GetType());
 
@@ -521,9 +525,22 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       for (const auto& arg : call->args_) {
         new_args.push_back(SubstituteExpr(arg, ctx.var_map));
       }
-      // Append shapes tuple after output_tensor for ND tiles
-      if (orig_tile_type && orig_tile_type->shape_.size() > 2) {
-        new_args.push_back(std::make_shared<MakeTuple>(orig_tile_type->shape_, span));
+      // Inject shapes tuple whenever the output tensor is ND (rank > 2).
+      // Codegen always requires args[3] in that case regardless of tile rank.
+      auto out_tensor_type = As<TensorType>(new_args[2]->GetType());
+      if (orig_tile_type && out_tensor_type && out_tensor_type->shape_.size() > 2) {
+        const size_t tensor_rank = out_tensor_type->shape_.size();
+        const size_t tile_rank = orig_tile_type->shape_.size();
+        std::vector<ExprPtr> shapes;
+        shapes.reserve(tensor_rank);
+        // Left-pad with 1s when tile rank < tensor rank.
+        for (size_t i = tile_rank; i < tensor_rank; ++i) {
+          shapes.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, span));
+        }
+        for (const auto& dim : orig_tile_type->shape_) {
+          shapes.push_back(dim);
+        }
+        new_args.push_back(std::make_shared<MakeTuple>(shapes, span));
       }
 
       // Construct call directly: store result type = output tensor type (args[2])

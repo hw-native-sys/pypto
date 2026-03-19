@@ -38,10 +38,12 @@ __all__ = [
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
+    "concat",
     "expands",
     "reshape",
     "transpose",
     "slice",
+    "fillpad",
     "matmul",
     "row_max",
     "row_sum",
@@ -54,7 +56,7 @@ __all__ = [
 
 from pypto.ir.utils import resolve_cast_mode
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import MemorySpace
+from pypto.pypto_core.ir import MemorySpace, PadValue
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -317,6 +319,18 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
+def concat(src0: T, src1: T) -> T:
+    """Column-wise concatenation, dispatched by input type."""
+    if isinstance(src0, Tensor) and isinstance(src1, Tensor):
+        return _tensor.concat(src0, src1)
+    if isinstance(src0, Tile) and isinstance(src1, Tile):
+        return _tile.concat(src0, src1)
+    raise TypeError(
+        f"concat: src0 and src1 must be the same type (both Tensor or both Tile),"
+        f" got {type(src0).__name__} and {type(src1).__name__}"
+    )
+
+
 def slice(
     input: T,
     shape: Sequence[IntLike],
@@ -329,6 +343,15 @@ def slice(
     if isinstance(input, Tile):
         return _tile.slice(input, shape, offset, valid_shape)
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def fillpad(value: T, pad_value: PadValue = PadValue.zero) -> T:
+    """Fill invalid elements, dispatched by input type."""
+    if isinstance(value, Tensor):
+        return _tensor.fillpad(value, pad_value)
+    if isinstance(value, Tile):
+        return _tile.fillpad(value, pad_value)
+    raise TypeError(f"fillpad: expected Tensor or Tile, got {type(value).__name__}")
 
 
 # ---------------------------------------------------------------------------

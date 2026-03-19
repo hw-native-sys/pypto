@@ -72,9 +72,21 @@ def test_insert_sync_cross_pipe():
     input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32), span)
     output = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
 
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
-    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    tile_a = ir.Var(
+        "tile_a",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
+    tile_b = ir.Var(
+        "tile_b",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
+    tile_c = ir.Var(
+        "tile_c",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_c, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
 
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32), span)
 
@@ -157,10 +169,26 @@ def test_insert_sync_intra_pipe():
     memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 5)
     memref_d = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(49152, DataType.INT64, span), 16384, 6)
 
-    t_a = ir.Var("t_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    t_b = ir.Var("t_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
-    t_c = ir.Var("t_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
-    t_d = ir.Var("t_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
+    t_a = ir.Var(
+        "t_a",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
+    t_b = ir.Var(
+        "t_b",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
+    t_c = ir.Var(
+        "t_c",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_c, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
+    t_d = ir.Var(
+        "t_d",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_d, memory_space=ir.MemorySpace.Vec),
+        span,
+    )
 
     # Build Before IR
     body = ir.SeqStmts(
@@ -238,11 +266,31 @@ def test_insert_sync_cube_pipe():
     input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP16), span)
     output = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
 
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP16, memref_a_l1), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP16, memref_b_l1), span)
-    tile_a_cube = ir.Var("tile_a_cube", ir.TileType([dim64, dim64], DataType.FP16, memref_a_l0a), span)
-    tile_b_cube = ir.Var("tile_b_cube", ir.TileType([dim64, dim64], DataType.FP16, memref_b_l0b), span)
-    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c_l0c), span)
+    tile_a = ir.Var(
+        "tile_a",
+        ir.TileType([dim64, dim64], DataType.FP16, memref_a_l1, memory_space=ir.MemorySpace.Mat),
+        span,
+    )
+    tile_b = ir.Var(
+        "tile_b",
+        ir.TileType([dim64, dim64], DataType.FP16, memref_b_l1, memory_space=ir.MemorySpace.Mat),
+        span,
+    )
+    tile_a_cube = ir.Var(
+        "tile_a_cube",
+        ir.TileType([dim64, dim64], DataType.FP16, memref_a_l0a, memory_space=ir.MemorySpace.Left),
+        span,
+    )
+    tile_b_cube = ir.Var(
+        "tile_b_cube",
+        ir.TileType([dim64, dim64], DataType.FP16, memref_b_l0b, memory_space=ir.MemorySpace.Right),
+        span,
+    )
+    tile_c = ir.Var(
+        "tile_c",
+        ir.TileType([dim64, dim64], DataType.FP32, memref_c_l0c, memory_space=ir.MemorySpace.Acc),
+        span,
+    )
 
     load_a = tile.load(input_a, offsets=[0, 0], shapes=[64, 64])
     load_b = tile.load(input_b, offsets=[0, 0], shapes=[64, 64])
@@ -341,11 +389,19 @@ def test_if_both_branches():
     memref_c = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(32768, DataType.INT64, span), 16384, 102)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
-    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_c = ir.Var(
+        "tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c, memory_space=ir.MemorySpace.Vec), span
+    )
     condition = ir.ConstBool(True, span)
-    if_return_var = ir.Var("result", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    if_return_var = ir.Var(
+        "result", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
 
     # Build Before IR
     then_body = ir.SeqStmts(
@@ -441,8 +497,12 @@ def test_if_one_branch():
     memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 101)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
     condition = ir.ConstBool(True, span)
 
     # Build Before IR
@@ -537,8 +597,12 @@ def test_branch_merge():
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
     condition = ir.ConstBool(True, span)
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32), span)
 
@@ -672,8 +736,12 @@ def test_for_loop():
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32), span)
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
@@ -792,8 +860,12 @@ def test_for_cross_iteration():
     memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 301)
 
     input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
     start = ir.ConstInt(0, DataType.INT32, span)
@@ -886,8 +958,12 @@ def test_for_cross_iteration_mte3_to_mte2():
     memref_data = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 602)
 
     data_tensor = ir.Var("data", ir.TensorType([64, 64], DataType.FP32, memref_data), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32, memref_data), span)
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
@@ -996,8 +1072,12 @@ def test_for_with_if_branches():
     memref_data = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 16384, 502)
 
     data_tensor = ir.Var("data", ir.TensorType([64, 64], DataType.FP32, memref_data), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
     store_result = ir.Var("store_result", ir.TensorType([64, 64], DataType.FP32, memref_data), span)
     condition = ir.ConstBool(True, span)
 
@@ -1153,10 +1233,18 @@ def test_if_scope_crossing_dedup():
 
     input_a = ir.Var("input_a", ir.TensorType([64, 64], DataType.FP32), span)
     input_b = ir.Var("input_b", ir.TensorType([64, 64], DataType.FP32), span)
-    tile_a = ir.Var("tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a), span)
-    tile_b = ir.Var("tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b), span)
-    tile_c = ir.Var("tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c), span)
-    tile_d = ir.Var("tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_c = ir.Var(
+        "tile_c", ir.TileType([dim64, dim64], DataType.FP32, memref_c, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_d = ir.Var(
+        "tile_d", ir.TileType([dim64, dim64], DataType.FP32, memref_d, memory_space=ir.MemorySpace.Vec), span
+    )
     condition = ir.ConstBool(True, span)
 
     # Build Before IR

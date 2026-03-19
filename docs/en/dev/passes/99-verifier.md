@@ -15,7 +15,7 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 - **Pluggable Rule System**: Extend with custom verification rules
 - **Property-Based Verification**: Opt-in property sets — verify exactly what you need
-- **Structural Properties**: TypeChecked, BreakContinueValid, and NoRedundantBlocks are verified at pipeline start by `PassPipeline` and before/after each pass by `VerificationInstrument`
+- **Structural Properties**: TypeChecked, BreakContinueValid, NoRedundantBlocks, and UseAfterDef are verified at pipeline start by `PassPipeline` and before/after each pass by `VerificationInstrument`
 - **Dual Verification Modes**: Collect diagnostics or throw on first error
 - **Pass Integration**: Use as a Pass in optimization pipelines
 - **Comprehensive Diagnostics**: Collect all issues with source locations
@@ -26,10 +26,10 @@ Extensible verification system for validating PyPTO IR correctness through plugg
 
 | Category | Examples | Behavior |
 | -------- | -------- | -------- |
-| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks | Always true. Verified at pipeline start and before/after each pass by `VerificationInstrument`. Never in PassProperties. |
+| **Structural** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef | Always true. Verified at pipeline start and before/after each pass by `VerificationInstrument`. Never in PassProperties. |
 | **Pipeline** | SSAForm, NoNestedCalls, HasMemRefs, ... | Produced/invalidated by passes. Verified per pass-declared contracts. |
 
-`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks}`. These are verified **at pipeline start** by `PassPipeline::Run()` and **before/after each pass** by `VerificationInstrument`. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
+`GetStructuralProperties()` returns `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef}`. These are verified **at pipeline start** by `PassPipeline::Run()` and **before/after each pass** by `VerificationInstrument`. Since no pass declares them in `required`/`produced`/`invalidated`, `VerificationInstrument` unions them with the pass's declared properties to ensure no pass breaks these fundamental invariants.
 
 ### Verification Rule System
 
@@ -65,6 +65,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
+| **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | Consecutive assigns wrapped in OpStmts |
 | **NoRedundantBlocks** | NoRedundantBlocks | No single-child or nested SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
@@ -109,6 +110,24 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | `CALL_IN_BINARY_EXPR` | Call expression in binary expression |
 | `CALL_IN_UNARY_EXPR` | Call expression in unary expression |
 
+### UseAfterDefCheck
+
+**Error types** (`use_after_def::ErrorType`):
+
+| Error Code | Name | Description |
+| ---------- | ---- | ----------- |
+| 401 | `USE_BEFORE_DEF` | Variable referenced before any definition in the current scope |
+
+**Scoping rules:**
+
+- Function parameters are in scope for the entire function body
+- `AssignStmt`: LHS variable enters scope after RHS is evaluated
+- `ForStmt`: `loop_var` and `iter_args` are in scope inside the loop body only; `return_vars` enter the enclosing scope after the loop
+- `WhileStmt`: `iter_args` are in scope for the condition and body; `return_vars` enter the enclosing scope after the loop
+- `IfStmt`:
+  - **SSA / phi-node form (`return_vars_` present)**: definitions inside then/else branches do **not** propagate to the outer scope; only `return_vars` enter the enclosing scope after the `if`
+  - **Non-SSA "leak" form (`return_vars_` absent)**: branch-local definitions may be visible after the `if`; `ConvertToSSA` and `SSAVerify` are responsible for validating the resulting form
+
 ## PropertyVerifierRegistry
 
 **Header**: `include/pypto/ir/verifier/property_verifier_registry.h`
@@ -138,8 +157,8 @@ Singleton registry mapping `IRProperty` values to `PropertyVerifier` factories. 
 
 | Function | Returns | Description |
 | -------- | ------- | ----------- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks}` | Invariants verified at pipeline start and before/after each pass |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks}` | Default set for `run_verifier()` |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef}` | Invariants verified at pipeline start and before/after each pass |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef}` | Default set for `run_verifier()` |
 | `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks}` | Lightweight set for `PassPipeline` auto-verify |
 
 ### RunVerifier Pass Factory
@@ -262,3 +281,5 @@ result = verify_pass(program)
 ## Testing
 
 Test coverage in `tests/ut/ir/transforms/test_verifier.py`: valid/invalid program verification, property-based selection, exception vs. diagnostic modes, pass integration, diagnostic field access, report generation, structural/default property sets.
+
+UseAfterDef-specific coverage in `tests/ut/ir/transforms/test_verify_use_after_def.py`: valid programs (params, chained assigns, for loop body, return_var after loop), invalid programs (use-before-def, loop var out of scope, branch def not visible outside), error code/rule name verification, structural property membership.

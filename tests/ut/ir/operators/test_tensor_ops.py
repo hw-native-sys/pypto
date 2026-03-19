@@ -785,6 +785,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.rsqrt")
     assert ir.is_op_registered("tensor.cast")
     assert ir.is_op_registered("tensor.assemble")
+    assert ir.is_op_registered("tensor.fillpad")
     assert ir.is_op_registered("tensor.maximum")
     assert ir.is_op_registered("tensor.row_expand_mul")
     assert ir.is_op_registered("tensor.row_expand_div")
@@ -914,6 +915,33 @@ def test_tensor_slice_with_valid_shape():
     assert len(call.args) == 4
     assert result_type.tensor_view is not None
     assert len(result_type.tensor_view.valid_shape) == 2
+
+
+def test_tensor_fillpad_clears_valid_shape():
+    """Test tensor.fillpad materializes a full-valid tensor view."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_view = ir.TensorView(
+        stride=[],
+        layout=ir.TensorLayout.ND,
+        valid_shape=[dim8, ir.ConstInt(4, DataType.INT32, span)],
+    )
+    tensor_type = ir.TensorType([dim8, dim16], DataType.FP32, None, tensor_view)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.fillpad(tensor_var, pad_value=ir.PadValue.min)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.fillpad"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert len(result_type.tensor_view.valid_shape) == 2
+    assert result_type.tensor_view.valid_shape[0] == dim8
+    assert result_type.tensor_view.valid_shape[1] == dim16
 
 
 def test_tensor_reshape_with_valid_shape():
@@ -1381,6 +1409,57 @@ def test_tensor_expands():
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
     assert len(result_type.shape) == 2
+
+
+def test_tensor_concat():
+    """Test tensor.concat - column-wise concatenation."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    call = tensor.concat(t0_var, t1_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.concat"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 32
+
+
+def test_tensor_concat_dtype_mismatch():
+    """Test tensor.concat rejects mismatched dtypes."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim32, dim16], DataType.FP16)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    with pytest.raises(ValueError, match="same dtype"):
+        tensor.concat(t0_var, t1_var)
+
+
+def test_tensor_concat_row_mismatch():
+    """Test tensor.concat rejects mismatched row counts."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    t0_type = ir.TensorType([dim32, dim16], DataType.FP32)
+    t1_type = ir.TensorType([dim8, dim16], DataType.FP32)
+    t0_var = ir.Var("src0", t0_type, span)
+    t1_var = ir.Var("src1", t1_type, span)
+
+    with pytest.raises(ValueError, match="row count must match"):
+        tensor.concat(t0_var, t1_var)
 
 
 if __name__ == "__main__":

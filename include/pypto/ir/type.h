@@ -216,7 +216,7 @@ enum class TileLayout {
  * - max: Pad with maximum value of the element type
  * - min: Pad with minimum value of the element type
  */
-enum class TilePad {
+enum class PadValue {
   null,  ///< No padding
   zero,  ///< Zero padding
   max,   ///< Max value padding
@@ -238,7 +238,7 @@ struct TileView {
   TileLayout blayout = TileLayout::row_major;  ///< Block layout
   TileLayout slayout = TileLayout::none_box;   ///< Scatter layout
   uint64_t fractal = 512;                      ///< Fractal size
-  TilePad pad = TilePad::null;                 ///< Pad mode
+  PadValue pad = PadValue::null;               ///< Pad mode
 
   /**
    * @brief Default constructor for aggregate initialization
@@ -258,7 +258,7 @@ struct TileView {
    */
   TileView(std::vector<ExprPtr> valid_shape, std::vector<ExprPtr> stride, ExprPtr start_offset,
            TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
-           uint64_t fractal = 512, TilePad pad = TilePad::null)
+           uint64_t fractal = 512, PadValue pad = PadValue::null)
       : valid_shape(std::move(valid_shape)),
         stride(std::move(stride)),
         start_offset(std::move(start_offset)),
@@ -282,6 +282,9 @@ struct TileView {
                            reflection::UsualField(&TileView::pad, "pad"));
   }
 };
+
+bool operator==(const TileView& lhs, const TileView& rhs);
+bool operator!=(const TileView& lhs, const TileView& rhs);
 
 /**
  * @brief Base class for shaped types (tensors and tiles)

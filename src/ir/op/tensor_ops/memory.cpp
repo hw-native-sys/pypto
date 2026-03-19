@@ -211,6 +211,31 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }
 
+TypePtr DeduceTensorFillpadType(const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.fillpad requires exactly 1 argument (tensor), but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.fillpad requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  PadValue pad_value = PadValue::zero;
+  for (const auto& kv : kwargs) {
+    if (kv.first == "pad_value") {
+      pad_value = std::any_cast<PadValue>(kv.second);
+      CHECK(pad_value != PadValue::null) << "tensor.fillpad requires pad_value to be zero/max/min, not null";
+    }
+  }
+
+  std::optional<TensorView> tensor_view = tensor_type->tensor_view_;
+  if (tensor_view.has_value()) {
+    tensor_view->valid_shape = tensor_type->shape_;
+  }
+
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+                                      std::move(tensor_view));
+}
+
 TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tensor.assemble requires exactly 3 arguments: target, source, and offset tuple
@@ -292,6 +317,16 @@ REGISTER_OP("tensor.assemble")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.fillpad")
+    .set_op_category("TensorOp")
+    .set_description("Fill invalid tensor view elements with a specified padding value")
+    .add_argument("tensor", "Input tensor (TensorType)")
+    .set_attr<PadValue>("pad_value")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorFillpadType(args, kwargs);
     });
 
 TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,

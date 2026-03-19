@@ -346,7 +346,7 @@ class TileLayout(enum.Enum):
     col_major = ...
     """Column-major layout."""
 
-class TilePad(enum.Enum):
+class PadValue(enum.Enum):
     """Tile pad mode enumeration."""
 
     null = ...
@@ -491,7 +491,7 @@ class TileView:
     fractal: int
     """Fractal size."""
 
-    pad: TilePad
+    pad: PadValue
     """Pad mode."""
 
     @overload
@@ -507,7 +507,7 @@ class TileView:
         blayout: TileLayout = ...,
         slayout: TileLayout = ...,
         fractal: int = ...,
-        pad: TilePad = ...,
+        pad: PadValue = ...,
     ) -> None:
         """Create a tile view with all parameters.
 
@@ -520,6 +520,12 @@ class TileView:
             fractal: Fractal size (default: 512)
             pad: Pad mode (default: null)
         """
+
+    def __eq__(self, other: object) -> bool:
+        """Structural equality comparison."""
+
+    def __ne__(self, other: object) -> bool:
+        """Structural inequality comparison."""
 
 class TileType(ShapedType):
     """Tile type representation (multi-dimensional tensor)."""
@@ -982,7 +988,7 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad]]
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -1020,7 +1026,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -1038,7 +1044,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
         type: Type,
         span: Span,
     ) -> None:
@@ -2213,7 +2219,7 @@ def create_op_call(op_name: str, args: Sequence[Expr], span: Span) -> Call:
 def create_op_call(
     op_name: str,
     args: Sequence[Expr],
-    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | TilePad],
+    kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
     span: Span,
 ) -> Call:
     """Create a Call expression with args and kwargs.

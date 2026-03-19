@@ -54,6 +54,8 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::TileOps2D, CreateTileOps2DPropertyVerifier);
   Register(IRProperty::TileMemoryInferred, CreateTileMemoryInferredPropertyVerifier);
   Register(IRProperty::BreakContinueValid, CreateBreakContinuePropertyVerifier);
+  Register(IRProperty::UseAfterDef, CreateUseAfterDefPropertyVerifier);
+  Register(IRProperty::StructuredCtrlFlow, CreateStructuredCtrlFlowPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

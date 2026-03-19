@@ -15,7 +15,7 @@
 
 - **可插拔规则系统**：可通过自定义验证规则进行扩展
 - **基于属性的验证**：选择性属性集——精确验证所需内容
-- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid 和 NoRedundantBlocks 在流水线启动时由 `PassPipeline` 验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证
+- **结构性属性 (Structural Properties)**：TypeChecked、BreakContinueValid、NoRedundantBlocks 和 UseAfterDef 在流水线启动时由 `PassPipeline` 验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证
 - **双重验证模式**：收集诊断信息或在首个错误时抛出异常
 - **Pass 集成**：可作为优化流水线中的 Pass 使用
 - **全面的诊断信息**：收集所有问题及源码位置
@@ -26,10 +26,10 @@
 
 | 类别 | 示例 | 行为 |
 | ---- | ---- | ---- |
-| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks | 始终为真。在流水线启动时验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证。不在 PassProperties 中声明。 |
+| **结构性** | TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef | 始终为真。在流水线启动时验证，并由 `VerificationInstrument` 在每个 Pass 执行前后验证。不在 PassProperties 中声明。 |
 | **流水线** | SSAForm, NoNestedCalls, HasMemRefs, ... | 由 Pass 产生/失效。按 Pass 声明的契约验证。 |
 
-`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks}`。这些在 `PassPipeline::Run()` 中**于流水线启动时验证**，并由 `VerificationInstrument` **在每个 Pass 执行前后验证**。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
+`GetStructuralProperties()` 返回 `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef}`。这些在 `PassPipeline::Run()` 中**于流水线启动时验证**，并由 `VerificationInstrument` **在每个 Pass 执行前后验证**。由于没有 Pass 在 `required`/`produced`/`invalidated` 中声明它们，`VerificationInstrument` 将它们与 Pass 声明的属性合并，确保没有 Pass 破坏这些基本不变量。
 
 ### 验证规则系统
 
@@ -65,6 +65,7 @@
 | **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
+| **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | 连续赋值包装在 OpStmts 中 |
 | **NoRedundantBlocks** | NoRedundantBlocks | 无单子节点或嵌套的 SeqStmts/OpStmts |
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 InCore ScopeStmts |
@@ -109,6 +110,24 @@
 | `CALL_IN_BINARY_EXPR` | 调用表达式在二元表达式中 |
 | `CALL_IN_UNARY_EXPR` | 调用表达式在一元表达式中 |
 
+### UseAfterDefCheck
+
+**错误类型** (`use_after_def::ErrorType`)：
+
+| 错误码 | 名称 | 描述 |
+| ------ | ---- | ---- |
+| 401 | `USE_BEFORE_DEF` | 变量在当前作用域中任何定义之前被引用 |
+
+**作用域规则：**
+
+- 函数参数在整个函数体内可见
+- `AssignStmt`：LHS 变量在 RHS 求值后进入作用域
+- `ForStmt`：`loop_var` 和 `iter_args` 仅在循环体内可见；`return_vars` 在循环结束后进入外层作用域
+- `WhileStmt`：`iter_args` 在条件和循环体内可见；`return_vars` 在循环结束后进入外层作用域
+- `IfStmt`：
+  - **SSA/phi 形式（存在 `return_vars`）**：then/else 分支内新定义的局部变量**不**传播到外层作用域，只有 `return_vars` 在 if 结束后进入外层作用域
+  - **泄漏模式（无 `return_vars`）**：then/else 分支内定义的变量**可能泄漏**到外层作用域；该形式通常由 Python 解析器在无 `yield` 的情况下生成，后续由 `ConvertToSSA`/`SSAVerify` 负责将其转换并检查合法性
+
 ## PropertyVerifierRegistry
 
 **头文件**：`include/pypto/ir/verifier/property_verifier_registry.h`
@@ -138,8 +157,8 @@
 
 | 函数 | 返回值 | 描述 |
 | ---- | ------ | ---- |
-| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks}` | 在流水线启动时及每个 Pass 执行前后验证的不变量 |
-| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks}` | `run_verifier()` 的默认属性集 |
+| `GetStructuralProperties()` | `{TypeChecked, BreakContinueValid, NoRedundantBlocks, UseAfterDef}` | 在流水线启动时及每个 Pass 执行前后验证的不变量 |
+| `GetDefaultVerifyProperties()` | `{SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid, NoRedundantBlocks, UseAfterDef}` | `run_verifier()` 的默认属性集 |
 | `GetVerifiedProperties()` | `{SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid, NoRedundantBlocks}` | `PassPipeline` 自动验证的轻量级属性集 |
 
 ### RunVerifier Pass 工厂
@@ -262,3 +281,5 @@ result = verify_pass(program)
 ## 测试
 
 测试覆盖在 `tests/ut/ir/transforms/test_verifier.py` 中：有效/无效程序验证、基于属性的选择、异常与诊断模式、Pass 集成、诊断字段访问、报告生成、结构性/默认属性集。
+
+UseAfterDef 专项覆盖在 `tests/ut/ir/transforms/test_verify_use_after_def.py` 中：有效程序（参数、链式赋值、for 循环体、循环后 return_var）、无效程序（先用后定义、循环变量越界、分支定义不可见于外层）、错误码/规则名验证、结构性属性成员验证。

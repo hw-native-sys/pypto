@@ -92,19 +92,33 @@ class MemRefUpdateMutator : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const VarPtr& op) override {
+    // Check if already remapped (same old pointer seen again).
+    auto it = var_remap_.find(op.get());
+    if (it != var_remap_.end()) {
+      return it->second;
+    }
     TypePtr new_type = UpdateTypeMemRef(op->GetType());
     if (new_type != op->GetType()) {
-      return std::make_shared<Var>(op->name_hint_, new_type, op->span_);
+      auto new_var = std::make_shared<Var>(op->name_hint_, new_type, op->span_);
+      var_remap_[op.get()] = new_var;
+      return new_var;
     }
     return op;
   }
 
   ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    // Check if already remapped.
+    auto it = var_remap_.find(op.get());
+    if (it != var_remap_.end()) {
+      return it->second;
+    }
     auto new_init = VisitExpr(op->initValue_);
     TypePtr new_type = UpdateTypeMemRef(op->GetType());
 
     if (new_init != op->initValue_ || new_type != op->GetType()) {
-      return std::make_shared<IterArg>(op->name_hint_, new_type, new_init, op->span_);
+      auto new_iter_arg = std::make_shared<IterArg>(op->name_hint_, new_type, new_init, op->span_);
+      var_remap_[op.get()] = new_iter_arg;
+      return new_iter_arg;
     }
     return op;
   }
@@ -133,6 +147,7 @@ class MemRefUpdateMutator : public IRMutator {
 
  private:
   std::unordered_map<const MemRef*, MemRefPtr> memref_map_;
+  std::unordered_map<const Expr*, ExprPtr> var_remap_;
 
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
     auto memref = GetTypeMemRef(type);

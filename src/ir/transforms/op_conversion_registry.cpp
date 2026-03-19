@@ -128,6 +128,7 @@ OpConversionRegistry::OpConversionRegistry() {
   // Transform ops
   RegisterSimple("tensor.reshape", "tile.reshape");
   RegisterSimple("tensor.transpose", "tile.transpose");
+  RegisterSimple("tensor.concat", "tile.concat");
 
   // ────────────────────────────────────────────────────────────────────────
   // Broadcast-aware elementwise binary ops
@@ -322,6 +323,52 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
   RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
+
+  RegisterCustom(
+      "tensor.fillpad",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 1) << "tensor.fillpad conversion expects 1 arg (input)";
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+
+        if (As<TileType>(input->GetType())) {
+          if (kwargs.empty()) {
+            return ConversionResult{op_reg.Create("tile.fillpad", {input}, span)};
+          }
+          return ConversionResult{op_reg.Create("tile.fillpad", {input}, kwargs, span)};
+        }
+
+        auto tensor_type = As<TensorType>(input->GetType());
+        CHECK(tensor_type) << "tensor.fillpad conversion: input must be TensorType or TileType, got "
+                           << input->GetType()->TypeName();
+
+        auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
+        auto shapes = MakeShapesTuple(tensor_type->shape_, span);
+
+        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+          valid_shape = tensor_type->tensor_view_->valid_shape;
+        }
+        auto valid_shapes = MakeShapesTuple(valid_shape, span);
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+        auto load_call =
+            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
+        auto load_var = std::make_shared<Var>("fillpad_src", load_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+
+        ExprPtr fillpad_call;
+        if (kwargs.empty()) {
+          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, span);
+        } else {
+          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, kwargs, span);
+        }
+        return ConversionResult{std::move(prologue), fillpad_call};
+      });
 
   // ────────────────────────────────────────────────────────────────────────
   // tensor.assemble → tile.store
