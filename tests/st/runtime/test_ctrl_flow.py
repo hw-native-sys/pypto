@@ -526,8 +526,8 @@ class TestForLoopBreak(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_break(a, b, c)
                 return c
 
@@ -590,8 +590,8 @@ class TestForLoopContinue(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_continue(a, b, c)
                 return c
 
@@ -659,8 +659,8 @@ class TestForLoopBreakContinue(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_break_continue(a, b, c)
                 return c
 

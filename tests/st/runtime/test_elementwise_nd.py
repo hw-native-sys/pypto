@@ -53,8 +53,8 @@ class Tile4DMulPartialProgram:
     def orchestrator(
         self,
         a: pl.Tensor[[4, 3, 8, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
     ) -> pl.Tensor[[4, 3, 8, 64], pl.FP32]:
-        out = pl.create_tensor([4, 3, 8, 64], dtype=pl.FP32)
         out = self.kernel(a, out)
         return out
 
@@ -90,8 +90,8 @@ class Tile4DQuadrantProgram:
     def orchestrator(
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
-        out = pl.create_tensor([2, 2, 8, 16], dtype=pl.FP32)
         out = self.kernel(a, out)
         return out
 
@@ -131,8 +131,8 @@ class Tile4DTopToBottomProgram:
         self,
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
         b: pl.Tensor[[2, 2, 8, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
-        out = pl.create_tensor([2, 2, 8, 16], dtype=pl.FP32)
         out = self.kernel(a, b, out)
         return out
 
@@ -166,8 +166,8 @@ class Tile2DStoreTo3DProgram:
         self,
         a: pl.Tensor[[4, 16], pl.FP32],
         b: pl.Tensor[[4, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
-        out = pl.create_tensor([2, 4, 16], dtype=pl.FP32)
         out = self.kernel(a, b, out)
         return out
 
