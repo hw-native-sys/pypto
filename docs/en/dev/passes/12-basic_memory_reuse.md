@@ -54,7 +54,7 @@ program_optimized = reuse_pass(program)
 - Full TileType compatibility — checked by `AreTileTypesCompatible`:
   - Same shape (all dimensions must match exactly)
   - Same dtype (e.g., FP32 vs BF16 prevents reuse, handling `tile.cast` automatically)
-  - Same TileView attributes when present: `valid_shape`, `pad`, `blayout`, `slayout`, `fractal` (e.g., `tile.fillpad` changes `valid_shape` and `pad`, so its output cannot reuse its input)
+  - Same TileView attributes when present: all fields (`valid_shape`, `stride`, `start_offset`, `blayout`, `slayout`, `fractal`, `pad`) are compared via `TileView::operator==` (e.g., `tile.fillpad` changes `valid_shape` and `pad`, so its output cannot reuse its input)
 
 **Alloc cleanup**:
 

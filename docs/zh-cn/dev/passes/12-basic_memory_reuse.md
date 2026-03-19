@@ -48,9 +48,13 @@ program_optimized = reuse_pass(program)
 
 **复用条件**：
 
-- 生命周期不重叠（无干涉）
+- 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - 大小兼容（复用目标必须足够大）
+- 完整的 TileType 兼容性 — 由 `AreTileTypesCompatible` 检查：
+  - 相同 shape（所有维度必须精确匹配）
+  - 相同 dtype（例如 FP32 与 BF16 阻止复用，自动处理 `tile.cast`）
+  - 相同 TileView 属性：所有字段（`valid_shape`、`stride`、`start_offset`、`blayout`、`slayout`、`fractal`、`pad`）通过 `TileView::operator==` 比较（例如 `tile.fillpad` 改变 `valid_shape` 和 `pad`，因此其输出不能复用其输入）
 
 **Alloc 清理**：
 
