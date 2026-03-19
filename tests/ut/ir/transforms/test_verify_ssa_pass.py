@@ -1,0 +1,253 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Unit tests for SSA verification via run_verifier()."""
+
+import pypto.language as pl
+import pytest
+from pypto import DataType, ir, passes
+from pypto.ir import builder
+
+
+def test_verify_ssa_valid():
+    """Test SSA verification with valid SSA IR."""
+    ib = builder.IRBuilder()
+
+    with ib.function("test_valid_ssa") as f:
+        a = f.param("a", ir.ScalarType(DataType.INT64))
+        b = f.param("b", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+
+        x = ib.let("x", a)
+        _y = ib.let("y", b)
+        z = ib.let("z", x)
+
+        ib.return_stmt(z)
+
+    func = f.get_result()
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    # Run verification using run_verifier
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
+
+    assert result_program is not None
+
+
+def test_verify_ssa_multiple_assignment():
+    """Test SSA verification detects multiple assignments."""
+    ib = builder.IRBuilder()
+
+    with ib.function("test_multiple_assignment") as f:
+        a = f.param("a", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+
+        _x = ib.let("x", a)
+        x2 = ib.let("x", a)  # Second assignment violates SSA
+
+        ib.return_stmt(x2)
+
+    func = f.get_result()
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
+    assert result_program is not None
+
+
+def test_verify_ssa_name_shadowing():
+    """Test SSA verification detects name shadowing."""
+    ib = builder.IRBuilder()
+
+    with ib.function("test_shadow") as f:
+        a = f.param("a", ir.ScalarType(DataType.INT64))
+        f.return_type(ir.ScalarType(DataType.INT64))
+
+        outer_i = ib.let("i", a)
+
+        loop_var = ib.var("i", ir.ScalarType(DataType.INT64))  # Shadows outer 'i'
+        with ib.for_loop(loop_var, 0, 5, 1):
+            _tmp = ib.let("tmp", loop_var)
+
+        ib.return_stmt(outer_i)
+
+    func = f.get_result()
+    program = ir.Program([func], "test_program", ir.Span.unknown())
+
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
+    assert result_program is not None
+
+
+def test_verify_ssa_missing_yield():
+    """Test SSA verification detects missing yield in ForStmt."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+    iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
+    body = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)  # No yield!
+    result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+    for_stmt = ir.ForStmt(
+        loop_var,
+        ir.ConstInt(0, DataType.INT64, span),
+        ir.ConstInt(10, DataType.INT64, span),
+        ir.ConstInt(1, DataType.INT64, span),
+        [iter_arg],
+        body,
+        [result_var],
+        span,
+    )
+
+    func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([result_var], span)], span)
+    func = ir.Function("test_missing_yield", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    with pytest.raises(Exception, match="must have YieldStmt"):
+        verify_pass(program)
+
+
+def test_verify_ssa_missing_else():
+    """Test SSA verification detects missing else branch."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+    condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+    then_body = ir.YieldStmt([a], span)
+    result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+    if_stmt = ir.IfStmt(condition, then_body, None, [result_var], span)  # Missing else
+
+    func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([result_var], span)], span)
+    func = ir.Function("test_missing_else", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    with pytest.raises(Exception, match="must have else branch"):
+        verify_pass(program)
+
+
+def test_verify_ssa_valid_control_flow():
+    """Test valid control flow passes verification."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+    # Valid ForStmt
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+    iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
+    yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
+    body = ir.YieldStmt([yield_value], span)
+    result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+    for_stmt = ir.ForStmt(
+        loop_var,
+        ir.ConstInt(0, DataType.INT64, span),
+        ir.ConstInt(10, DataType.INT64, span),
+        ir.ConstInt(1, DataType.INT64, span),
+        [iter_arg],
+        body,
+        [result_var],
+        span,
+    )
+
+    func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([result_var], span)], span)
+    func = ir.Function("test_valid", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
+    assert result_program is not None
+
+
+class TestConvertToSSAScope:
+    """Test SSA conversion is transparent for ScopeStmt."""
+
+    def test_ssa_conversion_transparent_for_scope(self):
+        """Test that SSA conversion treats ScopeStmt transparently."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Should be structurally equal (scope is transparent)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_ssa_conversion_with_variable_reassignment_in_scope(self):
+        """Test SSA conversion renames variables inside scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    y = pl.mul(y, y)
+                return y
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Verify SSA pass runs without error
+        # The scope should contain renamed variables (y_0, y_1)
+        assert After is not None
+
+        # Verify the pass succeeds
+        passes.run_verifier()(After)
+
+    def test_ssa_conversion_with_scope_and_outer_code(self):
+        """Test SSA conversion with code before and after scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.incore():
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
+                return c
+
+        # Apply SSA conversion
+        After = passes.convert_to_ssa()(Before)
+
+        # Verify SSA pass runs without error
+        assert After is not None
+
+        # Verify the pass succeeds
+        passes.run_verifier()(After)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

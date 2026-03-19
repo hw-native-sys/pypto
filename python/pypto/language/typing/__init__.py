@@ -1,0 +1,32 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Type wrappers for PyPTO Language DSL.
+
+This module provides type annotation and runtime wrapper classes for PyPTO's language DSL:
+- Scalar: Scalar values with specific data types
+- Tensor: Multi-dimensional arrays in global memory
+- Tile: Memory tiles in unified buffer memory for tile-level programming
+- Tuple: Heterogeneous tuple for multiple return types
+"""
+
+from typing import TypeAlias
+
+from pypto.language.typing.direction import InOut, Out
+from pypto.language.typing.dynamic import DynVar, dynamic
+from pypto.language.typing.scalar import Scalar
+from pypto.language.typing.tensor import Tensor
+from pypto.language.typing.tile import Tile
+from pypto.language.typing.tuple import Tuple
+from pypto.pypto_core.ir import Expr
+
+IntLike: TypeAlias = int | Scalar | Expr
+"""Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
+
+__all__ = ["DynVar", "InOut", "IntLike", "Out", "Scalar", "Tensor", "Tile", "Tuple", "dynamic"]

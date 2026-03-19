@@ -1,0 +1,1718 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iomanip>
+#include <ios>
+#include <map>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <typeindex>
+#include <typeinfo>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/pipe.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+
+namespace {
+
+/// Convert cast round mode integer to its string name for printing.
+/// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
+std::string CastModeToString(int mode) {
+  switch (mode) {
+    case 0:
+      return "none";
+    case 1:
+      return "rint";
+    case 2:
+      return "round";
+    case 3:
+      return "floor";
+    case 4:
+      return "ceil";
+    case 5:
+      return "trunc";
+    case 6:
+      return "odd";
+    default:
+      throw ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
+  }
+}
+
+}  // namespace
+
+// Precedence mapping for each expression type
+Precedence GetPrecedence(const ExprPtr& expr) {
+  // Using a static map is more efficient and maintainable than a long chain of dynamic_casts.
+  static const std::unordered_map<std::type_index, Precedence> kPrecedenceMap = {
+      // Logical operators≥
+      {std::type_index(typeid(Or)), Precedence::kOr},
+      {std::type_index(typeid(Xor)), Precedence::kXor},
+      {std::type_index(typeid(And)), Precedence::kAnd},
+      {std::type_index(typeid(Not)), Precedence::kNot},
+
+      // Comparison operators
+      {std::type_index(typeid(Eq)), Precedence::kComparison},
+      {std::type_index(typeid(Ne)), Precedence::kComparison},
+      {std::type_index(typeid(Lt)), Precedence::kComparison},
+      {std::type_index(typeid(Le)), Precedence::kComparison},
+      {std::type_index(typeid(Gt)), Precedence::kComparison},
+      {std::type_index(typeid(Ge)), Precedence::kComparison},
+
+      // Bitwise operators
+      {std::type_index(typeid(BitOr)), Precedence::kBitOr},
+      {std::type_index(typeid(BitXor)), Precedence::kBitXor},
+      {std::type_index(typeid(BitAnd)), Precedence::kBitAnd},
+      {std::type_index(typeid(BitShiftLeft)), Precedence::kBitShift},
+      {std::type_index(typeid(BitShiftRight)), Precedence::kBitShift},
+
+      // Arithmetic operators
+      {std::type_index(typeid(Add)), Precedence::kAddSub},
+      {std::type_index(typeid(Sub)), Precedence::kAddSub},
+      {std::type_index(typeid(Mul)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloorDiv)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloatDiv)), Precedence::kMulDivMod},
+      {std::type_index(typeid(FloorMod)), Precedence::kMulDivMod},
+      {std::type_index(typeid(Pow)), Precedence::kPow},
+
+      // Unary operators
+      {std::type_index(typeid(Neg)), Precedence::kUnary},
+      {std::type_index(typeid(BitNot)), Precedence::kUnary},
+
+      // Function-like operators and atoms
+      {std::type_index(typeid(Abs)), Precedence::kCall},
+      {std::type_index(typeid(Cast)), Precedence::kCall},
+      {std::type_index(typeid(Min)), Precedence::kCall},
+      {std::type_index(typeid(Max)), Precedence::kCall},
+      {std::type_index(typeid(Call)), Precedence::kCall},
+      {std::type_index(typeid(Var)), Precedence::kAtom},
+      {std::type_index(typeid(IterArg)), Precedence::kAtom},
+      {std::type_index(typeid(ConstInt)), Precedence::kAtom},
+      {std::type_index(typeid(ConstFloat)), Precedence::kAtom},
+      {std::type_index(typeid(ConstBool)), Precedence::kAtom},
+      {std::type_index(typeid(TupleGetItemExpr)), Precedence::kAtom},
+  };
+
+  INTERNAL_CHECK(expr) << "Expression is null";
+  const Expr& expr_ref = *expr;
+  const auto it = kPrecedenceMap.find(std::type_index(typeid(expr_ref)));
+  if (it != kPrecedenceMap.end()) {
+    return it->second;
+  }
+
+  // Default for any other expression types.
+  return Precedence::kAtom;
+}
+
+bool IsRightAssociative(const ExprPtr& expr) {
+  // Only ** (power) is right-associative in Python
+  return IsA<Pow>(expr);
+}
+
+/**
+ * @brief Python-style IR printer
+ *
+ * Prints IR nodes in Python syntax with type annotations and SSA-style control flow.
+ * This is the recommended printer for new code that outputs valid Python syntax.
+ *
+ * Key features:
+ * - Type annotations (e.g., x: pl.INT64, a: pl.Tensor[[4, 8], pl.FP32])
+ * - SSA-style if/for with pl.yield_() and pl.range()
+ * - Op attributes as keyword arguments
+ * - Program headers with # pypto.program: name
+ */
+class IRPythonPrinter : public IRVisitor {
+ public:
+  explicit IRPythonPrinter(std::string prefix = "pl", bool concise = false)
+      : prefix_(std::move(prefix)), concise_(concise) {}
+  ~IRPythonPrinter() override = default;
+
+  /**
+   * @brief Print an IR node to a string in Python IR syntax
+   *
+   * @param node IR node to print (can be Expr, Stmt, Function, or Program)
+   * @return Python-style string representation
+   */
+  std::string Print(const IRNodePtr& node);
+  std::string Print(const TypePtr& type);
+
+ protected:
+  // Expression visitors
+  void VisitExpr_(const VarPtr& op) override;
+  void VisitExpr_(const IterArgPtr& op) override;
+  void VisitExpr_(const MemRefPtr& op) override;
+  void VisitExpr_(const ConstIntPtr& op) override;
+  void VisitExpr_(const ConstFloatPtr& op) override;
+  void VisitExpr_(const ConstBoolPtr& op) override;
+  void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const MakeTuplePtr& op) override;
+  void VisitExpr_(const TupleGetItemExprPtr& op) override;
+
+  // Binary operations
+  void VisitExpr_(const AddPtr& op) override;
+  void VisitExpr_(const SubPtr& op) override;
+  void VisitExpr_(const MulPtr& op) override;
+  void VisitExpr_(const FloorDivPtr& op) override;
+  void VisitExpr_(const FloorModPtr& op) override;
+  void VisitExpr_(const FloatDivPtr& op) override;
+  void VisitExpr_(const MinPtr& op) override;
+  void VisitExpr_(const MaxPtr& op) override;
+  void VisitExpr_(const PowPtr& op) override;
+  void VisitExpr_(const EqPtr& op) override;
+  void VisitExpr_(const NePtr& op) override;
+  void VisitExpr_(const LtPtr& op) override;
+  void VisitExpr_(const LePtr& op) override;
+  void VisitExpr_(const GtPtr& op) override;
+  void VisitExpr_(const GePtr& op) override;
+  void VisitExpr_(const AndPtr& op) override;
+  void VisitExpr_(const OrPtr& op) override;
+  void VisitExpr_(const XorPtr& op) override;
+  void VisitExpr_(const BitAndPtr& op) override;
+  void VisitExpr_(const BitOrPtr& op) override;
+  void VisitExpr_(const BitXorPtr& op) override;
+  void VisitExpr_(const BitShiftLeftPtr& op) override;
+  void VisitExpr_(const BitShiftRightPtr& op) override;
+
+  // Unary operations
+  void VisitExpr_(const AbsPtr& op) override;
+  void VisitExpr_(const NegPtr& op) override;
+  void VisitExpr_(const NotPtr& op) override;
+  void VisitExpr_(const BitNotPtr& op) override;
+  void VisitExpr_(const CastPtr& op) override;
+
+  // Statement visitors
+  void VisitStmt_(const AssignStmtPtr& op) override;
+  void VisitStmt_(const IfStmtPtr& op) override;
+  void VisitStmt_(const YieldStmtPtr& op) override;
+  void VisitStmt_(const ReturnStmtPtr& op) override;
+  void VisitStmt_(const ForStmtPtr& op) override;
+  void VisitStmt_(const WhileStmtPtr& op) override;
+  void VisitStmt_(const ScopeStmtPtr& op) override;
+  void VisitStmt_(const SeqStmtsPtr& op) override;
+  void VisitStmt_(const OpStmtsPtr& op) override;
+  void VisitStmt_(const EvalStmtPtr& op) override;
+  void VisitStmt_(const BreakStmtPtr& op) override;
+  void VisitStmt_(const ContinueStmtPtr& op) override;
+  void VisitStmt_(const StmtPtr& op) override;
+
+  // Function and program visitors
+  void VisitFunction(const FunctionPtr& func);
+  void VisitProgram(const ProgramPtr& program);
+
+ private:
+  std::ostringstream stream_;
+  int indent_level_ = 0;
+  std::string prefix_;                    // Prefix for type names (e.g., "pl" or "ir")
+  bool concise_;                          // When true, omit intermediate type annotations
+  ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
+
+  // Per-function rename map: Var pointer → unique printed name.
+  // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
+  std::unordered_map<const Var*, std::string> var_rename_map_;
+
+  // Helper methods
+  std::string GetIndent() const;
+  void IncreaseIndent();
+  void DecreaseIndent();
+
+  // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
+  std::string GetVarName(const Var* var) const;
+
+  // Build var_rename_map_ for a function by scanning all Var def-sites in DFS pre-order.
+  // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
+  void BuildVarRenameMap(const FunctionPtr& func);
+
+  // Print a statement block at current indent level.
+  // SeqStmts/OpStmts are transparent containers - recursed into without extra indent.
+  void PrintStmtBlock(const StmtPtr& stmt);
+
+  // Statement body visitor with SSA-style handling
+  void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
+  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
+
+  // Binary/unary operator helpers (reuse precedence logic)
+  void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
+  void PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name);
+  void PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left);
+  bool NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left);
+
+  // Shape printing helper
+  void PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape);
+
+  // MemRef and TileView printing helpers
+  std::string PrintMemRef(const MemRef& memref);
+  std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
+  std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
+};
+
+// Helper function to format float literals with decimal point
+std::string FormatFloatLiteral(double value) {
+  // Check if the value is an integer (no fractional part)
+  if (value == std::floor(value)) {
+    // For integer values, format as X.0
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << value;
+    return oss.str();
+  } else {
+    // For non-integer values, use default formatting with enough precision
+    std::ostringstream oss;
+    oss << value;
+    return oss.str();
+  }
+}
+
+// DataTypeToPythonString removed — now uses DataTypeToString from dtype.h
+
+// IRPythonPrinter implementation
+std::string IRPythonPrinter::Print(const IRNodePtr& node) {
+  stream_.str("");
+  stream_.clear();
+  indent_level_ = 0;
+
+  // Try each type in order
+  if (auto program = As<Program>(node)) {
+    VisitProgram(program);
+  } else if (auto func = As<Function>(node)) {
+    VisitFunction(func);
+  } else if (auto stmt = As<Stmt>(node)) {
+    VisitStmt(stmt);
+  } else if (auto expr = As<Expr>(node)) {
+    VisitExpr(expr);
+  } else {
+    // Unsupported node type
+    stream_ << "<unsupported IRNode type>";
+  }
+
+  return stream_.str();
+}
+
+std::string IRPythonPrinter::Print(const TypePtr& type) {
+  if (auto scalar_type = As<ScalarType>(type)) {
+    // Print as pl.Scalar[pl.INT64] for proper round-trip support
+    return prefix_ + ".Scalar[" + prefix_ + "." + DataTypeToString(scalar_type->dtype_) + "]";
+  }
+
+  if (auto tensor_type = As<TensorType>(type)) {
+    std::ostringstream oss;
+    // Subscript-style: pl.Tensor[[shape], dtype]
+    oss << prefix_ << ".Tensor[[";
+    PrintShapeDims(oss, tensor_type->shape_);
+    oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
+
+    // Add optional tensor_view parameter if present.
+    // Always emit something when tensor_view is set so that print->parse roundtrip
+    // preserves presence: structural equality distinguishes present vs absent.
+    if (tensor_type->tensor_view_.has_value()) {
+      auto tv_str = PrintTensorView(tensor_type->tensor_view_.value(), tensor_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", " << tv_str;
+      } else {
+        oss << ", " << prefix_ << ".TensorView()";
+      }
+    }
+
+    // Add optional memref as positional arg
+    if (tensor_type->memref_.has_value()) {
+      oss << ", " << PrintMemRef(*tensor_type->memref_.value());
+    }
+
+    oss << "]";
+    return oss.str();
+  }
+
+  if (auto tile_type = As<TileType>(type)) {
+    std::ostringstream oss;
+    // Subscript-style: pl.Tile[[shape], dtype]
+    oss << prefix_ << ".Tile[[";
+    PrintShapeDims(oss, tile_type->shape_);
+    oss << "], " << prefix_ << "." << DataTypeToString(tile_type->dtype_);
+
+    // Add optional memref as positional arg
+    if (tile_type->memref_.has_value()) {
+      oss << ", " << PrintMemRef(*tile_type->memref_.value());
+    }
+
+    if (tile_type->memory_space_.has_value()) {
+      auto mem_str = MemorySpaceToString(tile_type->memory_space_.value());
+      oss << ", " << prefix_ << ".Mem." << mem_str;
+    }
+
+    // Add optional tile_view parameter if present and non-trivial.
+    if (tile_type->tile_view_.has_value()) {
+      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
+      if (!tv_str.empty()) {
+        oss << ", " << tv_str;
+      }
+      // When all TileView fields are at defaults, omit entirely.
+    }
+
+    oss << "]";
+    return oss.str();
+  }
+
+  if (auto tuple_type = As<TupleType>(type)) {
+    std::ostringstream oss;
+    if (tuple_type->types_.empty()) {
+      oss << prefix_ << ".Tuple[()]";
+    } else {
+      oss << prefix_ << ".Tuple[";
+      for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << Print(tuple_type->types_[i]);
+      }
+      oss << "]";
+    }
+    return oss.str();
+  }
+
+  if (auto memref_type = As<MemRefType>(type)) {
+    return prefix_ + ".MemRefType";
+  }
+
+  return prefix_ + ".UnknownType";
+}
+
+std::string IRPythonPrinter::GetIndent() const {
+  return std::string(static_cast<size_t>(indent_level_ * 4), ' ');
+}
+
+void IRPythonPrinter::IncreaseIndent() { indent_level_++; }
+
+void IRPythonPrinter::DecreaseIndent() {
+  if (indent_level_ > 0) {
+    indent_level_--;
+  }
+}
+
+// Expression visitors - reuse precedence logic from base printer
+void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << GetVarName(op.get()); }
+
+void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_hint_; }
+
+void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
+
+void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
+  // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
+  // in the Python DSL, so they print as bare integers. Other integer types (INT8,
+  // INT32, etc.) need explicit dtype annotation.
+  if (op->dtype() == DataType::DEFAULT_CONST_INT || op->dtype() == DataType::INDEX) {
+    stream_ << op->value_;
+  } else {
+    stream_ << prefix_ << ".const(" << op->value_ << ", " << prefix_ << "." << DataTypeToString(op->dtype())
+            << ")";
+  }
+}
+
+void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
+  if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
+    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", " << prefix_ << "."
+            << DataTypeToString(op->dtype()) << ")";
+  } else {
+    stream_ << FormatFloatLiteral(op->value_);
+  }
+}
+
+void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
+
+void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
+  INTERNAL_CHECK(op->op_) << "Call has null op";
+  // Check if this is a GlobalVar call within a Program context
+
+  if (auto gvar = As<GlobalVar>(op->op_)) {
+    if (current_program_) {
+      // This is a cross-function call - print as self.method_name()
+      stream_ << "self." << gvar->name_ << "(";
+
+      // Print positional arguments
+      for (size_t i = 0; i < op->args_.size(); ++i) {
+        if (i > 0) stream_ << ", ";
+        VisitExpr(op->args_[i]);
+      }
+
+      stream_ << ")";
+      return;
+    }
+  }
+
+  // Format operation name for printing
+  // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
+  // and are printed in parseable format like "pl.tensor.adds"
+  std::string op_name = op->op_->name_;
+
+  // Normalize tensor.add with scalar rhs to tensor.adds (matches Python API dispatch)
+  if (op_name == "tensor.add" && op->args_.size() == 2) {
+    if (std::dynamic_pointer_cast<const ConstFloat>(op->args_[1]) ||
+        std::dynamic_pointer_cast<const ConstInt>(op->args_[1])) {
+      op_name = "tensor.adds";
+    }
+  }
+
+  // Check if this is a registered operation (contains a dot)
+  if (op_name.find('.') != std::string::npos) {
+    // Print with pl. prefix
+    stream_ << prefix_ << "." << op_name << "(";
+  } else {
+    // Not a registered operation, print as-is
+    stream_ << op_name << "(";
+  }
+
+  // Special handling for tile.full: print as keyword args to match Python API
+  // IR stores: args_=[shape, value_expr], kwargs_={"dtype": dtype}
+  // Python API: full(shape, dtype, value) — print as full(shape, dtype=.., value=..)
+  // because pl.FP32 as positional is rejected by the parser (standalone attribute access)
+  if (op->op_->name_ == "tile.full" && op->args_.size() >= 2) {
+    VisitExpr(op->args_[0]);  // shape (positional)
+    for (const auto& [key, val] : op->kwargs_) {
+      if (key == "dtype") {
+        stream_ << ", dtype=" << prefix_ << "."
+                << DataTypeToString(AnyCast<DataType>(val, "tile.full dtype"));
+        break;
+      }
+    }
+    stream_ << ", value=";
+    VisitExpr(op->args_[1]);  // value (as keyword)
+    stream_ << ")";
+    return;
+  }
+
+  // Special handling for tile.load: always print full form to ensure roundtrip stability.
+  // IR built directly via ir.Call may have only 3 positional args (tensor, offsets, shapes)
+  // but the Python API pl.tile.load() defaults valid_shapes=shapes, target_memory=Vec,
+  // transpose=False — after reparsing those defaults are filled in, causing mismatch.
+  if (op->op_->name_ == "tile.load" && op->args_.size() == 3 && op->kwargs_.empty()) {
+    VisitExpr(op->args_[0]);  // source tensor
+    stream_ << ", ";
+    VisitExpr(op->args_[1]);  // offsets
+    stream_ << ", ";
+    VisitExpr(op->args_[2]);  // shapes
+    stream_ << ", ";
+    VisitExpr(op->args_[2]);  // valid_shapes = shapes (default)
+    stream_ << ", target_memory=" << prefix_ << ".Mem.Vec, transpose=False)";
+    return;
+  }
+
+  // Print positional arguments
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+
+    // Special handling for tile.alloc's first argument (memory_space)
+    if (op->op_->name_ == "tile.alloc" && i == 0) {
+      // Try to extract the integer value and convert it to MemorySpace enum
+      if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
+        int space_value = static_cast<int>(const_int->value_);
+        stream_ << prefix_ << ".Mem." << MemorySpaceToString(static_cast<MemorySpace>(space_value));
+      } else {
+        VisitExpr(op->args_[i]);
+      }
+    } else {
+      VisitExpr(op->args_[i]);
+    }
+  }
+
+  // Print kwargs as keyword arguments
+  bool need_comma = !op->args_.empty();
+  for (const auto& [key, value] : op->kwargs_) {
+    if (need_comma) {
+      stream_ << ", ";
+    }
+    need_comma = true;
+    stream_ << key << "=";
+
+    // Print value based on type
+    if (value.type() == typeid(int)) {
+      int int_val = AnyCast<int>(value, "printing kwarg: " + key);
+      // Print pipe kwargs as PipeType enum names for readability
+      if (key == "set_pipe" || key == "wait_pipe") {
+        stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
+      } else if (key == "mode") {
+        stream_ << "'" << CastModeToString(int_val) << "'";
+      } else {
+        stream_ << int_val;
+      }
+    } else if (value.type() == typeid(bool)) {
+      stream_ << (AnyCast<bool>(value, "printing kwarg: " + key) ? "True" : "False");
+    } else if (value.type() == typeid(std::string)) {
+      stream_ << "'" << AnyCast<std::string>(value, "printing kwarg: " + key) << "'";
+    } else if (value.type() == typeid(double)) {
+      stream_ << FormatFloatLiteral(AnyCast<double>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(float)) {
+      stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "printing kwarg: " + key)));
+    } else if (value.type() == typeid(DataType)) {
+      stream_ << prefix_ << "." << DataTypeToString(AnyCast<DataType>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(MemorySpace)) {
+      stream_ << prefix_ << ".Mem."
+              << MemorySpaceToString(AnyCast<MemorySpace>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TensorLayout)) {
+      stream_ << prefix_ << ".TensorLayout."
+              << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TilePad)) {
+      auto pad = AnyCast<TilePad>(value, "printing kwarg: " + key);
+      stream_ << prefix_ << ".TilePad.";
+      switch (pad) {
+        case TilePad::null:
+          stream_ << "null";
+          break;
+        case TilePad::zero:
+          stream_ << "zero";
+          break;
+        case TilePad::max:
+          stream_ << "max";
+          break;
+        case TilePad::min:
+          stream_ << "min";
+          break;
+      }
+    } else {
+      throw TypeError("Invalid kwarg type for key: " + key +
+                      ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
+                      "TensorLayout, or TilePad, but got " +
+                      DemangleTypeName(value.type().name()));
+    }
+  }
+
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const MakeTuplePtr& op) {
+  stream_ << "[";
+  for (size_t i = 0; i < op->elements_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(op->elements_[i]);
+  }
+  stream_ << "]";
+}
+
+void IRPythonPrinter::VisitExpr_(const TupleGetItemExprPtr& op) {
+  VisitExpr(op->tuple_);
+  stream_ << "[" << op->index_ << "]";
+}
+
+// Binary and unary operators - reuse from base printer logic
+void IRPythonPrinter::PrintChild(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
+  bool needs_parens = NeedsParens(parent, child, is_left);
+
+  if (needs_parens) {
+    stream_ << "(";
+  }
+
+  VisitExpr(child);
+
+  if (needs_parens) {
+    stream_ << ")";
+  }
+}
+
+bool IRPythonPrinter::NeedsParens(const ExprPtr& parent, const ExprPtr& child, bool is_left) {
+  Precedence parent_prec = GetPrecedence(parent);
+  Precedence child_prec = GetPrecedence(child);
+
+  if (child_prec < parent_prec) {
+    return true;
+  }
+
+  if (child_prec == parent_prec) {
+    if (IsRightAssociative(parent)) {
+      return is_left;
+    } else {
+      return !is_left;
+    }
+  }
+
+  return false;
+}
+
+void IRPythonPrinter::PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol) {
+  PrintChild(op, op->left_, true);
+  stream_ << " " << op_symbol << " ";
+  PrintChild(op, op->right_, false);
+}
+
+void IRPythonPrinter::PrintFunctionBinaryOp(const BinaryExprPtr& op, const char* func_name) {
+  stream_ << prefix_ << "." << func_name << "(";
+  VisitExpr(op->left_);
+  stream_ << ", ";
+  VisitExpr(op->right_);
+  stream_ << ")";
+}
+
+// Arithmetic binary operators
+void IRPythonPrinter::VisitExpr_(const AddPtr& op) { PrintBinaryOp(op, "+"); }
+void IRPythonPrinter::VisitExpr_(const SubPtr& op) { PrintBinaryOp(op, "-"); }
+void IRPythonPrinter::VisitExpr_(const MulPtr& op) { PrintBinaryOp(op, "*"); }
+void IRPythonPrinter::VisitExpr_(const FloorDivPtr& op) { PrintBinaryOp(op, "//"); }
+void IRPythonPrinter::VisitExpr_(const FloorModPtr& op) { PrintBinaryOp(op, "%"); }
+void IRPythonPrinter::VisitExpr_(const FloatDivPtr& op) { PrintBinaryOp(op, "/"); }
+void IRPythonPrinter::VisitExpr_(const PowPtr& op) { PrintBinaryOp(op, "**"); }
+
+// Function-style binary operators
+void IRPythonPrinter::VisitExpr_(const MinPtr& op) { PrintFunctionBinaryOp(op, "min"); }
+void IRPythonPrinter::VisitExpr_(const MaxPtr& op) { PrintFunctionBinaryOp(op, "max"); }
+
+// Comparison operators
+void IRPythonPrinter::VisitExpr_(const EqPtr& op) { PrintBinaryOp(op, "=="); }
+void IRPythonPrinter::VisitExpr_(const NePtr& op) { PrintBinaryOp(op, "!="); }
+void IRPythonPrinter::VisitExpr_(const LtPtr& op) { PrintBinaryOp(op, "<"); }
+void IRPythonPrinter::VisitExpr_(const LePtr& op) { PrintBinaryOp(op, "<="); }
+void IRPythonPrinter::VisitExpr_(const GtPtr& op) { PrintBinaryOp(op, ">"); }
+void IRPythonPrinter::VisitExpr_(const GePtr& op) { PrintBinaryOp(op, ">="); }
+
+// Logical operators
+void IRPythonPrinter::VisitExpr_(const AndPtr& op) { PrintBinaryOp(op, "and"); }
+void IRPythonPrinter::VisitExpr_(const OrPtr& op) { PrintBinaryOp(op, "or"); }
+void IRPythonPrinter::VisitExpr_(const XorPtr& op) { PrintBinaryOp(op, "xor"); }
+
+// Bitwise operators
+void IRPythonPrinter::VisitExpr_(const BitAndPtr& op) { PrintBinaryOp(op, "&"); }
+void IRPythonPrinter::VisitExpr_(const BitOrPtr& op) { PrintBinaryOp(op, "|"); }
+void IRPythonPrinter::VisitExpr_(const BitXorPtr& op) { PrintBinaryOp(op, "^"); }
+void IRPythonPrinter::VisitExpr_(const BitShiftLeftPtr& op) { PrintBinaryOp(op, "<<"); }
+void IRPythonPrinter::VisitExpr_(const BitShiftRightPtr& op) { PrintBinaryOp(op, ">>"); }
+
+// Unary operators
+void IRPythonPrinter::VisitExpr_(const NegPtr& op) {
+  stream_ << "-";
+  Precedence operand_prec = GetPrecedence(op->operand_);
+  if (operand_prec < Precedence::kUnary) {
+    stream_ << "(";
+    VisitExpr(op->operand_);
+    stream_ << ")";
+  } else {
+    VisitExpr(op->operand_);
+  }
+}
+
+void IRPythonPrinter::VisitExpr_(const AbsPtr& op) {
+  stream_ << "abs(";
+  VisitExpr(op->operand_);
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
+  auto scalar_type = As<ScalarType>(op->GetType());
+  INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
+  stream_ << prefix_ << ".cast(";
+  VisitExpr(op->operand_);
+  stream_ << ", " << prefix_ << "." << DataTypeToString(scalar_type->dtype_) << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const NotPtr& op) {
+  stream_ << "not ";
+  Precedence operand_prec = GetPrecedence(op->operand_);
+  if (operand_prec < Precedence::kNot) {
+    stream_ << "(";
+    VisitExpr(op->operand_);
+    stream_ << ")";
+  } else {
+    VisitExpr(op->operand_);
+  }
+}
+
+void IRPythonPrinter::VisitExpr_(const BitNotPtr& op) {
+  stream_ << "~";
+  Precedence operand_prec = GetPrecedence(op->operand_);
+  if (operand_prec < Precedence::kUnary) {
+    stream_ << "(";
+    VisitExpr(op->operand_);
+    stream_ << ")";
+  } else {
+    VisitExpr(op->operand_);
+  }
+}
+
+// Statement visitors with proper Python syntax
+void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
+  // Print with type annotation: var: type = value
+  // In concise mode, omit the type annotation: var = value
+  VisitExpr(op->var_);
+  if (!concise_) {
+    stream_ << ": " << Print(op->var_->GetType());
+  }
+  stream_ << " = ";
+  VisitExpr(op->value_);
+}
+
+void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
+  // SSA-style if with pl.yield_()
+  stream_ << "if ";
+  VisitExpr(op->condition_);
+  stream_ << ":\n";
+
+  IncreaseIndent();
+  VisitStmtBody(op->then_body_, op->return_vars_);
+  DecreaseIndent();
+
+  if (op->else_body_.has_value()) {
+    stream_ << "\n" << GetIndent() << "else:\n";
+    IncreaseIndent();
+    VisitStmtBody(*op->else_body_, op->return_vars_);
+    DecreaseIndent();
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const YieldStmtPtr& op) {
+  // Note: In function context, this will be changed to "return" by VisitFunction
+  stream_ << prefix_ << ".yield_(";
+  for (size_t i = 0; i < op->value_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(op->value_[i]);
+  }
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
+  stream_ << "return";
+  if (!op->value_.empty()) {
+    stream_ << " ";
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->value_[i]);
+    }
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
+  // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
+  stream_ << "for " << GetVarName(op->loop_var_.get());
+
+  // If we have iter_args, add tuple unpacking without type annotations
+  if (!op->iter_args_.empty()) {
+    stream_ << ", (";
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << op->iter_args_[i]->name_hint_;
+    }
+    // Add trailing comma for single-element tuples to distinguish from parenthesized expression
+    if (op->iter_args_.size() == 1) {
+      stream_ << ",";
+    }
+    stream_ << ")";
+  }
+
+  // Select range function based on loop kind
+  const char* range_func = ".range(";
+  switch (op->kind_) {
+    case ForKind::Unroll:
+      range_func = ".unroll(";
+      break;
+    case ForKind::Parallel:
+      range_func = ".parallel(";
+      break;
+    case ForKind::Sequential:
+      break;
+    default:
+      INTERNAL_CHECK(false) << "Unknown ForKind in python_printer: " << ForKindToString(op->kind_);
+      break;
+  }
+  stream_ << " in " << prefix_ << range_func;
+
+  // Use concise range form like Python: range(stop) when start==0 and step==1,
+  // range(start, stop) when step==1, range(start, stop, step) otherwise.
+  auto is_const_int = [](const ExprPtr& expr, int64_t value) -> bool {
+    if (auto ci = As<ConstInt>(expr)) {
+      // Only elide for canonical loop-bound dtypes to preserve round-trip fidelity.
+      return ci->value_ == value &&
+             (ci->dtype() == DataType::DEFAULT_CONST_INT || ci->dtype() == DataType::INDEX);
+    }
+    return false;
+  };
+
+  bool start_is_zero = is_const_int(op->start_, 0);
+  bool step_is_one = is_const_int(op->step_, 1);
+
+  if (start_is_zero && step_is_one) {
+    // range(stop)
+    VisitExpr(op->stop_);
+  } else if (step_is_one) {
+    // range(start, stop)
+    VisitExpr(op->start_);
+    stream_ << ", ";
+    VisitExpr(op->stop_);
+  } else {
+    // range(start, stop, step)
+    VisitExpr(op->start_);
+    stream_ << ", ";
+    VisitExpr(op->stop_);
+    stream_ << ", ";
+    VisitExpr(op->step_);
+  }
+
+  // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
+  // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
+  // always take the simple (no iter_args) path.
+  if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
+    INTERNAL_CHECK(false) << "ForKind::Unroll does not support iter_args/init_values";
+  }
+  if (!op->iter_args_.empty()) {
+    stream_ << ", init_values=(";
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->iter_args_[i]->initValue_);
+    }
+    // Add trailing comma for single-element tuple
+    if (op->iter_args_.size() == 1) stream_ << ",";
+    stream_ << ")";
+  }
+
+  // Add chunk kwargs
+  if (op->chunk_size_.has_value()) {
+    stream_ << ", chunk=";
+    VisitExpr(*op->chunk_size_);
+    if (op->chunk_policy_ != ChunkPolicy::LeadingFull) {
+      stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_policy_) << "\"";
+    }
+  }
+
+  stream_ << "):\n";
+
+  IncreaseIndent();
+  VisitStmtBody(op->body_, op->return_vars_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
+  // Check if this is SSA-style (with iter_args) or natural style
+  if (op->iter_args_.empty()) {
+    // Natural while loop without iter_args
+    stream_ << "while ";
+    VisitExpr(op->condition_);
+    stream_ << ":\n";
+
+    IncreaseIndent();
+    VisitStmtBody(op->body_, op->return_vars_);
+    DecreaseIndent();
+  } else {
+    // SSA-style while with iter_args - print as explicit DSL syntax
+    stream_ << "for (";
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << op->iter_args_[i]->name_hint_;
+    }
+    // Add trailing comma for single-element tuples
+    if (op->iter_args_.size() == 1) {
+      stream_ << ",";
+    }
+    stream_ << ") in " << prefix_ << ".while_(init_values=(";
+
+    // Add init_values for iter_args
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      VisitExpr(op->iter_args_[i]->initValue_);
+    }
+    // Add trailing comma for single-element tuple
+    if (op->iter_args_.size() == 1) stream_ << ",";
+    stream_ << ")):\n";
+
+    IncreaseIndent();
+
+    // Print condition as pl.cond() call as first body statement
+    stream_ << GetIndent() << prefix_ << ".cond(";
+    VisitExpr(op->condition_);
+    stream_ << ")\n";
+
+    VisitStmtBody(op->body_, op->return_vars_);
+    DecreaseIndent();
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
+  if (op->scope_kind_ == ScopeKind::Hierarchy) {
+    // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y):
+    stream_ << "with " << prefix_ << ".at(";
+    bool first = true;
+    if (op->level_.has_value()) {
+      stream_ << "level=" << prefix_ << ".Level." << LevelToString(*op->level_);
+      first = false;
+    }
+    if (op->role_.has_value()) {
+      if (!first) stream_ << ", ";
+      stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
+    }
+    stream_ << "):\n";
+  } else {
+    // Map ScopeKind to DSL function name for robustness
+    static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
+        {ScopeKind::InCore, "incore"},
+        {ScopeKind::AutoInCore, "auto_incore"},
+        {ScopeKind::Cluster, "cluster"},
+    };
+
+    auto it = scope_kind_to_dsl.find(op->scope_kind_);
+    INTERNAL_CHECK(it != scope_kind_to_dsl.end())
+        << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
+
+    stream_ << "with " << prefix_ << "." << it->second << "():\n";
+  }
+
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    PrintStmtBlock(op->stmts_[i]);
+    if (i < op->stmts_.size() - 1) {
+      stream_ << "\n";
+    }
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const OpStmtsPtr& op) {
+  for (size_t i = 0; i < op->stmts_.size(); ++i) {
+    PrintStmtBlock(op->stmts_[i]);
+    if (i < op->stmts_.size() - 1) {
+      stream_ << "\n";
+    }
+  }
+}
+
+void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (size_t i = 0; i < seq->stmts_.size(); ++i) {
+      PrintStmtBlock(seq->stmts_[i]);
+      if (i < seq->stmts_.size() - 1) stream_ << "\n";
+    }
+  } else if (auto ops = As<OpStmts>(stmt)) {
+    for (size_t i = 0; i < ops->stmts_.size(); ++i) {
+      PrintStmtBlock(ops->stmts_[i]);
+      if (i < ops->stmts_.size() - 1) stream_ << "\n";
+    }
+  } else {
+    stream_ << GetIndent();
+    VisitStmt(stmt);
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
+  // Print expression statement: expr
+  VisitExpr(op->expr_);
+}
+
+void IRPythonPrinter::VisitStmt_(const BreakStmtPtr& op) { stream_ << "break"; }
+
+void IRPythonPrinter::VisitStmt_(const ContinueStmtPtr& op) { stream_ << "continue"; }
+
+void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
+
+void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
+  if (return_vars.size() == 1) {
+    stream_ << GetVarName(return_vars[0].get());
+    if (!concise_) {
+      stream_ << ": " << Print(return_vars[0]->GetType());
+    }
+  } else {
+    for (size_t i = 0; i < return_vars.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << GetVarName(return_vars[i].get());
+    }
+  }
+}
+
+void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+  // Helper to visit statement body and wrap YieldStmt with assignment if needed
+  if (auto yield_stmt = As<YieldStmt>(body)) {
+    // If parent has return_vars, wrap yield as assignment
+    if (!yield_stmt->value_.empty() && !return_vars.empty()) {
+      stream_ << GetIndent();
+      PrintYieldAssignmentVars(return_vars);
+      stream_ << " = " << prefix_ << ".yield_(";
+      for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
+        if (i > 0) stream_ << ", ";
+        VisitExpr(yield_stmt->value_[i]);
+      }
+      stream_ << ")";
+    } else {
+      stream_ << GetIndent();
+      VisitStmt(yield_stmt);
+    }
+  } else if (auto seq_stmts = As<SeqStmts>(body)) {
+    // Process each statement in sequence
+    for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+      auto stmt = seq_stmts->stmts_[i];
+
+      // Check if this is the last statement and it's a YieldStmt
+      bool is_last = (i == seq_stmts->stmts_.size() - 1);
+      if (auto yield_stmt = As<YieldStmt>(stmt)) {
+        if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
+          // Wrap as assignment
+          stream_ << GetIndent();
+          PrintYieldAssignmentVars(return_vars);
+          stream_ << " = " << prefix_ << ".yield_(";
+          for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
+            if (j > 0) stream_ << ", ";
+            VisitExpr(yield_stmt->value_[j]);
+          }
+          stream_ << ")";
+        } else {
+          stream_ << GetIndent();
+          VisitStmt(stmt);
+        }
+      } else {
+        PrintStmtBlock(stmt);
+      }
+
+      if (i < seq_stmts->stmts_.size() - 1) {
+        stream_ << "\n";
+      }
+    }
+  } else {
+    PrintStmtBlock(body);
+  }
+}
+
+// Collect all Var definition sites in DFS pre-order for SSA rename map construction.
+static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& out) {
+  if (!stmt) return;
+  if (auto assign = As<AssignStmt>(stmt)) {
+    out.push_back(assign->var_.get());
+  } else if (auto for_stmt = As<ForStmt>(stmt)) {
+    out.push_back(for_stmt->loop_var_.get());
+    for (auto& rv : for_stmt->return_vars_) out.push_back(rv.get());
+    for (auto& ia : for_stmt->iter_args_) out.push_back(ia.get());
+    CollectVarDefsInOrder(for_stmt->body_, out);
+  } else if (auto if_stmt = As<IfStmt>(stmt)) {
+    for (auto& rv : if_stmt->return_vars_) out.push_back(rv.get());
+    CollectVarDefsInOrder(if_stmt->then_body_, out);
+    if (if_stmt->else_body_.has_value()) CollectVarDefsInOrder(*if_stmt->else_body_, out);
+  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+    for (auto& rv : while_stmt->return_vars_) out.push_back(rv.get());
+    CollectVarDefsInOrder(while_stmt->body_, out);
+  } else if (auto seq = As<SeqStmts>(stmt)) {
+    for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
+  } else if (auto ops = As<OpStmts>(stmt)) {
+    for (auto& s : ops->stmts_) CollectVarDefsInOrder(s, out);
+  } else if (auto scope = As<ScopeStmt>(stmt)) {
+    CollectVarDefsInOrder(scope->body_, out);
+  }
+}
+
+std::string IRPythonPrinter::GetVarName(const Var* var) const {
+  auto it = var_rename_map_.find(var);
+  if (it != var_rename_map_.end()) return it->second;
+  return var->name_hint_;
+}
+
+void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
+  var_rename_map_.clear();
+
+  // Collect all Var def-sites in DFS pre-order: params first, then body.
+  std::vector<const Var*> defs;
+  for (auto& p : func->params_) defs.push_back(p.get());
+  if (func->body_) CollectVarDefsInOrder(func->body_, defs);
+
+  // Deduplicate by pointer (same Var object may appear as both param and assign target).
+  {
+    std::unordered_set<const Var*> seen;
+    std::vector<const Var*> unique_defs;
+    for (const Var* v : defs) {
+      if (seen.insert(v).second) unique_defs.push_back(v);
+    }
+    defs = std::move(unique_defs);
+  }
+
+  // Count occurrences of each name across distinct Var objects.
+  std::unordered_map<std::string, int> name_counts;
+  for (const Var* v : defs) name_counts[v->name_hint_]++;
+
+  // Assign printed names: unique names keep their original; duplicate names get suffixes.
+  std::set<std::string> used_names;
+  for (const Var* v : defs) {
+    if (name_counts[v->name_hint_] == 1) {
+      // No conflict — no rename map entry needed (GetVarName falls back to name_).
+      used_names.insert(v->name_hint_);
+    }
+  }
+  for (const Var* v : defs) {
+    if (name_counts[v->name_hint_] == 1) continue;  // Already handled above.
+    std::string candidate = v->name_hint_;
+    if (used_names.find(candidate) == used_names.end()) {
+      used_names.insert(candidate);
+      var_rename_map_[v] = candidate;
+    } else {
+      int suffix = 1;
+      while (true) {
+        candidate = v->name_hint_ + "_" + std::to_string(suffix);
+        if (used_names.find(candidate) == used_names.end()) {
+          used_names.insert(candidate);
+          var_rename_map_[v] = candidate;
+          break;
+        }
+        suffix++;
+      }
+    }
+  }
+}
+
+void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
+  // Build rename map for this function to handle SSA name shadowing.
+  BuildVarRenameMap(func);
+
+  // Print decorator
+  stream_ << GetIndent() << "@" << prefix_ << ".function";
+  {
+    bool has_type = func->func_type_ != FunctionType::Opaque;
+    bool has_level = func->level_.has_value();
+    bool has_role = func->role_.has_value();
+    if (has_type || has_level || has_role) {
+      stream_ << "(";
+      bool first = true;
+      if (has_type) {
+        stream_ << "type=" << prefix_ << ".FunctionType." << FunctionTypeToString(func->func_type_);
+        first = false;
+      }
+      if (has_level) {
+        if (!first) stream_ << ", ";
+        stream_ << "level=" << prefix_ << ".Level." << LevelToString(*func->level_);
+        first = false;
+      }
+      if (has_role) {
+        if (!first) stream_ << ", ";
+        stream_ << "role=" << prefix_ << ".Role." << RoleToString(*func->role_);
+      }
+      stream_ << ")";
+    }
+  }
+  stream_ << "\n";
+
+  // Print function signature
+  stream_ << GetIndent() << "def " << func->name_ << "(";
+
+  // Add 'self' as first parameter when inside @pl.program
+  if (current_program_) {
+    stream_ << "self";
+  }
+
+  // Print parameters with type annotations and direction wrappers
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    if (i > 0 || current_program_) stream_ << ", ";
+    const auto& var = func->params_[i];
+    const auto& dir = func->param_directions_[i];
+    stream_ << GetVarName(var.get()) << ": ";
+    if (dir == ParamDirection::InOut) {
+      stream_ << prefix_ << ".InOut[" << Print(var->GetType()) << "]";
+    } else if (dir == ParamDirection::Out) {
+      stream_ << prefix_ << ".Out[" << Print(var->GetType()) << "]";
+    } else {
+      stream_ << Print(var->GetType());
+    }
+  }
+
+  stream_ << ")";
+
+  // Print return type annotation
+  if (!func->return_types_.empty()) {
+    stream_ << " -> ";
+    if (func->return_types_.size() == 1) {
+      stream_ << Print(func->return_types_[0]);
+    } else {
+      stream_ << "tuple[";
+      for (size_t i = 0; i < func->return_types_.size(); ++i) {
+        if (i > 0) stream_ << ", ";
+        stream_ << Print(func->return_types_[i]);
+      }
+      stream_ << "]";
+    }
+  }
+
+  stream_ << ":\n";
+
+  // Print body - convert yield to return in function context
+  IncreaseIndent();
+  if (func->body_) {
+    if (auto seq_stmts = As<SeqStmts>(func->body_)) {
+      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+        // Convert yield to return in function context
+        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
+          stream_ << GetIndent() << "return";
+          if (!yield_stmt->value_.empty()) {
+            stream_ << " ";
+            for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
+              if (j > 0) stream_ << ", ";
+              VisitExpr(yield_stmt->value_[j]);
+            }
+          }
+        } else {
+          PrintStmtBlock(seq_stmts->stmts_[i]);
+        }
+        if (i < seq_stmts->stmts_.size() - 1) {
+          stream_ << "\n";
+        }
+      }
+    } else if (auto yield_stmt = As<YieldStmt>(func->body_)) {
+      stream_ << GetIndent() << "return";
+      if (!yield_stmt->value_.empty()) {
+        stream_ << " ";
+        for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          VisitExpr(yield_stmt->value_[i]);
+        }
+      }
+    } else {
+      PrintStmtBlock(func->body_);
+    }
+  }
+  DecreaseIndent();
+}
+
+// Helper class to collect GlobalVar references from a function's body
+class GlobalVarCollector : public IRVisitor {
+ public:
+  std::set<GlobalVarPtr, GlobalVarPtrLess> collected_gvars;
+
+  void VisitExpr_(const CallPtr& op) override {
+    // Visit the op field (which may be a GlobalVar for cross-function calls)
+    INTERNAL_CHECK(op->op_) << "Call has null op";
+    if (auto gvar = As<GlobalVar>(op->op_)) {
+      collected_gvars.insert(gvar);
+    }
+    // Visit arguments
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
+// Topologically sort functions so called functions come before callers
+// This ensures that when reparsing, function return types are known when needed
+static std::vector<std::pair<GlobalVarPtr, FunctionPtr>> TopologicalSortFunctions(
+    const std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess>& functions) {
+  // Build dependency graph: function -> set of functions it calls
+  std::map<GlobalVarPtr, std::set<GlobalVarPtr, GlobalVarPtrLess>, GlobalVarPtrLess> dependencies;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> gvar_to_func;
+
+  for (const auto& [gvar, func] : functions) {
+    gvar_to_func[gvar] = func;
+    // Collect all GlobalVars referenced in the function body
+    GlobalVarCollector collector;
+    if (func->body_) {
+      collector.VisitStmt(func->body_);
+    }
+    // Only keep GlobalVars that are actually functions in this program
+    for (const auto& called_gvar : collector.collected_gvars) {
+      if (functions.count(called_gvar) > 0) {
+        dependencies[gvar].insert(called_gvar);
+      }
+    }
+  }
+
+  // Topological sort using DFS
+  std::vector<std::pair<GlobalVarPtr, FunctionPtr>> sorted;
+  std::set<GlobalVarPtr, GlobalVarPtrLess> visited;
+  std::set<GlobalVarPtr, GlobalVarPtrLess> in_progress;  // For cycle detection
+
+  std::function<bool(const GlobalVarPtr&)> dfs = [&](const GlobalVarPtr& gvar) -> bool {
+    if (visited.count(gvar)) return true;
+    if (in_progress.count(gvar)) return false;  // Cycle detected
+
+    in_progress.insert(gvar);
+
+    // Visit dependencies first (dependencies = functions this function calls)
+    if (dependencies.count(gvar)) {
+      for (const auto& dep : dependencies[gvar]) {
+        if (!dfs(dep)) return false;  // Cycle detected
+      }
+    }
+
+    in_progress.erase(gvar);
+    visited.insert(gvar);
+    // Add to sorted AFTER visiting dependencies, so dependencies come first
+    sorted.emplace_back(gvar, gvar_to_func[gvar]);
+    return true;
+  };
+
+  // Visit all functions
+  for (const auto& [gvar, func] : functions) {
+    if (!dfs(gvar)) {
+      // Cycle detected, fall back to original order
+      sorted.clear();
+      for (const auto& pair : functions) {
+        sorted.emplace_back(pair);
+      }
+      return sorted;
+    }
+  }
+
+  return sorted;
+}
+
+static std::set<std::string> CollectDynVarNames(const ProgramPtr& program) {
+  std::set<std::string> dyn_vars;
+  std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
+    if (auto tensor_type = As<TensorType>(type)) {
+      for (const auto& dim : tensor_type->shape_) {
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+      }
+      if (tensor_type->tensor_view_.has_value()) {
+        for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        }
+        for (const auto& dim : tensor_type->tensor_view_->stride) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        }
+      }
+    } else if (auto tile_type = As<TileType>(type)) {
+      for (const auto& dim : tile_type->shape_) {
+        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+      }
+      if (tile_type->tile_view_.has_value()) {
+        for (const auto& dim : tile_type->tile_view_->valid_shape) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        }
+        for (const auto& dim : tile_type->tile_view_->stride) {
+          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        }
+        if (tile_type->tile_view_->start_offset) {
+          if (auto var = As<Var>(tile_type->tile_view_->start_offset)) {
+            dyn_vars.insert(var->name_hint_);
+          }
+        }
+      }
+    }
+  };
+  // Use a full IRVisitor so that dynamic-dimension Var names are found in every
+  // expression context: loop bounds (ForStmt start/stop/step/chunk_size),
+  // if/while conditions, EvalStmt expressions, AssignStmt values, etc.
+  // The ad-hoc collect_from_stmt only inspected AssignStmt variable types and
+  // missed all those other locations.
+  class DynVarCollector : public IRVisitor {
+   public:
+    explicit DynVarCollector(const std::function<void(const TypePtr&)>& collect_from_type)
+        : collect_from_type_(collect_from_type) {}
+
+    void VisitExpr_(const VarPtr& op) override {
+      // Collect dynamic dimension names from the variable's type annotation.
+      // Handles TensorType/TileType shapes and their tensor_view_/tile_view_ fields.
+      collect_from_type_(op->GetType());
+    }
+
+   private:
+    const std::function<void(const TypePtr&)>& collect_from_type_;
+  };
+
+  DynVarCollector collector(collect_from_type);
+  for (const auto& [gvar, func] : program->functions_) {
+    for (const auto& param : func->params_) {
+      collector.VisitExpr(param);
+    }
+    for (const auto& ret_type : func->return_types_) {
+      collect_from_type(ret_type);
+    }
+    if (func->body_) {
+      collector.VisitStmt(func->body_);
+    }
+  }
+  return dyn_vars;
+}
+
+void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
+  // Print program header comment
+  stream_ << "# pypto.program: " << (program->name_.empty() ? "Program" : program->name_) << "\n";
+
+  // Print import statement based on prefix
+  if (prefix_ == "pl") {
+    stream_ << "import pypto.language as pl\n\n";
+  } else {
+    stream_ << "from pypto import language as " << prefix_ << "\n\n";
+  }
+
+  // Emit pl.dynamic() declarations for dynamic shape variables used in function signatures
+  auto dyn_vars = CollectDynVarNames(program);
+  if (!dyn_vars.empty()) {
+    for (const auto& name : dyn_vars) {
+      stream_ << name << " = " << prefix_ << ".dynamic(\"" << name << "\")\n";
+    }
+    stream_ << "\n";
+  }
+
+  // Print as @pl.program class with @pl.function methods
+  stream_ << "@" << prefix_ << ".program\n";
+  stream_ << "class " << (program->name_.empty() ? "Program" : program->name_) << ":\n";
+
+  IncreaseIndent();
+
+  // Sort functions in dependency order (called functions before callers)
+  auto sorted_functions = TopologicalSortFunctions(program->functions_);
+
+  // Print each function as a method, delegating to VisitFunction
+  // Setting current_program_ enables self parameter and self.method() call printing
+  auto prev_program = current_program_;
+  current_program_ = program;
+
+  bool first = true;
+  for (const auto& [gvar, func] : sorted_functions) {
+    if (!first) {
+      stream_ << "\n";  // Blank line between functions
+    }
+    first = false;
+
+    VisitFunction(func);
+  }
+
+  current_program_ = prev_program;
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape) {
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    // For ConstInt shape dims, print raw value to avoid dtype annotations
+    if (auto const_int = As<ConstInt>(shape[i])) {
+      oss << const_int->value_;
+    } else {
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(shape[i]);
+    }
+  }
+}
+
+// Helper methods for MemRef and TileView printing
+std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
+  std::ostringstream oss;
+  oss << prefix_ << ".MemRef(";
+
+  // Print address expression
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(memref.addr_);
+
+  // Print size and id
+  oss << ", " << memref.size_ << ", " << memref.id_ << ")";
+  return oss.str();
+}
+
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
+                                           const std::vector<ExprPtr>& tile_shape) {
+  std::ostringstream oss;
+  oss << prefix_ << ".TileView(";
+
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tile's shape
+  bool valid_shape_matches = (tile_view.valid_shape.size() == tile_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tile_shape.size(); ++i) {
+      const auto& vs_expr = tile_view.valid_shape[i];
+      const auto& ts_expr = tile_shape[i];
+
+      // Fast path: identical ExprPtr (handles symbolic shapes)
+      if (vs_expr == ts_expr) continue;
+
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.valid_shape[i]);
+    }
+    oss << "]";
+  }
+
+  // stride — omit if empty
+  if (!tile_view.stride.empty()) {
+    maybe_comma();
+    oss << "stride=[";
+    for (size_t i = 0; i < tile_view.stride.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tile_view.stride[i]);
+    }
+    oss << "]";
+  }
+
+  // start_offset — omit if null
+  if (tile_view.start_offset) {
+    maybe_comma();
+    oss << "start_offset=";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tile_view.start_offset);
+  }
+
+  // blayout — omit if row_major (default)
+  if (tile_view.blayout != TileLayout::row_major) {
+    maybe_comma();
+    oss << "blayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.blayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
+  }
+
+  // slayout — omit if none_box (default)
+  if (tile_view.slayout != TileLayout::none_box) {
+    maybe_comma();
+    oss << "slayout=" << prefix_ << ".TileLayout.";
+    switch (tile_view.slayout) {
+      case TileLayout::none_box:
+        oss << "none_box";
+        break;
+      case TileLayout::row_major:
+        oss << "row_major";
+        break;
+      case TileLayout::col_major:
+        oss << "col_major";
+        break;
+    }
+  }
+
+  // fractal — omit if at default value
+  if (tile_view.fractal != TileView{}.fractal) {
+    maybe_comma();
+    oss << "fractal=" << tile_view.fractal;
+  }
+
+  // pad — omit if null (default)
+  if (tile_view.pad != TilePad::null) {
+    maybe_comma();
+    oss << "pad=" << prefix_ << ".TilePad.";
+    switch (tile_view.pad) {
+      case TilePad::null:
+        oss << "null";
+        break;
+      case TilePad::zero:
+        oss << "zero";
+        break;
+      case TilePad::max:
+        oss << "max";
+        break;
+      case TilePad::min:
+        oss << "min";
+        break;
+    }
+  }
+
+  // If all fields were at defaults, return empty string to skip tile_view entirely
+  if (first) return "";
+
+  oss << ")";
+  return oss.str();
+}
+
+std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
+                                             const std::vector<ExprPtr>& tensor_shape) {
+  std::ostringstream oss;
+  oss << prefix_ << ".TensorView(";
+
+  bool first = true;
+  auto maybe_comma = [&]() {
+    if (!first) oss << ", ";
+    first = false;
+  };
+
+  // valid_shape — omit if it matches the parent tensor's shape
+  bool valid_shape_matches = (tensor_view.valid_shape.size() == tensor_shape.size());
+  if (valid_shape_matches) {
+    for (size_t i = 0; i < tensor_shape.size(); ++i) {
+      const auto& vs_expr = tensor_view.valid_shape[i];
+      const auto& ts_expr = tensor_shape[i];
+      if (vs_expr == ts_expr) continue;
+      auto vs = As<ConstInt>(vs_expr);
+      auto ts = As<ConstInt>(ts_expr);
+      if (!vs || !ts || vs->value_ != ts->value_) {
+        valid_shape_matches = false;
+        break;
+      }
+    }
+  }
+  if (!valid_shape_matches && !tensor_view.valid_shape.empty()) {
+    maybe_comma();
+    oss << "valid_shape=[";
+    for (size_t i = 0; i < tensor_view.valid_shape.size(); ++i) {
+      if (i > 0) oss << ", ";
+      IRPythonPrinter temp_printer(prefix_);
+      oss << temp_printer.Print(tensor_view.valid_shape[i]);
+    }
+    oss << "]";
+  }
+
+  bool has_stride = !tensor_view.stride.empty();
+  bool has_non_default_layout = (tensor_view.layout != TensorLayout::ND);
+
+  // If valid_shape matched and stride/layout are at defaults, skip TensorView entirely
+  if (first && !has_stride && !has_non_default_layout) return "";
+
+  // When TensorView is non-trivial, always emit both stride and layout to satisfy
+  // the C++ constructor signature TensorView(stride, layout, valid_shape=[]).
+  // Omitting either required arg causes TypeError when Python eagerly evaluates
+  // function parameter annotations during exec() in the text parser.
+  maybe_comma();
+  oss << "stride=[";
+  for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
+    if (i > 0) oss << ", ";
+    IRPythonPrinter temp_printer(prefix_);
+    oss << temp_printer.Print(tensor_view.stride[i]);
+  }
+  oss << "]";
+
+  maybe_comma();
+  oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
+
+  oss << ")";
+  return oss.str();
+}
+
+// ================================
+// Public API
+// ================================
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix, bool concise) {
+  IRPythonPrinter printer(prefix, concise);
+  return printer.Print(node);
+}
+
+std::string PythonPrint(const TypePtr& type, const std::string& prefix) {
+  IRPythonPrinter printer(prefix);
+  return printer.Print(type);
+}
+
+}  // namespace ir
+}  // namespace pypto

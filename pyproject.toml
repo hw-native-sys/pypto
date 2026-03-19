@@ -1,0 +1,122 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+[build-system]
+requires = ["scikit-build-core>=0.10.0", "nanobind>=2.0.0", "ninja>=1.11.0", "cmake>=3.15"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pypto"
+version = "0.1.0"
+authors = [{ name = "PyPTO Contributors" }]
+description = "A high-performance programming framework for tile-centric computing"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0"]
+keywords = ["python", "pto", "tile", "tile-centric"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Compilers",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-forked>=1.0",
+    "pyright==1.1.407",
+    "ruff==0.14.8",
+    "clang-tidy==21.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hw-native-sys/pypto"
+Repository = "https://github.com/hw-native-sys/pypto"
+"Bug Tracker" = "https://github.com/hw-native-sys/pypto/issues"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+required-version = "0.14.8"
+
+[tool.ruff.lint]
+select = [
+    "PL", # pylint, https://docs.astral.sh/ruff/rules/#pylint-pl
+    "I",  # isort, https://docs.astral.sh/ruff/rules/#isort-i
+    "E",  # pycodestyle errors, https://docs.astral.sh/ruff/rules/#error-e
+    "W",  # pycodestyle warnings, https://docs.astral.sh/ruff/rules/#warning-w
+    "F",  # pyflakes, https://docs.astral.sh/ruff/rules/#pyflakes-f
+    "UP", # pyupgrade, https://docs.astral.sh/ruff/rules/#pyupgrade-up
+]
+ignore = [
+  "ANN401",  # flake8-annotations: any-type
+  "PLR2004", # pylint: magic-value-comparison
+  "PLR0911", # too many return statements
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+# DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length
+"tests/ut/ir/transforms/test_expand_mixed_kernel.py" = ["E501"]
+
+[tool.ruff.lint.pylint]
+max-statements = 100
+max-args = 10
+max-branches = 15
+
+[tool.ruff.format]
+quote-style = "double"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.scikit-build]
+# Specify where to find the Python package
+wheel.packages = ["python/pypto"]
+# Install the package data files (*.pyi, py.typed)
+wheel.install-dir = "pypto"
+# Set minimum CMake version
+cmake.minimum-version = "3.15"
+# Build type
+cmake.build-type = "RelWithDebInfo"
+# Build directory, better for incremental build
+build-dir = "build"
+# extra cmake arguments
+cmake.args = [
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+]
+
+[tool.pyright]
+include = ["python/pypto", "tests"]
+exclude = ["**/__pycache__", "build", "dist", "tests/st"]
+extraPaths = ["python"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+reportMissingTypeStubs = false
+reportMissingModuleSource = false
+reportCallIssue = false
+# for dsl parser
+reportAssignmentType = false
+reportOperatorIssue = false
+reportRedeclaration = false
+
+[tool.pylint]
+# Pylint is not used in this project, but as it is a widely used linter,
+# we provide basic configuration for a consistent developer experience.
+max-line-length = 110
+disable = ["missing-docstring"]

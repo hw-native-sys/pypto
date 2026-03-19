@@ -1,0 +1,169 @@
+---
+name: fix-issue
+description: Fix a GitHub issue by fetching content, creating a branch, planning the fix, and implementing it. Use when the user asks to fix a specific issue number or work on a GitHub issue.
+---
+
+# PyPTO Issue Fix Workflow
+
+Fetch GitHub issue, create branch, plan, and implement the fix.
+
+## Task Tracking
+
+Create tasks to track progress through this workflow:
+
+1. Fetch issue & create branch
+2. Plan the fix
+3. Implement the fix
+4. Run tests
+5. Commit changes
+6. Create PR (optional)
+
+## Workflow
+
+1. Check gh CLI authentication
+2. Fetch issue content
+3. Assign issue to me
+4. Create issue branch
+5. Enter plan mode to design fix
+6. Implement the fix
+7. Run tests (use `testing` skill)
+8. Commit changes (use `git-commit` skill)
+9. Create PR (optional, use `github-pr` skill)
+
+## Step 1: Check gh CLI Authentication
+
+```bash
+gh auth status
+```
+
+**If not authenticated**, prompt user:
+
+```text
+gh CLI is not authenticated. Please run: gh auth login
+```
+
+⚠️ **Stop here if not authenticated** - user must login first.
+
+## Step 2: Fetch Issue Content and Comments
+
+```bash
+gh issue view ISSUE_NUMBER --json number,title,body,state,labels
+gh issue view ISSUE_NUMBER --comments
+```
+
+**Parse**: Issue number, title, description, state (open/closed), labels, and all comments.
+
+Comments often contain clarifications, reproduction steps, or design decisions that are critical for understanding the full context of the issue.
+
+**If issue is closed**: Ask user if they still want to work on it.
+
+## Step 3: Assign Issue to Me
+
+Before assigning, check if someone is already working on the issue:
+
+```bash
+gh issue view ISSUE_NUMBER --json assignees --jq '.assignees[].login'
+```
+
+**If assigned to current user**: Continue — already claimed.
+
+**If assigned to someone else**: Ask the user whether to proceed or pick a different issue.
+
+**If unassigned**: Assign to yourself (best-effort — skip gracefully if permissions are insufficient):
+
+```bash
+gh issue edit ISSUE_NUMBER --add-assignee @me
+```
+
+If the assignment fails due to permissions (common on forks or some org repos), continue with the workflow — do not block.
+
+## Step 4: Create Issue Branch
+
+**Branch naming**: `issue-{number}-{short-description}`
+
+```bash
+git checkout main && git pull upstream main
+ISSUE_NUM=123
+BRANCH_NAME="issue-${ISSUE_NUM}-fix-tensor-validation"
+git checkout -b "$BRANCH_NAME"
+```
+
+## Step 5: Enter Plan Mode
+
+Use `EnterPlanMode` to design the fix.
+
+**Plan should cover**:
+
+- Root cause analysis (for bugs)
+- Files that need changes
+- Implementation strategy
+- Testing approach
+- Documentation updates
+- Cross-layer changes (C++, Python, type stubs)
+
+## Step 6: Implement the Fix
+
+After plan approval, follow PyPTO conventions:
+
+1. Make code changes following plan
+2. Follow `.claude/rules/` conventions
+3. Update documentation if needed
+4. Add/update tests
+5. Maintain cross-layer sync (C++, Python, type stubs)
+
+## Step 7: Run Tests
+
+```text
+/testing
+```
+
+Fix any failures before committing.
+
+## Step 8: Commit Changes
+
+```text
+/git-commit
+```
+
+**Commit message format**:
+
+```text
+fix(scope): Brief description
+
+Fixes #ISSUE_NUMBER
+
+Detailed explanation of the fix.
+```
+
+## Step 9: Create PR (Optional)
+
+```text
+/github-pr
+```
+
+**PR must reference issue**: "Fixes #ISSUE_NUMBER"
+
+## Common Issue Types
+
+| Type | Approach |
+| ---- | -------- |
+| Bug fix | Reproduce, root cause, fix, add regression test |
+| Feature request | Plan API design, implement, add tests and docs |
+| Refactoring | Plan changes, ensure tests pass, maintain API |
+| Documentation | Fix/improve docs, verify examples work |
+
+## Checklist
+
+- [ ] gh CLI authenticated
+- [ ] Issue content fetched and understood
+- [ ] Issue assignment attempted (best-effort)
+- [ ] Issue branch created from latest main
+- [ ] Plan created and approved
+- [ ] Fix implemented following PyPTO rules
+- [ ] Tests added/updated and passing
+- [ ] Changes committed with issue reference
+- [ ] Documentation updated if needed
+
+## Remember
+
+**Reference the issue number** in commit messages and PR description using "Fixes #ISSUE_NUMBER" for auto-linking.

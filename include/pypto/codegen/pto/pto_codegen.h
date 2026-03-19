@@ -1,0 +1,331 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#ifndef PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
+#define PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "pypto/backend/common/backend.h"
+#include "pypto/codegen/codegen_base.h"
+#include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+
+namespace codegen {
+
+/**
+ * @brief PTO MLIR code generator
+ *
+ * Generates PTO-ISA MLIR format code from PyPTO IR Program.
+ * Traverses the IR using the visitor pattern (aligned with CCECodegen).
+ * Automatically generates make_tensor_view, partition_view, and alloc_tile instructions.
+ */
+class PTOCodegen : public CodegenBase {
+ public:
+  /** @brief Default constructor (backend is always PTO) */
+  PTOCodegen();
+
+  /**
+   * @brief Construct PTO codegen with backend pointer (for internal use)
+   */
+  explicit PTOCodegen(const backend::Backend* backend);
+
+  ~PTOCodegen() override = default;
+
+  /**
+   * @brief Generate PTO-ISA MLIR format code from IR Program
+   *
+   * @param program Input PyPTO IR Program
+   * @return MLIR code as string
+   */
+  std::string Generate(const ir::ProgramPtr& program);
+
+  // CodegenBase interface (unified API for operator codegen callbacks)
+  [[nodiscard]] std::string GetCurrentResultTarget() const override;
+  void Emit(const std::string& line) override;
+  std::string GetExprAsCode(const ir::ExprPtr& expr) override;
+  [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
+  int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
+  std::string GetVarName(const ir::VarPtr& var) override;
+
+  // PTO-specific helper methods for operator codegen functions
+
+  /**
+   * @brief Create a new temporary SSA variable
+   *
+   * @return New SSA variable name (e.g., "%1", "%2")
+   */
+  std::string NewTemp();
+
+  /**
+   * @brief Create a named SSA variable using an IR variable name
+   *
+   * If the name is non-empty and not already used, returns "%<name>".
+   * Otherwise falls back to NewTemp() for a numeric name.
+   *
+   * @param name IR variable name (e.g., "sq_sum_0_tile")
+   * @return Named SSA variable (e.g., "%sq_sum_0_tile") or numeric fallback
+   */
+  std::string NewNamedTemp(const std::string& name);
+
+  /**
+   * @brief Get or create tensor view for a variable
+   *
+   * @param tensor Tensor variable
+   * @return Tensor view name
+   */
+  std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
+
+  /**
+   * @brief Get or emit index constant
+   *
+   * @param val Constant value
+   * @return Index constant string
+   */
+  std::string GetIndexConstant(int64_t val);
+
+  /**
+   * @brief Register a variable name to an MLIR SSA name
+   *
+   * @param var_name IR variable name (e.g., "M")
+   * @param mlir_name MLIR SSA name (e.g., "%arg3")
+   */
+  void RegisterVarToMlir(const std::string& var_name, const std::string& mlir_name);
+
+  /**
+   * @brief Register a tensor variable to its tensor view SSA name
+   *
+   * Used when block.store assigns a tensor result that inherits the input tensor's view.
+   *
+   * @param var_name IR variable name
+   * @param tensor_view_name MLIR tensor view SSA name
+   */
+  void RegisterTensorView(const std::string& var_name, const std::string& tensor_view_name);
+
+  /**
+   * @brief Get or emit float constant (emits to constants section, returns SSA name)
+   *
+   * @param value Constant value
+   * @param mlir_type MLIR type string (e.g., "f32", "i32")
+   * @return SSA variable name for the constant
+   */
+  std::string GetOrEmitFloatConstant(double value, const std::string& mlir_type = "f32");
+
+  /**
+   * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
+   */
+  std::string GetTensorViewTypeString(const ir::TensorType* tensor_type) const;
+
+  /**
+   * @brief Get tile_buf type string for a MemRef (e.g., "!pto.tile_buf<loc=vec, dtype=f32, ...>")
+   */
+  std::string GetTileBufTypeString(const ir::MemRef* memref) const;
+
+  /**
+   * @brief Get type annotation for an expression (for ins/outs clauses)
+   */
+  std::string GetExprTypeAnnotation(const ir::ExprPtr& expr);
+
+  /**
+   * @brief Get tile_buf type string for the current assignment result target
+   *
+   * Uses the memref-based lookup (same as alloc_tile) to ensure the emitted
+   * type is consistent with the SSA value's definition.
+   */
+  std::string GetCurrentResultTileBufTypeString() const;
+
+  /**
+   * @brief Get tile_buf type string from the current result's own TileType
+   *
+   * Unlike GetCurrentResultTileBufTypeString(), this bypasses the memref lookup
+   * and uses current_result_tile_type_ directly. Needed for operations like
+   * reshape where the output shape differs from the memref's alloc_tile shape.
+   */
+  std::string GetCurrentResultTileBufTypeStringFromTileType() const;
+
+  /**
+   * @brief Get tile_buf type string directly from a TileType
+   *
+   * Unlike GetTileBufTypeString(memref), this uses the shape/layout from the
+   * provided TileType directly, bypassing the memref_to_tile_type_ lookup.
+   * Needed when multiple variables with different shapes share the same MemRef
+   * (e.g., reshape input/output).
+   */
+  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type) const;
+
+  /**
+   * @brief Allocate a new tile buffer for codegen (emitted at function scope)
+   *
+   * Used when an operation needs a distinct output buffer (e.g., reshape where
+   * input and output would otherwise share the same buffer).
+   *
+   * @param tile_buf_type_string The tile_buf type string for the alloc_tile instruction
+   * @return New SSA variable name for the allocated buffer
+   */
+  std::string AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint = "");
+
+  /**
+   * @brief Override the current result buffer name
+   *
+   * Allows codegen lambdas to redirect the result to a newly allocated buffer.
+   * VisitStmt_ detects the change and updates variable-to-MLIR mappings accordingly.
+   *
+   * @param buf New result buffer SSA name
+   */
+  void SetCurrentResultBuf(const std::string& buf);
+  void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
+
+ protected:
+  // Override visitor methods for code generation - Statements
+  void VisitStmt_(const ir::AssignStmtPtr& op) override;
+  void VisitStmt_(const ir::ForStmtPtr& op) override;
+  void VisitStmt_(const ir::IfStmtPtr& op) override;
+  void VisitStmt_(const ir::WhileStmtPtr& op) override;
+  void VisitStmt_(const ir::YieldStmtPtr& op) override;
+  void VisitStmt_(const ir::EvalStmtPtr& op) override;
+
+  // Override visitor methods for code generation - Expressions
+  void VisitExpr_(const ir::CallPtr& op) override;
+  void VisitExpr_(const ir::VarPtr& op) override;
+  void VisitExpr_(const ir::IterArgPtr& op) override;
+  void VisitExpr_(const ir::ConstIntPtr& op) override;
+  void VisitExpr_(const ir::ConstFloatPtr& op) override;
+  void VisitExpr_(const ir::ConstBoolPtr& op) override;
+  void VisitExpr_(const ir::AddPtr& op) override;
+  void VisitExpr_(const ir::SubPtr& op) override;
+  void VisitExpr_(const ir::MulPtr& op) override;
+  void VisitExpr_(const ir::FloorDivPtr& op) override;
+  void VisitExpr_(const ir::FloorModPtr& op) override;
+  void VisitExpr_(const ir::EqPtr& op) override;
+  void VisitExpr_(const ir::NePtr& op) override;
+  void VisitExpr_(const ir::LtPtr& op) override;
+  void VisitExpr_(const ir::LePtr& op) override;
+  void VisitExpr_(const ir::GtPtr& op) override;
+  void VisitExpr_(const ir::GePtr& op) override;
+  void VisitExpr_(const ir::CastPtr& op) override;
+
+ private:
+  /**
+   * @brief Generate PTO-ISA MLIR for a single function
+   */
+  void GenerateFunction(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Build variable name to MemRef mapping from function body
+   */
+  void BuildVarToMemRefMapping(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Emit make_tensor_view for all tensor parameters
+   */
+  void EmitMakeTensorViews(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Emit alloc_tile for all MemRefs
+   */
+  void EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs);
+
+  /**
+   * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
+   */
+  void EmitExtraAllocTiles();
+
+  /**
+   * @brief Get indent string for current level
+   */
+  std::string GetIndent() const;
+
+  /**
+   * @brief Get or emit index constant (internal; writes to constants section)
+   */
+  std::string GetOrEmitIndexConstant(int64_t value);
+
+  /**
+   * @brief Get tile_buf name for a MemRef
+   */
+  std::string GetTileBufForMemRef(const ir::MemRefPtr& memref);
+
+  // Output streams
+  std::ostringstream stream_;
+  std::ostringstream constants_section_;
+  std::ostringstream body_section_;
+  int indent_level_ = 0;
+
+  // Variable mappings
+  std::map<std::string, std::string> var_to_mlir_;
+  std::map<std::string, std::string> tensor_to_view_;
+  std::map<const ir::MemRef*, std::string> memref_to_mlir_;
+  std::map<std::string, const ir::MemRef*> var_to_memref_;
+  std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
+  std::map<int64_t, std::string> emitted_constants_;
+  std::set<double> emitted_float_constants_;
+  std::map<double, std::string> float_const_names_;
+
+  /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
+  std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
+  /// Maps extra tile buffer SSA names to their type strings (for correct type annotations)
+  std::map<std::string, std::string> extra_tile_buf_types_;
+
+  int temp_counter_ = 0;
+  std::set<std::string> used_ssa_names_;
+
+  /// Maps each unique MemRef to the first IR variable name assigned to it (program order)
+  std::map<const ir::MemRef*, std::string> memref_to_var_name_;
+
+  // Current function context
+  ir::FunctionPtr current_function_;
+  std::string current_result_buf_;
+  std::shared_ptr<const ir::TileType> current_result_tile_type_;
+
+  const backend::Backend* backend_;  ///< Backend instance for querying op info
+
+  // Control flow expression result communication
+  std::string current_expr_value_;         ///< SSA name from expression visitors
+  std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values
+
+  /// Emit an arith binary op, return SSA result name
+  std::string EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs, const std::string& rhs,
+                                const std::string& result_type);
+
+  /// Emit an arith.cmpi comparison, return SSA result name (i1)
+  std::string EmitArithCmpi(const std::string& predicate, const std::string& lhs, const std::string& rhs,
+                            const std::string& operand_type);
+
+  /// Helper for binary expression visitors
+  void VisitBinaryArithExpr(const ir::BinaryExprPtr& op, const std::string& int_op,
+                            const std::string& float_op);
+
+  /// Helper for comparison expression visitors
+  void VisitCmpExpr(const ir::BinaryExprPtr& op, const std::string& predicate);
+
+  /// Get MLIR type string for a scalar iter_arg/return_var (e.g., "index", "i1", "f32")
+  std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
+};
+
+}  // namespace codegen
+}  // namespace pypto
+
+#endif  // PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_

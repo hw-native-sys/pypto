@@ -1,0 +1,372 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""
+Multi-kernel fuzz test generator CLI.
+
+Generates test cases with configurable parameters via command-line arguments.
+
+Usage:
+    python generate_test.py --num-cases 5
+"""
+
+import argparse
+import random
+import sys
+from pathlib import Path
+from typing import Any
+
+# Add tests/st to path for importing harness
+_SCRIPT_DIR = Path(__file__).parent
+_TESTS_ST_DIR = _SCRIPT_DIR.parent
+if str(_TESTS_ST_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ST_DIR))
+
+# noqa: E402 - Import after path modification
+from fuzz.src.core.config import ControlFlowConfig  # noqa: E402
+from fuzz.src.multi_kernel_test_generator import MultiKernelTestGenerator  # noqa: E402
+
+
+def create_argument_parser() -> argparse.ArgumentParser:
+    """Create and configure argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Generate multi-kernel fuzzing test cases",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example:
+  # Generate test cases with default configuration
+  python generate_test.py
+
+  # Generate 5 test cases
+  python generate_test.py --num-cases 5
+
+  # Specify configuration index (starting from 0)
+  python generate_test.py --config-index 0
+
+  # Generate 3 test cases from configuration 0
+  python generate_test.py --config-index 0 --num-cases 3
+
+  # Specify output file
+  python generate_test.py --output custom_test.py
+
+  # Set error tolerance
+  python generate_test.py --atol 1e-3 --rtol 1e-3
+
+  # Set advanced operators probability (0.0-1.0)
+  python generate_test.py --advanced-ops-prob 0.7
+
+  # Combined usage
+  python generate_test.py --config-index 1 --atol 1e-4 --rtol 1e-4 \\
+      --advanced-ops-prob 0.5 --output my_test.py
+        """,
+    )
+
+    parser.add_argument(
+        "--config-index",
+        type=int,
+        default=0,
+        help="Specify the configuration index to use (starting from 0)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output file path (default: generated/test_fuzz_multi_kernel.py)",
+    )
+    parser.add_argument("--atol", type=float, default=5e-5, help="Absolute error tolerance")
+    parser.add_argument("--rtol", type=float, default=5e-5, help="Relative error tolerance")
+    parser.add_argument(
+        "--advanced-ops-prob",
+        type=float,
+        default=0.5,
+        help="Probability of selecting advanced operators (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--num-cases",
+        type=int,
+        default=None,
+        help="Number of test cases to generate",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Base seed for test generation (default: random)",
+    )
+
+    return parser
+
+
+def get_default_configs() -> list[dict[str, Any]]:
+    """Get default test configurations."""
+    return [
+        {
+            # Basic info
+            "name": "fuzz_sequential",
+            "description": "1-kernel sequential with composable control flow (depth=2)",
+            "num_instances": 10,
+            "seed": None,
+            # Kernel config
+            "num_kernels": 2,
+            "mode": "sequential",
+            "num_ops": 5,
+            "enable_advanced_ops": True,
+            # Shape config
+            "shape": (64, 64),
+            "input_shapes_list": [[(64, 64), (64, 64)]],
+            "tensor_init_type": "range",
+            # Control flow config
+            "enable_for_loop": False,
+            "max_for_loop_iterations": 2,
+            "for_loop_probability": 1.0,
+            "enable_if_else": False,
+            "if_else_probability": 1.0,
+            "max_depth": 1,
+            "depth_decay": 0.5,
+        },
+    ]
+
+
+def select_configs(all_configs: list[dict[str, Any]], config_index: int | None) -> list[dict[str, Any]]:
+    """Select configurations based on config_index."""
+    if config_index is None:
+        return all_configs
+    if config_index < 0 or config_index >= len(all_configs):
+        print(f"Error: configuration index {config_index} out of range (0-{len(all_configs) - 1})")
+        sys.exit(1)
+    return [all_configs[config_index]]
+
+
+def apply_num_cases_override(configs: list[dict[str, Any]], num_cases: int | None) -> None:
+    """Override num_instances if num_cases is specified."""
+    if num_cases is None:
+        return
+    if num_cases <= 0:
+        print(f"Error: --num-cases must be positive, got {num_cases}")
+        sys.exit(1)
+    for config in configs:
+        config["num_instances"] = num_cases
+
+
+def print_summary(configs: list[dict[str, Any]], output_path: Path, args: argparse.Namespace) -> None:
+    """Print generation summary."""
+    total_test_cases = sum(config.get("num_instances", 1) for config in configs)
+
+    print("Multi-kernel fuzzing test generator")
+    print("=" * 60)
+    print(f"Number of configurations: {len(configs)}")
+    print(f"Total test cases: {total_test_cases}")
+    print(f"Output file: {output_path}")
+    print(f"Absolute error tolerance (atol): {args.atol}")
+    print(f"Relative error tolerance (rtol): {args.rtol}")
+    print(f"Advanced operators probability: {args.advanced_ops_prob}")
+    print("=" * 60)
+    print()
+
+
+def print_config_details(configs: list[dict[str, Any]]) -> None:
+    """Print detailed configuration information."""
+    print("Will generate the following test cases:")
+    print()
+    test_case_num = 1
+    for config_idx, config in enumerate(configs):
+        num_instances = config.get("num_instances", 1)
+        print(f"Configuration {config_idx}: {config['name']}")
+        print(f"   {config['description']}")
+        print(f"   Number of instances: {num_instances}")
+        print(f"   Random seed: {config.get('seed', 42)}")
+        print(f"   Enable advanced operators: {'Yes' if config.get('enable_advanced_ops', False) else 'No'}")
+        print(f"   Tensor initialization: {config.get('tensor_init_type', 'constant')}")
+        if num_instances > 1:
+            print(f"   Will generate test cases: {test_case_num} - {test_case_num + num_instances - 1}")
+        else:
+            print(f"   Will generate test case: {test_case_num}")
+        test_case_num += num_instances
+        print()
+
+
+def expand_configs(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand configurations to create individual test configs."""
+    expanded = []
+    for config in configs:
+        num_instances = config.get("num_instances", 1)
+        base_seed = config.get("seed")
+
+        for instance_idx in range(num_instances):
+            test_config = config.copy()
+            if num_instances > 1:
+                test_config["name"] = f"{config['name']}_{instance_idx}"
+                test_config["seed"] = (base_seed + instance_idx) if base_seed is not None else instance_idx
+            expanded.append(test_config)
+
+    return expanded
+
+
+def generate_test_cases(expanded_configs: list[dict[str, Any]], args: argparse.Namespace) -> list[str]:
+    """Generate test case code for all configurations.
+
+    Automatically retries with a different seed if golden validation detects NaN/Inf.
+    """
+    max_retries = 5
+    all_test_cases = []
+    for test_config in expanded_configs:
+        control_flow = ControlFlowConfig(
+            enable_for_loop=test_config.get("enable_for_loop", False),
+            max_for_loop_iterations=test_config.get("max_for_loop_iterations", 4),
+            enable_if_else=test_config.get("enable_if_else", False),
+            for_loop_probability=test_config.get("for_loop_probability", 1.0),
+            if_else_probability=test_config.get("if_else_probability", 1.0),
+            max_depth=test_config.get("max_depth", 0),
+            depth_decay=test_config.get("depth_decay", 0.5),
+        )
+
+        seed = test_config.get("seed", 42)
+        test_code = None
+        for attempt in range(max_retries):
+            current_seed = seed + attempt * 1000
+            generator = MultiKernelTestGenerator(
+                seed=current_seed,
+                enable_advanced_ops=test_config.get("enable_advanced_ops", False),
+                advanced_ops_probability=args.advanced_ops_prob,
+                tensor_init_type=test_config.get("tensor_init_type", "constant"),
+                control_flow=control_flow,
+            )
+            try:
+                test_code = generator.generate_test_case(
+                    test_name=test_config["name"],
+                    num_kernels=test_config.get("num_kernels", 3),
+                    orchestration_mode=test_config.get("mode", "sequential"),
+                    shape=test_config.get("shape", (128, 128)),
+                    num_ops=test_config.get("num_ops", test_config.get("num_ops_range", (3, 7))),
+                    input_shapes_list=test_config.get("input_shapes_list"),
+                    tensor_init_type=test_config.get("tensor_init_type"),
+                    atol=args.atol,
+                    rtol=args.rtol,
+                )
+                break
+            except ValueError as e:
+                print(f"  Skipping seed {current_seed} for {test_config['name']}: {e}")
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"Failed to generate valid test case for {test_config['name']} "
+                        f"after {max_retries} attempts"
+                    ) from e
+
+        all_test_cases.append(test_code)
+
+    return all_test_cases
+
+
+def generate_test_suite(expanded_configs: list[dict[str, Any]]) -> str:
+    """Generate test suite class code."""
+    test_suite = '''
+class TestMultiKernelFuzzing:
+    """Multi-kernel fuzzing test suite"""
+
+'''
+    for test_config in expanded_configs:
+        test_name = test_config["name"]
+        class_name = f"Test{test_name.title().replace('_', '')}"
+        test_suite += f'''    def test_{test_name}(self, test_runner):
+        """Test {test_name}"""
+        test_case = {class_name}()
+        result = test_runner.run(test_case)
+        if not result.passed:
+            import inspect
+            try:
+                program_source = inspect.getsource(test_case.get_program())
+            except (TypeError, OSError):
+                program_source = "<source unavailable>"
+            print(f"\\n{{'=' * 60}}")
+            print(f"FAILED PROGRAM ({{test_case.get_name()}}):")
+            print(f"{{'=' * 60}}")
+            print(program_source)
+            print(f"{{'=' * 60}}\\n")
+        assert result.passed, f"Test failed: {{result.error}}"
+
+'''
+    return test_suite
+
+
+def write_test_file(output_path: Path, test_cases: list[str], test_suite: str) -> None:
+    """Write generated test cases to file."""
+    file_header = '''"""
+Auto-generated multi-kernel fuzzing test cases
+
+This file is automatically generated by MultiKernelTestGenerator.
+Contains multiple test cases, each with multiple InCore kernels and an Orchestration function.
+"""
+
+import sys
+from pathlib import Path
+from typing import Any, List
+
+import torch
+import pytest
+
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+
+
+'''
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(file_header)
+        f.write("\n\n".join(test_cases))
+        f.write("\n\n")
+        f.write(test_suite)
+
+
+def main() -> None:
+    """Main function."""
+    parser = create_argument_parser()
+    args = parser.parse_args()
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = _SCRIPT_DIR / "generated" / "test_fuzz_multi_kernel.py"
+
+    # Resolve seed: use provided value or generate a random one.
+    # Always print so CI logs can reproduce a failure with --seed <N>.
+    seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
+    print("=" * 60)
+    print(f"Fuzz seed: {seed}")
+    print("=" * 60)
+    print()
+
+    all_configs = get_default_configs()
+    selected_configs = select_configs(all_configs, args.config_index)
+    apply_num_cases_override(selected_configs, args.num_cases)
+
+    # Propagate the resolved seed into every config so expand_configs()
+    # can derive per-instance seeds as seed+i without hitting None.
+    for config in selected_configs:
+        config["seed"] = seed
+
+    print_summary(selected_configs, output_path, args)
+    print_config_details(selected_configs)
+
+    print("Generating test file...")
+    expanded_configs = expand_configs(selected_configs)
+    test_cases = generate_test_cases(expanded_configs, args)
+    test_suite = generate_test_suite(expanded_configs)
+    write_test_file(output_path, test_cases, test_suite)
+
+    print()
+    print(f"✓ Successfully generated {len(expanded_configs)} test case(s)")
+    print(f"✓ Output file: {output_path}")
+    print()
+    print("Run tests:")
+    print(f"  pytest {output_path}")
+    print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,196 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+cmake_minimum_required(VERSION 3.15)
+
+# Support both scikit-build and native CMake builds
+if(DEFINED SKBUILD_PROJECT_NAME)
+    # Building with scikit-build-core
+    project(${SKBUILD_PROJECT_NAME} VERSION ${SKBUILD_PROJECT_VERSION})
+    set(SKBUILD_MODE ON)
+else()
+    # Building with native CMake
+    file(STRINGS "${CMAKE_SOURCE_DIR}/pyproject.toml" _version_line LIMIT_COUNT 1 REGEX "^version ?= ?\"")
+
+    if(_version_line)
+        string(REGEX REPLACE "^version ?= ?\"([^\"]*)\".*" "\\1" _pypto_version "${_version_line}")
+        project(pypto VERSION ${_pypto_version})
+    else()
+        message(FATAL_ERROR "Failed to parse version from pyproject.toml")
+    endif()
+
+    set(SKBUILD_MODE OFF)
+endif()
+
+set(LIBRARY_NAME "${PROJECT_NAME}_core")
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Enable ccache if available
+find_program(CCACHE_PROGRAM ccache)
+
+if(CCACHE_PROGRAM)
+    message(STATUS "Found ccache: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+else()
+    message(STATUS "ccache not found")
+endif()
+
+# Set default build type if not specified
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Debug or Release)" FORCE)
+endif()
+
+# Compiler flags
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -O2")
+
+# Fix debug info paths when building in a temp directory (e.g., pip install)
+# This remaps paths in DWARF debug info so backtraces show clean relative paths
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # Remap source directory to "." so absolute source paths become relative
+    add_compile_options(-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
+endif()
+
+# Find Python and nanobind
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(nanobind CONFIG REQUIRED)
+
+# Include directories
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+# External dependencies
+include(${CMAKE_SOURCE_DIR}/cmake/libbacktrace.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/msgpack.cmake)
+
+# PyPTO core sources
+set(PYPTO_SOURCES
+    # Core
+    src/core/backtrace.cpp
+    src/core/error.cpp
+
+    # IR - Core
+    src/ir/builder.cpp
+    src/ir/core.cpp
+    src/ir/expr.cpp
+    src/ir/function.cpp
+    src/ir/memref.cpp
+    src/ir/op_registry.cpp
+    src/ir/program.cpp
+    src/ir/stmt.cpp
+    src/ir/type.cpp
+
+    # IR - Operators
+    src/ir/op/tile_ops/batch_matmul.cpp
+    src/ir/op/tile_ops/broadcast.cpp
+    src/ir/op/tile_ops/elementwise.cpp
+    src/ir/op/tile_ops/matmul.cpp
+    src/ir/op/tile_ops/memory.cpp
+    src/ir/op/tile_ops/reduction.cpp
+    src/ir/op/tile_ops/transform.cpp
+    src/ir/op/tile_ops/unary.cpp
+    src/ir/op/tile_ops/cross_core.cpp
+    src/ir/op/sync_ops/sync.cpp
+    src/ir/op/sync_ops/cross_core.cpp
+    src/ir/op/tensor_ops/broadcast.cpp
+    src/ir/op/tensor_ops/elementwise.cpp
+    src/ir/op/tensor_ops/matmul.cpp
+    src/ir/op/tensor_ops/memory.cpp
+    src/ir/op/tensor_ops/reduction.cpp
+    src/ir/op/tensor_ops/transform.cpp
+    src/ir/op/tensor_ops/unary.cpp
+    src/ir/op/testing.cpp
+    src/ir/op/type_inference.cpp
+
+    # IR - Transforms
+    src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/basic_memory_reuse_pass.cpp
+    src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
+    src/ir/transforms/convert_to_ssa_pass.cpp
+    src/ir/transforms/dependency_analyzer.cpp
+    src/ir/transforms/flatten_call_expr_pass.cpp
+    src/ir/transforms/infer_tile_memory_space_pass.cpp
+    src/ir/transforms/init_memref.cpp
+    src/ir/transforms/ir_property.cpp
+    src/ir/transforms/insert_sync_pass.cpp
+    src/ir/transforms/mutator.cpp
+    src/ir/transforms/normalize_stmt_structure_pass.cpp
+    src/ir/transforms/op_conversion_registry.cpp
+    src/ir/transforms/outline_incore_scopes_pass.cpp
+    src/ir/transforms/outline_cluster_scopes_pass.cpp
+    src/ir/transforms/expand_mixed_kernel_pass.cpp
+    src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp
+    src/ir/transforms/pass_context.cpp
+    src/ir/transforms/passes.cpp
+    src/ir/transforms/resolve_transpose_layout_pass.cpp
+    src/ir/transforms/python_printer.cpp
+    src/ir/transforms/split_chunked_loops_pass.cpp
+    src/ir/transforms/interchange_chunk_loops_pass.cpp
+    src/ir/transforms/unroll_loops_pass.cpp
+    src/ir/transforms/structural_equal.cpp
+    src/ir/transforms/structural_hash.cpp
+    src/ir/transforms/utils/deep_clone_utils.cpp
+    src/ir/transforms/utils/substitute_vars.cpp
+    src/ir/transforms/utils/normalize_stmt_structure.cpp
+    src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/visitor.cpp
+
+    # IR - Reporter
+    src/ir/reporter/report.cpp
+    src/ir/reporter/memory_report_generator.cpp
+    src/ir/reporter/report_generator_registry.cpp
+
+    # IR - Verifier
+    src/ir/verifier/verifier.cpp
+    src/ir/verifier/property_verifier_registry.cpp
+    src/ir/verifier/verify_ssa_pass.cpp
+    src/ir/verifier/verify_no_nested_call_pass.cpp
+    src/ir/verifier/verify_break_continue_pass.cpp
+    src/ir/verifier/type_check_pass.cpp
+
+    # IR - Serialization
+    src/ir/serialization/deserializer.cpp
+    src/ir/serialization/serializer.cpp
+    src/ir/serialization/type_deserializers.cpp
+    src/ir/serialization/type_registry.cpp
+
+    # Codegen
+    src/codegen/cce/cce_codegen.cpp
+    src/codegen/cce/code_context.cpp
+    src/codegen/cce/code_emitter.cpp
+    src/codegen/cce/type_converter.cpp
+    src/codegen/codegen_base.cpp
+    src/codegen/orchestration/orchestration_codegen.cpp
+    src/codegen/orchestration_op_registry.cpp
+    src/codegen/pto/pto_codegen.cpp
+    src/codegen/tensor_op_codegen.cpp
+
+    # Backend
+    src/backend/910B_CCE/backend_910b_cce.cpp
+    src/backend/910B_CCE/backend_910b_cce_ops.cpp
+    src/backend/910B_PTO/backend_910b_pto.cpp
+    src/backend/910B_PTO/backend_910b_pto_ops.cpp
+    src/backend/950/backend_950.cpp
+    src/backend/950/backend_950_ops.cpp
+    src/backend/common/backend.cpp
+    src/backend/common/backend_config.cpp
+    src/backend/common/backend_registry.cpp
+    src/backend/common/pto_ops_common.cpp
+    src/backend/common/soc.cpp
+)
+
+# Include Python bindings
+add_subdirectory(python/bindings)

@@ -1,0 +1,1159 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
+
+#include <any>
+#include <memory>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "../module.h"
+#include "pypto/core/any_cast.h"
+#include "pypto/core/common.h"
+#include "pypto/core/error.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/reflection/field_visitor.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/serialization/deserializer.h"
+#include "pypto/ir/serialization/serializer.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/op_conversion_registry.h"
+#include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
+#include "pypto/ir/type.h"
+
+namespace nb = nanobind;
+
+namespace pypto {
+namespace python {
+
+using namespace pypto::ir;  // NOLINT(build/namespaces)
+using pypto::DataType;
+
+template <typename T>
+bool TryConvertAnyToPy(const std::any& value, nb::object& out) {
+  if (value.type() != typeid(T)) {
+    return false;
+  }
+  out = nb::cast(AnyCastRef<T>(value, "converting to Python"));
+  return true;
+}
+
+template <typename... Ts>
+nb::object AnyToPyObject(const std::any& value, const std::string& key) {
+  nb::object out;
+  if ((TryConvertAnyToPy<Ts>(value, out) || ...)) {
+    return out;
+  }
+  throw pypto::TypeError("Attribute '" + key + "' has unsupported type");
+}
+
+// Helper to bind a single field using reflection
+template <typename ClassType, typename PyClassType, typename FieldDesc>
+void BindField(PyClassType& nb_class, const FieldDesc& desc) {
+  nb_class.def_ro(desc.name, desc.field_ptr);
+}
+
+// Helper to bind all fields from a tuple of field descriptors
+template <typename ClassType, typename PyClassType, typename DescTuple, std::size_t... Is>
+void BindFieldsImpl(PyClassType& nb_class, const DescTuple& descriptors, std::index_sequence<Is...>) {
+  (BindField<ClassType>(nb_class, std::get<Is>(descriptors)), ...);
+}
+
+// Main function to bind all fields using reflection
+template <typename ClassType, typename PyClassType>
+void BindFields(PyClassType& nb_class) {
+  constexpr auto descriptors = ClassType::GetFieldDescriptors();
+  constexpr auto num_fields = std::tuple_size_v<decltype(descriptors)>;
+  BindFieldsImpl<ClassType>(nb_class, descriptors, std::make_index_sequence<num_fields>{});
+}
+
+// Helper function to convert nb::dict to vector<pair<string, any>>
+std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& kwargs_dict) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  for (auto item : kwargs_dict) {
+    std::string key = nb::cast<std::string>(item.first);
+
+    // Try to cast to common types
+    // NOTE: Check DataType/MemorySpace/PipeType/CoreType/TilePad BEFORE int, and bool BEFORE int
+    if (nb::isinstance<DataType>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<DataType>(item.second));
+    } else if (nb::isinstance<MemorySpace>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<MemorySpace>(item.second));
+    } else if (nb::isinstance<TensorLayout>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<TensorLayout>(item.second));
+    } else if (nb::isinstance<PipeType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<PipeType>(item.second)));
+    } else if (nb::isinstance<CoreType>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
+    } else if (nb::isinstance<TilePad>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<TilePad>(item.second));
+    } else if (nb::isinstance<nb::bool_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<bool>(item.second));
+    } else if (nb::isinstance<nb::int_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<int>(item.second));
+    } else if (nb::isinstance<nb::str>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<std::string>(item.second));
+    } else if (nb::isinstance<nb::float_>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else {
+      throw pypto::TypeError("Unsupported kwarg type for key: " + key);
+    }
+  }
+  return kwargs;
+}
+
+void BindIR(nb::module_& m) {
+  nb::module_ ir = m.def_submodule("ir", "PyPTO IR (Intermediate Representation) module");
+
+  // Span - value type, copy semantics
+  nb::class_<Span>(ir, "Span", "Source location information tracking file, line, and column positions")
+      .def(nb::init<std::string, int, int, int, int>(), nb::arg("filename"), nb::arg("begin_line"),
+           nb::arg("begin_column"), nb::arg("end_line") = -1, nb::arg("end_column") = -1,
+           "Create a source span")
+      .def("to_string", &Span::to_string, "Convert span to string representation")
+      .def("is_valid", &Span::is_valid, "Check if the span has valid coordinates")
+      .def_static("unknown", &Span::unknown,
+                  "Create an unknown/invalid span for cases where source location is unavailable")
+      .def("__repr__", &Span::to_string)
+      .def("__str__", &Span::to_string)
+      .def_ro("filename", &Span::filename_, "Source filename")
+      .def_ro("begin_line", &Span::begin_line_, "Beginning line (1-indexed)")
+      .def_ro("begin_column", &Span::begin_column_, "Beginning column (1-indexed)")
+      .def_ro("end_line", &Span::end_line_, "Ending line (1-indexed)")
+      .def_ro("end_column", &Span::end_column_, "Ending column (1-indexed)");
+
+  // Op - operation/function
+  nb::class_<Op>(ir, "Op",
+                 "Represents callable operations in the IR. Stores the schema of allowed kwargs (key -> type "
+                 "mapping). Actual kwarg values are stored per-Call instance in Call.kwargs")
+      .def(nb::init<std::string>(), nb::arg("name"), "Create an operation with the given name")
+      .def_ro("name", &Op::name_, "Operation name")
+      .def("has_attr", &Op::HasAttr, nb::arg("key"), "Check if a kwarg is registered in the schema")
+      .def("get_attr_keys", &Op::GetAttrKeys, "Get all registered kwarg keys from the schema");
+
+  // GlobalVar - global function reference
+  nb::class_<GlobalVar, Op>(ir, "GlobalVar",
+                            "Global variable reference for functions in a program. "
+                            "Can be used in Call expressions to invoke functions within the same program.")
+      .def(nb::init<std::string>(), nb::arg("name"),
+           "Create a global variable reference with the given name");
+
+  // Type - abstract base, const shared_ptr
+  auto type_class = nb::class_<Type>(ir, "Type", "Base class for type representations");
+  BindFields<Type>(type_class);
+  type_class.def(
+      "__str__", [](const TypePtr& self) { return PythonPrint(self, "pl"); },
+      "Python-style string representation");
+  type_class.def(
+      "__eq__", [](const TypePtr& self, const TypePtr& other) { return structural_equal(self, other); },
+      "Equality comparison");
+
+  // UnknownType - const shared_ptr
+  auto unknown_type_class =
+      nb::class_<UnknownType, Type>(ir, "UnknownType", "Unknown or unspecified type representation");
+  unknown_type_class.def(nb::init<>(), "Create an unknown type");
+  unknown_type_class.def_static(
+      "get", []() { return GetUnknownType(); }, "Get the singleton UnknownType instance");
+  BindFields<UnknownType>(unknown_type_class);
+
+  // ScalarType - const shared_ptr
+  auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
+  scalar_type_class.def(nb::init<DataType>(), nb::arg("dtype"), "Create a scalar type");
+  BindFields<ScalarType>(scalar_type_class);
+
+  // IRNode - abstract base, const shared_ptr
+  auto irnode_class = nb::class_<IRNode>(ir, "IRNode", "Base class for all IR nodes");
+  BindFields<IRNode>(irnode_class);
+  irnode_class
+      .def(
+          "same_as", [](const IRNodePtr& self, const IRNodePtr& other) { return self == other; },
+          nb::arg("other"), "Check if this IR node is the same as another IR node.")
+      .def(
+          "__str__",
+          [](const IRNodePtr& self) {
+            // Use unified PythonPrint API with default "pl" prefix
+            return PythonPrint(self, "pl");
+          },
+          "Python-style string representation")
+      .def(
+          "as_python",
+          [](const IRNodePtr& self, const std::string& prefix, bool concise) {
+            return PythonPrint(self, prefix, concise);
+          },
+          nb::arg("prefix") = "pl", nb::arg("concise") = false,
+          "Convert to Python-style string representation.\n\n"
+          "Args:\n"
+          "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+          "    concise: If true, omit intermediate type annotations (default false)");
+
+  // Expr - abstract base, const shared_ptr
+  auto expr_class = nb::class_<Expr, IRNode>(ir, "Expr", "Base class for all expressions");
+  BindFields<Expr>(expr_class);
+
+  // ShapedType - abstract base for types with shape and optional memref
+  auto shaped_type_class =
+      nb::class_<ShapedType, Type>(ir, "ShapedType", "Base class for shaped types (tensors and tiles)");
+  BindFields<ShapedType>(shaped_type_class);
+  shaped_type_class.def_prop_ro("memory_space", &ShapedType::GetMemorySpace,
+                                "Canonical memory space for this shaped type");
+  shaped_type_class.def(
+      "shares_memref_with",
+      [](const ShapedTypePtr& self, const ShapedTypePtr& other) {
+        if (!self->memref_.has_value() || !other->memref_.has_value()) {
+          return false;
+        }
+        return self->memref_.value().get() == other->memref_.value().get();
+      },
+      nb::arg("other"), "Check if this ShapedType shares the same MemRef object with another ShapedType");
+
+  // TensorLayout enum - must be before TensorView and TensorType
+  nb::enum_<TensorLayout>(ir, "TensorLayout", "Tensor layout enumeration")
+      .value("ND", TensorLayout::ND, "ND layout")
+      .value("DN", TensorLayout::DN, "DN layout")
+      .value("NZ", TensorLayout::NZ, "NZ layout")
+      .export_values();
+
+  // TensorView - struct for tensor view information - must be before TensorType
+  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride, layout and valid shape")
+      .def(nb::init<>(), "Create an empty tensor view")
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&>(),
+           nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
+           "Create a tensor view with stride, layout and optional valid shape")
+      .def_rw("stride", &TensorView::stride, "Stride for each dimension")
+      .def_rw("layout", &TensorView::layout, "Tensor layout type")
+      .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension");
+
+  // TensorType - const shared_ptr
+  auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
+  tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                        "Create a tensor type");
+  tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                        "Create a tensor type");
+  tensor_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a tensor type with optional memory reference and tensor view");
+  tensor_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a tensor type with constant shape, optional memory reference and tensor view");
+  BindFields<TensorType>(tensor_type_class);
+
+  // TileType - const shared_ptr
+  auto tile_type_class =
+      nb::class_<TileType, ShapedType>(ir, "TileType", "Tile type representation (multi-dimensional tensor)");
+  tile_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
+               std::optional<MemorySpace>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
+      nb::arg("memory_space") = nb::none(),
+      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
+  tile_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TileView>,
+               std::optional<MemorySpace>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
+      nb::arg("memory_space") = nb::none(),
+      "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
+  BindFields<TileType>(tile_type_class);
+
+  // TupleType - const shared_ptr
+  auto tuple_type_class =
+      nb::class_<TupleType, Type>(ir, "TupleType", "Tuple type representation (contains multiple types)");
+  tuple_type_class.def(nb::init<const std::vector<TypePtr>&>(), nb::arg("types"),
+                       "Create a tuple type from a list of types");
+  BindFields<TupleType>(tuple_type_class);
+
+  // MemorySpace enum
+  nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
+      .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
+      .value("Vec", MemorySpace::Vec, "Vector/unified buffer (on-chip)")
+      .value("Mat", MemorySpace::Mat, "Matrix/L1 buffer")
+      .value("Left", MemorySpace::Left, "Left matrix operand buffer")
+      .value("Right", MemorySpace::Right, "Right matrix operand buffer")
+      .value("Acc", MemorySpace::Acc, "Accumulator buffer")
+      .value("Bias", MemorySpace::Bias, "Bias buffer")
+      .export_values();
+
+  // Short alias: ir.Mem = ir.MemorySpace
+  ir.attr("Mem") = ir.attr("MemorySpace");
+
+  // PipeType enum
+  nb::enum_<PipeType>(ir, "PipeType", nb::is_arithmetic(), "Pipeline type enumeration")
+      .value("MTE1", PipeType::MTE1, "Memory Transfer Engine 1")
+      .value("MTE2", PipeType::MTE2, "Memory Transfer Engine 2")
+      .value("MTE3", PipeType::MTE3, "Memory Transfer Engine 3")
+      .value("M", PipeType::M, "Matrix Unit")
+      .value("V", PipeType::V, "Vector Unit")
+      .value("S", PipeType::S, "Scalar Unit")
+      .value("FIX", PipeType::FIX, "Fix Pipe")
+      .value("ALL", PipeType::ALL, "All Pipes")
+      .export_values();
+
+  // CoreType enum
+  nb::enum_<CoreType>(ir, "CoreType", nb::is_arithmetic(), "Core type enumeration")
+      .value("VECTOR", CoreType::VECTOR, "Vector Core")
+      .value("CUBE", CoreType::CUBE, "Cube Core")
+      .export_values();
+
+  // TileLayout enum - must be before TileView
+  nb::enum_<TileLayout>(ir, "TileLayout", "Tile layout enumeration")
+      .value("none_box", TileLayout::none_box, "No layout constraint")
+      .value("row_major", TileLayout::row_major, "Row-major layout")
+      .value("col_major", TileLayout::col_major, "Column-major layout")
+      .export_values();
+
+  // TilePad enum - must be before TileView
+  nb::enum_<TilePad>(ir, "TilePad", "Tile pad mode enumeration")
+      .value("null", TilePad::null, "No padding")
+      .value("zero", TilePad::zero, "Zero padding")
+      .value("max", TilePad::max, "Max value padding")
+      .value("min", TilePad::min, "Min value padding")
+      .export_values();
+
+  // TileView - struct for tile view information
+  nb::class_<TileView>(
+      ir, "TileView",
+      "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad")
+      .def(nb::init<>(), "Create an empty tile view")
+      .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
+                    uint64_t, TilePad>(),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
+           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = TilePad::null,
+           "Create a tile view with valid_shape, stride, start_offset, blayout, slayout, fractal, and pad")
+      .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
+      .def_rw("stride", &TileView::stride, "Stride for each dimension")
+      .def_rw("start_offset", &TileView::start_offset, "Starting offset")
+      .def_rw("blayout", &TileView::blayout, "Block layout")
+      .def_rw("slayout", &TileView::slayout, "Scatter layout")
+      .def_rw("fractal", &TileView::fractal, "Fractal size")
+      .def_rw("pad", &TileView::pad, "Pad mode");
+
+  // Dynamic dimension constant
+  ir.attr("DYNAMIC_DIM") = kDynamicDim;
+
+  // OpRegistry
+  ir.def(
+      "create_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const Span& span) {
+        return OpRegistry::GetInstance().Create(op_name, args, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("span"),
+      "Create a Call expression (backward compatibility)");
+
+  ir.def(
+      "create_op_call",
+      [](const std::string& op_name, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        // Convert Python dict to C++ vector<pair<string, any>> to preserve order
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+      },
+      nb::arg("op_name"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a Call expression with args and kwargs");
+
+  ir.def(
+      "is_op_registered",
+      [](const std::string& op_name) { return OpRegistry::GetInstance().IsRegistered(op_name); },
+      nb::arg("op_name"), "Check if an operator is registered");
+
+  ir.def(
+      "get_op", [](const std::string& op_name) { return OpRegistry::GetInstance().GetOp(op_name); },
+      nb::arg("op_name"), "Get an operator instance by name");
+
+  ir.def(
+      "get_op_memory_spec",
+      [](const std::string& op_name) -> nb::object {
+        auto& registry = OpRegistry::GetInstance();
+        if (!registry.IsRegistered(op_name)) return nb::none();
+        const auto& spec = registry.GetEntry(op_name).GetMemorySpec();
+        if (!spec.has_value()) return nb::none();
+        // Empty spec (from no_memory_spec()) — no constraints and no resolver
+        if (spec->input_constraints.empty() && !spec->deduce_output_memory) return nb::none();
+
+        nb::dict result;
+        // Input constraints
+        nb::list inputs;
+        for (const auto& c : spec->input_constraints) {
+          nb::list allowed;
+          for (auto ms : c) allowed.append(ms);
+          inputs.append(nb::cast(allowed));
+        }
+        result["input_constraints"] = inputs;
+        // Output (resolve with empty kwargs for display)
+        if (spec->deduce_output_memory) {
+          auto out = spec->deduce_output_memory({});
+          if (out.has_value()) {
+            result["output_memory"] = *out;
+          } else {
+            result["output_memory"] = "inherit_from_input";
+          }
+        } else {
+          result["output_memory"] = nb::none();
+        }
+        return result;
+      },
+      nb::arg("op_name"), "Get memory space specification for a registered operator");
+
+  // Var - const shared_ptr
+  auto var_class = nb::class_<Var, Expr>(ir, "Var", "Variable reference expression");
+
+  var_class.def(
+      nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name_hint"), nb::arg("type"),
+      nb::arg("span"),
+      "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
+  BindFields<Var>(var_class);
+
+  // IterArg - const shared_ptr
+  auto iterarg_class = nb::class_<IterArg, Var>(ir, "IterArg", "Iteration argument variable");
+  iterarg_class.def(nb::init<const std::string&, const TypePtr&, const ExprPtr&, const Span&>(),
+                    nb::arg("name_hint"), nb::arg("type"), nb::arg("initValue"), nb::arg("span"),
+                    "Create an iteration argument with initial value");
+  BindFields<IterArg>(iterarg_class);
+
+  // MemRef - now inherits from Var (first-class expression)
+  auto memref_class =
+      nb::class_<MemRef, Var>(ir, "MemRef", "Memory reference variable for shaped types (inherits from Var)");
+  memref_class
+      .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("memory_space"),
+           nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
+           "Create a memory reference with legacy memory_space, addr, size, id, and span."
+           " The memory space is kept only in the generated name for compatibility.")
+      .def(nb::init<ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
+           nb::arg("span") = Span::unknown(), "Create a memory reference with addr, size, id, and span")
+      .def_rw("addr_", &MemRef::addr_, "Starting address expression")
+      .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
+      .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");
+
+  // ConstInt - const shared_ptr
+  auto constint_class = nb::class_<ConstInt, Expr>(ir, "ConstInt", "Constant integer expression");
+  constint_class.def(nb::init<int64_t, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
+                     nb::arg("span"), "Create a constant integer expression");
+  BindFields<ConstInt>(constint_class);
+  constint_class.def_prop_ro("dtype", &ConstInt::dtype, "Data type of the expression");
+
+  // ConstFloat - const shared_ptr
+  auto constfloat_class = nb::class_<ConstFloat, Expr>(ir, "ConstFloat", "Constant float expression");
+  constfloat_class.def(nb::init<double, DataType, const Span&>(), nb::arg("value"), nb::arg("dtype"),
+                       nb::arg("span"), "Create a constant float expression");
+  BindFields<ConstFloat>(constfloat_class);
+  constfloat_class.def_prop_ro("dtype", &ConstFloat::dtype, "Data type of the expression");
+
+  // ConstBool - const shared_ptr
+  auto constbool_class = nb::class_<ConstBool, Expr>(ir, "ConstBool", "Constant boolean expression");
+  constbool_class.def(nb::init<bool, const Span&>(), nb::arg("value"), nb::arg("span"),
+                      "Create a constant boolean expression");
+  BindFields<ConstBool>(constbool_class);
+  constbool_class.def_prop_ro("dtype", &ConstBool::dtype, "Data type of the expression (always BOOL)");
+
+  // Call - const shared_ptr
+  auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
+
+  // Constructors without kwargs (backward compatibility)
+  call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const Span&>(), nb::arg("op"),
+                 nb::arg("args"), nb::arg("span"), "Create a function call expression");
+  call_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const TypePtr&, const Span&>(),
+                 nb::arg("op"), nb::arg("args"), nb::arg("type"), nb::arg("span"),
+                 "Create a function call expression with explicit type");
+
+  // Constructors with kwargs (using nb::dict) - use factory functions
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("span"),
+      "Create a function call expression with kwargs");
+
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const TypePtr& type, const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, kwargs, type, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("type"), nb::arg("span"),
+      "Create a function call expression with kwargs and explicit type");
+
+  BindFields<Call>(call_class);
+
+  // Expose kwargs as a read-only property
+  call_class.def_prop_ro(
+      "kwargs",
+      [](const CallPtr& self) {
+        nb::dict result;
+        for (const auto& [key, value] : self->kwargs_) {
+          if (value.type() == typeid(int)) {
+            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(bool)) {
+            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(std::string)) {
+            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(double)) {
+            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(float)) {
+            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(DataType)) {
+            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(MemorySpace)) {
+            result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TensorLayout)) {
+            result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TilePad)) {
+            result[key.c_str()] = AnyCast<TilePad>(value, "converting to Python: " + key);
+          }
+        }
+        return result;
+      },
+      "Keyword arguments (metadata) for this call");
+
+  // MakeTuple - const shared_ptr
+  auto make_tuple_class = nb::class_<MakeTuple, Expr>(ir, "MakeTuple", "Tuple construction expression");
+  make_tuple_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("elements"),
+                       nb::arg("span"), "Create a tuple construction expression");
+  BindFields<MakeTuple>(make_tuple_class);
+
+  // TupleGetItemExpr - const shared_ptr
+  auto tuple_get_item_class =
+      nb::class_<TupleGetItemExpr, Expr>(ir, "TupleGetItemExpr", "Tuple element access expression");
+  tuple_get_item_class.def(nb::init<const ExprPtr&, int, const Span&>(), nb::arg("tuple"), nb::arg("index"),
+                           nb::arg("span"), "Create a tuple element access expression");
+  BindFields<TupleGetItemExpr>(tuple_get_item_class);
+
+  // BinaryExpr - abstract, const shared_ptr
+  auto binaryexpr_class = nb::class_<BinaryExpr, Expr>(ir, "BinaryExpr", "Base class for binary operations");
+  BindFields<BinaryExpr>(binaryexpr_class);
+
+  // UnaryExpr - abstract, const shared_ptr
+  auto unaryexpr_class = nb::class_<UnaryExpr, Expr>(ir, "UnaryExpr", "Base class for unary operations");
+  BindFields<UnaryExpr>(unaryexpr_class);
+
+// Macro to bind binary expression nodes
+#define BIND_BINARY_EXPR(OpName, Description)                                                  \
+  nb::class_<OpName, BinaryExpr>(ir, #OpName, Description)                                     \
+      .def(nb::init<const ExprPtr&, const ExprPtr&, DataType, const Span&>(), nb::arg("left"), \
+           nb::arg("right"), nb::arg("dtype"), nb::arg("span"), "Create " Description);
+
+  // Bind all binary expression nodes
+  BIND_BINARY_EXPR(Add, "Addition expression (left + right)")
+  BIND_BINARY_EXPR(Sub, "Subtraction expression (left - right)")
+  BIND_BINARY_EXPR(Mul, "Multiplication expression (left * right)")
+  BIND_BINARY_EXPR(FloorDiv, "Floor division expression (left // right)")
+  BIND_BINARY_EXPR(FloorMod, "Floor modulo expression (left % right)")
+  BIND_BINARY_EXPR(FloatDiv, "Float division expression (left / right)")
+  BIND_BINARY_EXPR(Min, "Minimum expression (min(left, right))")
+  BIND_BINARY_EXPR(Max, "Maximum expression (max(left, right))")
+  BIND_BINARY_EXPR(Pow, "Power expression (left ** right)")
+  BIND_BINARY_EXPR(Eq, "Equality expression (left == right)")
+  BIND_BINARY_EXPR(Ne, "Inequality expression (left != right)")
+  BIND_BINARY_EXPR(Lt, "Less than expression (left < right)")
+  BIND_BINARY_EXPR(Le, "Less than or equal to expression (left <= right)")
+  BIND_BINARY_EXPR(Gt, "Greater than expression (left > right)")
+  BIND_BINARY_EXPR(Ge, "Greater than or equal to expression (left >= right)")
+  BIND_BINARY_EXPR(And, "Logical and expression (left and right)")
+  BIND_BINARY_EXPR(Or, "Logical or expression (left or right)")
+  BIND_BINARY_EXPR(Xor, "Logical xor expression (left xor right)")
+  BIND_BINARY_EXPR(BitAnd, "Bitwise and expression (left & right)")
+  BIND_BINARY_EXPR(BitOr, "Bitwise or expression (left | right)")
+  BIND_BINARY_EXPR(BitXor, "Bitwise xor expression (left ^ right)")
+  BIND_BINARY_EXPR(BitShiftLeft, "Bitwise left shift expression (left << right)")
+  BIND_BINARY_EXPR(BitShiftRight, "Bitwise right shift expression (left >> right)")
+
+#undef BIND_BINARY_EXPR
+
+// Macro to bind unary expression nodes
+#define BIND_UNARY_EXPR(OpName, Description)                                                        \
+  nb::class_<OpName, UnaryExpr>(ir, #OpName, Description)                                           \
+      .def(nb::init<const ExprPtr&, DataType, const Span&>(), nb::arg("operand"), nb::arg("dtype"), \
+           nb::arg("span"), "Create " Description);
+
+  // Bind all unary expression nodes
+  BIND_UNARY_EXPR(Abs, "Absolute value expression (abs(operand))")
+  BIND_UNARY_EXPR(Neg, "Negation expression (-operand)")
+  BIND_UNARY_EXPR(Not, "Logical not expression (not operand)")
+  BIND_UNARY_EXPR(BitNot, "Bitwise not expression (~operand)")
+  BIND_UNARY_EXPR(Cast, "Cast expression (cast operand to dtype)")
+
+#undef BIND_UNARY_EXPR
+
+  // Bind structural hash and equality functions
+  // structural_hash overloads share the same auto-mapping semantics:
+  //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
+  //   enable_auto_mapping=False -> variable identity is preserved deterministically
+  ir.def("structural_hash", static_cast<uint64_t (*)(const IRNodePtr&, bool)>(&structural_hash),
+         nb::arg("node"), nb::arg("enable_auto_mapping") = false,
+         "Compute deterministic structural hash of an IR node (ignores Span). "
+         "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
+         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
+  ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
+         nb::arg("type"), nb::arg("enable_auto_mapping") = false,
+         "Compute deterministic structural hash of a type. "
+         "enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).");
+
+  ir.def("structural_equal",
+         static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),
+         nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Check if two IR nodes are structurally equal. "
+         "Ignores source location (Span). Returns True if IR nodes have identical structure. "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+  ir.def("structural_equal", static_cast<bool (*)(const TypePtr&, const TypePtr&, bool)>(&structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Check if two types are structurally equal. "
+         "Ignores source location (Span). Returns True if types have identical structure. "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+
+  ir.def("assert_structural_equal",
+         static_cast<void (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&assert_structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Assert two IR nodes are structurally equal. "
+         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
+         "Ignores source location (Span). "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+  ir.def("assert_structural_equal",
+         static_cast<void (*)(const TypePtr&, const TypePtr&, bool)>(&assert_structural_equal),
+         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
+         "Assert two types are structurally equal. "
+         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
+         "Ignores source location (Span). "
+         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
+         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
+         "name).");
+
+  // Serialization functions
+  ir.def(
+      "serialize",
+      [](const IRNodePtr& node) {
+        auto data = serialization::Serialize(node);
+        return nb::bytes(reinterpret_cast<const char*>(data.data()), data.size());
+      },
+      nb::arg("node"), "Serialize an IR node to MessagePack bytes");
+
+  ir.def(
+      "deserialize",
+      [](const nb::bytes& data) {
+        std::vector<uint8_t> vec(static_cast<const uint8_t*>(data.data()),
+                                 static_cast<const uint8_t*>(data.data()) + data.size());
+        return serialization::Deserialize(vec);
+      },
+      nb::arg("data"), "Deserialize an IR node from MessagePack bytes");
+
+  ir.def("serialize_to_file", &serialization::SerializeToFile, nb::arg("node"), nb::arg("path"),
+         "Serialize an IR node to a file");
+
+  ir.def("deserialize_from_file", &serialization::DeserializeFromFile, nb::arg("path"),
+         "Deserialize an IR node from a file");
+
+  // ========== Statements ==========
+
+  // Stmt - abstract base, const shared_ptr
+  auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
+  BindFields<Stmt>(stmt_class);
+
+  // AssignStmt - const shared_ptr
+  auto assign_stmt_class =
+      nb::class_<AssignStmt, Stmt>(ir, "AssignStmt", "Assignment statement: var = value");
+  assign_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const Span&>(), nb::arg("var"),
+                        nb::arg("value"), nb::arg("span"), "Create an assignment statement");
+  BindFields<AssignStmt>(assign_stmt_class);
+
+  // IfStmt - const shared_ptr
+  auto if_stmt_class = nb::class_<IfStmt, Stmt>(
+      ir, "IfStmt", "Conditional statement: if condition then then_body else else_body");
+  if_stmt_class.def(nb::init<const ExprPtr&, const StmtPtr&, const std::optional<StmtPtr>&,
+                             const std::vector<VarPtr>&, const Span&>(),
+                    nb::arg("condition"), nb::arg("then_body"), nb::arg("else_body") = nb::none(),
+                    nb::arg("return_vars"), nb::arg("span"),
+                    "Create a conditional statement with then and else branches (else_body can be None)");
+  BindFields<IfStmt>(if_stmt_class);
+
+  // YieldStmt - const shared_ptr
+  auto yield_stmt_class = nb::class_<YieldStmt, Stmt>(ir, "YieldStmt", "Yield statement: yield value");
+  yield_stmt_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("value"),
+                       nb::arg("span"), "Create a yield statement with a list of expressions");
+  yield_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a yield statement without values");
+  BindFields<YieldStmt>(yield_stmt_class);
+
+  // ReturnStmt - const shared_ptr
+  auto return_stmt_class = nb::class_<ReturnStmt, Stmt>(ir, "ReturnStmt", "Return statement: return value");
+  return_stmt_class.def(nb::init<const std::vector<ExprPtr>&, const Span&>(), nb::arg("value"),
+                        nb::arg("span"), "Create a return statement with a list of expressions");
+  return_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a return statement without values");
+  BindFields<ReturnStmt>(return_stmt_class);
+
+  // ForKind enum (must be before ForStmt which uses it)
+  nb::enum_<ForKind>(ir, "ForKind", "For loop kind classification")
+      .value("Sequential", ForKind::Sequential, "Standard sequential for loop (default)")
+      .value("Parallel", ForKind::Parallel, "Parallel for loop")
+      .value("Unroll", ForKind::Unroll, "Compile-time unrolled for loop")
+      .export_values();
+
+  // ChunkPolicy enum (must be before ForStmt which uses it)
+  nb::enum_<ChunkPolicy>(ir, "ChunkPolicy", "Chunk policy for loop chunking")
+      .value("LeadingFull", ChunkPolicy::LeadingFull, "Full chunks first, smaller remainder at end")
+      .export_values();
+
+  // LoopOrigin enum (must be before ForStmt which uses it)
+  nb::enum_<LoopOrigin>(ir, "LoopOrigin", "Loop origin classification")
+      .value("Original", LoopOrigin::Original, "Regular loop (default)")
+      .value("ChunkOuter", LoopOrigin::ChunkOuter, "Outer loop from chunk splitting")
+      .value("ChunkInner", LoopOrigin::ChunkInner, "Inner loop from chunk splitting")
+      .value("ChunkRemainder", LoopOrigin::ChunkRemainder, "Remainder loop from chunk splitting")
+      .export_values();
+
+  // ForStmt - const shared_ptr
+  auto for_stmt_class = nb::class_<ForStmt, Stmt>(
+      ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
+  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
+                              const std::vector<IterArgPtr>&, const StmtPtr&, const std::vector<VarPtr>&,
+                              const Span&, ForKind, const std::optional<ExprPtr>&, ChunkPolicy, LoopOrigin>(),
+                     nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"),
+                     nb::arg("iter_args"), nb::arg("body"), nb::arg("return_vars"), nb::arg("span"),
+                     nb::arg("kind") = ForKind::Sequential, nb::arg("chunk_size") = nb::none(),
+                     nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
+                     nb::arg("loop_origin") = LoopOrigin::Original, "Create a for loop statement");
+  BindFields<ForStmt>(for_stmt_class);
+
+  // WhileStmt - const shared_ptr
+  auto while_stmt_class =
+      nb::class_<WhileStmt, Stmt>(ir, "WhileStmt", "While loop statement: while condition: body");
+  while_stmt_class.def(nb::init<const ExprPtr&, const std::vector<IterArgPtr>&, const StmtPtr&,
+                                const std::vector<VarPtr>&, const Span&>(),
+                       nb::arg("condition"), nb::arg("iter_args"), nb::arg("body"), nb::arg("return_vars"),
+                       nb::arg("span"), "Create a while loop statement");
+  BindFields<WhileStmt>(while_stmt_class);
+
+  // ScopeKind enum
+  nb::enum_<ScopeKind>(ir, "ScopeKind", "Scope kind classification")
+      .value("InCore", ScopeKind::InCore, "InCore scope for AICore sub-graphs")
+      .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
+      .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
+      .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
+      .export_values();
+
+  // ScopeStmt - const shared_ptr
+  auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
+      ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
+  scope_stmt_class.def(
+      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>>(),
+      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
+      nb::arg("role") = nb::none(), "Create a scope statement");
+  BindFields<ScopeStmt>(scope_stmt_class);
+
+  // SeqStmts - const shared_ptr
+  auto seq_stmts_class =
+      nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");
+  seq_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
+                      "Create a sequence of statements");
+  seq_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const SeqStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("SeqStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
+  BindFields<SeqStmts>(seq_stmts_class);
+
+  // OpStmts - const shared_ptr
+  auto op_stmts_class = nb::class_<OpStmts, Stmt>(
+      ir, "OpStmts", "Operation statements: a sequence of assignment and/or evaluation statements");
+  op_stmts_class.def(nb::init<const std::vector<StmtPtr>&, const Span&>(), nb::arg("stmts"), nb::arg("span"),
+                     "Create an operation statements");
+  op_stmts_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const OpStmts>& self, int index) -> StmtPtr {
+        int size = static_cast<int>(self->stmts_.size());
+        if (index < -size || index >= size) {
+          throw pypto::IndexError("OpStmts index " + std::to_string(index) + " out of range [" +
+                                  std::to_string(-size) + ", " + std::to_string(size - 1) + "]");
+        }
+        if (index < 0) index += size;
+        return self->stmts_[index];
+      },
+      nb::arg("index"), "Get statement by index, supports negative indexing");
+  BindFields<OpStmts>(op_stmts_class);
+
+  // EvalStmt - const shared_ptr
+  auto eval_stmt_class = nb::class_<EvalStmt, Stmt>(ir, "EvalStmt", "Evaluation statement: expr");
+  eval_stmt_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("expr"), nb::arg("span"),
+                      "Create an evaluation statement");
+  BindFields<EvalStmt>(eval_stmt_class);
+
+  // BreakStmt - const shared_ptr
+  auto break_stmt_class = nb::class_<BreakStmt, Stmt>(ir, "BreakStmt", "Break statement: break");
+  break_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a break statement");
+  BindFields<BreakStmt>(break_stmt_class);
+
+  // ContinueStmt - const shared_ptr
+  auto continue_stmt_class =
+      nb::class_<ContinueStmt, Stmt>(ir, "ContinueStmt", "Continue statement: continue");
+  continue_stmt_class.def(nb::init<const Span&>(), nb::arg("span"), "Create a continue statement");
+  BindFields<ContinueStmt>(continue_stmt_class);
+
+  // FunctionType enum
+  nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
+      .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
+      .value("Orchestration", FunctionType::Orchestration, "Host/AICPU control and coordination")
+      .value("InCore", FunctionType::InCore, "AICore sub-graph execution (unspecialized)")
+      .value("AIC", FunctionType::AIC, "Cube core kernel (specialized InCore)")
+      .value("AIV", FunctionType::AIV, "Vector core kernel (specialized InCore)")
+      .value("Group", FunctionType::Group, "Co-scheduled group of AIC + AIV kernels")
+      .export_values();
+
+  // Level enum — hierarchy level in the Linqu machine model
+  nb::enum_<Level>(ir, "Level", "Hierarchy level in the Linqu machine model")
+      .value("AIV", Level::AIV, "Single AIV (Vector) core")
+      .value("AIC", Level::AIC, "Single AIC (Cube) core")
+      .value("CORE_GROUP", Level::CORE_GROUP, "Core-group (e.g. 1 AIC + 2 AIV)")
+      .value("CHIP_DIE", Level::CHIP_DIE, "Chip die")
+      .value("CHIP", Level::CHIP, "Chip (UMA)")
+      .value("HOST", Level::HOST, "Host (single OS instance)")
+      .value("CLUSTER_0", Level::CLUSTER_0, "Cluster-level-0 (pod)")
+      .value("CLUSTER_1", Level::CLUSTER_1, "Cluster-level-1 (supernode)")
+      .value("CLUSTER_2", Level::CLUSTER_2, "Cluster-level-2 (cross-rack)")
+      .value("GLOBAL", Level::GLOBAL, "Global coordinator")
+      // Readability aliases
+      .value("L2CACHE", Level::L2CACHE, "Alias for CHIP_DIE")
+      .value("PROCESSOR", Level::PROCESSOR, "Alias for CHIP")
+      .value("UMA", Level::UMA, "Alias for CHIP")
+      .value("NODE", Level::NODE, "Alias for HOST")
+      .value("POD", Level::POD, "Alias for CLUSTER_0")
+      .value("CLOS1", Level::CLOS1, "Alias for CLUSTER_1")
+      .value("CLOS2", Level::CLOS2, "Alias for CLUSTER_2")
+      .export_values();
+
+  // Role enum — function role at L3-L7 hierarchy levels
+  nb::enum_<Role>(ir, "Role", "Function role at L3-L7 hierarchy levels")
+      .value("Orchestrator", Role::Orchestrator, "Builds DAG, submits tasks")
+      .value("Worker", Role::Worker, "Executes compute/data tasks")
+      .export_values();
+
+  // ParamDirection enum
+  nb::enum_<ParamDirection>(ir, "ParamDirection", "Parameter direction classification")
+      .value("In", ParamDirection::In, "Read-only input (default)")
+      .value("Out", ParamDirection::Out, "Write-only output")
+      .value("InOut", ParamDirection::InOut, "Read-write input/output")
+      .export_values();
+
+  // IsInCoreType helper
+  ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),
+         "Check if a FunctionType is an InCore variant (InCore, AIC, or AIV)");
+
+  // LevelToLinquLevel helper
+  ir.def("level_to_linqu_level", &LevelToLinquLevel, nb::arg("level"),
+         "Map Level enum value to Linqu hierarchy level number (0-7)");
+
+  // Function - const shared_ptr
+  auto function_class = nb::class_<Function, IRNode>(
+      ir, "Function", "Function definition with name, parameters, return types, and body");
+  function_class.def(
+      "__init__",
+      [](Function* self, const std::string& name, const nb::list& params,
+         const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
+         std::optional<Level> level, std::optional<Role> role) {
+        std::vector<VarPtr> param_vars;
+        std::vector<ParamDirection> param_dirs;
+        param_vars.reserve(nb::len(params));
+        param_dirs.reserve(nb::len(params));
+        for (auto item : params) {
+          // Accept either a Var (default In) or a tuple (Var, ParamDirection)
+          if (nb::isinstance<nb::tuple>(item)) {
+            auto tup = nb::cast<nb::tuple>(item);
+            if (nb::len(tup) != 2) {
+              throw pypto::TypeError("Each tuple in 'params' must be (Var, ParamDirection)");
+            }
+            param_vars.push_back(nb::cast<VarPtr>(tup[0]));
+            param_dirs.push_back(nb::cast<ParamDirection>(tup[1]));
+          } else {
+            param_vars.push_back(nb::cast<VarPtr>(item));
+            param_dirs.push_back(ParamDirection::In);
+          }
+        }
+        new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
+                            type, level, role);
+      },
+      nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
+      nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
+      "Create a function definition");
+  BindFields<Function>(function_class);
+
+  // Program - const shared_ptr
+  auto program_class =
+      nb::class_<Program, IRNode>(ir, "Program",
+                                  "Program definition with functions mapped by GlobalVar references. "
+                                  "Functions are automatically sorted by name for deterministic ordering.");
+  program_class.def(nb::init<const std::vector<FunctionPtr>&, const std::string&, const Span&>(),
+                    nb::arg("functions"), nb::arg("name"), nb::arg("span"),
+                    "Create a program from a list of functions. "
+                    "GlobalVar references are created automatically from function names.");
+  program_class.def("get_function", &Program::GetFunction, nb::arg("name"),
+                    "Get a function by name, returns None if not found");
+  program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
+                    "Get a GlobalVar by name, returns None if not found");
+  program_class.def(
+      "__getitem__",
+      [](const std::shared_ptr<const Program>& self, const std::string& name) {
+        return self->GetFunction(name);
+      },
+      nb::arg("name"), "Get function by name, returns None if not found");
+  // Custom property for functions_ map that converts to Python dict
+  program_class.def_prop_ro(
+      "functions",
+      [](const std::shared_ptr<const Program>& self) {
+        nb::dict result;
+        for (const auto& [gvar, func] : self->functions_) {
+          result[nb::cast(gvar)] = nb::cast(func);
+        }
+        return result;
+      },
+      "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
+  program_class.def_ro("name", &Program::name_, "Program name");
+  program_class.def_ro("span", &Program::span_, "Source location");
+
+  // Python-style printer function - unified API for IRNode
+  ir.def(
+      "python_print",
+      [](const IRNodePtr& node, const std::string& prefix, bool concise) {
+        return PythonPrint(node, prefix, concise);
+      },
+      nb::arg("node"), nb::arg("prefix") = "pl", nb::arg("concise") = false,
+      "Print IR node (Expr, Stmt, Function, or Program) in Python IR syntax.\n\n"
+      "Args:\n"
+      "    node: IR node to print\n"
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')\n"
+      "    concise: If true, omit intermediate type annotations (default false)");
+
+  // Python-style printer function for Type objects - use separate name to avoid overload ambiguity
+  ir.def(
+      "python_print_type",
+      [](const TypePtr& type, const std::string& prefix) { return PythonPrint(type, prefix); },
+      nb::arg("type"), nb::arg("prefix") = "pl",
+      "Print Type object in Python IR syntax.\n\n"
+      "Args:\n"
+      "    type: Type to print\n"
+      "    prefix: Module prefix (default 'pl' for 'import pypto.language as pl')");
+
+  // operator functions for Var (wrapped in Python for span capture and normalization)
+  // Using standalone C++ API functions from scalar_expr.h
+  // Note: first parameter (self) is implicit when binding as method
+  ir.def("add", &MakeAdd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Addition operator");
+  ir.def("sub", &MakeSub, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Subtraction operator");
+  ir.def("mul", &MakeMul, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Multiplication operator");
+  ir.def("truediv", &MakeFloatDiv, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "True division operator");
+  ir.def("floordiv", &MakeFloorDiv, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Floor division operator");
+  ir.def("mod", &MakeFloorMod, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Modulo operator");
+  ir.def("pow", &MakePow, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Power operator");
+  ir.def("eq", &MakeEq, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Equality operator");
+  ir.def("ne", &MakeNe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Inequality operator");
+  ir.def("lt", &MakeLt, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Less than operator");
+  ir.def("le", &MakeLe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Less than or equal operator");
+  ir.def("gt", &MakeGt, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Greater than operator");
+  ir.def("ge", &MakeGe, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Greater than or equal operator");
+  ir.def("neg", &MakeNeg, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Negation operator");
+  ir.def("cast", &MakeCast, nb::arg("operand"), nb::arg("dtype"), nb::arg("span") = Span::unknown(),
+         "Cast operator");
+  ir.def("bit_and", &MakeBitAnd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise and operator");
+  ir.def("bit_or", &MakeBitOr, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise or operator");
+  ir.def("bit_xor", &MakeBitXor, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Bitwise xor operator");
+  ir.def("bit_shift_left", &MakeBitShiftLeft, nb::arg("lhs"), nb::arg("rhs"),
+         nb::arg("span") = Span::unknown(), "Bitwise left shift operator");
+  ir.def("bit_shift_right", &MakeBitShiftRight, nb::arg("lhs"), nb::arg("rhs"),
+         nb::arg("span") = Span::unknown(), "Bitwise right shift operator");
+  ir.def("bit_not", &MakeBitNot, nb::arg("operand"), nb::arg("span") = Span::unknown(),
+         "Bitwise not operator");
+  ir.def("not_", &MakeNot, nb::arg("operand"), nb::arg("span") = Span::unknown(), "Logical not operator");
+  ir.def("min_", &MakeMin, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Minimum operator");
+  ir.def("max_", &MakeMax, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
+         "Maximum operator");
+
+  // ParentStmtAnalysis - utility class for analyzing statement parent relationships
+  auto parent_stmt_analysis_class = nb::class_<ParentStmtAnalysis>(
+      ir, "ParentStmtAnalysis",
+      "Utility class for analyzing parent-child relationships in statement trees.\n\n"
+      "This class builds a mapping from each statement to its parent statement within\n"
+      "a function's body. It is useful for passes that need to traverse upward in the\n"
+      "IR tree or understand the context of a statement.\n\n"
+      "Example usage:\n"
+      "    analysis = ir.ParentStmtAnalysis()\n"
+      "    analysis.build_map(function)\n"
+      "    parent = analysis.get_parent(some_stmt)\n"
+      "    if parent:\n"
+      "        # Use parent statement\n\n"
+      "Note: The analysis becomes invalid after IR transformations. Call build_map again\n"
+      "if the IR tree is modified.");
+
+  parent_stmt_analysis_class.def(nb::init<>(), "Create a ParentStmtAnalysis instance");
+
+  parent_stmt_analysis_class.def(
+      "build_map", &ParentStmtAnalysis::BuildMap, nb::arg("func"),
+      "Build the parent mapping from a function's body.\n\n"
+      "Traverses the function's statement tree and records parent-child relationships.\n"
+      "This method clears any existing mapping before building the new one.\n\n"
+      "Args:\n"
+      "    func: The function to analyze (can be None, resulting in empty map)\n\n"
+      "Parent relationships established:\n"
+      "- For SeqStmts/OpStmts: Each child statement's parent is the SeqStmts/OpStmts\n"
+      "- For IfStmt: then_body and else_body (if present) have IfStmt as parent\n"
+      "- For ForStmt: body has ForStmt as parent\n"
+      "- Root statement (function.body) has no parent");
+
+  parent_stmt_analysis_class.def("get_parent", &ParentStmtAnalysis::GetParent, nb::arg("stmt"),
+                                 "Get the parent statement of a given statement.\n\n"
+                                 "Args:\n"
+                                 "    stmt: The statement to query\n\n"
+                                 "Returns:\n"
+                                 "    Parent statement, or None if:\n"
+                                 "    - stmt is the root statement (function body)\n"
+                                 "    - stmt is not found in the analyzed tree\n"
+                                 "    - stmt is None");
+
+  parent_stmt_analysis_class.def("has_parent", &ParentStmtAnalysis::HasParent, nb::arg("stmt"),
+                                 "Check if a statement has a recorded parent.\n\n"
+                                 "Args:\n"
+                                 "    stmt: The statement to check\n\n"
+                                 "Returns:\n"
+                                 "    True if stmt has a parent in the map, False otherwise");
+
+  parent_stmt_analysis_class.def("clear", &ParentStmtAnalysis::Clear,
+                                 "Clear the parent mapping.\n\n"
+                                 "Removes all recorded parent-child relationships. Useful for reusing\n"
+                                 "the same ParentStmtAnalysis instance with different functions.");
+
+  // Op conversion registry bindings
+  ir.def(
+      "register_op_conversion",
+      [](const std::string& from_op, const std::string& to_op) {
+        OpConversionRegistry::GetInstance().RegisterSimple(from_op, to_op);
+      },
+      nb::arg("from_op"), nb::arg("to_op"),
+      "Register a simple tensor-to-tile op name mapping.\n\n"
+      "Args:\n"
+      "    from_op: Source op name (e.g., 'tensor.add')\n"
+      "    to_op: Target op name (e.g., 'tile.add')");
+
+  ir.def(
+      "register_op_conversion_custom",
+      [](const std::string& from_op, nb::object func) {
+        // Capture Python callable in a C++ ConversionFunc
+        nb::object py_func = nb::borrow(func);
+        OpConversionRegistry::GetInstance().RegisterCustom(
+            from_op,
+            [py_func](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const Span& span) -> ConversionResult {
+              nb::gil_scoped_acquire guard;
+              // Convert kwargs to Python list of (key, value) tuples
+              nb::list py_kwargs_list;
+              for (const auto& [key, val] : kwargs) {
+                nb::object py_val =
+                    AnyToPyObject<DataType, MemorySpace, TensorLayout, bool, int, std::string, double>(val,
+                                                                                                       key);
+                nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
+                py_kwargs_list.append(pair);
+              }
+              nb::object result = py_func(nb::cast(args), py_kwargs_list, nb::cast(span));
+              // Result can be:
+              // 1. An ExprPtr (simple conversion)
+              // 2. A tuple of (list[StmtPtr], ExprPtr) (complex conversion)
+              if (nb::isinstance<nb::tuple>(result)) {
+                nb::tuple result_tuple = nb::cast<nb::tuple>(result);
+                auto prologue = nb::cast<std::vector<StmtPtr>>(result_tuple[0]);
+                auto expr = nb::cast<ExprPtr>(result_tuple[1]);
+                return ConversionResult{std::move(prologue), std::move(expr)};
+              }
+              return ConversionResult{nb::cast<ExprPtr>(result)};
+            });
+      },
+      nb::arg("from_op"), nb::arg("func"),
+      "Register a custom conversion function for a tensor op.\n\n"
+      "The function receives (args, kwargs, span) and should return either:\n"
+      "- An Expr (simple conversion)\n"
+      "- A tuple (list[Stmt], Expr) for complex conversions with prologue statements");
+
+  ir.def(
+      "has_op_conversion",
+      [](const std::string& op_name) { return OpConversionRegistry::GetInstance().HasConversion(op_name); },
+      nb::arg("op_name"), "Check if a conversion rule exists for an operator.");
+
+  ir.def(
+      "deep_clone",
+      [](const StmtPtr& body) -> nb::tuple {
+        auto result = DeepClone(body);
+        // Convert raw-pointer-keyed map to shared_ptr-keyed map for Python
+        std::vector<std::pair<VarPtr, VarPtr>> var_map_pairs;
+        for (const auto& [raw_ptr, new_var] : result.var_map) {
+          // Find the original VarPtr from the raw pointer — wrap as non-owning shared_ptr
+          // Since Python holds the original IR tree alive, the raw pointer is valid
+          var_map_pairs.emplace_back(std::shared_ptr<const Var>(std::shared_ptr<const Var>{}, raw_ptr),
+                                     new_var);
+        }
+        return nb::make_tuple(result.cloned_body, var_map_pairs);
+      },
+      nb::arg("body"),
+      "Deep-clone a statement subtree, creating fresh Var objects at definition sites.\n\n"
+      "Returns a tuple of (cloned_body, var_map) where var_map is a list of\n"
+      "(original_var, cloned_var) pairs for definition-site clones.");
+}
+
+}  // namespace python
+}  // namespace pypto

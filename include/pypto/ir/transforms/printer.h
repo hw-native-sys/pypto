@@ -1,0 +1,94 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#ifndef PYPTO_IR_TRANSFORMS_PRINTER_H_
+#define PYPTO_IR_TRANSFORMS_PRINTER_H_
+
+#include <ostream>
+#include <string>
+
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+
+/**
+ * @brief Operator precedence levels
+ *
+ * Based on Python operator precedence.
+ * Higher value = tighter binding (higher precedence).
+ */
+enum class Precedence : int {
+  kOr = 1,          // or
+  kXor = 2,         // xor
+  kAnd = 3,         // and
+  kNot = 4,         // not (unary)
+  kComparison = 5,  // ==, !=, <, <=, >, >=
+  kBitOr = 6,       // |
+  kBitXor = 7,      // ^
+  kBitAnd = 8,      // &
+  kBitShift = 9,    // <<, >>
+  kAddSub = 10,     // +, -
+  kMulDivMod = 11,  // *, /, //, %
+  kUnary = 12,      // -(unary), ~
+  kPow = 13,        // ** (right-associative!)
+  kCall = 14,       // function calls, min(), max(), abs()
+  kAtom = 15        // variables, constants
+};
+
+/**
+ * @brief Get operator precedence for an expression
+ *
+ * @param expr Expression to get precedence for
+ * @return Precedence level
+ */
+Precedence GetPrecedence(const ExprPtr& expr);
+
+/**
+ * @brief Check if operator is right-associative
+ *
+ * @param expr Expression to check
+ * @return true if right-associative, false if left-associative
+ */
+bool IsRightAssociative(const ExprPtr& expr);
+
+/**
+ * @brief Print an IR node in Python syntax
+ *
+ * @param node IR node to print (Expr, Stmt, Function, or Program)
+ * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
+ * @param concise If true, omit intermediate type annotations (default: false)
+ * @return Python-style string representation
+ */
+std::string PythonPrint(const IRNodePtr& node, const std::string& prefix = "pl", bool concise = false);
+
+/**
+ * @brief Print a type in Python syntax
+ *
+ * @param type Type to print (ScalarType, TensorType, TupleType, etc.)
+ * @param prefix Module prefix to use (default: "pl", can be "ir" for legacy)
+ * @return Python-style string representation
+ */
+std::string PythonPrint(const TypePtr& type, const std::string& prefix = "pl");
+
+/// Stream insertion for IR nodes and types.
+/// Enables direct use in CHECK/LOG macros and std::ostream output.
+/// ExprPtr, StmtPtr, etc. implicitly convert to IRNodePtr.
+inline std::ostream& operator<<(std::ostream& os, const IRNodePtr& node) { return os << PythonPrint(node); }
+
+inline std::ostream& operator<<(std::ostream& os, const TypePtr& type) { return os << PythonPrint(type); }
+
+}  // namespace ir
+}  // namespace pypto
+
+#endif  // PYPTO_IR_TRANSFORMS_PRINTER_H_

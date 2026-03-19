@@ -1,0 +1,85 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "pypto/ir/memref.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <string>
+#include <utility>
+
+#include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+
+std::string MemorySpaceToString(MemorySpace space) {
+  switch (space) {
+    case MemorySpace::DDR:
+      return "DDR";
+    case MemorySpace::Vec:
+      return "Vec";
+    case MemorySpace::Mat:
+      return "Mat";
+    case MemorySpace::Left:
+      return "Left";
+    case MemorySpace::Right:
+      return "Right";
+    case MemorySpace::Acc:
+      return "Acc";
+    case MemorySpace::Bias:
+      return "Bias";
+    default:
+      return "Unknown";
+  }
+}
+
+MemorySpace StringToMemorySpace(const std::string& str) {
+  if (str == "DDR") return MemorySpace::DDR;
+  if (str == "Vec") return MemorySpace::Vec;
+  if (str == "Mat") return MemorySpace::Mat;
+  if (str == "Left") return MemorySpace::Left;
+  if (str == "Right") return MemorySpace::Right;
+  if (str == "Acc") return MemorySpace::Acc;
+  if (str == "Bias") return MemorySpace::Bias;
+  throw pypto::ValueError("Unknown MemorySpace: " + str);
+}
+
+// Helper function to convert string to lowercase
+static std::string ToLowerCase(const std::string& str) {
+  std::string result = str;
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return result;
+}
+
+static std::string BuildMemRefName(uint64_t id) { return "mem_" + std::to_string(id); }
+
+static std::string BuildMemRefName(MemorySpace naming_space, uint64_t id) {
+  return "mem_" + ToLowerCase(MemorySpaceToString(naming_space)) + "_" + std::to_string(id);
+}
+
+// MemRef implementation
+MemRef::MemRef(ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : MemRef(BuildMemRefName(id), std::move(addr), size, id, std::move(span)) {}
+
+MemRef::MemRef(MemorySpace naming_space, ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : MemRef(BuildMemRefName(naming_space, id), std::move(addr), size, id, std::move(span)) {}
+
+MemRef::MemRef(std::string name, ExprPtr addr, uint64_t size, uint64_t id, Span span)
+    : Var(std::move(name), GetMemRefType(), std::move(span)), addr_(std::move(addr)), size_(size), id_(id) {}
+
+}  // namespace ir
+}  // namespace pypto
