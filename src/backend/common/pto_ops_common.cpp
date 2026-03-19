@@ -406,8 +406,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(tstore_line.str());
 
-  std::string result_var = codegen.GetCurrentResultTarget();
-  if (!result_var.empty()) {
+  auto result_var = codegen.GetCurrentResultVar();
+  if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor_view);
     codegen.RegisterVarToMlir(result_var, tensor_view);
   }
@@ -531,8 +531,8 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
   oss << ")";
   codegen.Emit(oss.str());
 
-  std::string result_var = codegen.GetCurrentResultTarget();
-  if (!result_var.empty()) {
+  auto result_var = codegen.GetCurrentResultVar();
+  if (result_var != nullptr) {
     codegen.RegisterVarToMlir(result_var, tile);
   }
   return "";
@@ -603,8 +603,8 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   }
   codegen.Emit(oss.str());
 
-  std::string result_var = codegen.GetCurrentResultTarget();
-  if (!result_var.empty()) {
+  auto result_var = codegen.GetCurrentResultVar();
+  if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor);
     codegen.RegisterVarToMlir(result_var, tensor);
   }
@@ -629,9 +629,9 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   } else {
     INTERNAL_CHECK(false) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
   }
-  auto target_var_name = codegen.GetCurrentResultTarget();
-  if (!target_var_name.empty() && !shape_name.empty()) {
-    codegen.RegisterVarToMlir(target_var_name, shape_name);
+  auto target_var = codegen.GetCurrentResultVar();
+  if (target_var != nullptr && !shape_name.empty()) {
+    codegen.RegisterVarToMlir(target_var, shape_name);
   }
 
   return "";

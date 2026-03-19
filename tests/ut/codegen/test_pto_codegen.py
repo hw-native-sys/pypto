@@ -19,6 +19,8 @@ Tests verify:
 - SSA form with correct variable naming
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -994,6 +996,107 @@ def test_pto_codegen_repairs_row_sum_add_layout_mismatch():
         f"Expected row-major operands/results after repair, got: {tadd_lines[0]}"
     )
     assert "rows=1, cols=16" in tadd_lines[0], f"Expected repaired row-vector add, got: {tadd_lines[0]}"
+
+
+def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
+    """Loop-carried tile and reshape result must not collapse to one SSA mapping."""
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class LoopReshapeRepairProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            data: pl.Tensor[[16, 512], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            acc_row_major_seed: pl.Tile[[1, 16], pl.FP32] = pl.tile.reshape(acc_tile, [1, 16])
+            zero_row_major: pl.Tile[[1, 16], pl.FP32] = pl.tile.muls(acc_row_major_seed, 0.0)
+            init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.reshape(zero_row_major, [16, 1])
+            for i, (acc_iter,) in pl.range(2, init_values=(init_tile,)):
+                offset: pl.Scalar[pl.INDEX] = i * 256
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                acc_row_major: pl.Tile[[1, 16], pl.FP32] = pl.tile.reshape(acc_iter, [1, 16])
+                partial_row_major: pl.Tile[[1, 16], pl.FP32] = pl.tile.reshape(partial, [1, 16])
+                updated_row_major: pl.Tile[[1, 16], pl.FP32] = pl.tile.add(acc_row_major, partial_row_major)
+                updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.reshape(updated_row_major, [16, 1])
+                result = pl.yield_(updated)
+            final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+            return final
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed_program = pm.run_passes(LoopReshapeRepairProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    lines = [line.strip() for line in mlir_code.split("\n")]
+
+    reshape_lines = [line for line in lines if " = pto.treshape " in line]
+    assert reshape_lines, "Expected at least one pto.treshape"
+
+    tadd_lines = [line for line in lines if line.startswith("pto.tadd ")]
+    assert len(tadd_lines) == 1, f"Expected exactly one pto.tadd, got: {tadd_lines}"
+
+    tadd_line = tadd_lines[0]
+
+    reshape_infos = []
+    for reshape_line in reshape_lines:
+        reshape_match = re.match(
+            r"(%[\w.$]+)\s*=\s*pto\.treshape\s+(%[\w.$]+)\s*:\s*(.+?)\s*->\s*(.+)", reshape_line
+        )
+        assert reshape_match is not None, f"Unable to parse reshape: {reshape_line}"
+        reshape_infos.append(
+            {
+                "result": reshape_match.group(1),
+                "src": reshape_match.group(2),
+                "src_type": reshape_match.group(3),
+                "dst_type": reshape_match.group(4),
+            }
+        )
+
+    tadd_match = re.search(r"outs\((%[\w.$]+)\s*:", tadd_line)
+    assert tadd_match is not None, f"Unable to parse tadd outs: {tadd_line}"
+    tadd_out = tadd_match.group(1)
+
+    reshape_back_results = {
+        info
+        for info in [
+            reshape["result"]
+            for reshape in reshape_infos
+            if "rows=1, cols=16" in reshape["src_type"] and "rows=16, cols=1" in reshape["dst_type"]
+        ]
+    }
+
+    loop_carried_reshapes = [
+        info
+        for info in reshape_infos
+        if info["src"] in reshape_back_results
+        and "rows=16, cols=1" in info["src_type"]
+        and "rows=1, cols=16" in info["dst_type"]
+    ]
+    assert loop_carried_reshapes, (
+        "Expected a loop-carried column-vector to row-vector reshape fed by a prior reshape-back SSA, "
+        f"but none matched in: {reshape_lines}"
+    )
+
+    assert all(info["src"] != tadd_out for info in loop_carried_reshapes), (
+        "Loop-carried accumulator must not collapse to the row-major reshape result SSA, "
+        f"but reshape source used tadd out {tadd_out}: {loop_carried_reshapes}"
+    )
+
+    assert all(info["result"] != tadd_out for info in loop_carried_reshapes), (
+        "Reshape result SSA should remain distinct from the tadd output buffer, "
+        f"but reshape result reused {tadd_out}: {loop_carried_reshapes}"
+    )
 
 
 def test_pto_codegen_mixed_scalar_and_tile_iter_args():

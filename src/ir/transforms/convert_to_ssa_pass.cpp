@@ -379,8 +379,8 @@ class SSAConverter {
 
   VarPtr AllocVersion(const Var* canonical, const TypePtr& type, const Span& span) {
     int v = NextVersion(canonical);
-    auto var = std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "ssa", v), SubstType(type),
-                                     span);
+    auto var =
+        std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "ssa", v), SubstType(type), span);
     cur_[canonical] = var;
     return var;
   }
@@ -539,8 +539,8 @@ class SSAConverter {
       ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv),
                                               init->GetType(), init, op->span_));
       int rv = NextVersion(canonical);
-      carried_rvs.push_back(
-          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), init->GetType(), op->span_));
+      carried_rvs.push_back(std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv),
+                                                  init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
@@ -556,10 +556,11 @@ class SSAConverter {
         init = std::make_shared<Var>(canonical->name_hint_, type, op->span_);
       }
       int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type, init,
-                                              op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type,
+                                              init, op->span_));
       int rv = NextVersion(canonical);
-      auto rv_var = std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), type, op->span_);
+      auto rv_var =
+          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), type, op->span_);
       esc_rvs.push_back(rv_var);
     }
 
@@ -669,8 +670,8 @@ class SSAConverter {
       ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv),
                                               init->GetType(), init, op->span_));
       int rv = NextVersion(canonical);
-      carried_rvs.push_back(
-          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), init->GetType(), op->span_));
+      carried_rvs.push_back(std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv),
+                                                  init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
@@ -682,8 +683,8 @@ class SSAConverter {
       auto init = FindInitValue(type, before);
       if (!init) init = std::make_shared<Var>(canonical->name_hint_, type, op->span_);
       int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type, init,
-                                              op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type,
+                                              init, op->span_));
       int rv = NextVersion(canonical);
       esc_rvs.push_back(
           std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), type, op->span_));
@@ -784,8 +785,8 @@ class SSAConverter {
       for (const auto& rv : op->return_vars_) {
         auto rv_canonical = tracker_.GetCanonical(rv.get());
         int v = NextVersion(rv_canonical);
-        auto nrv =
-            std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v), rv->GetType(), rv->span_);
+        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v),
+                                         rv->GetType(), rv->span_);
         return_vars.push_back(nrv);
         cur_[rv_canonical] = nrv;
       }
@@ -801,8 +802,8 @@ class SSAConverter {
       VarPtr tv = then_ver.count(canonical) ? then_ver.at(canonical) : before.at(canonical);
       VarPtr ev = else_ver.count(canonical) ? else_ver.at(canonical) : before.at(canonical);
       int pv = NextVersion(canonical);
-      auto phi =
-          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "phi", pv), tv->GetType(), op->span_);
+      auto phi = std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "phi", pv), tv->GetType(),
+                                       op->span_);
       return_vars.push_back(phi);
       then_yields.push_back(tv);
       else_yields.push_back(ev);
@@ -821,8 +822,8 @@ class SSAConverter {
       }
       if (!handled) {
         int v = NextVersion(rv_canonical);
-        auto nrv =
-            std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v), rv->GetType(), rv->span_);
+        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v),
+                                         rv->GetType(), rv->span_);
         return_vars.push_back(nrv);
         cur_[rv_canonical] = nrv;
       }

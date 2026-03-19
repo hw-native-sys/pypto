@@ -108,22 +108,27 @@ class PTOCodegen : public CodegenBase {
   std::string GetIndexConstant(int64_t val);
 
   /**
-   * @brief Register a variable name to an MLIR SSA name
+   * @brief Register a variable to an MLIR SSA name
    *
-   * @param var_name IR variable name (e.g., "M")
+   * @param var IR variable
    * @param mlir_name MLIR SSA name (e.g., "%arg3")
    */
-  void RegisterVarToMlir(const std::string& var_name, const std::string& mlir_name);
+  void RegisterVarToMlir(const ir::VarPtr& var, const std::string& mlir_name);
 
   /**
    * @brief Register a tensor variable to its tensor view SSA name
    *
    * Used when block.store assigns a tensor result that inherits the input tensor's view.
    *
-   * @param var_name IR variable name
+   * @param var IR variable
    * @param tensor_view_name MLIR tensor view SSA name
    */
-  void RegisterTensorView(const std::string& var_name, const std::string& tensor_view_name);
+  void RegisterTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
+
+  /**
+   * @brief Get the IR variable currently being assigned
+   */
+  [[nodiscard]] ir::VarPtr GetCurrentResultVar() const;
 
   /**
    * @brief Get or emit float constant (emits to constants section, returns SSA name)
@@ -253,9 +258,17 @@ class PTOCodegen : public CodegenBase {
   void GenerateFunction(const ir::FunctionPtr& func);
 
   /**
-   * @brief Build variable name to MemRef mapping from function body
+   * @brief Build variable identity to MemRef mapping from function body
    */
   void BuildVarToMemRefMapping(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Get the pointer-identity key for a variable
+   */
+  [[nodiscard]] const ir::Var* GetVarKey(const ir::VarPtr& var) const;
+  void BindVarToMlir(const ir::VarPtr& var, const std::string& mlir_name);
+  void BindTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
+  void BindVarToMemRef(const ir::VarPtr& var, const ir::MemRef* memref);
 
   /**
    * @brief Emit make_tensor_view for all tensor parameters
@@ -293,11 +306,17 @@ class PTOCodegen : public CodegenBase {
   std::ostringstream body_section_;
   int indent_level_ = 0;
 
-  // Variable mappings
-  std::map<std::string, std::string> var_to_mlir_;
-  std::map<std::string, std::string> tensor_to_view_;
+  // Variable mappings keyed by Var identity in the final IR snapshot.
+  std::map<const ir::Var*, std::string> var_to_mlir_;
+  // Compatibility fallback for passes that rebuild equivalent Vars by name.
+  std::map<std::string, std::string> var_name_to_mlir_;
+  std::map<const ir::Var*, std::string> tensor_to_view_;
+  // Compatibility fallback for passes that preserve names but not Var identity.
+  std::map<std::string, std::string> tensor_name_to_view_;
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
-  std::map<std::string, const ir::MemRef*> var_to_memref_;
+  std::map<const ir::Var*, const ir::MemRef*> var_to_memref_;
+  // Compatibility fallback for name-based substitutions in upstream passes.
+  std::map<std::string, const ir::MemRef*> var_name_to_memref_;
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
   std::map<int64_t, std::string> emitted_constants_;
   std::set<double> emitted_float_constants_;
@@ -316,6 +335,7 @@ class PTOCodegen : public CodegenBase {
 
   // Current function context
   ir::FunctionPtr current_function_;
+  ir::VarPtr current_result_var_;
   std::string current_result_buf_;
   std::shared_ptr<const ir::TileType> current_result_tile_type_;
 
