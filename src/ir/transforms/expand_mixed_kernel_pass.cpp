@@ -11,8 +11,8 @@
 
 #include <algorithm>
 #include <any>
-#include <cctype>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -204,11 +204,11 @@ StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
 
 // Forward declare
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                 std::unordered_map<std::string, CoreAffinity>& var_affinity);
+                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity);
 
 CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
                                   std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                  std::unordered_map<std::string, CoreAffinity>& var_affinity) {
+                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity) {
   CoreAffinity combined = CoreAffinity::SHARED;
   for (const auto& stmt : stmts) {
     combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity));
@@ -217,13 +217,13 @@ CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
 }
 
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                 std::unordered_map<std::string, CoreAffinity>& var_affinity) {
+                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity) {
   CoreAffinity result = CoreAffinity::SHARED;
 
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (call) result = ClassifyCallAffinity(call);
-    var_affinity[assign->var_->name_hint_] = result;
+    var_affinity[assign->var_.get()] = result;
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyCallAffinity(call);
@@ -1028,7 +1028,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
-  std::unordered_map<std::string, CoreAffinity> var_affinity;
+  std::unordered_map<const Var*, CoreAffinity> var_affinity;
   AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
 
   // Collect CV boundary moves from explicit tile.move ops
@@ -1135,19 +1135,73 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
     // Also remap any undefined SSA versions of output parameters that survive in
     // the AIV body after AIC-side stores inside nested control flow are stripped.
-    auto canonicalize_name = [](const std::string& name) {
-      auto last_underscore = name.rfind('_');
-      if (last_underscore == std::string::npos || last_underscore + 1 >= name.size()) {
-        return name;
+    // Build an origin map: for each body Var, trace back to the function parameter
+    // it was derived from. Propagates through assignments, iter_args, and return_vars.
+    std::unordered_map<const Var*, const Var*> origin_map;
+    // Seed with param -> param identity
+    for (const auto& param : func->params_) {
+      origin_map[param.get()] = param.get();
+    }
+
+    // Helper to propagate origin from a Var expression
+    auto propagate_from_expr = [&](const Var* dest, const ExprPtr& src_expr) {
+      if (auto src_var = std::dynamic_pointer_cast<const Var>(src_expr)) {
+        auto it = origin_map.find(src_var.get());
+        if (it != origin_map.end()) {
+          origin_map[dest] = it->second;
+        }
       }
-      const auto suffix = name.substr(last_underscore + 1);
-      const bool numeric_suffix = std::all_of(
-          suffix.begin(), suffix.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
-      if (!numeric_suffix) {
-        return name;
-      }
-      return name.substr(0, last_underscore);
     };
+
+    // Recursive walk to propagate origins through assignments, iter_args, and return_vars
+    std::function<void(const std::vector<StmtPtr>&)> walk_origins;
+    walk_origins = [&](const std::vector<StmtPtr>& ss) {
+      for (const auto& stmt : ss) {
+        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+          const Var* lhs = assign->var_.get();
+          if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+            auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+            if (opnode && opnode->name_ == "tile.store" && call->args_.size() >= 3) {
+              propagate_from_expr(lhs, call->args_[2]);
+              continue;
+            }
+          }
+          propagate_from_expr(lhs, assign->value_);
+        } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+          // Propagate: iter_arg -> origin of init_value
+          for (const auto& ia : for_stmt->iter_args_) {
+            propagate_from_expr(ia.get(), ia->initValue_);
+          }
+          walk_origins(FlattenBody(for_stmt->body_));
+          // Propagate: return_var[i] -> origin of iter_arg[i]
+          for (size_t i = 0; i < for_stmt->return_vars_.size() && i < for_stmt->iter_args_.size(); ++i) {
+            auto ia_it = origin_map.find(for_stmt->iter_args_[i].get());
+            if (ia_it != origin_map.end()) {
+              origin_map[for_stmt->return_vars_[i].get()] = ia_it->second;
+            }
+          }
+        } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+          for (const auto& ia : while_stmt->iter_args_) {
+            propagate_from_expr(ia.get(), ia->initValue_);
+          }
+          walk_origins(FlattenBody(while_stmt->body_));
+          for (size_t i = 0; i < while_stmt->return_vars_.size() && i < while_stmt->iter_args_.size(); ++i) {
+            auto ia_it = origin_map.find(while_stmt->iter_args_[i].get());
+            if (ia_it != origin_map.end()) {
+              origin_map[while_stmt->return_vars_[i].get()] = ia_it->second;
+            }
+          }
+        } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+          walk_origins(FlattenBody(if_stmt->then_body_));
+          if (if_stmt->else_body_.has_value()) {
+            walk_origins(FlattenBody(if_stmt->else_body_.value()));
+          }
+        } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+          walk_origins(seq->stmts_);
+        }
+      }
+    };
+    walk_origins(stmts);
 
     outline_utils::VarRefCollector aiv_ref_collector;
     aiv_ref_collector.VisitStmt(aiv_body_stmt);
@@ -1155,16 +1209,15 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       if (!ref_ptr || aiv_def_collector.var_defs.count(ref_ptr) || aiv_map.count(ref_ptr)) {
         continue;
       }
-      const auto ref_name = canonicalize_name(ref_ptr->name_hint_);
+      // Find the origin parameter for this dangling reference
+      auto origin_it = origin_map.find(ref_ptr);
+      if (origin_it == origin_map.end()) continue;
+      const Var* origin_param = origin_it->second;
+      // Verify the origin is an Out/InOut parameter
       for (size_t idx = 0; idx < func->params_.size() && idx < func->param_directions_.size(); ++idx) {
-        if (func->param_directions_[idx] == ParamDirection::In) {
-          continue;
-        }
-        const auto& param = func->params_[idx];
-        if (!param || canonicalize_name(param->name_hint_) != ref_name) {
-          continue;
-        }
-        auto param_it = aiv_map.find(param.get());
+        if (func->param_directions_[idx] == ParamDirection::In) continue;
+        if (func->params_[idx].get() != origin_param) continue;
+        auto param_it = aiv_map.find(origin_param);
         if (param_it != aiv_map.end()) {
           aiv_map[ref_ptr] = param_it->second;
         }
@@ -1344,7 +1397,7 @@ Pass ExpandMixedKernel() {
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
       auto stmts = FlattenBody(func->body_);
       std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
-      std::unordered_map<std::string, CoreAffinity> var_affinity;
+      std::unordered_map<const Var*, CoreAffinity> var_affinity;
       auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
 
       // A function is mixed if the combined affinity is MIXED or BOUNDARY

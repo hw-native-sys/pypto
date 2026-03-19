@@ -64,14 +64,16 @@ Pass OutlineHierarchyScopes() {
       // Build symbol table for this function
       outline_utils::VarCollector type_collector;
       for (const auto& var : func->params_) {
-        type_collector.var_types[var->name_hint_] = var->GetType();
-        type_collector.var_objects[var->name_hint_] = var;
+        type_collector.var_types[var.get()] = var->GetType();
+        type_collector.var_objects[var.get()] = var;
+        type_collector.known_names.insert(var->name_hint_);
       }
       type_collector.VisitStmt(func->body_);
 
       // Outline Hierarchy scopes in this function
       outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
-                                            ScopeKind::Hierarchy, FunctionType::Opaque, "_hierarchy_");
+                                            type_collector.known_names, ScopeKind::Hierarchy,
+                                            FunctionType::Opaque, "_hierarchy_");
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Preserve parent function type (don't promote — hierarchy is orthogonal to FunctionType)

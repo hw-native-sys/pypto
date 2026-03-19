@@ -11,11 +11,11 @@
 
 #include "pypto/ir/transforms/dependency_analyzer.h"
 
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -307,9 +307,9 @@ std::vector<BasicBlock> DependencyAnalyzer::IdentifyBasicBlocks(const StmtPtr& s
 std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const BasicBlock& block) {
   std::vector<DependencyEdge> dependencies;
 
-  // Track last write and last read for each variable
-  std::map<std::string, StmtPtr> last_write;               // var_name -> stmt that last wrote it
-  std::map<std::string, std::vector<StmtPtr>> last_reads;  // var_name -> stmts that read it
+  // Track last write and last read for each variable (by pointer identity, post-SSA)
+  std::unordered_map<const Var*, StmtPtr> last_write;               // var -> stmt that last wrote it
+  std::unordered_map<const Var*, std::vector<StmtPtr>> last_reads;  // var -> stmts that read it
 
   // Helper class to collect variable reads and writes
   class VarCollector : public IRVisitor {
@@ -337,23 +337,23 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Check for RAW dependencies (Read-After-Write)
       for (const auto& read_var : collector.read_vars) {
-        std::string var_name = read_var->name_hint_;
-        if (last_write.count(var_name)) {
+        auto lw_it = last_write.find(read_var.get());
+        if (lw_it != last_write.end()) {
           DependencyEdge edge;
-          edge.producer = last_write[var_name];
+          edge.producer = lw_it->second;
           edge.consumer = stmt;
           edge.variable = read_var;
           edge.type = DependencyEdge::RAW;
-          edge.producer_pipe = GetPipeTypeFromStmt(last_write[var_name]);
+          edge.producer_pipe = GetPipeTypeFromStmt(lw_it->second);
           edge.consumer_pipe = GetPipeTypeFromStmt(stmt);
           dependencies.push_back(edge);
         }
       }
 
       // Check for WAR dependencies (Write-After-Read)
-      std::string def_name = def_var->name_hint_;
-      if (last_reads.count(def_name)) {
-        for (const auto& read_stmt : last_reads[def_name]) {
+      auto lr_it = last_reads.find(def_var.get());
+      if (lr_it != last_reads.end()) {
+        for (const auto& read_stmt : lr_it->second) {
           DependencyEdge edge;
           edge.producer = read_stmt;
           edge.consumer = stmt;
@@ -366,23 +366,24 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
       }
 
       // Check for WAW dependencies (Write-After-Write)
-      if (last_write.count(def_name)) {
+      auto lw_it = last_write.find(def_var.get());
+      if (lw_it != last_write.end()) {
         DependencyEdge edge;
-        edge.producer = last_write[def_name];
+        edge.producer = lw_it->second;
         edge.consumer = stmt;
         edge.variable = def_var;
         edge.type = DependencyEdge::WAW;
-        edge.producer_pipe = GetPipeTypeFromStmt(last_write[def_name]);
+        edge.producer_pipe = GetPipeTypeFromStmt(lw_it->second);
         edge.consumer_pipe = GetPipeTypeFromStmt(stmt);
         dependencies.push_back(edge);
       }
 
       // Update tracking: record this write
-      last_write[def_name] = stmt;
+      last_write[def_var.get()] = stmt;
 
       // Record reads for this statement
       for (const auto& read_var : collector.read_vars) {
-        last_reads[read_var->name_hint_].push_back(stmt);
+        last_reads[read_var.get()].push_back(stmt);
       }
 
     } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
@@ -391,14 +392,14 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Check for RAW dependencies
       for (const auto& read_var : collector.read_vars) {
-        std::string var_name = read_var->name_hint_;
-        if (last_write.count(var_name)) {
+        auto lw_it = last_write.find(read_var.get());
+        if (lw_it != last_write.end()) {
           DependencyEdge edge;
-          edge.producer = last_write[var_name];
+          edge.producer = lw_it->second;
           edge.consumer = stmt;
           edge.variable = read_var;
           edge.type = DependencyEdge::RAW;
-          edge.producer_pipe = GetPipeTypeFromStmt(last_write[var_name]);
+          edge.producer_pipe = GetPipeTypeFromStmt(lw_it->second);
           edge.consumer_pipe = GetPipeTypeFromStmt(stmt);
           dependencies.push_back(edge);
         }
@@ -406,7 +407,7 @@ std::vector<DependencyEdge> DependencyAnalyzer::AnalyzeBlockDependencies(const B
 
       // Record reads
       for (const auto& read_var : collector.read_vars) {
-        last_reads[read_var->name_hint_].push_back(stmt);
+        last_reads[read_var.get()].push_back(stmt);
       }
     }
   }
@@ -441,12 +442,12 @@ std::vector<DependencyEdge> DependencyAnalyzer::MergeDependencies(
   std::vector<DependencyEdge> merged;
 
   // Take union of all dependencies from all paths
-  // Use a set to track unique edges (by producer, consumer, variable, type)
-  std::set<std::tuple<StmtPtr, StmtPtr, std::string, DependencyEdge::Type>> seen;
+  // Use a set to track unique edges (by producer, consumer, variable pointer, type)
+  std::set<std::tuple<StmtPtr, StmtPtr, const Var*, DependencyEdge::Type>> seen;
 
   for (const auto& path : path_dependencies) {
     for (const auto& edge : path) {
-      auto key = std::make_tuple(edge.producer, edge.consumer, edge.variable->name_hint_, edge.type);
+      auto key = std::make_tuple(edge.producer, edge.consumer, edge.variable.get(), edge.type);
       if (seen.find(key) == seen.end()) {
         seen.insert(key);
         merged.push_back(edge);

@@ -182,58 +182,67 @@ class StoreEvalToAssignMutator : public IRMutator {
   std::unordered_map<const Var*, VarPtr> target_vars_;
 };
 
-/** @brief Visitor to build a symbol table mapping variable names to their types and Var objects. */
+/** @brief Visitor to build a symbol table mapping variable pointers to their types and Var objects. */
 class VarCollector : public IRVisitor {
  public:
-  std::unordered_map<std::string, TypePtr> var_types;
-  std::unordered_map<std::string, VarPtr> var_objects;
+  std::unordered_map<const Var*, TypePtr> var_types;
+  std::unordered_map<const Var*, VarPtr> var_objects;
+  std::unordered_set<std::string> known_names;
 
  protected:
   // Use VisitVarLike_ to collect both Var and IterArg references.
   // VisitExpr_(IterArgPtr) calls VisitVarLike_ then visits initValue_,
   // so IterArgs from outer loops are included in the symbol table.
   void VisitVarLike_(const VarPtr& op) override {
-    var_types.try_emplace(op->name_hint_, op->GetType());
-    var_objects.try_emplace(op->name_hint_, op);
+    var_types.try_emplace(op.get(), op->GetType());
+    var_objects.try_emplace(op.get(), op);
+    known_names.insert(op->name_hint_);
     IRVisitor::VisitVarLike_(op);
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    var_types[op->var_->name_hint_] = op->var_->GetType();
-    var_objects[op->var_->name_hint_] = op->var_;
+    var_types[op->var_.get()] = op->var_->GetType();
+    var_objects[op->var_.get()] = op->var_;
+    known_names.insert(op->var_->name_hint_);
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    var_types[op->loop_var_->name_hint_] = op->loop_var_->GetType();
-    var_objects[op->loop_var_->name_hint_] = op->loop_var_;
+    var_types[op->loop_var_.get()] = op->loop_var_->GetType();
+    var_objects[op->loop_var_.get()] = op->loop_var_;
+    known_names.insert(op->loop_var_->name_hint_);
     for (const auto& iter_arg : op->iter_args_) {
-      var_types[iter_arg->name_hint_] = iter_arg->GetType();
-      var_objects[iter_arg->name_hint_] = iter_arg;
+      var_types[iter_arg.get()] = iter_arg->GetType();
+      var_objects[iter_arg.get()] = iter_arg;
+      known_names.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_hint_] = return_var->GetType();
-      var_objects[return_var->name_hint_] = return_var;
+      var_types[return_var.get()] = return_var->GetType();
+      var_objects[return_var.get()] = return_var;
+      known_names.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     for (const auto& iter_arg : op->iter_args_) {
-      var_types[iter_arg->name_hint_] = iter_arg->GetType();
-      var_objects[iter_arg->name_hint_] = iter_arg;
+      var_types[iter_arg.get()] = iter_arg->GetType();
+      var_objects[iter_arg.get()] = iter_arg;
+      known_names.insert(iter_arg->name_hint_);
     }
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_hint_] = return_var->GetType();
-      var_objects[return_var->name_hint_] = return_var;
+      var_types[return_var.get()] = return_var->GetType();
+      var_objects[return_var.get()] = return_var;
+      known_names.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     for (const auto& return_var : op->return_vars_) {
-      var_types[return_var->name_hint_] = return_var->GetType();
-      var_objects[return_var->name_hint_] = return_var;
+      var_types[return_var.get()] = return_var->GetType();
+      var_objects[return_var.get()] = return_var;
+      known_names.insert(return_var->name_hint_);
     }
     IRVisitor::VisitStmt_(op);
   }
@@ -253,12 +262,14 @@ class VarCollector : public IRVisitor {
  */
 class ScopeOutliner : public IRMutator {
  public:
-  ScopeOutliner(std::string func_name, const std::unordered_map<std::string, TypePtr>& var_types,
-                const std::unordered_map<std::string, VarPtr>& var_objects, ScopeKind target_scope_kind,
+  ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
+                const std::unordered_map<const Var*, VarPtr>& var_objects,
+                const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
                 FunctionType outlined_func_type, std::string name_suffix)
       : func_name_(std::move(func_name)),
         var_types_(var_types),
         var_objects_(var_objects),
+        known_names_(known_names),
         target_scope_kind_(target_scope_kind),
         outlined_func_type_(outlined_func_type),
         name_suffix_(std::move(name_suffix)) {}
@@ -386,7 +397,7 @@ class ScopeOutliner : public IRMutator {
     std::vector<VarPtr> input_vars;
     for (const Var* var_ptr : ref_collector.var_refs) {
       if (!def_collector.var_defs.count(var_ptr)) {
-        auto obj_it = var_objects_.find(var_ptr->name_hint_);
+        auto obj_it = var_objects_.find(var_ptr);
         CHECK(obj_it != var_objects_.end())
             << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
         input_vars.push_back(obj_it->second);
@@ -405,7 +416,7 @@ class ScopeOutliner : public IRMutator {
 
     for (const Var* var_ptr : def_collector.var_defs) {
       if (used_after.count(var_ptr)) {
-        auto scope_it = scope_var_collector.var_objects.find(var_ptr->name_hint_);
+        auto scope_it = scope_var_collector.var_objects.find(var_ptr);
         CHECK(scope_it != scope_var_collector.var_objects.end())
             << "Variable " << var_ptr->name_hint_ << " not found in scope body";
         output_vars.push_back(scope_it->second);
@@ -428,7 +439,7 @@ class ScopeOutliner : public IRMutator {
     std::unordered_map<const Var*, const Var*> store_body_ptrs;
     for (const Var* var_ptr : store_collector.store_targets) {
       if (!def_collector.var_defs.count(var_ptr)) {
-        auto ext_it = var_objects_.find(var_ptr->name_hint_);
+        auto ext_it = var_objects_.find(var_ptr);
         CHECK(ext_it != var_objects_.end())
             << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
         output_vars.push_back(ext_it->second);
@@ -451,16 +462,18 @@ class ScopeOutliner : public IRMutator {
     int saved_scope_counter = scope_counter_;
     auto saved_var_types = var_types_;
     auto saved_var_objects = var_objects_;
+    auto saved_known_names = known_names_;
     auto saved_required_outputs = required_outputs_;
     auto saved_renames = store_target_renames_;
     func_name_ = outlined_func_name;
     scope_counter_ = 0;
-    for (const auto& [name, type] : scope_var_collector.var_types) {
-      var_types_[name] = type;
+    for (const auto& [ptr, type] : scope_var_collector.var_types) {
+      var_types_[ptr] = type;
     }
-    for (const auto& [name, var] : scope_var_collector.var_objects) {
-      var_objects_[name] = var;
+    for (const auto& [ptr, var] : scope_var_collector.var_objects) {
+      var_objects_[ptr] = var;
     }
+    known_names_.insert(scope_var_collector.known_names.begin(), scope_var_collector.known_names.end());
     store_target_renames_.clear();
     // Propagate output requirements so nested scopes know what's needed
     required_outputs_.clear();
@@ -472,6 +485,7 @@ class ScopeOutliner : public IRMutator {
     scope_counter_ = saved_scope_counter;
     var_types_ = saved_var_types;
     var_objects_ = saved_var_objects;
+    known_names_ = saved_known_names;
     required_outputs_ = saved_required_outputs;
     store_target_renames_ = saved_renames;
 
@@ -492,9 +506,8 @@ class ScopeOutliner : public IRMutator {
     for (const auto& input_var : input_vars) {
       outlined_used_names.insert(input_var->name_hint_);
     }
-    for (const auto& [name, _] : scope_var_collector.var_objects) {
-      outlined_used_names.insert(name);
-    }
+    outlined_used_names.insert(scope_var_collector.known_names.begin(),
+                               scope_var_collector.known_names.end());
 
     // Create fresh output variables for the outlined function
     std::vector<VarPtr> outlined_output_vars;
@@ -504,7 +517,7 @@ class ScopeOutliner : public IRMutator {
       TypePtr var_type;
       if (is_store) {
         // Store target: external variable, look up from outer symbol table
-        auto type_it = var_types_.find(out_var->name_hint_);
+        auto type_it = var_types_.find(out_var.get());
         CHECK(type_it != var_types_.end())
             << "Variable " << out_var->name_hint_ << " not found in symbol table";
         var_type = type_it->second;
@@ -579,7 +592,7 @@ class ScopeOutliner : public IRMutator {
     auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
     std::vector<ExprPtr> call_args;
     for (const auto& input_var : input_vars) {
-      auto var_it = var_objects_.find(input_var->name_hint_);
+      auto var_it = var_objects_.find(input_var.get());
       CHECK(var_it != var_objects_.end())
           << "Variable " << input_var->name_hint_ << " not found in var_objects";
       call_args.push_back(var_it->second);
@@ -608,16 +621,16 @@ class ScopeOutliner : public IRMutator {
     auto resolve_call_site_var = [&](const VarPtr& out_var) -> VarPtr {
       bool is_store = store_output_set.count(out_var.get()) > 0;
       if (!is_store) {
-        auto var_it = scope_var_collector.var_objects.find(out_var->name_hint_);
+        auto var_it = scope_var_collector.var_objects.find(out_var.get());
         if (var_it != scope_var_collector.var_objects.end()) {
           return var_it->second;
         }
-        auto ext_it = var_objects_.find(out_var->name_hint_);
+        auto ext_it = var_objects_.find(out_var.get());
         CHECK(ext_it != var_objects_.end())
             << "Variable " << out_var->name_hint_ << " not found in var_objects";
         return ext_it->second;
       }
-      auto ext_it = var_objects_.find(out_var->name_hint_);
+      auto ext_it = var_objects_.find(out_var.get());
       CHECK(ext_it != var_objects_.end())
           << "Variable " << out_var->name_hint_ << " not found in var_objects";
       return CreateFreshStoreTargetVar(ext_it->second, op->span_);
@@ -680,7 +693,7 @@ class ScopeOutliner : public IRMutator {
     do {
       version++;
       new_name = base + "_" + std::to_string(version);
-    } while (var_types_.count(new_name));
+    } while (known_names_.count(new_name));
     return new_name;
   }
 
@@ -695,10 +708,11 @@ class ScopeOutliner : public IRMutator {
     auto type = original_var->GetType();
     auto fresh_var = std::make_shared<Var>(fresh_name, type, span);
     store_target_renames_[original_var.get()] = fresh_var;
-    var_types_[fresh_name] = type;
-    var_objects_[fresh_name] = fresh_var;
-    // Also update the original name so subsequent scopes pass the renamed var as call args
-    var_objects_[original_var->name_hint_] = fresh_var;
+    var_types_[fresh_var.get()] = type;
+    var_objects_[fresh_var.get()] = fresh_var;
+    known_names_.insert(fresh_name);
+    // Also update the original pointer so subsequent scopes pass the renamed var as call args
+    var_objects_[original_var.get()] = fresh_var;
     return fresh_var;
   }
 
@@ -748,8 +762,9 @@ class ScopeOutliner : public IRMutator {
   }
 
   std::string func_name_;
-  std::unordered_map<std::string, TypePtr> var_types_;
-  std::unordered_map<std::string, VarPtr> var_objects_;
+  std::unordered_map<const Var*, TypePtr> var_types_;
+  std::unordered_map<const Var*, VarPtr> var_objects_;
+  std::unordered_set<std::string> known_names_;
   std::unordered_set<const Var*> required_outputs_;
   /// Accumulates across scopes intentionally (not saved/restored like func_name_
   /// etc.) so that subsequent scopes and statements see the renamed variables.
