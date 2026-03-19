@@ -80,6 +80,7 @@ class VectorExampleProgram:
         self,
         a: pl.Tensor[[128, 128], pl.FP32],
         b: pl.Tensor[[128, 128], pl.FP32],
+        f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
         """Orchestration for formula: f = (a + b + 1)(a + b + 2) + (a + b)
 
@@ -98,7 +99,6 @@ class VectorExampleProgram:
         e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
         g: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         g = self.kernel_mul(d, e, g)
-        f: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         f = self.kernel_add(g, c, f)
         return f
 

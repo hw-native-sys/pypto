@@ -42,9 +42,11 @@ class MatmulProgram:
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
-        self, a: pl.Tensor[[64, 64], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         out_c = self.matmul(a, b, out_c)
         return out_c
 
@@ -86,7 +88,7 @@ class MatmulaccProgram:
         self,
         a: pl.Tensor[[64, 64], pl.FP32],
         b: pl.Tensor[[64, 64], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         out_c = self.matmul_acc(a, b, out_c)
         return out_c

@@ -65,7 +65,7 @@ class RMSNormProgram:
         self,
         x: pl.Tensor[[32, 64], pl.FP32],
         gamma: pl.Tensor[[1, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
     ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output: pl.Tensor[[32, 64], pl.FP32] = pl.create_tensor([32, 64], dtype=pl.FP32)
         output = self.kernel_rms_norm(x, gamma, output)
         return output

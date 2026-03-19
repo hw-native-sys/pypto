@@ -82,7 +82,7 @@ class LayerNormProgram:
         x: pl.Tensor[[32, 64], pl.FP32],
         gamma: pl.Tensor[[1, 64], pl.FP32],
         beta: pl.Tensor[[1, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
     ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output: pl.Tensor[[32, 64], pl.FP32] = pl.create_tensor([32, 64], dtype=pl.FP32)
         output = self.kernel_layer_norm(x, gamma, beta, output)
         return output

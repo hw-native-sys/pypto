@@ -77,8 +77,8 @@ class TestForLoopAdd(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_add_loop(a, b, c)
                 return c
 
@@ -145,8 +145,8 @@ class TestForLoopMul(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_mul_loop(a, b, c)
                 return c
 
@@ -215,8 +215,8 @@ class TestForLoopYieldAdd(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_add_yield(a, b, c)
                 return c
 
@@ -267,8 +267,8 @@ class TestForLoopYieldTileAccum(PTOTestCase):
             def orchestrator(
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
                 c = self.kernel_tile_accum(a, c)
                 return c
 
@@ -321,8 +321,8 @@ class TestIfYieldTensor(PTOTestCase):
                 self,
                 a: pl.Tensor[[64, 64], pl.FP32],
                 cond_tensor: pl.Tensor[[1], pl.INT32],
+                c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
                 cond: pl.Scalar[pl.INT32] = pl.tensor.read(cond_tensor, [0])
                 c = self.kernel_if_yield(a, cond, c)
                 return c
@@ -385,8 +385,8 @@ class TestForIfElseNested(PTOTestCase):
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
                 cond_tensor: pl.Tensor[[1], pl.INT32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 cond: pl.Scalar[pl.INT32] = pl.tensor.read(cond_tensor, [0])
                 c = self.kernel_for_if_else(a, b, cond, c)
                 return c
@@ -464,8 +464,8 @@ class TestWhileLoopAdd(PTOTestCase):
                 self,
                 a: pl.Tensor[[256, 64], pl.FP32],
                 b: pl.Tensor[[256, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> pl.Tensor[[256, 64], pl.FP32]:
-                c: pl.Tensor[[256, 64], pl.FP32] = pl.create_tensor([256, 64], dtype=pl.FP32)
                 c = self.kernel_while_add(a, b, c)
                 return c
 

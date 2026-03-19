@@ -420,6 +420,8 @@ def build_llama_mini_program(
             w_down: pl.Tensor[[head_dim, head_dim], pl.FP32],
             # LM head weight [D, V]
             w_lm: pl.Tensor[[head_dim, vocab_size], pl.FP32],
+            # Output
+            logits: pl.Out[pl.Tensor[[seq_len, vocab_size], pl.FP32]],
         ) -> pl.Tensor[[seq_len, vocab_size], pl.FP32]:
             """Minimal LLaMA 7B-style model forward pass (1 layer, 1 head).
 
@@ -524,9 +526,6 @@ def build_llama_mini_program(
             h_normed = self.kernel_rms_norm(h1, h_normed)
 
             # ===== LM Head: [S,D] @ [D,V] → logits [S,V] =====
-            logits: pl.Tensor[[seq_len, vocab_size], pl.FP32] = pl.create_tensor(
-                [seq_len, vocab_size], dtype=pl.FP32
-            )
             logits = self.kernel_lm_head(h_normed, w_lm, logits)
 
             return logits

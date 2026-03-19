@@ -37,9 +37,11 @@ class TileAdd128Program:
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
-        self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        b: pl.Tensor[[128, 128], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         out_c = self.tile_add(a, b, out_c)
         return out_c
 
@@ -61,9 +63,11 @@ class TileAdd64Program:
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
-        self, a: pl.Tensor[[64, 64], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         out_c = self.tile_add(a, b, out_c)
         return out_c
 
@@ -85,9 +89,11 @@ class TileMul128Program:
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
-        self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        b: pl.Tensor[[128, 128], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         out_c = self.tile_mul(a, b, out_c)
         return out_c
 
@@ -109,8 +115,10 @@ class TileMul64Program:
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
-        self, a: pl.Tensor[[64, 64], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         out_c = self.tile_mul(a, b, out_c)
         return out_c

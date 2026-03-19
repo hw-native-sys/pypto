@@ -53,7 +53,10 @@ class TileSoftmaxProgram:
         return output_new
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(self, a: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
         output = self.tile_softmax(a, output)
         return output

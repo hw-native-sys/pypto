@@ -64,6 +64,7 @@ class FFNGeluProgram:
         hidden_states: pl.Tensor[[64, 64], pl.FP32],
         gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
         down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
@@ -72,7 +73,6 @@ class FFNGeluProgram:
         activated: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         activated = self.gelu_kernel(gate, activated)
         # output = activated @ down_proj_weight
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.matmul_kernel(activated, down_proj_weight, output)
         return output
 
@@ -121,6 +121,7 @@ class FFNSwigluProgram:
         gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
         up_proj_weight: pl.Tensor[[64, 64], pl.FP32],
         down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
@@ -132,7 +133,6 @@ class FFNSwigluProgram:
         activated: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         activated = self.swiglu_kernel(gate, up, activated)
         # output = activated @ down_proj_weight
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.matmul_kernel(activated, down_proj_weight, output)
         return output
 
@@ -173,6 +173,7 @@ class FFNReluProgram:
         hidden_states: pl.Tensor[[64, 64], pl.FP32],
         gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
         down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
@@ -181,6 +182,5 @@ class FFNReluProgram:
         activated: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         activated = self.relu_kernel(gate, activated)
         # output = activated @ down_proj_weight
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.matmul_kernel(activated, down_proj_weight, output)
         return output

@@ -68,9 +68,11 @@ class TestMatmul(PTOTestCase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
+                self,
+                a: pl.Tensor[[M, K], pl.FP32],
+                b: pl.Tensor[[K, N], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                out_c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 out_c = self.matmul(a, b, out_c)
                 return out_c
 
@@ -128,9 +130,11 @@ class TestMatmulBTranspose(PTOTestCase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
+                self,
+                a: pl.Tensor[[M, K], pl.FP32],
+                b: pl.Tensor[[N, K], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                out_c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 out_c = self.matmul_btranspose(a, b, out_c)
                 return out_c
 
@@ -188,9 +192,11 @@ class TestMatmulATranspose(PTOTestCase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
+                self,
+                a: pl.Tensor[[K, M], pl.FP32],
+                b: pl.Tensor[[K, N], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                out_c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 out_c = self.matmul_atranspose(a, b, out_c)
                 return out_c
 
@@ -250,9 +256,11 @@ class TestMatmulABTranspose(PTOTestCase):
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
+                self,
+                a: pl.Tensor[[K, M], pl.FP32],
+                b: pl.Tensor[[N, K], pl.FP32],
+                out_c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                out_c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 out_c = self.matmul_abtranspose(a, b, out_c)
                 return out_c
 

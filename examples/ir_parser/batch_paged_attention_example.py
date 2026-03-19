@@ -400,7 +400,7 @@ def BuildBatchPagedAttentionProgram(
             value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
             context_lens: pl.Tensor[[batch], pl.INT32],
-            out: pl.Tensor[[out_rows, head_dim], pl.FP32],
+            out: pl.Out[pl.Tensor[[out_rows, head_dim], pl.FP32]],
             config: pl.Tensor[[7], pl.INT64],
             size_query: pl.Tensor[[1], pl.INT64],
             size_key_cache: pl.Tensor[[1], pl.INT64],

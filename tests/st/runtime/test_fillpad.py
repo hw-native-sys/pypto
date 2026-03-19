@@ -50,8 +50,8 @@ class FillpadZeroProgram:
     def orchestrator(
         self,
         input_tensor: pl.Tensor[[48, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.fillpad_zero_kernel(input_tensor, output)
         return output
 
@@ -77,8 +77,8 @@ class FillpadMaxProgram:
     def orchestrator(
         self,
         input_tensor: pl.Tensor[[48, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.fillpad_max_kernel(input_tensor, output)
         return output
 
@@ -104,8 +104,8 @@ class FillpadMinProgram:
     def orchestrator(
         self,
         input_tensor: pl.Tensor[[48, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        output: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         output = self.fillpad_min_kernel(input_tensor, output)
         return output
 

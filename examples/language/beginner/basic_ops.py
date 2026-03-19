@@ -42,8 +42,8 @@ class FusedAddScaleProgram:
         self,
         a: pl.Tensor[[128, 128], pl.FP32],
         b: pl.Tensor[[128, 128], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         out_c = self.fused_add_scale(a, b, out_c)
         return out_c
 
@@ -70,8 +70,8 @@ class FusedAddReluProgram:
         self,
         a: pl.Tensor[[128, 128], pl.FP32],
         b: pl.Tensor[[128, 128], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         out_c = self.fused_add_relu(a, b, out_c)
         return out_c
 
@@ -114,11 +114,11 @@ class FusedMatmulBiasProgram:
         a: pl.Tensor[[64, 64], pl.FP32],
         b: pl.Tensor[[64, 64], pl.FP32],
         bias: pl.Tensor[[64, 64], pl.FP32],
+        c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: c = matmul(a, b) + bias"""
         mm_out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         mm_out = self.matmul_kernel(a, b, mm_out)
-        c: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         c = self.add_bias_kernel(mm_out, bias, c)
         return c
 
@@ -162,10 +162,10 @@ class FusedLinearReluProgram:
         x: pl.Tensor[[64, 64], pl.FP32],
         w: pl.Tensor[[64, 64], pl.FP32],
         bias: pl.Tensor[[64, 64], pl.FP32],
+        y: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: y = relu(matmul(x, w) + bias)"""
         mm_out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         mm_out = self.matmul_kernel(x, w, mm_out)
-        y: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
         y = self.add_bias_relu_kernel(mm_out, bias, y)
         return y

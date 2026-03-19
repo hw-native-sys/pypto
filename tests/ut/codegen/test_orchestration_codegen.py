@@ -212,9 +212,9 @@ class TestOrchestration:
                 t: pl.Tensor[[4, 8], pl.FP32],
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                result: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 val: pl.Scalar[pl.FP32] = pl.tensor.read(t, [1, 3])  # noqa: F841
-                result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 result = self.kernel_add(a, b, result)
                 return result
 
@@ -252,8 +252,8 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
                 b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 c = self.kernel_add(a, b, c)
                 return c
 
@@ -759,9 +759,9 @@ class TestOrchestration:
             def orch_create(
                 self,
                 a: pl.Tensor[[32, 32], pl.FP16],
+                result: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
             ) -> pl.Tensor[[32, 32], pl.FP16]:
                 buf: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor([32, 32], dtype=pl.FP16)
-                result: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor([32, 32], dtype=pl.FP16)
                 result = self.kernel_fill(buf, result)
                 return result
 
@@ -982,9 +982,9 @@ class TestOrchestration:
                 self,
                 a: pl.Tensor[[64, 128], pl.FP32],
                 b: pl.Tensor[[64, 128], pl.FP32],
+                result: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 d0: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)  # noqa: F841
-                result: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
                 result = self.kernel_add(a, b, result)
                 return result
 

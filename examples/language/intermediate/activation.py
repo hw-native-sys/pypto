@@ -42,8 +42,8 @@ class SiluProgram:
     def silu_orch(
         self,
         x: pl.Tensor[[32, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output: pl.Tensor[[32, 128], pl.FP32] = pl.create_tensor([32, 128], dtype=pl.FP32)
         output = self.kernel_silu(x, output)
         return output
 
@@ -71,8 +71,8 @@ class GeluProgram:
     def gelu_orch(
         self,
         x: pl.Tensor[[32, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output: pl.Tensor[[32, 128], pl.FP32] = pl.create_tensor([32, 128], dtype=pl.FP32)
         output = self.kernel_gelu(x, output)
         return output
 
@@ -103,8 +103,8 @@ class SwigluProgram:
         self,
         gate: pl.Tensor[[32, 128], pl.FP32],
         up: pl.Tensor[[32, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output: pl.Tensor[[32, 128], pl.FP32] = pl.create_tensor([32, 128], dtype=pl.FP32)
         output = self.kernel_swiglu(gate, up, output)
         return output
 
@@ -137,7 +137,7 @@ class GegluProgram:
         self,
         gate: pl.Tensor[[32, 128], pl.FP32],
         up: pl.Tensor[[32, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output: pl.Tensor[[32, 128], pl.FP32] = pl.create_tensor([32, 128], dtype=pl.FP32)
         output = self.kernel_geglu(gate, up, output)
         return output

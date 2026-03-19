@@ -43,7 +43,7 @@ class HelloWorldProgram:
         self,
         a: pl.Tensor[[128, 128], pl.FP32],
         b: pl.Tensor[[128, 128], pl.FP32],
+        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c: pl.Tensor[[128, 128], pl.FP32] = pl.create_tensor([128, 128], dtype=pl.FP32)
         out_c = self.tile_add(a, b, out_c)
         return out_c

@@ -163,6 +163,7 @@ class BatchQKMatmulTestCase(PTOTestCase):
                 key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
                 block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
                 config: pl.Tensor[[5], pl.INT64],
+                sij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.FP32]],
             ) -> pl.Tensor[[batch_q_tile, block_size], pl.FP32]:
                 batch_count: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 block_idx: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
@@ -170,10 +171,6 @@ class BatchQKMatmulTestCase(PTOTestCase):
                 block_num_p: pl.Scalar[pl.INT64] = pl.tensor.read(config, [3])
                 num_heads_p: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
 
-                sij_batch: pl.Tensor[[batch_q_tile, block_size], pl.FP32] = pl.create_tensor(
-                    [batch_q_tile, block_size],
-                    dtype=pl.FP32,
-                )
                 sij_batch = self.KernelQkMatmul(
                     query,
                     key_cache,
@@ -329,6 +326,9 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 context_lens: pl.Tensor[[batch], pl.INT32],
                 scale_config: pl.Tensor[[1], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
+                pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
+                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, block_size], pl.BF16],
                 pl.Tensor[[batch_q_tile, 1], pl.FP32],
@@ -338,18 +338,6 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 block_idx: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
                 scale_value: pl.Scalar[pl.FP32] = pl.tensor.read(scale_config, [0])
 
-                pij_batch: pl.Tensor[[batch_q_tile, block_size], pl.BF16] = pl.create_tensor(
-                    [batch_q_tile, block_size],
-                    dtype=pl.BF16,
-                )
-                mij_batch: pl.Tensor[[batch_q_tile, 1], pl.FP32] = pl.create_tensor(
-                    [batch_q_tile, 1],
-                    dtype=pl.FP32,
-                )
-                lij_batch: pl.Tensor[[batch_q_tile, 1], pl.FP32] = pl.create_tensor(
-                    [batch_q_tile, 1],
-                    dtype=pl.FP32,
-                )
                 pij_batch, mij_batch, lij_batch = self.KernelSoftmaxPrepare(
                     sij_batch,
                     pij_batch,
@@ -515,15 +503,12 @@ class BatchPVMatmulTestCase(PTOTestCase):
                 value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
                 block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
                 config: pl.Tensor[[3], pl.INT64],
+                oi_new_batch: pl.Out[pl.Tensor[[batch_q_tile, head_dim], pl.FP32]],
             ) -> pl.Tensor[[batch_q_tile, head_dim], pl.FP32]:
                 batch_count: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 block_idx: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
                 block_num_p: pl.Scalar[pl.INT64] = pl.tensor.read(config, [2])
 
-                oi_new_batch: pl.Tensor[[batch_q_tile, head_dim], pl.FP32] = pl.create_tensor(
-                    [batch_q_tile, head_dim],
-                    dtype=pl.FP32,
-                )
                 oi_new_batch = self.KernelPvMatmul(
                     pij_batch,
                     value_cache,
@@ -767,9 +752,10 @@ class BatchOnlineUpdateTestCase(PTOTestCase):
                 lij_batch: pl.Tensor[[batch_q_tile, 1], pl.FP32],
                 oi_new_batch: pl.Tensor[[batch_q_tile, head_dim], pl.FP32],
                 config: pl.Tensor[[5], pl.INT64],
-                mi_batch: pl.Tensor[[batch_q_tile, 1], pl.FP32],
-                li_batch: pl.Tensor[[batch_q_tile, 1], pl.FP32],
-                oi_batch: pl.Tensor[[batch_q_tile, head_dim], pl.FP32],
+                mi_batch: pl.InOut[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                li_batch: pl.InOut[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                oi_batch: pl.InOut[pl.Tensor[[batch_q_tile, head_dim], pl.FP32]],
+                out_tensor: pl.Out[pl.Tensor[[out_rows, head_dim], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, 1], pl.FP32],
                 pl.Tensor[[batch_q_tile, 1], pl.FP32],
@@ -782,10 +768,6 @@ class BatchOnlineUpdateTestCase(PTOTestCase):
                 q_offset: pl.Scalar[pl.INT64] = pl.tensor.read(config, [3])
                 num_heads_p: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
 
-                out_tensor: pl.Tensor[[out_rows, head_dim], pl.FP32] = pl.create_tensor(
-                    [out_rows, head_dim],
-                    dtype=pl.FP32,
-                )
                 mi_batch, li_batch, oi_batch, out_tensor = self.KernelOnlineUpdate(
                     mij_batch,
                     lij_batch,
