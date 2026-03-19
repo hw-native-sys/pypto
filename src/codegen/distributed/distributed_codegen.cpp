@@ -12,7 +12,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 
 #include <algorithm>
-#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -21,8 +21,10 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -509,14 +511,14 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   std::vector<std::string> input_names;
   std::vector<std::string> all_arg_strs;
 
-  for (size_t i = 0; i < call->args_.size(); ++i) {
-    VisitExpr(call->args_[i]);
+  for (const auto& arg : call->args_) {
+    VisitExpr(arg);
     std::string arg_str = current_expr_value_;
     current_expr_value_ = "";
     all_arg_strs.push_back(arg_str);
 
     // Tensor args are inputs
-    if (std::dynamic_pointer_cast<const ir::TensorType>(call->args_[i]->GetType())) {
+    if (std::dynamic_pointer_cast<const ir::TensorType>(arg->GetType())) {
       input_names.push_back(arg_str);
     }
   }
@@ -574,8 +576,8 @@ void DistributedCodegen::EmitCallToOrchestrator(const ir::CallPtr& call, const i
   std::ostringstream lambda_args;
   // Pass the runtime as first arg to the orchestrator
   lambda_args << rt_var;
-  for (size_t i = 0; i < call->args_.size(); ++i) {
-    VisitExpr(call->args_[i]);
+  for (const auto& arg : call->args_) {
+    VisitExpr(arg);
     lambda_args << ", " << current_expr_value_;
     current_expr_value_ = "";
   }
@@ -661,7 +663,8 @@ void DistributedCodegen::CollectNeededRuntimes(const ir::FunctionPtr& func, std:
   for (const auto& name : collector.called_names_) {
     auto it = all_funcs_.find(name);
     if (it != all_funcs_.end() && it->second->level_.has_value()) {
-      needed.insert(ir::LevelToLinquLevel(*it->second->level_));
+      ir::Level level = it->second->level_.value();
+      needed.insert(ir::LevelToLinquLevel(level));
     }
   }
 }
