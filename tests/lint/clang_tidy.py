@@ -239,42 +239,6 @@ def _find_sources_including_headers(
     return dependent
 
 
-def filter_by_diff(
-    all_files: list[str],
-    diff_base: str,
-    changed: set[str] | None = None,
-) -> list[str] | None:
-    """Filter *all_files* to only those changed relative to *diff_base*.
-
-    Returns ``None`` (meaning "lint everything") only when ``git diff`` fails.
-    When header files changed, finds source files that include them rather
-    than falling back to all files.
-
-    If *changed* is provided it is used directly; otherwise ``_get_changed_files``
-    is called.
-    """
-    if changed is None:
-        changed = _get_changed_files(diff_base)
-    if changed is None:
-        return None  # git diff failed — lint everything
-
-    # If this script itself changed, run a full check to validate the change.
-    if SELF_PATH in changed:
-        return None
-
-    if not changed:
-        return []
-
-    changed_sources = [f for f in all_files if f in changed]
-    changed_headers = [f for f in changed if Path(f).suffix.lower() in HEADER_EXTENSIONS]
-
-    if changed_headers:
-        dependent = _find_sources_including_headers(changed_headers, all_files)
-        return sorted(set(changed_sources) | dependent)
-
-    return changed_sources
-
-
 def _apply_diff_filter(
     files: list[str],
     headers: list[str],
@@ -332,10 +296,15 @@ def _detect_cxx_compiler() -> str | None:
     installation and its system headers.  CMake often defaults to
     ``/usr/bin/c++``, which clang-tidy cannot resolve.
     """
-    # Honour explicit CXX override
+    # Honour explicit CXX override.  CXX may contain a wrapper
+    # (e.g. "ccache g++"), so extract the actual compiler token.
     cxx = os.environ.get("CXX")
     if cxx:
-        return cxx
+        tokens = shlex.split(cxx)
+        compiler = tokens[-1] if tokens else cxx
+        path = shutil.which(compiler)
+        if path:
+            return path
 
     # Ask the default c++ compiler for its target triple, then look for
     # the corresponding <triple>-g++ binary.
@@ -444,41 +413,41 @@ def ensure_compile_commands(build_dir: Path) -> Path:
 def _get_system_include_paths() -> list[str]:
     """Query the C++ compiler for its built-in system include paths.
 
-    Tries the ``CXX`` environment variable first (if set), then ``c++``,
-    ``g++``, and ``clang++`` in order, returning the search paths reported
-    by the first compiler found.
+    Uses the same compiler detected by ``_detect_cxx_compiler`` to ensure
+    consistency with the CMake configuration.
     """
-    compilers: list[str] = []
-    cxx = os.environ.get("CXX")
-    if cxx:
-        compilers.append(cxx)
-    compilers.extend(("c++", "g++", "clang++"))
-    for compiler in compilers:
-        try:
-            result = subprocess.run(
-                [compiler, "-E", "-x", "c++", "-v", "/dev/null"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            output = result.stderr
-            start = output.find("#include <...> search starts here:")
-            end = output.find("End of search list.", start)
-            if start == -1 or end == -1:
-                continue
-            block = output[start:end]
-            paths = []
-            for line in block.splitlines()[1:]:  # skip the marker line
-                p = line.strip()
-                if p and Path(p).is_dir():
-                    paths.append(p)
-            if paths:
-                _vprint(f"[clang-tidy] System include paths from {compiler}: {paths}")
-                return paths
-        except FileNotFoundError:
-            _vprint(f"[clang-tidy] {compiler} not found, trying next")
-            continue
-    return []
+    compiler = _detect_cxx_compiler()
+    if not compiler:
+        _vprint("[clang-tidy] No C++ compiler found for system include paths")
+        return []
+
+    try:
+        result = subprocess.run(
+            [compiler, "-E", "-x", "c++", "-v", "/dev/null"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        _vprint(f"[clang-tidy] {compiler} not found, cannot get system include paths")
+        return []
+
+    output = result.stderr
+    start = output.find("#include <...> search starts here:")
+    end = output.find("End of search list.", start)
+    if start == -1 or end == -1:
+        _vprint(f"[clang-tidy] Could not parse include paths from '{compiler} -v'")
+        return []
+
+    block = output[start:end]
+    paths = []
+    for line in block.splitlines()[1:]:  # skip the marker line
+        p = line.strip()
+        if p and Path(p).is_dir():
+            paths.append(p)
+    if paths:
+        _vprint(f"[clang-tidy] System include paths from {compiler}: {paths}")
+    return paths
 
 
 def _extract_header_compile_flags(build_dir: Path) -> list[str]:
