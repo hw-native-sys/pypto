@@ -1013,5 +1013,145 @@ class TestInplaceSafetyCheck:
         _assert_not_shares_memref(func, "tile_d", "tile_c")
 
 
+def _iter_all_assign_stmts(stmt):
+    """Recursively iterate all AssignStmt in a statement tree (enters ForStmt/IfStmt/WhileStmt bodies)."""
+    if isinstance(stmt, ir.AssignStmt):
+        yield stmt
+    elif isinstance(stmt, ir.SeqStmts):
+        for child in stmt.stmts:
+            yield from _iter_all_assign_stmts(child)
+    elif isinstance(stmt, ir.OpStmts):
+        for child in stmt.stmts:
+            yield from _iter_all_assign_stmts(child)
+    elif isinstance(stmt, ir.ForStmt):
+        yield from _iter_all_assign_stmts(stmt.body)
+    elif isinstance(stmt, ir.IfStmt):
+        yield from _iter_all_assign_stmts(stmt.then_body)
+        if stmt.else_body is not None:
+            yield from _iter_all_assign_stmts(stmt.else_body)
+    elif isinstance(stmt, ir.WhileStmt):
+        yield from _iter_all_assign_stmts(stmt.body)
+
+
+def _get_var_type_recursive(func, var_name):
+    """Extract ShapedType for a variable by name, searching the full statement tree."""
+    for stmt in _iter_all_assign_stmts(func.body):
+        if stmt.var.name_hint == var_name:
+            if isinstance(stmt.var.type, ir.ShapedType):
+                return stmt.var.type
+    return None
+
+
+def _assert_not_shares_memref_recursive(func, var_a, var_b):
+    """Assert two variables do NOT share MemRef, searching the full statement tree."""
+    type_a = _get_var_type_recursive(func, var_a)
+    type_b = _get_var_type_recursive(func, var_b)
+    assert type_a is not None, f"{var_a} should have ShapedType"
+    assert type_b is not None, f"{var_b} should have ShapedType"
+    assert not type_a.shares_memref_with(type_b), f"{var_b} should NOT share MemRef with {var_a}"
+
+
+class TestYieldAndInitValueAliasing:
+    """Tests for yield and init_value aliasing prevention (issue #585)."""
+
+    @pl.program
+    class _TestProgram:
+        """Shared program with two accumulators in a for-loop with yield."""
+
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            input_b: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            gate_init: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            up_init: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+            for _i, (gate_acc, up_acc) in pl.range(4, init_values=(gate_init, up_init)):
+                chunk: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                gate_new: pl.Tile[[64, 64], pl.FP32] = pl.add(gate_acc, chunk)
+                up_new: pl.Tile[[64, 64], pl.FP32] = pl.add(up_acc, chunk)
+                gate_out, _up_out = pl.yield_(gate_new, up_new)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(gate_out, [0, 0], output)
+            return result
+
+    def test_yield_prevents_aliasing_of_simultaneously_live_tiles(self):
+        """Two tile accumulators inside a loop, both yielded, must NOT share MemRef.
+
+        gate_new and up_new are both live at the yield point, so their lifetimes
+        overlap. Without the YieldStmt fix, the yield was silently skipped and
+        both tiles appeared dead, causing incorrect aliasing.
+        """
+        func = _prepare_and_run_memory_reuse(self._TestProgram)
+
+        # gate_new and up_new are both live at the yield → must NOT share MemRef
+        _assert_not_shares_memref_recursive(func, "gate_new", "up_new")
+
+    def test_init_values_prevent_aliasing_of_loop_inputs(self):
+        """Two tiles used as init_values must NOT share MemRef.
+
+        gate_init and up_init are both consumed at the loop entry point as
+        init_values. Without the ForStmt init_value fix, these variables
+        appeared dead and got incorrectly aliased.
+        """
+        func = _prepare_and_run_memory_reuse(self._TestProgram)
+
+        # gate_init and up_init are both used as init_values → must NOT share MemRef
+        _assert_not_shares_memref_recursive(func, "gate_init", "up_init")
+
+    def test_return_prevents_aliasing_of_simultaneously_live_tiles(self):
+        """Two tiles both live at the return point must NOT share MemRef."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                input_b: pl.Tensor[[64, 64], pl.FP32],
+                output_a: pl.Tensor[[64, 64], pl.FP32],
+                output_b: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
+                result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
+                _result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
+                return result_a
+
+        func = _prepare_and_run_memory_reuse(Before)
+
+        # tile_a and tile_b are both live (used in store) → must NOT share MemRef
+        _assert_not_shares_memref_recursive(func, "tile_a", "tile_b")
+
+    def test_while_init_values_prevent_aliasing(self):
+        """Two tiles used as while-loop init_values must NOT share MemRef."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[4], pl.FP32],
+                input_b: pl.Tensor[[4], pl.FP32],
+                output: pl.Tensor[[4], pl.FP32],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                gate_init: pl.Tile[[4], pl.FP32] = pl.load(input_a, [0], [4])
+                up_init: pl.Tile[[4], pl.FP32] = pl.load(input_b, [0], [4])
+                n: pl.Scalar[pl.INT64] = 0
+                for gate_acc, up_acc in pl.while_(init_values=(gate_init, up_init)):
+                    pl.cond(n < 4)
+                    chunk: pl.Tile[[4], pl.FP32] = pl.load(input_a, [0], [4])
+                    gate_new: pl.Tile[[4], pl.FP32] = pl.add(gate_acc, chunk)
+                    up_new: pl.Tile[[4], pl.FP32] = pl.add(up_acc, chunk)
+                    _gate_out, _up_out = pl.yield_(gate_new, up_new)
+                result: pl.Tensor[[4], pl.FP32] = pl.store(_gate_out, [0], output)
+                return result
+
+        func = _prepare_and_run_memory_reuse(Before)
+
+        # gate_init and up_init are both used as while-loop init_values → must NOT share MemRef
+        _assert_not_shares_memref_recursive(func, "gate_init", "up_init")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
