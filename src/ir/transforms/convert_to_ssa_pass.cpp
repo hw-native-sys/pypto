@@ -10,14 +10,12 @@
  */
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -32,7 +30,6 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -40,79 +37,20 @@ namespace ir {
 
 namespace {
 
-struct AutoNameSeed {
-  std::string base_name;
-  std::string qualifier;
-};
-
-static AutoNameSeed GetAutoNameSeed(const std::string& name) {
-  auto parsed = auto_name::Parse(name);
-  if (parsed.has_auto_suffix && (parsed.role.has_value() || parsed.version.has_value())) {
-    return AutoNameSeed{parsed.base_name, parsed.qualifier};
-  }
-  return AutoNameSeed{name, ""};
-}
-
-static std::string GetAutoNameKey(const std::string& name) {
-  auto seed = GetAutoNameSeed(name);
-  return auto_name::BuildName(seed.base_name, seed.qualifier);
-}
-
-static std::string BuildAutoNamedVersion(const std::string& name, const std::string& role, int version) {
-  auto seed = GetAutoNameSeed(name);
-  return auto_name::BuildName(seed.base_name, seed.qualifier, role, version);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CanonicalVarTracker — confines name-based identity to a single class
-//
-// Pre-SSA IR creates new Var objects per assignment (let x = e1; let x = e2
-// -> two distinct Vars). This tracker maps each name to a canonical Var*
-// representative, so all SSA logic can use pointer identity instead of
-// string comparisons.
-// ═══════════════════════════════════════════════════════════════════════════
-
-class CanonicalVarTracker {
- public:
-  /// Get the canonical Var* for a given Var. First occurrence of a name
-  /// becomes the canonical; subsequent occurrences return the same pointer.
-  const Var* GetCanonical(const Var* var) {
-    auto [it, inserted] = name_to_canonical_.try_emplace(var->name_hint_, var);
-    return it->second;
-  }
-
-  /// Explicitly register a Var as canonical for its name (overrides previous).
-  void Register(const Var* var) { name_to_canonical_[var->name_hint_] = var; }
-
-  /// Look up the canonical Var* for a base name (used by RegisterIterArgs).
-  [[nodiscard]] const Var* FindByName(const std::string& name) const {
-    auto it = name_to_canonical_.find(name);
-    return (it != name_to_canonical_.end()) ? it->second : nullptr;
-  }
-
-  using State = std::unordered_map<std::string, const Var*>;
-  [[nodiscard]] State Save() const { return name_to_canonical_; }
-  void Restore(State saved) { name_to_canonical_ = std::move(saved); }
-
- private:
-  std::unordered_map<std::string, const Var*> name_to_canonical_;
-};
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Collectors — Pre-analysis visitors for loop variable classification
 // ═══════════════════════════════════════════════════════════════════════════
 
 class AssignmentCollector : public IRVisitor {
  public:
-  explicit AssignmentCollector(CanonicalVarTracker& tracker) : tracker_(tracker) {}
-  std::unordered_set<const Var*> assigned;  // canonical pointers
+  std::set<const Var*> assigned;
   void Collect(const StmtPtr& stmt) {
     if (stmt) VisitStmt(stmt);
   }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    assigned.insert(tracker_.GetCanonical(op->var_.get()));
+    assigned.insert(op->var_.get());
     VisitExpr(op->value_);
   }
   void VisitStmt_(const ForStmtPtr& op) override {
@@ -130,23 +68,17 @@ class AssignmentCollector : public IRVisitor {
   void VisitStmt_(const SeqStmtsPtr& op) override {
     for (const auto& s : op->stmts_) VisitStmt(s);
   }
-
- private:
-  CanonicalVarTracker& tracker_;
 };
 
 class TypeCollector : public IRVisitor {
  public:
-  explicit TypeCollector(CanonicalVarTracker& tracker) : tracker_(tracker) {}
-  std::unordered_map<const Var*, TypePtr> types;  // canonical key
+  std::unordered_map<const Var*, TypePtr> types;
   void Collect(const StmtPtr& stmt) {
     if (stmt) VisitStmt(stmt);
   }
 
  protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    types[tracker_.GetCanonical(op->var_.get())] = op->var_->GetType();
-  }
+  void VisitStmt_(const AssignStmtPtr& op) override { types[op->var_.get()] = op->var_->GetType(); }
   void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -156,15 +88,11 @@ class TypeCollector : public IRVisitor {
   void VisitStmt_(const SeqStmtsPtr& op) override {
     for (const auto& s : op->stmts_) VisitStmt(s);
   }
-
- private:
-  CanonicalVarTracker& tracker_;
 };
 
 class UseCollector : public IRVisitor {
  public:
-  explicit UseCollector(CanonicalVarTracker& tracker) : tracker_(tracker) {}
-  std::unordered_set<const Var*> used;  // canonical pointers
+  std::set<const Var*> used;
   void Collect(const StmtPtr& stmt) {
     if (stmt) VisitStmt(stmt);
   }
@@ -174,12 +102,9 @@ class UseCollector : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
-    if (op) used.insert(tracker_.GetCanonical(op.get()));
+    if (op) used.insert(op.get());
     IRVisitor::VisitVarLike_(op);
   }
-
- private:
-  CanonicalVarTracker& tracker_;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,92 +114,88 @@ class UseCollector : public IRVisitor {
 // is NOT counted as live-in. This prevents false escaping-var promotion
 // for loop-local temporaries (issue #592) while correctly detecting
 // variables used before reassignment (CodeRabbit review concern).
-//
-// Returns canonical Var* pointers via CanonicalVarTracker.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Forward declaration for mutual recursion
-static std::unordered_set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts,
-                                                       CanonicalVarTracker& tracker);
+static std::set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts);
 
-static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt, CanonicalVarTracker& tracker) {
+static std::set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
   if (!stmt) return {};
 
   if (auto op = As<AssignStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     uc.CollectExpr(op->value_);
     return uc.used;
   }
   if (auto op = As<EvalStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     uc.CollectExpr(op->expr_);
     return uc.used;
   }
   if (auto op = As<ReturnStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     for (const auto& v : op->value_) uc.CollectExpr(v);
     return uc.used;
   }
   if (auto op = As<YieldStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     for (const auto& v : op->value_) uc.CollectExpr(v);
     return uc.used;
   }
   if (auto op = As<SeqStmts>(stmt)) {
-    return ComputeSeqLiveIn(op->stmts_, tracker);
+    return ComputeSeqLiveIn(op->stmts_);
   }
   if (auto op = As<ForStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     uc.CollectExpr(op->start_);
     uc.CollectExpr(op->stop_);
     uc.CollectExpr(op->step_);
     for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
     if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
-    auto body_li = ComputeStmtLiveIn(op->body_, tracker);
-    body_li.erase(tracker.GetCanonical(op->loop_var_.get()));
-    for (const auto& ia : op->iter_args_) body_li.erase(tracker.GetCanonical(ia.get()));
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    body_li.erase(op->loop_var_.get());
+    for (const auto& ia : op->iter_args_) body_li.erase(static_cast<const Var*>(ia.get()));
     uc.used.insert(body_li.begin(), body_li.end());
     return uc.used;
   }
   if (auto op = As<WhileStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     uc.CollectExpr(op->condition_);
     for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
-    auto body_li = ComputeStmtLiveIn(op->body_, tracker);
-    for (const auto& ia : op->iter_args_) body_li.erase(tracker.GetCanonical(ia.get()));
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    for (const auto& ia : op->iter_args_) body_li.erase(static_cast<const Var*>(ia.get()));
     uc.used.insert(body_li.begin(), body_li.end());
     return uc.used;
   }
   if (auto op = As<IfStmt>(stmt)) {
-    UseCollector uc(tracker);
+    UseCollector uc;
     uc.CollectExpr(op->condition_);
-    auto then_li = ComputeStmtLiveIn(op->then_body_, tracker);
+    auto then_li = ComputeStmtLiveIn(op->then_body_);
     uc.used.insert(then_li.begin(), then_li.end());
     if (op->else_body_.has_value()) {
-      auto else_li = ComputeStmtLiveIn(*op->else_body_, tracker);
+      auto else_li = ComputeStmtLiveIn(*op->else_body_);
       uc.used.insert(else_li.begin(), else_li.end());
     }
     return uc.used;
   }
   if (auto op = As<ScopeStmt>(stmt)) {
-    return ComputeStmtLiveIn(op->body_, tracker);
+    return ComputeStmtLiveIn(op->body_);
   }
   if (auto op = As<OpStmts>(stmt)) {
-    return ComputeSeqLiveIn(op->stmts_, tracker);
+    return ComputeSeqLiveIn(op->stmts_);
   }
   return {};
 }
 
-static std::unordered_set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts,
-                                                       CanonicalVarTracker& tracker) {
-  std::unordered_set<const Var*> defined;
-  std::unordered_set<const Var*> live_in;
+static std::set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts) {
+  std::set<const Var*> defined;
+  std::set<const Var*> live_in;
   for (const auto& s : stmts) {
-    auto stmt_li = ComputeStmtLiveIn(s, tracker);
-    for (const auto& canonical : stmt_li) {  // NOLINT: set insertion is order-independent
-      if (!defined.count(canonical)) live_in.insert(canonical);
+    auto stmt_li = ComputeStmtLiveIn(s);
+    for (const auto& vp : stmt_li) {
+      if (!defined.count(vp)) live_in.insert(vp);
     }
-    AssignmentCollector ac(tracker);
+    AssignmentCollector ac;
     ac.Collect(s);
     defined.insert(ac.assigned.begin(), ac.assigned.end());
   }
@@ -302,8 +223,7 @@ class SSAConverter {
     std::vector<VarPtr> new_params;
     std::vector<ParamDirection> new_dirs;
     for (size_t i = 0; i < func->params_.size(); ++i) {
-      auto canonical = tracker_.GetCanonical(func->params_[i].get());
-      new_params.push_back(AllocVersion(canonical, func->params_[i]->GetType(), func->params_[i]->span_));
+      new_params.push_back(AllocVersion(func->params_[i]));
       new_dirs.push_back(func->param_directions_[i]);
     }
 
@@ -318,25 +238,23 @@ class SSAConverter {
 
   class ExprSubstituter : public IRMutator {
    public:
-    ExprSubstituter(const std::unordered_map<const Var*, VarPtr>& versions, CanonicalVarTracker& tracker)
-        : versions_(versions), tracker_(tracker) {}
+    explicit ExprSubstituter(const std::unordered_map<const Var*, VarPtr>& versions) : versions_(versions) {}
 
    protected:
     ExprPtr VisitExpr_(const VarPtr& op) override {
-      auto it = versions_.find(tracker_.GetCanonical(op.get()));
+      auto it = versions_.find(op.get());
       return it != versions_.end() ? it->second : op;
     }
     ExprPtr VisitExpr_(const IterArgPtr& op) override {
-      auto it = versions_.find(tracker_.GetCanonical(op.get()));
+      auto it = versions_.find(static_cast<const Var*>(op.get()));
       return it != versions_.end() ? it->second : op;
     }
 
    private:
     const std::unordered_map<const Var*, VarPtr>& versions_;
-    CanonicalVarTracker& tracker_;
   };
 
-  ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(cur_, tracker_).VisitExpr(e) : e; }
+  ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(cur_).VisitExpr(e) : e; }
 
   TypePtr SubstType(const TypePtr& type) {
     if (!type) return type;
@@ -375,39 +293,14 @@ class SSAConverter {
 
   // ── Version management ─────────────────────────────────────────────
 
-  int NextVersion(const Var* canonical) { return ver_[canonical]++; }
-
-  VarPtr AllocVersion(const Var* canonical, const TypePtr& type, const Span& span) {
-    int v = NextVersion(canonical);
+  VarPtr AllocVersion(const VarPtr& orig_var) {
+    const Var* key = orig_var.get();
+    int v = ver_[key]++;
     auto var =
-        std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "ssa", v), SubstType(type), span);
-    cur_[canonical] = var;
+        std::make_shared<Var>(orig_var->name_hint_ + "_" + std::to_string(v), SubstType(orig_var->GetType()),
+                              orig_var->span_);
+    cur_[key] = var;
     return var;
-  }
-
-  void RegisterIterArgs(const std::vector<IterArgPtr>& ias) {
-    for (const auto& ia : ias) {
-      std::string key = GetAutoNameKey(ia->name_hint_);
-      auto base_canonical = tracker_.FindByName(key);
-      if (base_canonical) {
-        cur_[base_canonical] = ia;
-      }
-      // Also register under the iter_arg's own canonical
-      auto ia_canonical = tracker_.GetCanonical(ia.get());
-      if (ia_canonical != base_canonical) {
-        cur_[ia_canonical] = ia;
-      }
-    }
-  }
-
-  void RegisterExistingReturnVars(const std::vector<IterArgPtr>& ias, const std::vector<VarPtr>& rvs) {
-    for (size_t i = 0; i < ias.size() && i < rvs.size(); ++i) {
-      std::string key = GetAutoNameKey(ias[i]->name_hint_);
-      auto base_canonical = tracker_.FindByName(key);
-      if (base_canonical) {
-        cur_[base_canonical] = rvs[i];
-      }
-    }
   }
 
   // ── Statement dispatch ─────────────────────────────────────────────
@@ -432,8 +325,7 @@ class SSAConverter {
 
   StmtPtr ConvertAssign(const AssignStmtPtr& op) {
     auto val = SubstExpr(op->value_);
-    auto canonical = tracker_.GetCanonical(op->var_.get());
-    auto var = AllocVersion(canonical, op->var_->GetType(), op->var_->span_);
+    auto var = AllocVersion(op->var_);
     return std::make_shared<AssignStmt>(var, val, op->span_);
   }
 
@@ -445,15 +337,15 @@ class SSAConverter {
     // Precompute suffix_needs[i] = variables needed from the outer scope by stmts[i..N-1].
     // Uses order-aware live-in analysis: a variable defined before use within a compound
     // statement is NOT counted as needed. Single backward pass, O(N * stmt_size).
-    std::vector<std::unordered_set<const Var*>> suffix_needs(n + 1);
+    std::vector<std::set<const Var*>> suffix_needs(n + 1);
     for (size_t j = n; j > 0; --j) {
-      auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1], tracker_);
-      AssignmentCollector ac(tracker_);
+      auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1]);
+      AssignmentCollector ac;
       ac.Collect(op->stmts_[j - 1]);
       suffix_needs[j - 1] = live_in;
-      for (const auto& canonical : suffix_needs[j]) {
-        if (!ac.assigned.count(canonical)) {
-          suffix_needs[j - 1].insert(canonical);
+      for (const auto& vp : suffix_needs[j]) {
+        if (!ac.assigned.count(vp)) {
+          suffix_needs[j - 1].insert(vp);
         }
       }
     }
@@ -461,7 +353,7 @@ class SSAConverter {
     // Forward pass: convert each statement with correct future_needs_
     std::vector<StmtPtr> out;
     for (size_t i = 0; i < n; ++i) {
-      future_needs_ = (i + 1 < n) ? suffix_needs[i + 1] : std::unordered_set<const Var*>{};
+      future_needs_ = (i + 1 < n) ? suffix_needs[i + 1] : std::set<const Var*>{};
       out.push_back(ConvertStmt(op->stmts_[i]));
     }
     return SeqStmts::Flatten(std::move(out), op->span_);
@@ -486,104 +378,110 @@ class SSAConverter {
     }
 
     // Pre-analysis: classify assigned variables
-    AssignmentCollector ac(tracker_);
+    AssignmentCollector ac;
     ac.Collect(op->body_);
-    auto lv_canonical = tracker_.GetCanonical(op->loop_var_.get());
+    const Var* lv_ptr = op->loop_var_.get();
 
     // Loop-carried: assigned in body AND existed before AND not loop_var/existing iter_arg
     std::vector<const Var*> carried;
-    for (const auto& canonical : ac.assigned) {
-      if (canonical == lv_canonical) continue;
-      bool is_existing_ia = false;
-      for (const auto& ia : op->iter_args_) {
-        if (tracker_.GetCanonical(ia.get()) == canonical) {
-          is_existing_ia = true;
-          break;
-        }
-      }
+    for (const auto& vp : ac.assigned) {
+      if (vp == lv_ptr) continue;
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
+                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
       if (is_existing_ia) continue;
-      if (before.count(canonical)) carried.push_back(canonical);
+      if (before.count(vp)) carried.push_back(vp);
     }
-    std::sort(carried.begin(), carried.end(),
-              [](const Var* a, const Var* b) { return a->name_hint_ < b->name_hint_; });
+    // Deterministic ordering: sort by name_hint then UniqueId
+    std::sort(carried.begin(), carried.end(), [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    });
 
     // Pre-detect escaping vars: assigned in body AND NOT existed before AND needed
     // by future code (order-aware: used before redefined in the future sequence).
     // Must be detected BEFORE body conversion so the IfStmt handler can see them
     // in current_version_ (needed for single-branch phi creation, issue #600).
-    TypeCollector tc(tracker_);
+    TypeCollector tc;
     tc.Collect(op->body_);
     std::vector<const Var*> escaping;
-    for (const auto& canonical : ac.assigned) {
-      if (canonical == lv_canonical) continue;
-      if (before.count(canonical)) continue;
-      if (!saved_future_needs.count(canonical)) continue;
-      bool is_existing_ia = false;
-      for (const auto& ia : op->iter_args_) {
-        if (tracker_.GetCanonical(ia.get()) == canonical) {
-          is_existing_ia = true;
-          break;
-        }
-      }
+    for (const auto& vp : ac.assigned) {
+      if (vp == lv_ptr) continue;
+      if (before.count(vp)) continue;
+      if (!saved_future_needs.count(vp)) continue;
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
+                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
       if (is_existing_ia) continue;
-      escaping.push_back(canonical);
+      escaping.push_back(vp);
     }
-    std::sort(escaping.begin(), escaping.end(),
-              [](const Var* a, const Var* b) { return a->name_hint_ < b->name_hint_; });
+    std::sort(escaping.begin(), escaping.end(), [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    });
 
     // Create iter_args + return_vars for carried variables
     std::vector<VarPtr> carried_rvs;
-    for (const auto& canonical : carried) {
-      auto init = before.at(canonical);
-      int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv),
-                                              init->GetType(), init, op->span_));
-      int rv = NextVersion(canonical);
-      carried_rvs.push_back(std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv),
-                                                  init->GetType(), op->span_));
+    for (const auto& vp : carried) {
+      auto init = before.at(vp);
+      int iv = ver_[vp]++;
+      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
+                                               init, op->span_));
+      int rv = ver_[vp]++;
+      carried_rvs.push_back(
+          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
     std::vector<VarPtr> esc_rvs;
-    for (const auto& canonical : escaping) {
-      auto type_it = tc.types.find(canonical);
+    for (const auto& vp : escaping) {
+      auto type_it = tc.types.find(vp);
       if (type_it == tc.types.end()) continue;
       auto type = type_it->second;
       auto init = FindInitValue(type, before);
       if (!init) {
         // Last resort: create a placeholder using any variable with matching type
         // This covers zero-trip loop cases
-        init = std::make_shared<Var>(canonical->name_hint_, type, op->span_);
+        init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
       }
-      int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type,
-                                              init, op->span_));
-      int rv = NextVersion(canonical);
-      auto rv_var =
-          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), type, op->span_);
+      int iv = ver_[vp]++;
+      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init,
+                                               op->span_));
+      int rv = ver_[vp]++;
+      auto rv_var = std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_);
       esc_rvs.push_back(rv_var);
     }
 
-    // Version loop variable and register iter_args (including escaping)
-    int lvv = NextVersion(lv_canonical);
-    auto new_lv = std::make_shared<Var>(BuildAutoNamedVersion(lv_canonical->name_hint_, "idx", lvv),
-                                        op->loop_var_->GetType(), op->loop_var_->span_);
-    cur_[lv_canonical] = new_lv;
-    RegisterIterArgs(ias);
-    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = ias[op->iter_args_.size() + i];
+    // Version loop variable
+    auto new_lv = AllocVersion(op->loop_var_);
+
+    // Register iter_args: map ORIGINAL pointers → new iter_args for body substitution
+    // Existing iter_args: body references original IterArg pointers
+    size_t existing_count = op->iter_args_.size();
+    for (size_t i = 0; i < existing_count; ++i) {
+      cur_[static_cast<const Var*>(op->iter_args_[i].get())] = ias[i];
+    }
+    // Carried vars: body references original Var pointers
+    for (size_t i = 0; i < carried.size(); ++i) {
+      cur_[carried[i]] = ias[existing_count + i];
+    }
+    // Escaping vars: body references original Var pointers
     for (size_t i = 0; i < escaping.size(); ++i) {
-      cur_[escaping[i]] = ias[op->iter_args_.size() + carried.size() + i];
+      cur_[escaping[i]] = ias[existing_count + carried.size() + i];
     }
 
     // Convert body — IfStmt handler now sees escaping vars in cur_ via iter_args
     auto new_body = ConvertStmt(op->body_);
     auto after = cur_;
 
-    // Restore outer scope, register return_vars
+    // Restore outer scope, register return_vars for post-loop code
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
+    // Map original iter_arg pointers → return_vars for post-loop references
+    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
+      cur_[static_cast<const Var*>(op->iter_args_[i].get())] = op->return_vars_[i];
+      // Post-loop code may reference return_var directly (parser puts it in scope)
+      cur_[op->return_vars_[i].get()] = op->return_vars_[i];
+    }
 
     // Build return_vars in iter_arg order: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
@@ -594,9 +492,9 @@ class SSAConverter {
     // Build yields in matching order
     std::vector<ExprPtr> yields;
     if (auto y = ExtractYield(new_body)) yields = y->value_;
-    for (const auto& canonical : carried) yields.push_back(after.at(canonical));
-    for (const auto& canonical : escaping) {
-      auto it = after.find(canonical);
+    for (const auto& vp : carried) yields.push_back(after.at(vp));
+    for (const auto& vp : escaping) {
+      auto it = after.find(vp);
       if (it != after.end()) {
         yields.push_back(it->second);
       }
@@ -623,88 +521,91 @@ class SSAConverter {
     }
 
     // Pre-analysis
-    AssignmentCollector ac(tracker_);
+    AssignmentCollector ac;
     ac.Collect(op->body_);
 
     // Loop-carried classification
     std::vector<const Var*> carried;
-    for (const auto& canonical : ac.assigned) {
-      bool is_existing_ia = false;
-      for (const auto& ia : op->iter_args_) {
-        if (tracker_.GetCanonical(ia.get()) == canonical) {
-          is_existing_ia = true;
-          break;
-        }
-      }
+    for (const auto& vp : ac.assigned) {
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
+                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
       if (is_existing_ia) continue;
-      if (before.count(canonical)) carried.push_back(canonical);
+      if (before.count(vp)) carried.push_back(vp);
     }
-    std::sort(carried.begin(), carried.end(),
-              [](const Var* a, const Var* b) { return a->name_hint_ < b->name_hint_; });
+    std::sort(carried.begin(), carried.end(), [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    });
 
     // Pre-detect escaping vars (same logic as ForStmt — see issue #600 comment there)
-    TypeCollector tc(tracker_);
+    TypeCollector tc;
     tc.Collect(op->body_);
     std::vector<const Var*> escaping;
-    for (const auto& canonical : ac.assigned) {
-      if (before.count(canonical)) continue;
-      if (!saved_future_needs.count(canonical)) continue;
-      bool is_existing_ia = false;
-      for (const auto& ia : op->iter_args_) {
-        if (tracker_.GetCanonical(ia.get()) == canonical) {
-          is_existing_ia = true;
-          break;
-        }
-      }
+    for (const auto& vp : ac.assigned) {
+      if (before.count(vp)) continue;
+      if (!saved_future_needs.count(vp)) continue;
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
+                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
       if (is_existing_ia) continue;
-      escaping.push_back(canonical);
+      escaping.push_back(vp);
     }
-    std::sort(escaping.begin(), escaping.end(),
-              [](const Var* a, const Var* b) { return a->name_hint_ < b->name_hint_; });
+    std::sort(escaping.begin(), escaping.end(), [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    });
 
     // Create iter_args + return_vars for carried
     std::vector<VarPtr> carried_rvs;
-    for (const auto& canonical : carried) {
-      auto init = before.at(canonical);
-      int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv),
-                                              init->GetType(), init, op->span_));
-      int rv = NextVersion(canonical);
-      carried_rvs.push_back(std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv),
-                                                  init->GetType(), op->span_));
+    for (const auto& vp : carried) {
+      auto init = before.at(vp);
+      int iv = ver_[vp]++;
+      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
+                                               init, op->span_));
+      int rv = ver_[vp]++;
+      carried_rvs.push_back(
+          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
     std::vector<VarPtr> esc_rvs;
-    for (const auto& canonical : escaping) {
-      auto type_it = tc.types.find(canonical);
+    for (const auto& vp : escaping) {
+      auto type_it = tc.types.find(vp);
       if (type_it == tc.types.end()) continue;
       auto type = type_it->second;
       auto init = FindInitValue(type, before);
-      if (!init) init = std::make_shared<Var>(canonical->name_hint_, type, op->span_);
-      int iv = NextVersion(canonical);
-      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(canonical->name_hint_, "iter", iv), type,
-                                              init, op->span_));
-      int rv = NextVersion(canonical);
+      if (!init) init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
+      int iv = ver_[vp]++;
+      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init,
+                                               op->span_));
+      int rv = ver_[vp]++;
       esc_rvs.push_back(
-          std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "rv", rv), type, op->span_));
+          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_));
     }
 
-    // Register iter_args (including escaping), substitute condition, convert body
-    RegisterIterArgs(ias);
-    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = ias[op->iter_args_.size() + i];
-    for (size_t i = 0; i < escaping.size(); ++i) {
-      cur_[escaping[i]] = ias[op->iter_args_.size() + carried.size() + i];
+    // Register iter_args: map ORIGINAL pointers → new iter_args for body substitution
+    size_t existing_count = op->iter_args_.size();
+    for (size_t i = 0; i < existing_count; ++i) {
+      cur_[static_cast<const Var*>(op->iter_args_[i].get())] = ias[i];
     }
+    for (size_t i = 0; i < carried.size(); ++i) {
+      cur_[carried[i]] = ias[existing_count + i];
+    }
+    for (size_t i = 0; i < escaping.size(); ++i) {
+      cur_[escaping[i]] = ias[existing_count + carried.size() + i];
+    }
+
     auto new_cond = SubstExpr(op->condition_);
     auto new_body = ConvertStmt(op->body_);
     auto after = cur_;
 
-    // Restore outer scope
+    // Restore outer scope, register return_vars for post-loop code
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
+    for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
+      cur_[static_cast<const Var*>(op->iter_args_[i].get())] = op->return_vars_[i];
+      cur_[op->return_vars_[i].get()] = op->return_vars_[i];
+    }
 
     // Build return_vars: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
@@ -715,9 +616,9 @@ class SSAConverter {
     // Build yields
     std::vector<ExprPtr> yields;
     if (auto y = ExtractYield(new_body)) yields = y->value_;
-    for (const auto& canonical : carried) yields.push_back(after.at(canonical));
-    for (const auto& canonical : escaping) {
-      auto it = after.find(canonical);
+    for (const auto& vp : carried) yields.push_back(after.at(vp));
+    for (const auto& vp : escaping) {
+      auto it = after.find(vp);
       if (it != after.end()) yields.push_back(it->second);
     }
 
@@ -747,30 +648,29 @@ class SSAConverter {
 
     // Find variables that diverged between branches
     std::vector<const Var*> phis;
-    std::unordered_set<const Var*> seen;
-    // NOLINT next two loops: phis is sorted afterward, so iteration order is irrelevant
-    for (const auto& [canonical, v] :
-         then_ver) {  // NOLINT(bugprone-nondeterministic-pointer-iteration-order)
-      seen.insert(canonical);
-      auto bi = before.find(canonical);
+    std::set<const Var*> seen;
+    for (const auto& [vp, v] : then_ver) {
+      seen.insert(vp);
+      auto bi = before.find(vp);
       if (bi != before.end()) {
         bool then_changed = (bi->second != v);
-        auto ei = else_ver.find(canonical);
+        auto ei = else_ver.find(vp);
         bool else_changed = (ei != else_ver.end() && bi->second != ei->second);
-        if (then_changed || else_changed) phis.push_back(canonical);
-      } else if (else_ver.count(canonical)) {
+        if (then_changed || else_changed) phis.push_back(vp);
+      } else if (else_ver.count(vp)) {
         // New variable defined in BOTH branches needs a phi
-        phis.push_back(canonical);
+        phis.push_back(vp);
       }
     }
-    for (const auto& [canonical, v] :
-         else_ver) {  // NOLINT(bugprone-nondeterministic-pointer-iteration-order)
-      if (seen.count(canonical)) continue;
-      auto bi = before.find(canonical);
-      if (bi != before.end() && bi->second != v) phis.push_back(canonical);
+    for (const auto& [vp, v] : else_ver) {
+      if (seen.count(vp)) continue;
+      auto bi = before.find(vp);
+      if (bi != before.end() && bi->second != v) phis.push_back(vp);
     }
-    std::sort(phis.begin(), phis.end(),
-              [](const Var* a, const Var* b) { return a->name_hint_ < b->name_hint_; });
+    std::sort(phis.begin(), phis.end(), [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    });
 
     // No divergence — return simple IfStmt
     if (phis.empty() && op->return_vars_.empty()) {
@@ -783,12 +683,8 @@ class SSAConverter {
       cur_ = before;
       std::vector<VarPtr> return_vars;
       for (const auto& rv : op->return_vars_) {
-        auto rv_canonical = tracker_.GetCanonical(rv.get());
-        int v = NextVersion(rv_canonical);
-        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v),
-                                         rv->GetType(), rv->span_);
+        auto nrv = AllocVersion(rv);
         return_vars.push_back(nrv);
-        cur_[rv_canonical] = nrv;
       }
       return std::make_shared<IfStmt>(cond, new_then, new_else, return_vars, op->span_);
     }
@@ -798,34 +694,24 @@ class SSAConverter {
     std::vector<VarPtr> return_vars;
     std::vector<ExprPtr> then_yields, else_yields;
 
-    for (const auto& canonical : phis) {
-      VarPtr tv = then_ver.count(canonical) ? then_ver.at(canonical) : before.at(canonical);
-      VarPtr ev = else_ver.count(canonical) ? else_ver.at(canonical) : before.at(canonical);
-      int pv = NextVersion(canonical);
-      auto phi = std::make_shared<Var>(BuildAutoNamedVersion(canonical->name_hint_, "phi", pv), tv->GetType(),
-                                       op->span_);
+    for (const auto& vp : phis) {
+      VarPtr tv = then_ver.count(vp) ? then_ver.at(vp) : before.at(vp);
+      VarPtr ev = else_ver.count(vp) ? else_ver.at(vp) : before.at(vp);
+      int pv = ver_[vp]++;
+      auto phi = std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(pv), tv->GetType(), op->span_);
       return_vars.push_back(phi);
       then_yields.push_back(tv);
       else_yields.push_back(ev);
-      cur_[canonical] = phi;
+      cur_[vp] = phi;
     }
 
     // Preserve any existing return_vars not already handled as phis
     for (const auto& rv : op->return_vars_) {
-      auto rv_canonical = tracker_.GetCanonical(rv.get());
-      bool handled = false;
-      for (const auto& p : phis) {
-        if (p == rv_canonical) {
-          handled = true;
-          break;
-        }
-      }
+      bool handled = std::any_of(phis.begin(), phis.end(),
+                                  [&](const Var* p) { return p == rv.get(); });
       if (!handled) {
-        int v = NextVersion(rv_canonical);
-        auto nrv = std::make_shared<Var>(BuildAutoNamedVersion(rv_canonical->name_hint_, "rv", v),
-                                         rv->GetType(), rv->span_);
+        auto nrv = AllocVersion(rv);
         return_vars.push_back(nrv);
-        cur_[rv_canonical] = nrv;
       }
     }
 
@@ -887,16 +773,15 @@ class SSAConverter {
     for (size_t i = 0; i < orig_params_.size(); ++i) {
       if (orig_param_directions_[i] == ParamDirection::Out ||
           orig_param_directions_[i] == ParamDirection::InOut) {
-        auto canonical = tracker_.GetCanonical(orig_params_[i].get());
-        auto it = pre.find(canonical);
+        auto it = pre.find(orig_params_[i].get());
         if (it != pre.end() && it->second->GetType() == type) return it->second;
       }
     }
-    // Fall back to any pre-loop variable with matching type (deterministic ordering by UniqueId)
-    std::vector<std::pair<uint64_t, VarPtr>> candidates;
-    for (const auto& [canonical, v] : pre) {
+    // Fall back to any pre-loop variable with matching type (deterministic ordering)
+    std::vector<std::pair<std::string, VarPtr>> candidates;
+    for (const auto& [vp, v] : pre) {
       if (v->GetType() == type) {
-        candidates.emplace_back(canonical->UniqueId(), v);
+        candidates.emplace_back(vp->name_hint_, v);
       }
     }
     if (!candidates.empty()) {
@@ -937,10 +822,9 @@ class SSAConverter {
 
   // ── State ──────────────────────────────────────────────────────────
 
-  CanonicalVarTracker tracker_;                  // confines name-based identity to one class
-  std::unordered_map<const Var*, VarPtr> cur_;   // canonical → latest version
-  std::unordered_map<const Var*, int> ver_;      // canonical → next version number
-  std::unordered_set<const Var*> future_needs_;  // canonical vars needed in subsequent stmts
+  std::unordered_map<const Var*, VarPtr> cur_;  // orig Var → latest SSA version
+  std::unordered_map<const Var*, int> ver_;     // orig Var → next version number
+  std::set<const Var*> future_needs_;           // vars needed (used-before-defined) in subsequent stmts
   std::vector<VarPtr> orig_params_;              // original function params
   std::vector<ParamDirection> orig_param_directions_;
 };

@@ -38,8 +38,13 @@ struct DeepCloneResult {
 ///               cloning) and Var→ConstInt (loop unrolling).
 ///               Variables NOT in this map get fresh copies at definition sites.
 ///               Variables in this map are substituted directly at use sites.
+/// @param clone_def_vars If true (default), create fresh Var copies at every
+///               definition site. If false, keep original Var objects at def
+///               sites — useful when the IR uses shared Var pointers for the
+///               same source-level variable across multiple assignments.
 /// @return DeepCloneResult with cloned body and definition-site var mapping.
-DeepCloneResult DeepClone(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map = {});
+DeepCloneResult DeepClone(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map = {},
+                          bool clone_def_vars = true);
 
 }  // namespace ir
 }  // namespace pypto

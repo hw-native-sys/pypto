@@ -43,8 +43,7 @@ class TestResolveTransposeLayoutBTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -68,8 +67,7 @@ class TestResolveTransposeLayoutBTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -100,8 +98,7 @@ class TestResolveTransposeLayoutBTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -125,8 +122,7 @@ class TestResolveTransposeLayoutBTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -161,8 +157,7 @@ class TestResolveTransposeLayoutATranspose:
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -186,8 +181,7 @@ class TestResolveTransposeLayoutATranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -222,8 +216,7 @@ class TestResolveTransposeLayoutABTranspose:
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -247,8 +240,7 @@ class TestResolveTransposeLayoutABTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -279,8 +271,7 @@ class TestResolveTransposeLayoutABTranspose:
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -304,8 +295,7 @@ class TestResolveTransposeLayoutABTranspose:
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -340,8 +330,7 @@ class TestResolveTransposeLayoutNoOp:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -372,8 +361,7 @@ class TestResolveTransposeLayoutNoOp:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -429,8 +417,7 @@ class TestResolveTransposeLayoutNoOp:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -465,8 +452,7 @@ class TestResolveTransposeLayoutMixed:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -490,8 +476,7 @@ class TestResolveTransposeLayoutMixed:
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -522,8 +507,7 @@ class TestResolveTransposeLayoutMixed:
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         @pl.program
         class Expected:
@@ -547,8 +531,7 @@ class TestResolveTransposeLayoutMixed:
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                return self.matmul_incore(a, b, c)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -591,8 +574,7 @@ class TestResolveTransposeLayoutPartialLoad:
                 key_cache: pl.Tensor[[128, 128], pl.BF16],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
-                out = self.kernel(a, key_cache, out)
-                return out
+                return self.kernel(a, key_cache, out)
 
         @pl.program
         class Expected:
@@ -620,8 +602,7 @@ class TestResolveTransposeLayoutPartialLoad:
                 key_cache: pl.Tensor[[128, 128], pl.BF16, pl.DN],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
-                out = self.kernel(a, key_cache, out)
-                return out
+                return self.kernel(a, key_cache, out)
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)

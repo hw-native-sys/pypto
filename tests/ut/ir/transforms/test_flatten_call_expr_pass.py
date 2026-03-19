@@ -52,8 +52,8 @@ class TestFlattenCallInCallArgs:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 # Flattened: temp variable for inner call
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(_t0, 2.0)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -83,9 +83,9 @@ class TestFlattenCallInCallArgs:
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 # Both nested calls extracted
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.mul(y, 3.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, t__tmp_v1)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                _t1: pl.Tensor[[64], pl.FP32] = pl.mul(y, 3.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(_t0, _t1)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -107,9 +107,9 @@ class TestFlattenCallInCallArgs:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 # All nested calls extracted in order
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 2.0)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                _t1: pl.Tensor[[64], pl.FP32] = pl.add(_t0, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(_t1, 2.0)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -138,8 +138,8 @@ class TestFlattenCallInBinaryExpr:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-                result: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, x)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(_t0, x)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -160,8 +160,8 @@ class TestFlattenCallInBinaryExpr:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                result: pl.Tensor[[64], pl.FP32] = pl.add(x, t__tmp_v0)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(x, _t0)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -182,9 +182,9 @@ class TestFlattenCallInBinaryExpr:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                result: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, t__tmp_v1)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                _t1: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(_t0, _t1)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -209,8 +209,8 @@ class TestFlattenCallInUnaryExpr:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                result: pl.Tensor[[64], pl.FP32] = pl.exp(t__tmp_v0)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                result: pl.Tensor[[64], pl.FP32] = pl.exp(_t0)
                 return result
 
         After = passes.flatten_call_expr()(Before)
@@ -245,8 +245,8 @@ class TestFlattenCallInIfCondition:
                 result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
                 for i in pl.range(10):
                     if i > 5:
-                        t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
-                        result = pl.add(t__tmp_v0, 1.0)
+                        _t0: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
+                        result = pl.add(_t0, 1.0)
                 return result
 
         After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
@@ -263,45 +263,38 @@ class TestFlattenCallInIfCondition:
         @pl.program
         class Before:
             @pl.function
-            def main(
-                self,
-                y: pl.Tensor[[64], pl.FP32],
-                z: pl.Tensor[[64], pl.FP32],
-                b: pl.Tensor[[64], pl.FP32],
-                c: pl.Tensor[[64], pl.FP32],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                # Nested call before if
-                x: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(y, 1.0), z)
-                for i in pl.range(10):
-                    if i > 5:
-                        result = pl.add(result, 1.0)
-                # Nested call after if
-                a: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(b, 2.0), c)
-                return pl.add(x, a)
+            def main(self, y_0: pl.Tensor[[64], pl.FP32], z_0: pl.Tensor[[64], pl.FP32], b_0: pl.Tensor[[64], pl.FP32], c_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result_0 = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                x_0 = pl.tensor.mul(pl.tensor.adds(y_0, 1.0), z_0)
+                for i_0, (result_iter_1,) in pl.range(10, init_values=(result_0,)):
+                    if i_0 > 5:
+                        result_3 = pl.tensor.adds(result_iter_1, 1.0)
+                        result_4 = pl.yield_(result_3)
+                    else:
+                        result_4 = pl.yield_(result_iter_1)
+                    _result_2 = pl.yield_(result_4)
+                a_0 = pl.tensor.mul(pl.tensor.adds(b_0, 2.0), c_0)
+                return pl.tensor.add(x_0, a_0)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(
-                self,
-                y: pl.Tensor[[64], pl.FP32],
-                z: pl.Tensor[[64], pl.FP32],
-                b: pl.Tensor[[64], pl.FP32],
-                c: pl.Tensor[[64], pl.FP32],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                result: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                # Flattened: temp variable for first nested call
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(y, 1.0)
-                x: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, z)
-                for i in pl.range(10):
-                    if i > 5:
-                        result = pl.add(result, 1.0)
-                # Flattened: temp variable for second nested call
-                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(b, 2.0)
-                a: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, c)
-                return pl.add(x, a)
+            def main(self, y_0: pl.Tensor[[64], pl.FP32], z_0: pl.Tensor[[64], pl.FP32], b_0: pl.Tensor[[64], pl.FP32], c_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result_0 = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                _t0 = pl.tensor.adds(y_0, 1.0)
+                x_0 = pl.tensor.mul(_t0, z_0)
+                for i_0, (result_iter_1,) in pl.range(10, init_values=(result_0,)):
+                    if i_0 > 5:
+                        result_3 = pl.tensor.adds(result_iter_1, 1.0)
+                        result_4 = pl.yield_(result_3)
+                    else:
+                        result_4 = pl.yield_(result_iter_1)
+                    _result_2 = pl.yield_(result_4)
+                _t1 = pl.tensor.adds(b_0, 2.0)
+                a_0 = pl.tensor.mul(_t1, c_0)
+                return pl.tensor.add(x_0, a_0)
 
+        Before = passes.convert_to_ssa()(Before)
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
 
@@ -326,8 +319,8 @@ class TestFlattenCallInIfCondition:
             def main(
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t__tmp_v0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()
-                if t__tmp_v0 < 10:  # type: ignore[operator]
+                _t0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()
+                if _t0 < 10:  # type: ignore[operator]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
@@ -362,8 +355,8 @@ class TestFlattenCallInForRange:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(10):
-                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
-                    result = pl.mul(t__tmp_v0, 2.0)
+                    _t0: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
+                    result = pl.mul(_t0, 2.0)
                 return result
 
         After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
@@ -390,8 +383,8 @@ class TestFlattenCallInForRange:
             def main(
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t__tmp_v0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()  # type: ignore[attr-defined]
-                for _i in pl.range(t__tmp_v0):  # type: ignore[arg-type]
+                _t0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()  # type: ignore[attr-defined]
+                for _i in pl.range(_t0):  # type: ignore[arg-type]
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
@@ -425,9 +418,9 @@ class TestFlattenComplexNesting:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 result: pl.Tensor[[64], pl.FP32] = x
                 for i in pl.range(5):
-                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
-                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.exp(x)
-                    temp: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, t__tmp_v1)
+                    _t0: pl.Tensor[[64], pl.FP32] = pl.mul(result, 2.0)
+                    _t1: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                    temp: pl.Tensor[[64], pl.FP32] = pl.add(_t0, _t1)
                     if i > 2:
                         result = temp
                     else:
@@ -453,13 +446,13 @@ class TestFlattenComplexNesting:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
-                a: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
-                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(a, 3.0)
-                b: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 4.0)
-                t__tmp_v2: pl.Tensor[[64], pl.FP32] = pl.exp(b)
-                t__tmp_v3: pl.Tensor[[64], pl.FP32] = pl.exp(a)
-                c: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v2, t__tmp_v3)
+                _t0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                a: pl.Tensor[[64], pl.FP32] = pl.add(_t0, 1.0)
+                _t1: pl.Tensor[[64], pl.FP32] = pl.add(a, 3.0)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(_t1, 4.0)
+                _t2: pl.Tensor[[64], pl.FP32] = pl.exp(b)
+                _t3: pl.Tensor[[64], pl.FP32] = pl.exp(a)
+                c: pl.Tensor[[64], pl.FP32] = pl.add(_t2, _t3)
                 return c
 
         After = passes.flatten_call_expr()(Before)

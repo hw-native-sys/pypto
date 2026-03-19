@@ -120,7 +120,7 @@ class PagedAttention:
         pij_tile = pl.tile.exp(pij_tile)
         pij_bf16_tile = pl.tile.cast(pij_tile, mode="round", target_type=pl.BF16)
         pij_tile = pl.tile.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
-        sum_tile: pl.Tile[[16, 1], pl.FP16] = pl.tile.row_sum(pij_tile, tmp_tile)
+        sum_tile: pl.Tile[[16, 1], pl.BF16] = pl.tile.row_sum(pij_tile, tmp_tile)
         pl.store(max_tile, [0, 0], mij)
         pl.store(sum_tile, [0, 0], lij)
         pl.store(pij_bf16_tile, [0, 0], pij)

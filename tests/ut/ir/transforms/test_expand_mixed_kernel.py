@@ -104,6 +104,7 @@ class TestPassthrough:
                 out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
                 return out_0
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_orchestration_unchanged(self):
@@ -158,6 +159,7 @@ class TestPassthrough:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_pure_vector_inside_loop_becomes_aiv(self):
@@ -249,6 +251,7 @@ class TestSplitStructure:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_function_count_after_split(self):
@@ -333,6 +336,7 @@ class TestCrossCoreBoundaries:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_v2c_boundary_add_to_matmul(self):
@@ -405,6 +409,7 @@ class TestCrossCoreBoundaries:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -481,6 +486,7 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_matmul_bias_in_aic(self):
@@ -611,6 +617,7 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_gemv_acc_in_aic(self):
@@ -682,6 +689,7 @@ class TestCubeOpVariants:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_gemv_bias_in_aic(self):
@@ -828,6 +836,7 @@ class TestVectorOpClassification:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_dn_transpose_moves_in_aic(self):
@@ -901,6 +910,7 @@ class TestVectorOpClassification:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -979,6 +989,7 @@ class TestRealisticPatterns:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_matmul_chain_vector_postprocessing(self):
@@ -1048,6 +1059,7 @@ class TestRealisticPatterns:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -1176,6 +1188,7 @@ class TestMultipleInCore:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.compute_b_incore_0_aiv(a, b, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_mixed_plus_pure_incore(self):
@@ -1263,6 +1276,7 @@ class TestMultipleInCore:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.mixed_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -1592,6 +1606,7 @@ class TestEdgeCases:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.compute_incore_0_aiv(x, y, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
@@ -1721,6 +1736,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_bidirectional_loop_accumulation(self):
@@ -1807,6 +1823,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_tpop_preserved_when_result_unused(self):
@@ -1884,6 +1901,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_multiple_iter_args_preserved(self):
@@ -2128,6 +2146,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_transient_shared_alias_does_not_keep_dead_iter_arg_alive(self):
@@ -2215,6 +2234,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
     def test_conditional_branch_references_source_tile_of_boundary_move(self):
@@ -2312,6 +2332,7 @@ class TestDCERegression:
                 result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
+        Expected = passes.convert_to_ssa()(Expected)
         ir.assert_structural_equal(After, Expected)
 
 
