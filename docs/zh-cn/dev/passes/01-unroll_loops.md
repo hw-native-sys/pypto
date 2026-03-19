@@ -74,10 +74,10 @@ class After:
 
 ## 流水线位置
 
-UnrollLoops 在 Default 和 PTOAS 策略中**运行一次**，位于 SSA 转换之前：
+UnrollLoops 在 Default 和 PTOAS 策略中**运行一次**，位于控制流结构化之前：
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
+UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 UnrollLoops 展开非分块的 `pl.unroll()` 循环（跳过分块展开循环，保留 `chunk` 供后续 `SplitChunkedLoops` 处理）。

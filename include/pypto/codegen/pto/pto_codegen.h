@@ -226,6 +226,25 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::GtPtr& op) override;
   void VisitExpr_(const ir::GePtr& op) override;
   void VisitExpr_(const ir::CastPtr& op) override;
+  // Logical
+  void VisitExpr_(const ir::AndPtr& op) override;
+  void VisitExpr_(const ir::OrPtr& op) override;
+  void VisitExpr_(const ir::XorPtr& op) override;
+  // Bitwise
+  void VisitExpr_(const ir::BitAndPtr& op) override;
+  void VisitExpr_(const ir::BitOrPtr& op) override;
+  void VisitExpr_(const ir::BitXorPtr& op) override;
+  void VisitExpr_(const ir::BitShiftLeftPtr& op) override;
+  void VisitExpr_(const ir::BitShiftRightPtr& op) override;
+  // Other binary
+  void VisitExpr_(const ir::FloatDivPtr& op) override;
+  void VisitExpr_(const ir::MinPtr& op) override;
+  void VisitExpr_(const ir::MaxPtr& op) override;
+  // Unary
+  void VisitExpr_(const ir::NotPtr& op) override;
+  void VisitExpr_(const ir::NegPtr& op) override;
+  void VisitExpr_(const ir::AbsPtr& op) override;
+  void VisitExpr_(const ir::BitNotPtr& op) override;
 
  private:
   /**

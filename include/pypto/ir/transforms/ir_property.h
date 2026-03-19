@@ -45,6 +45,7 @@ enum class IRProperty : uint64_t {
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   kCount                    ///< Sentinel (must be last)
 };
 
