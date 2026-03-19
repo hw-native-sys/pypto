@@ -1051,6 +1051,31 @@ def _assert_not_shares_memref_recursive(func, var_a, var_b):
     assert not type_a.shares_memref_with(type_b), f"{var_b} should NOT share MemRef with {var_a}"
 
 
+def _find_first_for_stmt(stmt):
+    """Return the first ForStmt found in a statement tree."""
+    if isinstance(stmt, ir.ForStmt):
+        return stmt
+    if isinstance(stmt, ir.SeqStmts):
+        for child in stmt.stmts:
+            found = _find_first_for_stmt(child)
+            if found is not None:
+                return found
+    if isinstance(stmt, ir.OpStmts):
+        for child in stmt.stmts:
+            found = _find_first_for_stmt(child)
+            if found is not None:
+                return found
+    if isinstance(stmt, ir.IfStmt):
+        found = _find_first_for_stmt(stmt.then_body)
+        if found is not None:
+            return found
+        if stmt.else_body is not None:
+            return _find_first_for_stmt(stmt.else_body)
+    if isinstance(stmt, ir.WhileStmt):
+        return _find_first_for_stmt(stmt.body)
+    return None
+
+
 class TestYieldAndInitValueAliasing:
     """Tests for yield and init_value aliasing prevention (issue #585)."""
 
@@ -1098,6 +1123,61 @@ class TestYieldAndInitValueAliasing:
 
         # gate_init and up_init are both used as init_values → must NOT share MemRef
         _assert_not_shares_memref_recursive(func, "gate_init", "up_init")
+
+    def test_loop_fixup_rewrites_iter_arg_body_refs_and_removes_stale_alloc(self):
+        """Loop fixup should rewrite body IterArg refs to the reused init buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                data: pl.Tensor[[16, 512], pl.FP32],
+                out: pl.Tensor[[16, 1], pl.FP32],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_tile, 0.0)
+                for i, (acc_iter,) in pl.range(2, init_values=(init_tile,)):
+                    offset: pl.Scalar[pl.INDEX] = i * 256
+                    chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
+                    tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                        [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                    updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)
+                    updated_mv: pl.Tile[[16, 1], pl.FP32] = pl.tile.move(
+                        updated, target_memory=pl.MemorySpace.Vec
+                    )
+                    result = pl.yield_(updated_mv)
+                final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return final
+
+        initialized = passes.init_mem_ref()(Before)
+        before_func = list(initialized.functions.values())[0]
+        before_alloc_count = _count_alloc_stmts(before_func)
+
+        After = passes.basic_memory_reuse()(initialized)
+        func = list(After.functions.values())[0]
+
+        loop = _find_first_for_stmt(func.body)
+        assert loop is not None, "Expected a ForStmt in transformed function"
+        assert len(loop.iter_args) == 1
+
+        iter_arg = loop.iter_args[0]
+        assert isinstance(iter_arg.initValue, ir.Var)
+        assert isinstance(iter_arg.type, ir.ShapedType)
+        assert isinstance(iter_arg.initValue.type, ir.ShapedType)
+        assert iter_arg.type.shares_memref_with(iter_arg.initValue.type), (
+            "Loop-carried IterArg should share the initValue MemRef after fixup"
+        )
+
+        after_alloc_count = _count_alloc_stmts(func)
+        assert after_alloc_count < before_alloc_count, (
+            f"Expected stale alloc cleanup after loop fixup, got before={before_alloc_count}, "
+            f"after={after_alloc_count}"
+        )
 
     def test_return_prevents_aliasing_of_simultaneously_live_tiles(self):
         """Two tiles both live at the return point must NOT share MemRef."""

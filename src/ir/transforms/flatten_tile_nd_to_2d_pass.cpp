@@ -124,12 +124,11 @@ std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& 
 }
 
 /**
- * @brief Substitute variables in an expression using a name-based map.
+ * @brief Substitute variables in an expression using a pointer-identity map.
  */
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
-  // IterArg inherits from Var, so As<Var> handles both
+ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
   if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var->name_hint_);
+    auto it = var_map.find(var.get());
     return (it != var_map.end()) ? it->second : expr;
   }
   if (auto call = As<Call>(expr)) {
@@ -251,7 +250,18 @@ class PreconditionChecker : public IRVisitor {
 // ============================================================================
 
 struct FlattenContext {
-  std::unordered_map<std::string, VarPtr> var_map;  // old var name -> new 2D var
+  std::unordered_map<const Var*, VarPtr> var_map;           // old Var* -> new 2D var
+  std::unordered_map<std::string, VarPtr> name_to_new_var;  // cross-scope return_var matching
+
+  void Insert(const VarPtr& old_var, const VarPtr& new_var) {
+    var_map[old_var.get()] = new_var;
+    name_to_new_var[old_var->name_hint_] = new_var;
+  }
+
+  void Erase(const VarPtr& var) {
+    var_map.erase(var.get());
+    name_to_new_var.erase(var->name_hint_);
+  }
 };
 
 /**
@@ -324,14 +334,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         new_else_body = WrapInSeqStmts(new_else, (*if_stmt->else_body_)->span_);
       }
 
-      // Substitute return_vars using the branch contexts
+      // Substitute return_vars using the branch contexts (name-based cross-scope matching)
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(if_stmt->return_vars_.size());
       for (const auto& rv : if_stmt->return_vars_) {
-        auto it = then_ctx.var_map.find(rv->name_hint_);
-        if (it != then_ctx.var_map.end()) {
+        auto it = then_ctx.name_to_new_var.find(rv->name_hint_);
+        if (it != then_ctx.name_to_new_var.end()) {
           new_return_vars.push_back(it->second);
-          ctx.var_map[rv->name_hint_] = it->second;
+          ctx.Insert(rv, it->second);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -349,7 +359,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_step = SubstituteExpr(for_stmt->step_, ctx.var_map);
 
       auto body_ctx = ctx;
-      // Process iter_args
       std::vector<IterArgPtr> new_iter_args;
       new_iter_args.reserve(for_stmt->iter_args_.size());
       for (const auto& ia : for_stmt->iter_args_) {
@@ -357,24 +366,24 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto new_ia = ia;
         if (new_init != ia->initValue_) {
           new_ia = std::make_shared<IterArg>(ia->name_hint_, new_init->GetType(), new_init, ia->span_);
+          body_ctx.Insert(ia, new_ia);
+        } else {
+          body_ctx.Erase(ia);
         }
         new_iter_args.push_back(new_ia);
-        // Shadow in body_ctx to avoid outer mapping leaking
-        body_ctx.var_map.erase(ia->name_hint_);
       }
 
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
 
-      // Substitute return_vars and propagate to outer context
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(for_stmt->return_vars_.size());
       for (const auto& rv : for_stmt->return_vars_) {
-        auto it = body_ctx.var_map.find(rv->name_hint_);
-        if (it != body_ctx.var_map.end()) {
+        auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
+        if (it != body_ctx.name_to_new_var.end()) {
           new_return_vars.push_back(it->second);
-          ctx.var_map[rv->name_hint_] = it->second;
+          ctx.Insert(rv, it->second);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -397,9 +406,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto new_ia = ia;
         if (new_init != ia->initValue_) {
           new_ia = std::make_shared<IterArg>(ia->name_hint_, new_init->GetType(), new_init, ia->span_);
+          body_ctx.Insert(ia, new_ia);
+        } else {
+          body_ctx.Erase(ia);
         }
         new_iter_args.push_back(new_ia);
-        body_ctx.var_map.erase(ia->name_hint_);
       }
 
       auto new_cond = SubstituteExpr(while_stmt->condition_, body_ctx.var_map);
@@ -407,14 +418,13 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
 
-      // Substitute return_vars and propagate to outer context
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(while_stmt->return_vars_.size());
       for (const auto& rv : while_stmt->return_vars_) {
-        auto it = body_ctx.var_map.find(rv->name_hint_);
-        if (it != body_ctx.var_map.end()) {
+        auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
+        if (it != body_ctx.name_to_new_var.end()) {
           new_return_vars.push_back(it->second);
-          ctx.var_map[rv->name_hint_] = it->second;
+          ctx.Insert(rv, it->second);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -461,7 +471,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        ctx.var_map[assign->var_->name_hint_] = new_var;
+        ctx.Insert(assign->var_, new_var);
       } else {
         result.push_back(stmt);
       }
@@ -492,7 +502,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             std::make_shared<Call>(call->op_, sub_args, call->kwargs_, flat_tile_type, call->span_);
         auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, flat_call, assign->span_));
-        ctx.var_map[assign->var_->name_hint_] = flat_var;
+        ctx.Insert(assign->var_, flat_var);
         continue;
       }
       // ≤2D tile.load: honor any pending var_map substitutions
@@ -500,7 +510,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-      ctx.var_map[assign->var_->name_hint_] = new_var;
+      ctx.Insert(assign->var_, new_var);
       continue;
     }
 
@@ -549,7 +559,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-      ctx.var_map[assign->var_->name_hint_] = new_var;
+      ctx.Insert(assign->var_, new_var);
       continue;
     }
 
@@ -573,7 +583,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto flat_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
-        ctx.var_map[assign->var_->name_hint_] = flat_var;
+        ctx.Insert(assign->var_, flat_var);
         continue;
       }
       // ≤2D: pass through
@@ -607,7 +617,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           auto new_var =
               std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
           result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-          ctx.var_map[assign->var_->name_hint_] = new_var;
+          ctx.Insert(assign->var_, new_var);
           continue;
         }
       }
@@ -637,7 +647,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-        ctx.var_map[assign->var_->name_hint_] = new_var;
+        ctx.Insert(assign->var_, new_var);
       }
     }
   }

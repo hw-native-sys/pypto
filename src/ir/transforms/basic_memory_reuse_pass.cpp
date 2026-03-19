@@ -782,10 +782,16 @@ class ForStmtYieldFixupMutator : public IRMutator {
 
     if (!changed) return for_stmt;
 
+    auto patched_body = VisitStmt(for_stmt->body_);
+
+    for (const auto& old_iter_arg : for_stmt->iter_args_) {
+      var_remap_.erase(old_iter_arg.get());
+    }
+
     return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                     new_iter_args, for_stmt->body_, std::move(new_return_vars),
-                                     for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-                                     for_stmt->chunk_policy_, for_stmt->loop_origin_);
+                                     new_iter_args, patched_body, std::move(new_return_vars), for_stmt->span_,
+                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
+                                     for_stmt->loop_origin_);
   }
 
   // Replace YieldStmt in body and insert move AssignStmts before it.

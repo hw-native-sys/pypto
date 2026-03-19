@@ -1523,10 +1523,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     if (tensor_type) {
       auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
       INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
-      auto tv_it = tensor_to_view_.find(GetVarKey(init_var));
-      INTERNAL_CHECK(tv_it != tensor_to_view_.end())
-          << "Tensor view not found for iter_arg init value: " << init_var->name_hint_;
-      init_mlir_name = tv_it->second;
+      init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);
       init_mlir_name = current_expr_value_;
@@ -1665,10 +1662,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     if (tensor_type) {
       auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
       INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
-      auto tv_it = tensor_to_view_.find(GetVarKey(init_var));
-      INTERNAL_CHECK(tv_it != tensor_to_view_.end())
-          << "Tensor view not found for iter_arg init value: " << init_var->name_hint_;
-      init_mlir_name = tv_it->second;
+      init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);
       init_mlir_name = current_expr_value_;
