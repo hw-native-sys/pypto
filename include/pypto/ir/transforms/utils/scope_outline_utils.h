@@ -13,12 +13,10 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
 #include <algorithm>
-#include <climits>
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,6 +31,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/substitute_vars.h"
 #include "pypto/ir/type.h"
 
@@ -529,10 +528,9 @@ class ScopeOutliner : public IRMutator {
       // to avoid redefining the input parameter in SSA form.
       std::string out_var_name;
       if (is_store) {
-        out_var_name = out_var->name_hint_ + "_store_ret";
-        int suffix_idx = 1;
-        while (outlined_used_names.count(out_var_name)) {
-          out_var_name = out_var->name_hint_ + "_store_ret_" + std::to_string(suffix_idx++);
+        out_var_name = auto_name::BuildName(auto_name::GetBaseName(out_var->name_hint_), "", "store");
+        if (outlined_used_names.count(out_var_name)) {
+          out_var_name = auto_name::GenerateFreshNameLike(out_var_name, outlined_used_names);
         }
       } else {
         out_var_name = out_var->name_hint_;
@@ -644,7 +642,8 @@ class ScopeOutliner : public IRMutator {
       return std::make_shared<AssignStmt>(output_var, call_expr, op->span_);
     } else {
       // Assign call result to a temporary variable, then unpack with TupleGetItem
-      auto ret_var = std::make_shared<Var>("ret", call_return_type, op->span_);
+      auto ret_var =
+          std::make_shared<Var>(auto_name::BuildName("ret", "", "tmp", 0), call_return_type, op->span_);
       std::vector<StmtPtr> stmts;
       stmts.push_back(std::make_shared<AssignStmt>(ret_var, call_expr, op->span_));
       for (size_t i = 0; i < output_vars.size(); ++i) {
@@ -662,39 +661,11 @@ class ScopeOutliner : public IRMutator {
    * E.g. "buf_0" -> "buf_1", "x_2" -> "x_3".  Falls back to appending "_1".
    */
   [[nodiscard]] std::string GenerateFreshSSAName(const std::string& original_name) const {
-    std::string base = original_name;
-    int version = 0;
-
-    auto last_underscore = original_name.rfind('_');
-    if (last_underscore != std::string::npos && last_underscore + 1 < original_name.size()) {
-      auto suffix = original_name.substr(last_underscore + 1);
-      bool all_digits = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
-                                                       [](char c) { return c >= '0' && c <= '9'; });
-      if (all_digits) {
-        try {
-          int parsed = std::stoi(suffix);
-          if (parsed >= INT_MAX) {
-            // Would overflow on version++ — treat entire name as base, start from _1.
-            base = original_name;
-            version = 0;
-          } else {
-            version = parsed;
-            base = original_name.substr(0, last_underscore);
-          }
-        } catch (const std::out_of_range&) {
-          // Suffix too large for int — treat entire name as base, start from _1.
-          base = original_name;
-          version = 0;
-        }
-      }
+    std::unordered_set<std::string> used_names;
+    for (const auto& [var, _] : var_types_) {
+      used_names.insert(var->name_hint_);
     }
-
-    std::string new_name;
-    do {
-      version++;
-      new_name = base + "_" + std::to_string(version);
-    } while (known_names_.count(new_name));
-    return new_name;
+    return auto_name::GenerateFreshNameLike(original_name, used_names);
   }
 
   /**

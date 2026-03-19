@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -115,7 +116,10 @@ bool IsRepairableCall(const CallPtr& call, const backend::BackendTileLayoutSpec&
 
 class BackendLayoutRepairMutator : public IRMutator {
  public:
-  std::string NextTempName(const std::string& base) { return base + "_" + std::to_string(temp_var_id_++); }
+  std::string NextTempName(const std::string& base, const std::vector<std::string>& qualifiers) {
+    return auto_name::BuildName(auto_name::GetBaseName(base), qualifiers, "tmp",
+                                static_cast<int>(temp_var_id_++));
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -148,7 +152,7 @@ class BackendLayoutRepairMutator : public IRMutator {
 
       auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
       auto reshape_var = std::make_shared<Var>(
-          NextTempName(op->var_->name_hint_ + "_arg" + std::to_string(i) + "_row_major"),
+          NextTempName(op->var_->name_hint_, {auto_name::RowMajorQualifier(), auto_name::ArgQualifier(i)}),
           reshape_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
       new_args[i] = reshape_var;
@@ -160,7 +164,7 @@ class BackendLayoutRepairMutator : public IRMutator {
     CHECK(repaired_call) << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
     if (!IsRowVectorRowMajor(result_tile_type)) {
-      auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_ + "_row_major"),
+      auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),
                                                  repaired_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(row_major_var, repaired_call, op->span_));
 
@@ -198,7 +202,7 @@ class BackendLayoutRepairMutator : public IRMutator {
       }
       auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
       auto reshape_var =
-          std::make_shared<Var>(NextTempName("layout_fix_arg" + std::to_string(i) + "_row_major"),
+          std::make_shared<Var>(NextTempName("layout_fix", {"row_major", "arg" + std::to_string(i)}),
                                 reshape_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
       new_args[i] = reshape_var;

@@ -27,6 +27,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -574,8 +575,14 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       const auto& orig_loop = reordered[loop_idx];
       for (size_t ia_idx = 0; ia_idx < num_iter_args; ++ia_idx) {
         const auto& orig_ia = first_orig->iter_args_[ia_idx];
-        std::string ia_name = orig_ia->name_hint_ + "_l" + std::to_string(loop_idx);
-        std::string rv_name = orig_ia->name_hint_ + "_l" + std::to_string(loop_idx) + "_rv";
+        auto parsed_name = auto_name::Parse(orig_ia->name_hint_);
+        std::string loop_qualifier = auto_name::LoopLevelQualifier(static_cast<int>(loop_idx));
+        std::string combined_qualifier =
+            parsed_name.qualifier.empty() ? loop_qualifier : parsed_name.qualifier + "_" + loop_qualifier;
+        std::string ia_name =
+            auto_name::BuildName(parsed_name.base_name, combined_qualifier, "iter", parsed_name.version);
+        std::string rv_name =
+            auto_name::BuildName(parsed_name.base_name, combined_qualifier, "rv", parsed_name.version);
 
         ExprPtr init_value;
         if (loop_idx == 0) {

@@ -39,7 +39,7 @@ program_flat = flatten_pass(program)
 ## Algorithm
 
 1. **Detect Nested Calls**: Identify call expressions in nested contexts
-2. **Extract to Temps**: Create temporary variables (named `_t0`, `_t1`, etc.)
+2. **Extract to Temps**: Create temporary variables (named like `t__tmp_v0`, `t__tmp_v1`, etc.)
 3. **Insert AssignStmt**: Add assignment statements before the original statement
 4. **Replace with Var**: Replace nested call with temporary variable reference
 5. **Handle Control Flow**: For if/for statements, insert into last OpStmts or create new one
@@ -62,8 +62,8 @@ c = foo(bar(a))  # bar(a) is nested in foo's arguments
 **After**:
 
 ```python
-_t0 = bar(a)
-c = foo(_t0)
+t__tmp_v0 = bar(a)
+c = foo(t__tmp_v0)
 ```
 
 ### Nested Call in If Condition
@@ -78,9 +78,9 @@ if is_valid(compute(x)):
 **After**:
 
 ```python
-_t0 = compute(x)
-_t1 = is_valid(_t0)
-if _t1:
+t__tmp_v0 = compute(x)
+t__tmp_v1 = is_valid(t__tmp_v0)
+if t__tmp_v1:
     y = 1
 ```
 
@@ -95,9 +95,9 @@ result = add(mul(a, b), div(c, d))
 **After**:
 
 ```python
-_t0 = mul(a, b)
-_t1 = div(c, d)
-result = add(_t0, _t1)
+t__tmp_v0 = mul(a, b)
+t__tmp_v1 = div(c, d)
+result = add(t__tmp_v0, t__tmp_v1)
 ```
 
 ### Nested in Binary Expression
@@ -111,9 +111,9 @@ x = compute(a) + compute(b)
 **After**:
 
 ```python
-_t0 = compute(a)
-_t1 = compute(b)
-x = _t0 + _t1
+t__tmp_v0 = compute(a)
+t__tmp_v1 = compute(b)
+x = t__tmp_v0 + t__tmp_v1
 ```
 
 ## Implementation

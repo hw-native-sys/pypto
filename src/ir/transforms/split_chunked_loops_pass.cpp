@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -214,7 +216,8 @@ class ChunkedLoopSplitter : public IRMutator {
     int64_t remainder = trip_count % chunk_size;
 
     const Var* loop_var_key = op->loop_var_.get();
-    std::string base_name = op->loop_var_->name_hint_;
+    auto loop_name = auto_name::Parse(op->loop_var_->name_hint_);
+    std::string base_name = loop_name.base_name;
 
     // Save previous substitutions for loop var and iter_args
     auto prev_loop_sub = SaveSubstitution(loop_var_key);
@@ -233,7 +236,7 @@ class ChunkedLoopSplitter : public IRMutator {
     if (!has_iter_args) {
       // Simple path: no iter_args to propagate
       return SplitSimple(op, start, step, chunk_size, num_full_chunks, remainder, loop_var_key, base_name,
-                         start_expr, step_expr, chunk_const, prev_loop_sub);
+                         loop_name.version, start_expr, step_expr, chunk_const, prev_loop_sub);
     }
 
     // Zero-trip loop: return vars resolve to iter_arg init values
@@ -256,10 +259,12 @@ class ChunkedLoopSplitter : public IRMutator {
 
     // Main nested loops (if there are full chunks)
     if (num_full_chunks > 0) {
-      auto out_var =
-          std::make_shared<Var>(base_name + "_out", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-      auto in_var =
-          std::make_shared<Var>(base_name + "_in", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto out_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto in_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
 
       // Create outer and inner iter_args/return_vars
       std::vector<IterArgPtr> outer_iter_args;
@@ -269,16 +274,25 @@ class ChunkedLoopSplitter : public IRMutator {
 
       for (const auto& ia : op->iter_args_) {
         auto visited_init = VisitExpr(ia->initValue_);
-        auto outer_ia =
-            std::make_shared<IterArg>(ia->name_hint_ + "_outer", ia->GetType(), visited_init, ia->span_);
-        auto outer_rv = std::make_shared<Var>(ia->name_hint_ + "_outer_rv", ia->GetType(), ia->span_);
+        auto ia_name = auto_name::Parse(ia->name_hint_);
+        auto outer_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), visited_init, ia->span_);
+        auto outer_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "rv", ia_name.version),
+            ia->GetType(), ia->span_);
         outer_iter_args.push_back(outer_ia);
         outer_return_vars.push_back(outer_rv);
 
         ExprPtr inner_init = outer_ia;
-        auto inner_ia =
-            std::make_shared<IterArg>(ia->name_hint_ + "_inner", ia->GetType(), inner_init, ia->span_);
-        auto inner_rv = std::make_shared<Var>(ia->name_hint_ + "_inner_rv", ia->GetType(), ia->span_);
+        auto inner_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), inner_init, ia->span_);
+        auto inner_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "rv", ia_name.version),
+            ia->GetType(), ia->span_);
         inner_iter_args.push_back(inner_ia);
         inner_return_vars.push_back(inner_rv);
 
@@ -317,8 +331,9 @@ class ChunkedLoopSplitter : public IRMutator {
 
     // Remainder loop
     if (remainder > 0) {
-      auto rem_var =
-          std::make_shared<Var>(base_name + "_rem", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto rem_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
 
       int64_t rem_start = start + num_full_chunks * chunk_size * step;
       auto rem_start_expr = MakeConstIndex(rem_start, op->span_);
@@ -330,8 +345,15 @@ class ChunkedLoopSplitter : public IRMutator {
       for (size_t i = 0; i < op->iter_args_.size(); ++i) {
         const auto& ia = op->iter_args_[i];
         ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : VisitExpr(ia->initValue_);
-        auto rem_ia = std::make_shared<IterArg>(ia->name_hint_ + "_rem", ia->GetType(), rem_init, ia->span_);
-        auto rem_rv = std::make_shared<Var>(ia->name_hint_ + "_rem_rv", ia->GetType(), ia->span_);
+        auto ia_name = auto_name::Parse(ia->name_hint_);
+        auto rem_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), rem_init, ia->span_);
+        auto rem_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "rv",
+                                 ia_name.version),
+            ia->GetType(), ia->span_);
         rem_iter_args.push_back(rem_ia);
         rem_return_vars.push_back(rem_rv);
 
@@ -349,9 +371,15 @@ class ChunkedLoopSplitter : public IRMutator {
       if (num_full_chunks > 0) {
         std::vector<VarPtr> body_def_vars;
         CollectDefVars(op->body_, body_def_vars);
+        std::unordered_set<std::string> used_names;
+        for (const auto& var : body_def_vars) {
+          used_names.insert(var->name_hint_);
+        }
         for (const auto& var : body_def_vars) {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
+          auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
+          used_names.insert(fresh_name);
+          auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
       }
@@ -449,15 +477,18 @@ class ChunkedLoopSplitter : public IRMutator {
    */
   StmtPtr SplitSimple(const ForStmtPtr& op, int64_t start, int64_t step, int64_t chunk_size,
                       int64_t num_full_chunks, int64_t remainder, const Var* loop_var_key,
-                      const std::string& base_name, const ExprPtr& start_expr, const ExprPtr& step_expr,
-                      const ExprPtr& chunk_const, const SavedSubstitution& prev_loop_sub) {
+                      const std::string& base_name, const std::optional<int>& loop_version,
+                      const ExprPtr& start_expr, const ExprPtr& step_expr, const ExprPtr& chunk_const,
+                      const SavedSubstitution& prev_loop_sub) {
     std::vector<StmtPtr> result_stmts;
 
     if (num_full_chunks > 0) {
-      auto out_var =
-          std::make_shared<Var>(base_name + "_out", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-      auto in_var =
-          std::make_shared<Var>(base_name + "_in", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto out_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto in_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
 
       ExprPtr substitution =
           MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_const), in_var), step_expr));
@@ -479,8 +510,9 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     if (remainder > 0) {
-      auto rem_var =
-          std::make_shared<Var>(base_name + "_rem", std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+      auto rem_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_version),
+          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
 
       int64_t rem_start = start + num_full_chunks * chunk_size * step;
       auto rem_start_expr = MakeConstIndex(rem_start, op->span_);
@@ -495,9 +527,15 @@ class ChunkedLoopSplitter : public IRMutator {
       if (num_full_chunks > 0) {
         std::vector<VarPtr> body_def_vars;
         CollectDefVars(op->body_, body_def_vars);
+        std::unordered_set<std::string> used_names;
+        for (const auto& var : body_def_vars) {
+          used_names.insert(var->name_hint_);
+        }
         for (const auto& var : body_def_vars) {
           prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh = std::make_shared<Var>(var->name_hint_, var->GetType(), var->span_);
+          auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
+          used_names.insert(fresh_name);
+          auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
           substitution_map_[var.get()] = fresh;
         }
       }

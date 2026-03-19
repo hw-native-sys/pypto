@@ -14,6 +14,8 @@ Pre-SSA tests compare printed IR because the pass creates new Var objects
 End-to-end tests verify the full pipeline: CtrlFlowTransform -> ConvertToSSA.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -42,6 +44,13 @@ def _has_bare_keyword(code: str, keyword: str) -> bool:
     return False
 
 
+def _require_break_flag_name(body: str) -> str:
+    """Extract the auto-named break flag introduced by CtrlFlowTransform."""
+    match = re.search(r"\b(break__tmp_v\d+)\b", body)
+    assert match is not None
+    return match.group(1)
+
+
 # ===========================================================================
 # Pre-SSA tests (non-strict_ssa input)
 # ===========================================================================
@@ -68,17 +77,17 @@ class TestBreakOnly:
 
         # Should have while loop with break flag
         assert "while" in body
-        assert "__break_0" in body
-        # No raw break/continue keywords (excluding __break_0 variable references)
+        break_name = _require_break_flag_name(body)
+        # No raw break/continue keywords (excluding break-flag references)
         assert "\n            break\n" not in python_print(After)
         assert "continue" not in body
         # Break flag init and condition
-        assert "__break_0: pl.Scalar[pl.BOOL] = False" in body
-        assert "not __break_0" in body
+        assert f"{break_name}: pl.Scalar[pl.BOOL] = False" in body
+        assert f"not {break_name}" in body
         # Break path sets flag to True
-        assert "__break_0: pl.Scalar[pl.BOOL] = True" in body
+        assert f"{break_name}: pl.Scalar[pl.BOOL] = True" in body
         # iter_adv guarded by break flag
-        assert "if not __break_0:" in body
+        assert f"if not {break_name}:" in body
 
     def test_break_first_stmt(self):
         """Break as the very first statement in the loop body."""
@@ -95,7 +104,7 @@ class TestBreakOnly:
         After = passes.ctrl_flow_transform()(Before)
         body = _get_function_body(python_print(After))
         assert "while" in body
-        assert "__break_0" in body
+        _require_break_flag_name(body)
         assert "\n            break\n" not in python_print(After)
 
 
@@ -151,9 +160,9 @@ class TestBreakAndContinue:
 
         # Should convert to while (due to break)
         assert "while" in body
-        assert "__break_0" in body
+        break_name = _require_break_flag_name(body)
         # Both break and continue should be eliminated
-        assert "break" not in body.replace("__break_0", "").replace("not __break_0", "")
+        assert "break" not in body.replace(break_name, "")
         assert "continue" not in body
         # Both operations should be present
         assert "pl.tensor.adds" in body
@@ -182,9 +191,9 @@ class TestWhileLoops:
         body = _get_function_body(python_print(After))
 
         assert "while" in body
-        assert "__break_0" in body
-        assert "break" not in body.replace("__break_0", "").replace("not __break_0", "")
-        assert "not __break_0" in body
+        break_name = _require_break_flag_name(body)
+        assert "break" not in body.replace(break_name, "")
+        assert f"not {break_name}" in body
 
     def test_while_continue(self):
         """WhileStmt with continue should restructure into if-else."""
@@ -230,7 +239,7 @@ class TestWhileLoops:
         body = _get_function_body(printed)
         assert "BreakStmt" not in printed
         assert "ContinueStmt" not in printed
-        assert "__break_0" in body
+        _require_break_flag_name(body)
         assert "add" in body
 
     def test_while_break_with_ssa_inline_expr(self):
@@ -258,7 +267,7 @@ class TestWhileLoops:
         body = _get_function_body(printed)
         assert "BreakStmt" not in printed
         assert "ContinueStmt" not in printed
-        assert "__break_0" in body
+        _require_break_flag_name(body)
 
 
 class TestIdentity:
@@ -335,8 +344,8 @@ class TestNestedLoops:
         assert "for j in pl.range" in body
         # Inner loop should become a while
         assert "while" in body
-        assert "__break_0" in body
-        assert "break" not in body.replace("__break_0", "").replace("not __break_0", "")
+        break_name = _require_break_flag_name(body)
+        assert "break" not in body.replace(break_name, "")
 
 
 class TestEndToEnd:

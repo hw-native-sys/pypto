@@ -740,6 +740,19 @@ class TestStrictSSAMode:
 class TestEdgeCases:
     """Tests for edge cases and corner scenarios."""
 
+    def test_reserved_auto_name_delimiter_in_base_raises(self):
+        """Base names containing '__' should be rejected before auto-naming."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, bad__x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(bad__x, bad__x)
+                return result
+
+        with pytest.raises(ValueError, match="reserved delimiter '__'"):
+            passes.convert_to_ssa()(Before)
+
     def test_variables_with_numeric_suffixes(self):
         """Variables ending in _<digits> should be treated as distinct (issue #170)."""
 

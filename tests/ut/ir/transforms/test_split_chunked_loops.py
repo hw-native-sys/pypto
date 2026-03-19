@@ -568,11 +568,11 @@ class TestNestedChunking:
         printed = python_print(After)
         init_refs = re.findall(r"init_values=\((\w+),\)", printed)
         for ref in init_refs:
-            assert ref != "x_iter_1", (
-                "Found bare 'x_iter_1' in init_values; should be x_iter_1_inner or x_iter_1_rem etc."
+            assert ref != "x__iter_v1", (
+                "Found bare 'x__iter_v1' in init_values; should be a chunk-qualified iter name."
             )
-            assert ref != "x_iter_3", (
-                "Found bare 'x_iter_3' in init_values; should be x_iter_3_inner or x_iter_3_rem etc."
+            assert ref != "x__iter_v3", (
+                "Found bare 'x__iter_v3' in init_values; should be a chunk-qualified iter name."
             )
 
 

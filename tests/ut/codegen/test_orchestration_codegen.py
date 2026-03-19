@@ -1309,11 +1309,11 @@ class TestOrchestration:
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
     def test_for_loop_with_inplace_return_after_passes(self):
-        """Test inplace detection when return var has compound SSA suffixes from pass pipeline.
+        """Test inplace detection when return var has compound auto-name suffixes from pass pipeline.
 
         When an Opaque function with auto_incore + parallel(chunk=) goes through the full
         pass pipeline (SSA → split_chunked_loops → interchange_chunk_loops → outline), the
-        return var acquires compound suffixes like "_iter_1_outer_l0_rv". GetSSABaseName must
+        return var acquires compound suffixes like "__co_l0_rv_v1". GetSSABaseName must
         strip all of these to match the return var back to the original param name for correct
         inplace detection (2 arg slots, not 3).
         """

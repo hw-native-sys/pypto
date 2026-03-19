@@ -59,9 +59,9 @@ Chunked loops outside `auto_incore` are rejected earlier by the DSL parser, so t
 Given a chunked loop in SSA form:
 
 ```text
-for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
-    x_1 = add(x_iter, 1.0)
-    yield(x_1)
+for i, (x__iter_v1=x__ssa_v0,) in range(start, stop, step, chunk=C) -> (x__rv_v2,):
+    x__ssa_v3 = add(x__iter_v1, 1.0)
+    yield(x__ssa_v3)
 ```
 
 1. Compute `trip_count = ceil((stop - start) / step)`
@@ -74,6 +74,25 @@ for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
 
 The inner loop preserves the original `ForKind` (Sequential, Parallel, or Unroll). The outer loop is always Sequential.
 
+## Auto-Name Abbreviations
+
+The printed IR examples use the compact auto-name format `base__qualifier_role_vN`.
+To keep generated names readable, some qualifiers are abbreviated:
+
+| Abbreviation | Meaning |
+| ------------ | ------- |
+| `co` | `chunk_outer` |
+| `ci` | `chunk_inner` |
+| `cr` | `chunk_rem` / chunk remainder |
+
+Examples:
+
+- `i__co_idx_v0` = outer chunk loop index
+- `x__ci_iter_v1` = inner chunk iter_arg
+- `x__cr_rv_v1` = remainder-loop return var
+
+Roles such as `idx`, `iter`, `rv`, and `ssa` keep their full spelling because they are already short and commonly used across passes.
+
 ## Example
 
 **Before** (printed SSA IR form; not valid DSL source since `chunk` + `init_values` is forbidden in the DSL):
@@ -82,11 +101,11 @@ The inner loop preserves the original `ForKind` (Sequential, Parallel, or Unroll
 @pl.program
 class Before:
     @pl.function
-    def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0, (x_iter_1,) in pl.range(10, init_values=(x_0,), chunk=5):
-            x_3 = pl.tensor.add(x_iter_1, 1.0)
-            x_2 = pl.yield_(x_3)
-        return x_2
+    def main(self, x__ssa_v0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        for i__idx_v0, (x__iter_v1,) in pl.range(10, init_values=(x__ssa_v0,), chunk=5):
+            x__ssa_v3 = pl.tensor.add(x__iter_v1, 1.0)
+            x__rv_v2 = pl.yield_(x__ssa_v3)
+        return x__rv_v2
 ```
 
 **After** (nested loops, divisible):
@@ -95,28 +114,30 @@ class Before:
 @pl.program
 class After:
     @pl.function
-    def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0_out, (x_iter_1_outer,) in pl.range(2, init_values=(x_0,)):
-            for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
-                x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
-                x_iter_1_inner_rv = pl.yield_(x_3)
-            x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
-        return x_iter_1_outer_rv
+    def main(self, x__ssa_v0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        for i__co_idx_v0, (x__co_iter_v1,) in pl.range(2, init_values=(x__ssa_v0,)):
+            for i__ci_idx_v0, (x__ci_iter_v1,) in pl.range(
+                5, init_values=(x__co_iter_v1,)
+            ):
+                x__ssa_v3 = pl.tensor.add(x__ci_iter_v1, 1.0)
+                x__ci_rv_v1 = pl.yield_(x__ssa_v3)
+            x__co_rv_v1 = pl.yield_(x__ci_rv_v1)
+        return x__co_rv_v1
 ```
 
 **With remainder** (`chunk=5`, trip_count=7):
 
 ```python
 # Generates: outer(0,1) * inner(0,5) + remainder(0,2)
-for i_0_out, (x_iter_1_outer,) in pl.range(1, init_values=(x_0,)):
-    for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
-        x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
-        x_iter_1_inner_rv = pl.yield_(x_3)
-    x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
-for i_0_rem, (x_iter_1_rem,) in pl.range(2, init_values=(x_iter_1_outer_rv,)):
-    x_3 = pl.tensor.add(x_iter_1_rem, 1.0)
-    x_iter_1_rem_rv = pl.yield_(x_3)
-return x_iter_1_rem_rv
+for i__co_idx_v0, (x__co_iter_v1,) in pl.range(1, init_values=(x__ssa_v0,)):
+    for i__ci_idx_v0, (x__ci_iter_v1,) in pl.range(5, init_values=(x__co_iter_v1,)):
+        x__ssa_v3 = pl.tensor.add(x__ci_iter_v1, 1.0)
+        x__ci_rv_v1 = pl.yield_(x__ssa_v3)
+    x__co_rv_v1 = pl.yield_(x__ci_rv_v1)
+for i__cr_idx_v0, (x__cr_iter_v1,) in pl.range(2, init_values=(x__co_rv_v1,)):
+    x__ssa_v4 = pl.tensor.add(x__cr_iter_v1, 1.0)
+    x__cr_rv_v1 = pl.yield_(x__ssa_v4)
+return x__cr_rv_v1
 ```
 
 ## LoopOrigin Tagging

@@ -182,17 +182,14 @@ class TestNestedChunkChainsInitSubstitution:
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        # The _inner suffix comes from SplitChunkedLoops for the inner loop's
-        # iter_arg. After InterchangeChunkLoops, these should be rewritten to
-        # _l<N> names. No raw _inner references should remain as init_values.
+        # SplitChunkedLoops introduces `ci` qualifiers for inner-loop
+        # index vars. After InterchangeChunkLoops, init_values should reference
+        # rewritten loop-threaded iter args, not the pre-interchange chunk-inner
+        # iter names.
         lines = after_str.split("\n")
         for line in lines:
-            if "init_values" in line and "_inner" in line:
-                # _inner names must NOT appear as bare init_values — they should
-                # have been substituted to _l<N> names by the interchange pass
-                assert "_inner_l" in line or "_inner_rv" in line or "_inner" not in line, (
-                    f"Dangling _inner reference in init_values: {line.strip()}"
-                )
+            if "init_values" in line:
+                assert "__ci_iter_" not in line, f"Dangling chunk-inner iter in init_values: {line.strip()}"
 
     def test_nested_chains_outline_no_crash(self):
         """Nested parallel chunk chains followed by OutlineIncoreScopes must not crash.

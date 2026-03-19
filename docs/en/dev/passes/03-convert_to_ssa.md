@@ -38,7 +38,7 @@ program_ssa = ssa_pass(program)
 
 ## Algorithm
 
-1. **Variable Renaming**: Rename variables with version suffixes (x → x_0, x_1, x_2) for each assignment
+1. **Variable Renaming**: Rename variables with SSA suffixes (x → x__ssa_v0, x__ssa_v1, x__ssa_v2) for each assignment
 2. **Phi Nodes for If**: Add phi nodes (return_vars + YieldStmt) for variables modified in if branches, including variables defined independently in both branches
 3. **Iter_args for Loops**: Convert loop-modified variables to iter_args + return_vars pattern with YieldStmt
 4. **Escaping Variable Promotion**: Variables first defined inside a loop body but used after the loop are promoted to iter_args + return_vars via forward-use analysis
@@ -47,7 +47,7 @@ program_ssa = ssa_pass(program)
 
 **Key transformations**:
 
-- `x = 1; x = 2` → `x_0 = 1; x_1 = 2`
+- `x = 1; x = 2` → `x__ssa_v0 = 1; x__ssa_v1 = 2`
 - If with divergent assignments → add return_vars and YieldStmt in both branches
 - For loops with loop-carried dependencies → add iter_args/return_vars/YieldStmt
 - Loop-escaping variables → promoted to iter_args with matching Out parameter as initial value
@@ -68,10 +68,10 @@ z = x + 4
 **After**:
 
 ```python
-x_0 = 1
-y = x_0 + 2
-x_1 = 3
-z = x_1 + 4
+x__ssa_v0 = 1
+y = x__ssa_v0 + 2
+x__ssa_v1 = 3
+z = x__ssa_v1 + 4
 ```
 
 ### If Statement
@@ -88,14 +88,14 @@ z = x + 3  # Uses x after if
 **After**:
 
 ```python
-x_0 = 1
+x__ssa_v0 = 1
 if condition:
-    x_1 = 2
-    yield (x_1,)  # Yield modified variable
+    x__ssa_v1 = 2
+    yield (x__ssa_v1,)  # Yield modified variable
 else:
-    yield (x_0,)  # Yield original variable
-return_vars = (x_2,)  # Phi node
-z = x_2 + 3
+    yield (x__ssa_v0,)  # Yield original variable
+return_vars = (x__phi_v2,)  # Phi node
+z = x__phi_v2 + 3
 ```
 
 ### For Loop
@@ -111,14 +111,14 @@ for i in range(10):
 **After**:
 
 ```python
-sum_0 = 0
+sum__ssa_v0 = 0
 for i in range(10):
-    iter_args = (sum_1,)
-    init_values = (sum_0,)
+    iter_args = (sum__iter_v1,)
+    init_values = (sum__ssa_v0,)
     # Loop body
-    sum_2 = sum_1 + i
-    yield (sum_2,)
-return_vars = (sum_3,)
+    sum__ssa_v2 = sum__iter_v1 + i
+    yield (sum__ssa_v2,)
+return_vars = (sum__rv_v3,)
 ```
 
 ### Loop-Escaping Variable
@@ -136,13 +136,13 @@ return out  # used after loop
 
 ```python
 for i in range(4):
-    iter_args = (out_iter_0,)
-    init_values = (c_0,)  # Out parameter as initial value
-    tile_c_0 = tile.add(tile_a_0, tile_b_0)
-    out_0 = tile.store(tile_c_0, [offset_0, 0], out_iter_0)
-    yield (out_0,)
-return_vars = (out_1,)
-return out_1
+    iter_args = (out__iter_v0,)
+    init_values = (c__ssa_v0,)  # Out parameter as initial value
+    tile_c__ssa_v0 = tile.add(tile_a__ssa_v0, tile_b__ssa_v0)
+    out__ssa_v1 = tile.store(tile_c__ssa_v0, [offset__ssa_v0, 0], out__iter_v0)
+    yield (out__ssa_v1,)
+return_vars = (out__rv_v2,)
+return out__rv_v2
 ```
 
 ## Implementation

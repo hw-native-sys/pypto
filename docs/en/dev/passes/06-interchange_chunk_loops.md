@@ -60,37 +60,70 @@ result = passes.interchange_chunk_loops()(program)
 
 5. **Handle remainders** — `ChunkRemainder` loops: recurse into body. Wrap standalone parallel remainder sub-loops in InCore.
 
+## Auto-Name Abbreviations
+
+The examples below use compact qualifiers inside `base__qualifier_role_vN` names:
+
+| Abbreviation | Meaning |
+| ------------ | ------- |
+| `co` | `chunk_outer` |
+| `ci` | `chunk_inner` |
+| `cr` | `chunk_rem` / chunk remainder |
+| `lN` | interchange loop level `N` |
+
+Examples:
+
+- `x__co_iter_v1` = chunk-outer iter_arg before interchange
+- `x__co_l0_iter_v1` = loop-threaded iter_arg after interchange, level 0
+- `x__co_l2_rv_v1` = return var flowing out of reordered level 2
+
+Roles such as `iter`, `rv`, `idx`, and `ssa` remain unabridged so the variable's purpose stays obvious.
+
 ## Example
 
 **Before** (after SplitChunkedLoops, all parallel):
 
 ```python
-for i_out, (x_outer,) in pl.range(2, init_values=(x_0,)):        # ChunkOuter
-    for i_in, (x_ia,) in pl.parallel(4, init_values=(x_outer,)):   # ChunkInner
-        for j_out, (y_outer,) in pl.range(3, init_values=(x_ia,)):  # ChunkOuter
-            for j_in, (y_ia,) in pl.parallel(4, init_values=(y_outer,)):  # ChunkInner
-                z = pl.add(y_ia, 1.0)
-                y_ia_rv = pl.yield_(z)
-            y_outer_rv = pl.yield_(y_ia_rv)
-        x_ia_rv = pl.yield_(y_outer_rv)
-    x_outer_rv = pl.yield_(x_ia_rv)
-return x_outer_rv
+for i__co_idx_v0, (x__co_iter_v1,) in pl.range(2, init_values=(x__ssa_v0,)):  # ChunkOuter
+    for i__ci_idx_v0, (x__ci_iter_v1,) in pl.parallel(
+        4, init_values=(x__co_iter_v1,)
+    ):  # ChunkInner
+        for j__co_idx_v0, (y__co_iter_v1,) in pl.range(
+            3, init_values=(x__ci_iter_v1,)
+        ):  # ChunkOuter
+            for j__ci_idx_v0, (y__ci_iter_v1,) in pl.parallel(
+                4, init_values=(y__co_iter_v1,)
+            ):  # ChunkInner
+                z = pl.add(y__ci_iter_v1, 1.0)
+                y__ci_rv_v1 = pl.yield_(z)
+            y__co_rv_v1 = pl.yield_(y__ci_rv_v1)
+        x__ci_rv_v1 = pl.yield_(y__co_rv_v1)
+    x__co_rv_v1 = pl.yield_(x__ci_rv_v1)
+return x__co_rv_v1
 ```
 
 **After** (InterchangeChunkLoops):
 
 ```python
-for i_out, (x_l0,) in pl.range(2, init_values=(x_0,)):        # ChunkOuter
-    for j_out, (x_l1,) in pl.range(3, init_values=(x_l0,)):    # ChunkOuter
+for i__co_idx_v0, (x__co_l0_iter_v1,) in pl.range(
+    2, init_values=(x__ssa_v0,)
+):  # ChunkOuter
+    for j__co_idx_v0, (x__co_l1_iter_v1,) in pl.range(
+        3, init_values=(x__co_l0_iter_v1,)
+    ):  # ChunkOuter
         with pl.incore():                                               # InCore inserted
-            for i_in, (x_l2,) in pl.parallel(4, init_values=(x_l1,)):  # ChunkInner
-                for j_in, (x_l3,) in pl.parallel(4, init_values=(x_l2,)):  # ChunkInner
-                    z = pl.add(x_l3, 1.0)
-                    x_l3_rv = pl.yield_(z)
-                x_l2_rv = pl.yield_(x_l3_rv)
-        x_l1_rv = pl.yield_(x_l2_rv)
-    x_l0_rv = pl.yield_(x_l1_rv)
-return x_l0_rv
+            for i__ci_idx_v0, (x__co_l2_iter_v1,) in pl.parallel(
+                4, init_values=(x__co_l1_iter_v1,)
+            ):  # ChunkInner
+                for j__ci_idx_v0, (x__co_l3_iter_v1,) in pl.parallel(
+                    4, init_values=(x__co_l2_iter_v1,)
+                ):  # ChunkInner
+                    z = pl.add(x__co_l3_iter_v1, 1.0)
+                    x__co_l3_rv_v1 = pl.yield_(z)
+                x__co_l2_rv_v1 = pl.yield_(x__co_l3_rv_v1)
+        x__co_l1_rv_v1 = pl.yield_(x__co_l2_rv_v1)
+    x__co_l0_rv_v1 = pl.yield_(x__co_l1_rv_v1)
+return x__co_l0_rv_v1
 ```
 
 ## Remainder Handling

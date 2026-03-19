@@ -59,9 +59,9 @@ with pl.auto_incore():
 给定 SSA 形式的分块循环：
 
 ```text
-for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
-    x_1 = add(x_iter, 1.0)
-    yield(x_1)
+for i, (x__iter_v1=x__ssa_v0,) in range(start, stop, step, chunk=C) -> (x__rv_v2,):
+    x__ssa_v3 = add(x__iter_v1, 1.0)
+    yield(x__ssa_v3)
 ```
 
 1. 计算 `trip_count = ceil((stop - start) / step)`
@@ -74,6 +74,25 @@ for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
 
 内层循环保留原始的 `ForKind`（Sequential、Parallel 或 Unroll），外层循环始终为 Sequential。
 
+## 自动命名缩写
+
+打印出来的 IR 示例使用紧凑的自动命名格式 `base__qualifier_role_vN`。
+为了让生成名更短、更易读，一些 qualifier 采用了缩写：
+
+| 缩写 | 含义 |
+| ---- | ---- |
+| `co` | `chunk_outer` |
+| `ci` | `chunk_inner` |
+| `cr` | `chunk_rem` / 余数分块 |
+
+示例：
+
+- `i__co_idx_v0`：外层分块循环索引
+- `x__ci_iter_v1`：内层分块 iter_arg
+- `x__cr_rv_v1`：余数循环 return var
+
+像 `idx`、`iter`、`rv`、`ssa` 这样的 role 保持全拼，因为它们已经足够短，而且在多个 pass 中通用。
+
 ## 示例
 
 **之前**（打印的 SSA IR 形式；非合法 DSL 源码，因为 DSL 中 `chunk` + `init_values` 不能同时使用）：
@@ -82,11 +101,11 @@ for i, (x_iter=x_0,) in range(start, stop, step, chunk=C) -> (x_rv,):
 @pl.program
 class Before:
     @pl.function
-    def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0, (x_iter_1,) in pl.range(10, init_values=(x_0,), chunk=5):
-            x_3 = pl.tensor.add(x_iter_1, 1.0)
-            x_2 = pl.yield_(x_3)
-        return x_2
+    def main(self, x__ssa_v0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        for i__idx_v0, (x__iter_v1,) in pl.range(10, init_values=(x__ssa_v0,), chunk=5):
+            x__ssa_v3 = pl.tensor.add(x__iter_v1, 1.0)
+            x__rv_v2 = pl.yield_(x__ssa_v3)
+        return x__rv_v2
 ```
 
 **之后**（嵌套循环，整除情况）：
@@ -95,28 +114,30 @@ class Before:
 @pl.program
 class After:
     @pl.function
-    def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        for i_0_out, (x_iter_1_outer,) in pl.range(2, init_values=(x_0,)):
-            for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
-                x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
-                x_iter_1_inner_rv = pl.yield_(x_3)
-            x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
-        return x_iter_1_outer_rv
+    def main(self, x__ssa_v0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        for i__co_idx_v0, (x__co_iter_v1,) in pl.range(2, init_values=(x__ssa_v0,)):
+            for i__ci_idx_v0, (x__ci_iter_v1,) in pl.range(
+                5, init_values=(x__co_iter_v1,)
+            ):
+                x__ssa_v3 = pl.tensor.add(x__ci_iter_v1, 1.0)
+                x__ci_rv_v1 = pl.yield_(x__ssa_v3)
+            x__co_rv_v1 = pl.yield_(x__ci_rv_v1)
+        return x__co_rv_v1
 ```
 
 **带余数**（`chunk=5`，trip_count=7）：
 
 ```python
 # 生成：outer(0,1) * inner(0,5) + remainder(0,2)
-for i_0_out, (x_iter_1_outer,) in pl.range(1, init_values=(x_0,)):
-    for i_0_in, (x_iter_1_inner,) in pl.range(5, init_values=(x_iter_1_outer,)):
-        x_3 = pl.tensor.add(x_iter_1_inner, 1.0)
-        x_iter_1_inner_rv = pl.yield_(x_3)
-    x_iter_1_outer_rv = pl.yield_(x_iter_1_inner_rv)
-for i_0_rem, (x_iter_1_rem,) in pl.range(2, init_values=(x_iter_1_outer_rv,)):
-    x_3 = pl.tensor.add(x_iter_1_rem, 1.0)
-    x_iter_1_rem_rv = pl.yield_(x_3)
-return x_iter_1_rem_rv
+for i__co_idx_v0, (x__co_iter_v1,) in pl.range(1, init_values=(x__ssa_v0,)):
+    for i__ci_idx_v0, (x__ci_iter_v1,) in pl.range(5, init_values=(x__co_iter_v1,)):
+        x__ssa_v3 = pl.tensor.add(x__ci_iter_v1, 1.0)
+        x__ci_rv_v1 = pl.yield_(x__ssa_v3)
+    x__co_rv_v1 = pl.yield_(x__ci_rv_v1)
+for i__cr_idx_v0, (x__cr_iter_v1,) in pl.range(2, init_values=(x__co_rv_v1,)):
+    x__ssa_v4 = pl.tensor.add(x__cr_iter_v1, 1.0)
+    x__cr_rv_v1 = pl.yield_(x__ssa_v4)
+return x__cr_rv_v1
 ```
 
 ## LoopOrigin 标记

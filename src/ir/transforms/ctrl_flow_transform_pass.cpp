@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -61,6 +62,24 @@ static std::vector<StmtPtr> FlattenToVec(const StmtPtr& stmt) {
     return seq->stmts_;
   }
   return {stmt};
+}
+
+static std::string GetAutoNamingBase(const std::string& name) {
+  auto parsed = auto_name::Parse(name);
+  if (parsed.has_auto_suffix && (parsed.role.has_value() || parsed.version.has_value())) {
+    return parsed.base_name;
+  }
+  return auto_name::GetCompatibleBaseName(name);
+}
+
+static std::string GetExprAutoNamingBase(const ExprPtr& expr) {
+  if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
+    return GetAutoNamingBase(var->name_hint_);
+  }
+  if (auto iter_arg = std::dynamic_pointer_cast<const IterArg>(expr)) {
+    return GetAutoNamingBase(iter_arg->name_hint_);
+  }
+  return "phi";
 }
 
 /// Simple mutator that substitutes one Var (or IterArg) for another by unique_id.
@@ -230,7 +249,7 @@ static std::vector<VarPtr> CreatePhiVars(const std::vector<ExprPtr>& values, int
   phis.reserve(values.size());
   for (const auto& val : values) {
     auto type = val->GetType();
-    auto name = "__phi_" + std::to_string(counter++);
+    auto name = auto_name::BuildName(GetExprAutoNamingBase(val), "", "phi", counter++);
     phis.push_back(std::make_shared<Var>(name, type, span));
   }
   return phis;
@@ -456,7 +475,7 @@ static BodyResult ProcessBodyForBreak(const std::vector<StmtPtr>& stmts, const V
     return resolved;
   };
 
-  // Helper: build break escape prefix stmts (AssignStmt setting __break = true)
+  // Helper: build break escape prefix stmts (AssignStmt setting break flag)
   auto break_prefix = [&]() -> std::vector<StmtPtr> {
     return {std::make_shared<AssignStmt>(break_var, MakeConstBool(true, span), span)};
   };
@@ -627,7 +646,9 @@ class CtrlFlowTransformMutator : public IRMutator {
  private:
   int name_counter_ = 0;
 
-  std::string FreshName(const std::string& prefix) { return prefix + "_" + std::to_string(name_counter_++); }
+  std::string FreshInternalName(const std::string& base_name, const std::string& role) {
+    return auto_name::BuildName(base_name, "", role, name_counter_++);
+  }
 
   static StmtPtr RebuildForIfChanged(const ForStmtPtr& op, const StmtPtr& new_body) {
     if (new_body.get() == op->body_.get()) {
@@ -672,10 +693,11 @@ class CtrlFlowTransformMutator : public IRMutator {
     Span span = op->span_;
 
     auto bool_type = std::make_shared<ScalarType>(DataType::BOOL);
-    auto break_var = std::make_shared<Var>(FreshName("__break"), bool_type, span);
+    auto break_var = std::make_shared<Var>(FreshInternalName("break", "tmp"), bool_type, span);
 
     auto loop_var_type = op->loop_var_->GetType();
-    auto loop_var = std::make_shared<Var>(FreshName("__lv"), loop_var_type, span);
+    auto loop_var = std::make_shared<Var>(
+        FreshInternalName(GetAutoNamingBase(op->loop_var_->name_hint_), "idx"), loop_var_type, span);
 
     VarSubstituter sub(op->loop_var_->UniqueId(), loop_var);
     auto substituted_body = sub.VisitStmt(body);
@@ -727,7 +749,7 @@ class CtrlFlowTransformMutator : public IRMutator {
     Span span = op->span_;
 
     auto bool_type = std::make_shared<ScalarType>(DataType::BOOL);
-    auto break_var = std::make_shared<Var>(FreshName("__break"), bool_type, span);
+    auto break_var = std::make_shared<Var>(FreshInternalName("break", "tmp"), bool_type, span);
 
     ExprPtr new_condition = MakeAndExpr(op->condition_, MakeNot(break_var, span), span);
 

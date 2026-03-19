@@ -35,6 +35,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -45,91 +46,13 @@ namespace {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 /**
- * @brief Extract the original base name from an SSA-renamed variable
+ * @brief Extract the semantic base name from an auto-generated IR variable
  *
- * SSA naming patterns (applied by successive passes):
- *   Regular vars: "{base}_{version}"  (e.g., "mi_update_4" -> "mi_update")
- *   Iter args:    "{base}_iter_{version}" (e.g., "mi_update_iter_2" -> "mi_update")
- *
- * Pass-pipeline suffixes (split_chunked_loops, interchange_chunk_loops):
- *   Return var:   "_rv"
- *   Loop level:   "_lN"  (interchange_chunk_loops)
- *   Chunk split:  "_outer", "_inner", "_rem"  (split_chunked_loops)
- *
- * These suffixes compose, e.g.:
- *   "output_tensor_iter_1_outer_l0_rv" -> "output_tensor"
- *
- * Stripping is applied iteratively until no more suffixes can be removed.
- * Used to match input args with output vars for inout parameter detection.
+ * New-style names use `base__qualifier_role_vN`, while legacy names continue to
+ * be accepted for compatibility. This helper normalizes both formats so codegen
+ * can match input args with output vars for inout parameter detection.
  */
-std::string GetSSABaseName(const std::string& name) {
-  // Check if `str` ends with `suffix` (length `len`) and strip it in-place.
-  // Returns false if the suffix is absent or would consume the entire string.
-  auto strip_suffix = [](std::string& str, const char* suffix, size_t len) -> bool {
-    if (str.size() > len && str.compare(str.size() - len, len, suffix) == 0) {
-      str.resize(str.size() - len);
-      return true;
-    }
-    return false;
-  };
-
-  std::string current = name;
-
-  // Iteratively strip pass-pipeline suffixes from the end
-  bool changed = true;
-  while (changed) {
-    changed = false;
-
-    // Strip "_rv" suffix (split_chunked_loops return var)
-    if (strip_suffix(current, "_rv", 3)) {
-      changed = true;
-      continue;
-    }
-
-    // Strip "_lN" suffix (interchange_chunk_loops level index)
-    {
-      size_t pos = current.rfind('_');
-      if (pos != std::string::npos && pos + 1 < current.size() && current[pos + 1] == 'l' &&
-          pos + 2 < current.size() &&
-          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 2), current.end(), ::isdigit)) {
-        current.resize(pos);
-        changed = true;
-        continue;
-      }
-    }
-
-    // Strip "_outer", "_inner", "_rem" suffixes (split_chunked_loops)
-    if (strip_suffix(current, "_outer", 6) || strip_suffix(current, "_inner", 6) ||
-        strip_suffix(current, "_rem", 4)) {
-      changed = true;
-      continue;
-    }
-
-    // Strip "_iter_N" suffix (SSA iter_arg pattern)
-    {
-      size_t pos = current.rfind("_iter_");
-      if (pos != std::string::npos && pos > 0 &&
-          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 6), current.end(), ::isdigit)) {
-        current.resize(pos);
-        changed = true;
-        continue;
-      }
-    }
-
-    // Strip "_N" suffix (regular SSA version)
-    {
-      size_t pos = current.rfind('_');
-      if (pos != std::string::npos && pos > 0 &&
-          std::all_of(current.begin() + static_cast<ptrdiff_t>(pos + 1), current.end(), ::isdigit)) {
-        current.resize(pos);
-        changed = true;
-        continue;
-      }
-    }
-  }
-
-  return current;
-}
+std::string GetSSABaseName(const std::string& name) { return auto_name::GetCompatibleBaseName(name); }
 
 /**
  * @brief Check if an operation is a built-in IR operation (not a user-defined function)

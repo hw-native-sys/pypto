@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -63,6 +64,18 @@ std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
  */
 StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
   return std::make_shared<SeqStmts>(stmts, span);
+}
+
+std::string MakeTileValueName(const std::string& source_name) {
+  return auto_name::BuildName(auto_name::GetBaseName(source_name), "", "tile");
+}
+
+std::string MakeOutParamName(size_t index) {
+  return auto_name::BuildName("ret" + std::to_string(index), "", "out");
+}
+
+std::string MakeStoreResultName(size_t index) {
+  return auto_name::BuildName("ret" + std::to_string(index), "", "store");
 }
 
 /**
@@ -721,7 +734,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto load_call = op_registry.Create("tile.load", {input, offset_arg, load_shapes, valid_shapes},
                                             load_kwargs, span);
 
-        std::string tile_name = assign->var_->name_hint_ + "_tile";
+        std::string tile_name = MakeTileValueName(assign->var_->name_hint_);
         auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(tile_var, load_call, assign->span_));
         tensor_to_tile[assign->var_->name_hint_] = tile_var;
@@ -739,7 +752,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       result.push_back(prologue_stmt);
     }
 
-    std::string tile_name = assign->var_->name_hint_ + "_tile";
+    std::string tile_name = MakeTileValueName(assign->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, conv_result.result->GetType(), assign->var_->span_);
     result.push_back(std::make_shared<AssignStmt>(tile_var, conv_result.result, assign->span_));
     tensor_to_tile[assign->var_->name_hint_] = tile_var;
@@ -799,7 +812,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     auto load_call = op_registry.Create("tile.load", {var, offsets, shapes, shapes}, load_kwargs, span);
 
     // Create tile variable
-    std::string tile_name = var->name_hint_ + "_tile";
+    std::string tile_name = MakeTileValueName(var->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);
 
     new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, span));
@@ -845,7 +858,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
             << func->return_types_[i]->TypeName();
 
         // Add output tensor parameter
-        std::string out_name = "outbuf" + std::to_string(num_added_outputs);
+        std::string out_name = MakeOutParamName(num_added_outputs);
         auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
         new_params.push_back(out_param);
         new_param_directions.push_back(ParamDirection::Out);
@@ -854,7 +867,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
         auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
 
-        auto store_var = std::make_shared<Var>(out_name, store_call->GetType(), span);
+        auto store_var =
+            std::make_shared<Var>(MakeStoreResultName(num_added_outputs), store_call->GetType(), span);
         new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
 
         new_return_types.push_back(store_call->GetType());
@@ -1162,8 +1176,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
                                                                      {"layout", layout}};
       auto create_call = op_registry.Create("tensor.create", {shape_tuple}, create_kwargs, span);
 
-      std::string out_name = "outbuf" + std::to_string(i);
-      auto out_var = std::make_shared<Var>(out_name, create_call->GetType(), span);
+      auto out_var = std::make_shared<Var>(MakeOutParamName(i), create_call->GetType(), span);
       result.push_back(std::make_shared<AssignStmt>(out_var, create_call, span));
       extra_args.push_back(out_var);
     }

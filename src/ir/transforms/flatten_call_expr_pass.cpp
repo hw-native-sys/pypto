@@ -11,7 +11,6 @@
 
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,6 +23,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 
@@ -96,11 +96,7 @@ class FlattenCallExprMutator : public IRMutator {
   /**
    * @brief Generate a unique temporary variable name
    */
-  std::string GenerateTempVarName() {
-    std::ostringstream oss;
-    oss << "_t" << temp_var_counter_++;
-    return oss.str();
-  }
+  std::string GenerateTempVarName() { return auto_name::BuildName("t", "", "tmp", temp_var_counter_++); }
 
   /**
    * @brief Extract a call expression into a temporary variable

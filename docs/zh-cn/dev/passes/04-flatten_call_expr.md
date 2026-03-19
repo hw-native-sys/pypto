@@ -39,7 +39,7 @@ program_flat = flatten_pass(program)
 ## 算法
 
 1. **检测嵌套调用**：识别嵌套上下文中的调用表达式
-2. **提取到临时变量**：创建临时变量（命名为 `_t0`、`_t1` 等）
+2. **提取到临时变量**：创建临时变量（命名为 `t__tmp_v0`、`t__tmp_v1` 等）
 3. **插入 AssignStmt**：在原始语句 (Statement) 之前添加赋值语句
 4. **替换为变量**：将嵌套调用替换为临时变量引用
 5. **处理控制流**：对于 if/for 语句，插入到最后一个 OpStmts 或创建新的 OpStmts
@@ -62,8 +62,8 @@ c = foo(bar(a))  # bar(a) is nested in foo's arguments
 **变换后**：
 
 ```python
-_t0 = bar(a)
-c = foo(_t0)
+t__tmp_v0 = bar(a)
+c = foo(t__tmp_v0)
 ```
 
 ### If 条件中的嵌套调用
@@ -78,9 +78,9 @@ if is_valid(compute(x)):
 **变换后**：
 
 ```python
-_t0 = compute(x)
-_t1 = is_valid(_t0)
-if _t1:
+t__tmp_v0 = compute(x)
+t__tmp_v1 = is_valid(t__tmp_v0)
+if t__tmp_v1:
     y = 1
 ```
 
@@ -95,9 +95,9 @@ result = add(mul(a, b), div(c, d))
 **变换后**：
 
 ```python
-_t0 = mul(a, b)
-_t1 = div(c, d)
-result = add(_t0, _t1)
+t__tmp_v0 = mul(a, b)
+t__tmp_v1 = div(c, d)
+result = add(t__tmp_v0, t__tmp_v1)
 ```
 
 ### 二元表达式中的嵌套
@@ -111,9 +111,9 @@ x = compute(a) + compute(b)
 **变换后**：
 
 ```python
-_t0 = compute(a)
-_t1 = compute(b)
-x = _t0 + _t1
+t__tmp_v0 = compute(a)
+t__tmp_v1 = compute(b)
+x = t__tmp_v0 + t__tmp_v1
 ```
 
 ## 实现
