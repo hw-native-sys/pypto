@@ -1847,8 +1847,8 @@ def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> C
         Call expression for tile transpose
     """
     actual_span = _get_span_or_capture(span)
-    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    axis1_expr = axis1 if isinstance(axis1, ConstInt) else ConstInt(axis1, DataType.INDEX, actual_span)
+    axis2_expr = axis2 if isinstance(axis2, ConstInt) else ConstInt(axis2, DataType.INDEX, actual_span)
 
     args = [tile, axis1_expr, axis2_expr]
 
