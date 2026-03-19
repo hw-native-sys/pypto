@@ -247,7 +247,7 @@ class LoopUnrollMutator : public IRMutator {
 
  private:
   /// Collect the last AssignStmt VarPtr for each name_hint in a statement tree.
-  /// Recurses into ForStmt bodies and SeqStmts.
+  /// Recurses into SeqStmts and bodies of structured control-flow statements.
   static void CollectLastDefsByName(const StmtPtr& s, std::unordered_map<std::string, VarPtr>& defs) {
     if (!s) return;
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
@@ -256,6 +256,15 @@ class LoopUnrollMutator : public IRMutator {
       for (const auto& child : seq->stmts_) CollectLastDefsByName(child, defs);
     } else if (auto for_s = std::dynamic_pointer_cast<const ForStmt>(s)) {
       if (for_s->body_) CollectLastDefsByName(for_s->body_, defs);
+    } else if (auto if_s = std::dynamic_pointer_cast<const IfStmt>(s)) {
+      if (if_s->then_body_) CollectLastDefsByName(if_s->then_body_, defs);
+      if (if_s->else_body_.has_value() && *if_s->else_body_) {
+        CollectLastDefsByName(*if_s->else_body_, defs);
+      }
+    } else if (auto while_s = std::dynamic_pointer_cast<const WhileStmt>(s)) {
+      if (while_s->body_) CollectLastDefsByName(while_s->body_, defs);
+    } else if (auto scope_s = std::dynamic_pointer_cast<const ScopeStmt>(s)) {
+      if (scope_s->body_) CollectLastDefsByName(scope_s->body_, defs);
     }
   }
 };

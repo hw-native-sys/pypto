@@ -124,7 +124,9 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 - `AssignStmt`: LHS variable enters scope after RHS is evaluated
 - `ForStmt`: `loop_var` and `iter_args` are in scope inside the loop body only; `return_vars` enter the enclosing scope after the loop
 - `WhileStmt`: `iter_args` are in scope for the condition and body; `return_vars` enter the enclosing scope after the loop
-- `IfStmt`: definitions inside then/else branches do **not** propagate to the outer scope; `return_vars` enter the enclosing scope after the if
+- `IfStmt`:
+  - **SSA / phi-node form (`return_vars_` present)**: definitions inside then/else branches do **not** propagate to the outer scope; only `return_vars` enter the enclosing scope after the `if`
+  - **Non-SSA "leak" form (`return_vars_` absent)**: branch-local definitions may be visible after the `if`; `ConvertToSSA` and `SSAVerify` are responsible for validating the resulting form
 
 ## PropertyVerifierRegistry
 

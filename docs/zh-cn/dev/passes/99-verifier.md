@@ -124,7 +124,9 @@
 - `AssignStmt`：LHS 变量在 RHS 求值后进入作用域
 - `ForStmt`：`loop_var` 和 `iter_args` 仅在循环体内可见；`return_vars` 在循环结束后进入外层作用域
 - `WhileStmt`：`iter_args` 在条件和循环体内可见；`return_vars` 在循环结束后进入外层作用域
-- `IfStmt`：then/else 分支内的定义**不**传播到外层作用域；`return_vars` 在 if 结束后进入外层作用域
+- `IfStmt`：
+  - **SSA/phi 形式（存在 `return_vars`）**：then/else 分支内新定义的局部变量**不**传播到外层作用域，只有 `return_vars` 在 if 结束后进入外层作用域
+  - **泄漏模式（无 `return_vars`）**：then/else 分支内定义的变量**可能泄漏**到外层作用域；该形式通常由 Python 解析器在无 `yield` 的情况下生成，后续由 `ConvertToSSA`/`SSAVerify` 负责将其转换并检查合法性
 
 ## PropertyVerifierRegistry
 

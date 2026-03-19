@@ -147,6 +147,7 @@ class MemRefUpdateMutator : public IRMutator {
 
  private:
   std::unordered_map<const MemRef*, MemRefPtr> memref_map_;
+  std::unordered_map<const Expr*, ExprPtr> var_remap_;
 
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
     auto memref = GetTypeMemRef(type);

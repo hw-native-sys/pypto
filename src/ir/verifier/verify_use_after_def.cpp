@@ -51,7 +51,9 @@ namespace {
  * - WhileStmt::iter_args_: in scope inside the loop body (including condition)
  * - WhileStmt::return_vars_: defined in the enclosing scope after the loop
  * - IfStmt::return_vars_: defined in the enclosing scope after the if
- * - Definitions inside if/else branches do NOT propagate to the outer scope
+ * - IfStmt without return_vars_ ("leak" mode): definitions inside then/else branches are
+ *   merged (unioned) back into the outer scope; otherwise, branch-local definitions
+ *   do NOT propagate to the outer scope
  */
 class UseAfterDefChecker : public IRVisitor {
  public:
@@ -73,7 +75,9 @@ class UseAfterDefChecker : public IRVisitor {
                                 static_cast<int>(use_after_def::ErrorType::USE_BEFORE_DEF), msg.str(),
                                 op->span_);
     }
-    // Leaf node — no children to recurse into.
+    // Do not call IRVisitor::VisitVarLike_ — type shape expressions are not
+    // data-flow uses and dynamic shape vars embedded in types are not defined
+    // by any statement in the function body.
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -134,6 +138,8 @@ class UseAfterDefChecker : public IRVisitor {
   void VisitStmt_(const WhileStmtPtr& op) override {
     if (!op) return;
 
+    auto saved_scope = in_scope_;
+
     // IterArg initial values are evaluated in the outer scope.
     for (const auto& iter_arg : op->iter_args_) {
       if (iter_arg && iter_arg->initValue_) {
@@ -153,10 +159,14 @@ class UseAfterDefChecker : public IRVisitor {
       if (iter_arg) in_scope_.erase(iter_arg.get());
     }
 
-    // return_vars are defined in the enclosing scope after the loop.
-    for (const auto& rv : op->return_vars_) {
-      if (rv) in_scope_.insert(rv.get());
+    if (!op->return_vars_.empty()) {
+      // SSA mode: only return_vars are visible after the loop.
+      in_scope_ = saved_scope;
+      for (const auto& rv : op->return_vars_) {
+        if (rv) in_scope_.insert(rv.get());
+      }
     }
+    // Leak mode: body-local definitions remain visible after the loop.
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
