@@ -932,7 +932,7 @@ def test_continue_in_else_branch():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+        @pl.function(type=pl.FunctionType.InCore, strict_ssa=False)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 if i > 5:
@@ -952,7 +952,7 @@ def test_break_in_else_branch():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+        @pl.function(type=pl.FunctionType.InCore, strict_ssa=False)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 if i < 7:

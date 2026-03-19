@@ -339,8 +339,12 @@ static BodyResult ProcessBodyForContinue(const std::vector<StmtPtr>& stmts,
 
       auto continue_values = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
       auto normal_stmts = CollectNormalPath(if_stmt, escape_in_then, split.post);
+      // Resolve yield values for the normal path: only vars available at split.pre
+      // are guaranteed to be defined; vars from split.post are defined inside
+      // normal_stmts and will be resolved by the recursive call.
+      auto normal_yield_values = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
       auto normal_result =
-          ProcessBodyForContinue(normal_stmts, iter_args, original_yield_values, name_counter, span);
+          ProcessBodyForContinue(normal_stmts, iter_args, normal_yield_values, name_counter, span);
 
       if (original_yield_values.empty()) {
         auto empty_body = std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, if_stmt->span_);
@@ -362,7 +366,13 @@ static BodyResult ProcessBodyForContinue(const std::vector<StmtPtr>& stmts,
       auto process_branch = [&](const StmtPtr& branch, bool has_target) -> BodyResult {
         auto decomposed = DecomposeBody(branch);
         auto& vals = decomposed.had_yield ? decomposed.yield_values : original_yield_values;
-        if (!has_target) return {std::move(decomposed.stmts), vals};
+        if (!has_target) {
+          // No continue in this branch: yield values must only reference vars
+          // available at the escape point (split.pre), not vars defined in
+          // split.post (which come after the IfStmt).
+          auto resolved = ResolveYieldAtEscape(vals, split.pre, iter_args);
+          return {std::move(decomposed.stmts), std::move(resolved)};
+        }
         return ProcessBodyForContinue(decomposed.stmts, iter_args, vals, name_counter, span);
       };
 
@@ -372,7 +382,8 @@ static BodyResult ProcessBodyForContinue(const std::vector<StmtPtr>& stmts,
       if (if_stmt->else_body_.has_value()) {
         else_result = process_branch(*if_stmt->else_body_, else_has_continue);
       } else {
-        else_result = {{}, original_yield_values};
+        auto resolved = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
+        else_result = {{}, std::move(resolved)};
       }
 
       // Rebuild IfStmt with phi nodes
@@ -484,8 +495,9 @@ static BodyResult ProcessBodyForBreak(const std::vector<StmtPtr>& stmts, const V
 
       auto break_values = build_break_values(split.pre);
       auto normal_stmts = CollectNormalPath(if_stmt, escape_in_then, split.post);
+      auto normal_yield_values = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
       auto normal_result =
-          ProcessBodyForBreak(normal_stmts, break_var, iter_args, original_yield_values, name_counter, span);
+          ProcessBodyForBreak(normal_stmts, break_var, iter_args, normal_yield_values, name_counter, span);
 
       return BuildEscapeIfStmt(if_stmt, escape_in_then, split.pre, break_prefix(), break_values,
                                std::move(normal_result), name_counter, span);
@@ -498,7 +510,10 @@ static BodyResult ProcessBodyForBreak(const std::vector<StmtPtr>& stmts, const V
       auto process_branch = [&](const StmtPtr& branch, bool has_target) -> BodyResult {
         auto decomposed = DecomposeBody(branch);
         auto& vals = decomposed.had_yield ? decomposed.yield_values : original_yield_values;
-        if (!has_target) return {std::move(decomposed.stmts), vals};
+        if (!has_target) {
+          auto resolved = ResolveYieldAtEscape(vals, split.pre, iter_args);
+          return {std::move(decomposed.stmts), std::move(resolved)};
+        }
         return ProcessBodyForBreak(decomposed.stmts, break_var, iter_args, vals, name_counter, span);
       };
 
@@ -508,7 +523,8 @@ static BodyResult ProcessBodyForBreak(const std::vector<StmtPtr>& stmts, const V
       if (if_stmt->else_body_.has_value()) {
         else_result = process_branch(*if_stmt->else_body_, else_has_break);
       } else {
-        else_result = {{}, original_yield_values};
+        auto resolved = ResolveYieldAtEscape(original_yield_values, split.pre, iter_args);
+        else_result = {{}, std::move(resolved)};
       }
 
       // Rebuild IfStmt with phi nodes
