@@ -438,6 +438,15 @@ def test_reduction_kwarg_schema():
     assert row_sum_op.has_attr("keep_dim")
 
 
+def test_fillpad_kwarg_schema():
+    """Test that fillpad ops declare pad_value in their kwarg schemas."""
+    tensor_fillpad_op = ir.get_op("tensor.fillpad")
+    tile_fillpad_op = ir.get_op("tile.fillpad")
+
+    assert tensor_fillpad_op.has_attr("pad_value")
+    assert tile_fillpad_op.has_attr("pad_value")
+
+
 class TestOpMemorySpecRegistry:
     """Test that op memory specs are correctly registered and queryable."""
 

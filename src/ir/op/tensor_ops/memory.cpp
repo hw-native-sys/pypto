@@ -229,7 +229,7 @@ TypePtr DeduceTensorFillpadType(const std::vector<ExprPtr>& args,
 
   std::optional<TensorView> tensor_view = tensor_type->tensor_view_;
   if (tensor_view.has_value()) {
-    tensor_view->valid_shape.clear();
+    tensor_view->valid_shape = tensor_type->shape_;
   }
 
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
@@ -323,6 +323,7 @@ REGISTER_OP("tensor.fillpad")
     .set_op_category("TensorOp")
     .set_description("Fill invalid tensor view elements with a specified padding value")
     .add_argument("tensor", "Input tensor (TensorType)")
+    .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorFillpadType(args, kwargs);

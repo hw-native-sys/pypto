@@ -905,6 +905,7 @@ REGISTER_OP("tile.fillpad")
     .add_argument("tile", "Input tile (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 1) << "The operator tile.fillpad requires exactly 1 argument, but got "

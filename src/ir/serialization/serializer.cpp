@@ -649,10 +649,29 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       layout_map["type"] = msgpack::object("TensorLayout", zone_);
       layout_map["value"] = msgpack::object(TensorLayoutToString(layout), zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(layout_map, zone_)));
+    } else if (value.type() == typeid(PadValue)) {
+      auto pad = AnyCast<PadValue>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> pad_map;
+      pad_map["type"] = msgpack::object("PadValue", zone_);
+      switch (pad) {
+        case PadValue::null:
+          pad_map["value"] = msgpack::object("null", zone_);
+          break;
+        case PadValue::zero:
+          pad_map["value"] = msgpack::object("zero", zone_);
+          break;
+        case PadValue::max:
+          pad_map["value"] = msgpack::object("max", zone_);
+          break;
+        case PadValue::min:
+          pad_map["value"] = msgpack::object("min", zone_);
+          break;
+      }
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(pad_map, zone_)));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "or TensorLayout, but got " +
+                      "TensorLayout, or PadValue, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

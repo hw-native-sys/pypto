@@ -939,7 +939,9 @@ def test_tensor_fillpad_clears_valid_shape():
     assert result_type.dtype == DataType.FP32
     assert result_type.tensor_view is not None
     assert result_type.tensor_view.layout == ir.TensorLayout.ND
-    assert result_type.tensor_view.valid_shape == []
+    assert len(result_type.tensor_view.valid_shape) == 2
+    assert result_type.tensor_view.valid_shape[0] == dim8
+    assert result_type.tensor_view.valid_shape[1] == dim16
 
 
 def test_tensor_reshape_with_valid_shape():

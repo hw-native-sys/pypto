@@ -1093,7 +1093,7 @@ void BindIR(nb::module_& m) {
 
   ir.def(
       "register_op_conversion_custom",
-      [](const std::string& from_op, nb::object func) {
+      [](const std::string& from_op, const nb::object& func) {
         // Capture Python callable in a C++ ConversionFunc
         nb::object py_func = nb::borrow(func);
         OpConversionRegistry::GetInstance().RegisterCustom(
@@ -1105,9 +1105,8 @@ void BindIR(nb::module_& m) {
               // Convert kwargs to Python list of (key, value) tuples
               nb::list py_kwargs_list;
               for (const auto& [key, val] : kwargs) {
-                nb::object py_val =
-                    AnyToPyObject<DataType, MemorySpace, TensorLayout, bool, int, std::string, double>(val,
-                                                                                                       key);
+                nb::object py_val = AnyToPyObject<DataType, MemorySpace, TensorLayout, PadValue, bool, int,
+                                                  std::string, double>(val, key);
                 nb::tuple pair = nb::make_tuple(nb::cast(key), py_val);
                 py_kwargs_list.append(pair);
               }
@@ -1141,6 +1140,7 @@ void BindIR(nb::module_& m) {
         auto result = DeepClone(body);
         // Convert raw-pointer-keyed map to shared_ptr-keyed map for Python
         std::vector<std::pair<VarPtr, VarPtr>> var_map_pairs;
+        var_map_pairs.reserve(result.var_map.size());
         for (const auto& [raw_ptr, new_var] : result.var_map) {
           // Find the original VarPtr from the raw pointer — wrap as non-owning shared_ptr
           // Since Python holds the original IR tree alive, the raw pointer is valid

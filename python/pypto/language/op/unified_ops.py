@@ -332,13 +332,13 @@ def slice(
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def fillpad(input: T, pad_value: PadValue = PadValue.zero) -> T:
+def fillpad(value: T, pad_value: PadValue = PadValue.zero) -> T:
     """Fill invalid elements, dispatched by input type."""
-    if isinstance(input, Tensor):
-        return _tensor.fillpad(input, pad_value)
-    if isinstance(input, Tile):
-        return _tile.fillpad(input, pad_value)
-    raise TypeError(f"fillpad: expected Tensor or Tile, got {type(input).__name__}")
+    if isinstance(value, Tensor):
+        return _tensor.fillpad(value, pad_value)
+    if isinstance(value, Tile):
+        return _tile.fillpad(value, pad_value)
+    raise TypeError(f"fillpad: expected Tensor or Tile, got {type(value).__name__}")
 
 
 # ---------------------------------------------------------------------------
