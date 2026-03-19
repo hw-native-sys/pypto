@@ -26,6 +26,7 @@ __all__ = [
     "load",
     "store",
     "assemble",
+    "concat",
     "move",
     "full",
     "fillpad",
@@ -269,6 +270,20 @@ def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
         Tile wrapping the assemble operation
     """
     call_expr = _ir_ops.assemble(target.unwrap(), source.unwrap(), _normalize_intlike(offset))
+    return Tile(expr=call_expr)
+
+
+def concat(src0: Tile, src1: Tile) -> Tile:
+    """Concatenate two tiles along the column dimension.
+
+    Args:
+        src0: First source tile
+        src1: Second source tile
+
+    Returns:
+        Tile with concatenated columns
+    """
+    call_expr = _ir_ops.concat(src0.unwrap(), src1.unwrap())
     return Tile(expr=call_expr)
 
 

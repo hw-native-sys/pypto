@@ -597,6 +597,11 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "tile.fillpad")
       return MakeUnaryCodegenCCE("TFILLPAD", op, codegen);
     });
 
+REGISTER_BACKEND_OP(Backend910B_CCE, "tile.concat")
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBinaryCodegenCCE("TCONCAT", op, codegen);
+    });
+
 REGISTER_BACKEND_OP(Backend910B_CCE, "tile.col_expand")
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeTileExpandsCodegenCCE("TCOLEXPAND", op, codegen);

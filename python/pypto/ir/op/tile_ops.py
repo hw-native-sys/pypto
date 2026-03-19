@@ -195,6 +195,25 @@ def assemble(
     return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], {}, actual_span)
 
 
+def concat(
+    src0: Expr,
+    src1: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Concatenate two tiles along the column dimension.
+
+    Args:
+        src0: First source tile (TileType)
+        src1: Second source tile (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise concatenation
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.concat", [src0, src1], {}, actual_span)
+
+
 def move(
     tile: Expr,
     target_memory: MemorySpace,

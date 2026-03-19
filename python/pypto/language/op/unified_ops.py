@@ -38,6 +38,7 @@ __all__ = [
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
+    "concat",
     "expands",
     "reshape",
     "transpose",
@@ -315,6 +316,15 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
     if isinstance(input, Tile):
         return _tile.transpose(input, axis1, axis2)
     raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def concat(src0: T, src1: T) -> T:
+    """Column-wise concatenation, dispatched by input type."""
+    if isinstance(src0, Tensor) and isinstance(src1, Tensor):
+        return _tensor.concat(src0, src1)
+    if isinstance(src0, Tile) and isinstance(src1, Tile):
+        return _tile.concat(src0, src1)
+    raise TypeError(f"concat: expected Tensor or Tile, got {type(src0).__name__}")
 
 
 def slice(

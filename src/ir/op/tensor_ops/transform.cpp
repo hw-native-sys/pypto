@@ -219,5 +219,46 @@ REGISTER_OP("tensor.transpose")
       return DeduceTensorTransposeType(args, kwargs);
     });
 
+TypePtr DeduceTensorConcatType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 2) << "tensor.concat requires 2 arguments (src0, src1), got " << args.size();
+
+  auto t0 = As<TensorType>(args[0]->GetType());
+  auto t1 = As<TensorType>(args[1]->GetType());
+  CHECK(t0) << "tensor.concat: src0 must be TensorType, got " << args[0]->GetType()->TypeName();
+  CHECK(t1) << "tensor.concat: src1 must be TensorType, got " << args[1]->GetType()->TypeName();
+  CHECK(t0->dtype_ == t1->dtype_) << "tensor.concat: src0 and src1 must have same dtype, got "
+                                  << t0->dtype_.ToString() << " and " << t1->dtype_.ToString();
+  CHECK(t0->shape_.size() == 2 && t1->shape_.size() == 2) << "tensor.concat requires 2D tensors";
+
+  auto r0 = As<ConstInt>(t0->shape_[0]);
+  auto r1 = As<ConstInt>(t1->shape_[0]);
+  if (r0 && r1) {
+    CHECK(r0->value_ == r1->value_) << "tensor.concat: row count must match, got " << r0->value_ << " vs "
+                                    << r1->value_;
+  }
+
+  std::vector<ExprPtr> out_shape = {t0->shape_[0]};
+  auto c0 = As<ConstInt>(t0->shape_[1]);
+  auto c1 = As<ConstInt>(t1->shape_[1]);
+  if (c0 && c1) {
+    out_shape.push_back(std::make_shared<ConstInt>(c0->value_ + c1->value_, c0->dtype(), args[0]->span_));
+  } else {
+    out_shape.push_back(std::make_shared<Add>(t0->shape_[1], t1->shape_[1], DataType::INDEX, args[0]->span_));
+  }
+
+  return std::make_shared<TensorType>(out_shape, t0->dtype_);
+}
+
+REGISTER_OP("tensor.concat")
+    .set_op_category("TensorOp")
+    .set_description("Concatenate two tensors along column dimension")
+    .add_argument("src0", "First source tensor (TensorType)")
+    .add_argument("src1", "Second source tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorConcatType(args, kwargs);
+    });
+
 }  // namespace ir
 }  // namespace pypto

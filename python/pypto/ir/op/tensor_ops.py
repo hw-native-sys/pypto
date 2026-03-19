@@ -736,6 +736,25 @@ def assemble(
     return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
 
 
+def concat(
+    src0: Expr,
+    src1: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Concatenate two tensors along the column dimension.
+
+    Args:
+        src0: First source tensor (TensorType)
+        src1: Second source tensor (TensorType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise concatenation
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.concat", [src0, src1], {}, actual_span)
+
+
 def reshape(
     tensor: Expr,
     shape: list[int | Expr] | _ir_core.MakeTuple,
