@@ -42,6 +42,7 @@ __all__ = [
     "reshape",
     "transpose",
     "slice",
+    "fillpad",
     "matmul",
     "row_max",
     "row_sum",
@@ -54,7 +55,7 @@ __all__ = [
 
 from pypto.ir.utils import resolve_cast_mode
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import MemorySpace
+from pypto.pypto_core.ir import MemorySpace, PadValue
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -329,6 +330,15 @@ def slice(
     if isinstance(input, Tile):
         return _tile.slice(input, shape, offset, valid_shape)
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def fillpad(input: T, pad_value: PadValue = PadValue.zero) -> T:
+    """Fill invalid elements, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.fillpad(input, pad_value)
+    if isinstance(input, Tile):
+        return _tile.fillpad(input, pad_value)
+    raise TypeError(f"fillpad: expected Tensor or Tile, got {type(input).__name__}")
 
 
 # ---------------------------------------------------------------------------

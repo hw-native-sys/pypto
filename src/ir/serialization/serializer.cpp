@@ -311,16 +311,16 @@ class IRSerializer::Impl {
     // Serialize pad
     std::string pad_str;
     switch (tile_view->pad) {
-      case TilePad::null:
+      case PadValue::null:
         pad_str = "null";
         break;
-      case TilePad::zero:
+      case PadValue::zero:
         pad_str = "zero";
         break;
-      case TilePad::max:
+      case PadValue::max:
         pad_str = "max";
         break;
-      case TilePad::min:
+      case PadValue::min:
         pad_str = "min";
         break;
     }

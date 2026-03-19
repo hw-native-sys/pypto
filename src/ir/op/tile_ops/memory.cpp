@@ -222,7 +222,7 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   tile_view.valid_shape = input_valid_shape;
 
   // Preserve pad value from input tile
-  if (tile_type->tile_view_ && tile_type->tile_view_->pad != TilePad::null) {
+  if (tile_type->tile_view_ && tile_type->tile_view_->pad != PadValue::null) {
     tile_view.pad = tile_type->tile_view_->pad;
   }
 

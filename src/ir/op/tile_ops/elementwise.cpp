@@ -915,12 +915,13 @@ REGISTER_OP("tile.fillpad")
       CHECK(tile_type) << "The operator tile.fillpad requires first argument to be a TileType, but got "
                        << args[0]->GetType()->TypeName();
 
-      // Get pad_value from kwargs, default to TilePad::zero
-      TilePad pad_value = TilePad::zero;
+      // Get pad_value from kwargs, default to PadValue::zero
+      PadValue pad_value = PadValue::zero;
       for (const auto& kv : kwargs) {
         if (kv.first == "pad_value") {
-          pad_value = std::any_cast<TilePad>(kv.second);
-          CHECK(pad_value != TilePad::null) << "tile.fillpad requires pad_value to be zero/max/min, not null";
+          pad_value = std::any_cast<PadValue>(kv.second);
+          CHECK(pad_value != PadValue::null)
+              << "tile.fillpad requires pad_value to be zero/max/min, not null";
         }
       }
 

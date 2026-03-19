@@ -169,7 +169,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       // - Take pad from the new tile if it has a non-null pad (e.g., from fillpad)
       // This ensures fillpad's pad_value is used while preserving the original valid_shape
       auto existing = memref_tile_types_[raw_ptr];
-      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::TilePad::null) {
+      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::PadValue::null) {
         // Merge: keep valid_shape from existing, take pad from new tile
         ir::TileView merged_view;
         if (existing->tile_view_.has_value()) {
@@ -822,7 +822,7 @@ static const char* TileLayoutToStr(ir::TileLayout layout) {
 // v_row/v_col are the valid shape dimensions (may differ from rows/cols when valid_shapes is specified)
 static std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                            int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                           uint64_t fractal, ir::TilePad pad, int64_t v_row, int64_t v_col,
+                                           uint64_t fractal, ir::PadValue pad, int64_t v_row, int64_t v_col,
                                            bool v_row_dynamic = false, bool v_col_dynamic = false) {
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
@@ -840,7 +840,7 @@ static std::string FormatTileBufTypeString(const std::string& loc, const std::st
 // v_row/v_col are set to valid_shape values if available, otherwise to rows/cols
 static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& codegen, std::string& dtype_str,
                                 int64_t& rows, int64_t& cols, ir::TileLayout& blayout,
-                                ir::TileLayout& slayout, uint64_t& fractal, ir::TilePad& pad, int64_t& v_row,
+                                ir::TileLayout& slayout, uint64_t& fractal, ir::PadValue& pad, int64_t& v_row,
                                 int64_t& v_col, bool& v_row_dynamic, bool& v_col_dynamic) {
   dtype_str = codegen.GetTypeString(tile_type.dtype_);
   if (tile_type.shape_.size() >= 2) {
@@ -896,7 +896,7 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
   ir::TileLayout blayout = ir::TileLayout::row_major;
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
-  ir::TilePad pad = ir::TilePad::null;
+  ir::PadValue pad = ir::PadValue::null;
 
   int64_t v_row = rows;
   int64_t v_col = cols;
@@ -922,7 +922,7 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   ir::TileLayout blayout = ir::TileLayout::row_major;
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
-  ir::TilePad pad = ir::TilePad::null;
+  ir::PadValue pad = ir::PadValue::null;
   int64_t v_row = rows;
   int64_t v_col = cols;
   bool v_row_dynamic = false;
