@@ -51,8 +51,7 @@ class TileConcatTestCase(PTOTestCase):
 class TestConcatOperations:
     """Test suite for concat operations."""
 
-    pytest.mark.skip("PTOAS doesn't support tconcat now.")
-
+    @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
     def test_tile_concat_32x32(self, test_runner):
         """Test tile concatenation: 32x16 + 32x16 -> 32x32."""
         test_case = TileConcatTestCase()

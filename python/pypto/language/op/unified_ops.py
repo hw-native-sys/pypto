@@ -324,7 +324,7 @@ def concat(src0: T, src1: T) -> T:
         return _tensor.concat(src0, src1)
     if isinstance(src0, Tile) and isinstance(src1, Tile):
         return _tile.concat(src0, src1)
-    raise TypeError(f"concat: expected Tensor or Tile, got {type(src0).__name__}")
+    raise TypeError(f"concat: src0 and src1 must be the same type (both Tensor or both Tile), got {type(src0).__name__} and {type(src1).__name__}")
 
 
 def slice(
