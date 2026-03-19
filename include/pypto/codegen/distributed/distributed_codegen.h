@@ -20,8 +20,13 @@
 
 #include "pypto/codegen/cce/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/core/dtype.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace codegen {

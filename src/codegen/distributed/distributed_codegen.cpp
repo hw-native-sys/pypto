@@ -12,6 +12,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -19,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
@@ -88,12 +89,10 @@ void DistributedCodegen::ClassifyFunctions() {
       continue;
     }
 
-    if (func->role_.has_value() && *func->role_ == ir::Role::Worker) {
-      workers_[func->name_] = func;
-    } else if (func->role_.has_value() && *func->role_ == ir::Role::Orchestrator) {
+    if (func->role_.has_value() && *func->role_ == ir::Role::Orchestrator) {
       orchestrators_[func->name_] = func;
     } else {
-      // Has level but no role — treat as worker
+      // Explicit Worker role or level-only (no role) — treat as worker
       workers_[func->name_] = func;
     }
 
