@@ -1070,7 +1070,7 @@ class TypeResolver:
                     )
                 tv.fractal = val
             elif kw.arg == "pad":
-                tv.pad = self._resolve_tilepad(kw.value)
+                tv.pad = self._resolve_padvalue(kw.value)
             else:
                 raise ParserTypeError(
                     f"Unknown TileView keyword argument: {kw.arg!r}",
@@ -1153,20 +1153,20 @@ class TypeResolver:
             hint="Use pl.TileLayout.none_box, pl.TileLayout.row_major, or pl.TileLayout.col_major",
         )
 
-    def _resolve_tilepad(self, node: ast.expr) -> "ir.TilePad":
-        """Resolve pl.TilePad.xxx to ir.TilePad."""
-        _TILEPAD_MAP = {
-            "null": ir.TilePad.null,
-            "zero": ir.TilePad.zero,
-            "max": ir.TilePad.max,
-            "min": ir.TilePad.min,
+    def _resolve_padvalue(self, node: ast.expr) -> "ir.PadValue":
+        """Resolve pl.PadValue.xxx to ir.PadValue."""
+        _PADVALUE_MAP = {
+            "null": ir.PadValue.null,
+            "zero": ir.PadValue.zero,
+            "max": ir.PadValue.max,
+            "min": ir.PadValue.min,
         }
         if isinstance(node, ast.Attribute):
-            if node.attr in _TILEPAD_MAP:
-                return _TILEPAD_MAP[node.attr]
+            if node.attr in _PADVALUE_MAP:
+                return _PADVALUE_MAP[node.attr]
         raise ParserTypeError(
-            f"Unknown TilePad value: {ast.unparse(node)}",
-            hint="Use pl.TilePad.null, pl.TilePad.zero, pl.TilePad.max, or pl.TilePad.min",
+            f"Unknown PadValue value: {ast.unparse(node)}",
+            hint="Use pl.PadValue.null, pl.PadValue.zero, pl.PadValue.max, or pl.PadValue.min",
         )
 
     def _is_memref_node(self, node: ast.expr) -> bool:

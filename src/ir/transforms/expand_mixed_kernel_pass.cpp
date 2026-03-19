@@ -922,8 +922,9 @@ enum class CoreSide { AIC, AIV };
 
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
-/// tpop_var_remap collects original dest_var pointer -> clean-typed new_var mappings
-/// for tpop dest vars, so downstream references can be updated via pointer-based substitution.
+/// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
+/// -> clean-typed new_var mappings, so downstream references to either the pre-move or
+/// post-move variable can be updated via pointer-based substitution.
 std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                    const std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves,
@@ -961,6 +962,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           auto clean_type = CleanTileType(bm.dest_var->GetType());
           auto clean_var = std::make_shared<Var>(bm.dest_var->name_hint_, clean_type, stmt->span_);
           tpop_var_remap[bm.dest_var.get()] = clean_var;
+          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+            tpop_var_remap[source_var.get()] = clean_var;
+          }
           result.push_back(std::make_shared<AssignStmt>(
               clean_var, CreateTpop(pop_op, clean_type, stmt->span_), stmt->span_));
         }

@@ -37,6 +37,7 @@ When you need to perform a code review:
 - [ ] Clear, descriptive names
 - [ ] Appropriate comments for complex logic
 - [ ] Linter errors fixed (not suppressed)
+- [ ] **Pass complexity ≤ O(N log N)**: No nested full scans over IR node collections, no linear scans for lookups (see [`pass-complexity.md`](../../rules/pass-complexity.md))
 
 ### 2. Python Style (see `python-style.md` for full details)
 
@@ -111,6 +112,7 @@ When APIs change, all three layers must be updated together. See [cross-layer-sy
 - **AI co-author**: `Co-Authored-By: Claude` or similar lines in commits
 - **Hardcoded paths**: Absolute paths like `/home/user/...` instead of relative paths
 - **Vague error messages**: `raise ValueError("Invalid")` without context
+- **Quadratic pass complexity**: Nested full scans over the same/global IR node collection, or linear scans instead of indexed lookups inside a pass traversal
 
 ## Output Format
 

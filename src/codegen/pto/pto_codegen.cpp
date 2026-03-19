@@ -169,7 +169,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       // - Take pad from the new tile if it has a non-null pad (e.g., from fillpad)
       // This ensures fillpad's pad_value is used while preserving the original valid_shape
       auto existing = memref_tile_types_[raw_ptr];
-      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::TilePad::null) {
+      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::PadValue::null) {
         // Merge: keep valid_shape from existing, take pad from new tile
         ir::TileView merged_view;
         if (existing->tile_view_.has_value()) {
@@ -353,7 +353,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
           GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
         }
         GetOrEmitIndexConstant(1);
-      } else if (tensor_type->shape_.size() == 1) {
+      } else {
+        // 1-D and N-D (N>2): pre-emit constant 1 (innermost stride). For N>2,
+        // other strides are computed dynamically via arith.muli in
+        // EmitMakeTensorViews to support dynamic dims.
         GetOrEmitIndexConstant(1);
       }
     }
@@ -423,6 +426,28 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
 
+      // For N-D (N > 2): pre-compute row-major strides as SSA values using arith.muli
+      // so that dynamic dimensions (ir::Var) are handled correctly. Emit any needed
+      // multiply instructions BEFORE the make_tensor_view line.
+      std::vector<std::string> nd_stride_names;
+      if (tensor_type->shape_.size() > 2) {
+        const size_t rank = tensor_type->shape_.size();
+        nd_stride_names.resize(rank);
+        nd_stride_names[rank - 1] = GetOrEmitIndexConstant(1);
+        for (int j = static_cast<int>(rank) - 2; j >= 0; j--) {
+          std::string dim_mlir;
+          if (auto var = As<ir::Var>(tensor_type->shape_[j + 1])) {
+            dim_mlir = var_to_mlir_.at(var->name_hint_);
+          } else {
+            dim_mlir = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j + 1]));
+          }
+          std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(j));
+          stream_ << GetIndent() << mul_name << " = arith.muli " << nd_stride_names[j + 1] << ", " << dim_mlir
+                  << " : index\n";
+          nd_stride_names[j] = mul_name;
+        }
+      }
+
       stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
       stream_ << "%arg" << i;
 
@@ -453,6 +478,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       } else if (tensor_type->shape_.size() == 1) {
         stream_ << GetOrEmitIndexConstant(1);
+      } else {
+        // Use pre-computed SSA stride names (built above via arith.muli)
+        for (size_t j = 0; j < nd_stride_names.size(); j++) {
+          if (j > 0) stream_ << ", ";
+          stream_ << nd_stride_names[j];
+        }
       }
       stream_ << "]";
 
@@ -791,7 +822,7 @@ static const char* TileLayoutToStr(ir::TileLayout layout) {
 // v_row/v_col are the valid shape dimensions (may differ from rows/cols when valid_shapes is specified)
 static std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,
                                            int64_t cols, ir::TileLayout blayout, ir::TileLayout slayout,
-                                           uint64_t fractal, ir::TilePad pad, int64_t v_row, int64_t v_col,
+                                           uint64_t fractal, ir::PadValue pad, int64_t v_row, int64_t v_col,
                                            bool v_row_dynamic = false, bool v_col_dynamic = false) {
   std::ostringstream oss;
   oss << "!pto.tile_buf<loc=" << loc << ", dtype=" << dtype_str;
@@ -809,7 +840,7 @@ static std::string FormatTileBufTypeString(const std::string& loc, const std::st
 // v_row/v_col are set to valid_shape values if available, otherwise to rows/cols
 static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& codegen, std::string& dtype_str,
                                 int64_t& rows, int64_t& cols, ir::TileLayout& blayout,
-                                ir::TileLayout& slayout, uint64_t& fractal, ir::TilePad& pad, int64_t& v_row,
+                                ir::TileLayout& slayout, uint64_t& fractal, ir::PadValue& pad, int64_t& v_row,
                                 int64_t& v_col, bool& v_row_dynamic, bool& v_col_dynamic) {
   dtype_str = codegen.GetTypeString(tile_type.dtype_);
   if (tile_type.shape_.size() >= 2) {
@@ -865,7 +896,7 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
   ir::TileLayout blayout = ir::TileLayout::row_major;
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
-  ir::TilePad pad = ir::TilePad::null;
+  ir::PadValue pad = ir::PadValue::null;
 
   int64_t v_row = rows;
   int64_t v_col = cols;
@@ -891,7 +922,7 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   ir::TileLayout blayout = ir::TileLayout::row_major;
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
-  ir::TilePad pad = ir::TilePad::null;
+  ir::PadValue pad = ir::PadValue::null;
   int64_t v_row = rows;
   int64_t v_col = cols;
   bool v_row_dynamic = false;
@@ -1059,7 +1090,7 @@ void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
 
 void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   std::string result = NewTemp();
-  std::string val = op->value_ ? "true" : "false";
+  std::string val = op->value_ ? "1" : "0";
   Emit(result + " = arith.constant " + val + " : i1");
   current_expr_value_ = result;
 }
@@ -1131,6 +1162,112 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   }
 
   Emit(result + " = " + mlir_op + " " + src + " : " + src_type + " to " + dst_type);
+  current_expr_value_ = result;
+}
+
+// ========================================================================
+// Expression visitors - Logical & Bitwise
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::AndPtr& op) { VisitBinaryArithExpr(op, "arith.andi", "arith.andi"); }
+void PTOCodegen::VisitExpr_(const ir::OrPtr& op) { VisitBinaryArithExpr(op, "arith.ori", "arith.ori"); }
+void PTOCodegen::VisitExpr_(const ir::XorPtr& op) { VisitBinaryArithExpr(op, "arith.xori", "arith.xori"); }
+void PTOCodegen::VisitExpr_(const ir::BitAndPtr& op) { VisitBinaryArithExpr(op, "arith.andi", "arith.andi"); }
+void PTOCodegen::VisitExpr_(const ir::BitOrPtr& op) { VisitBinaryArithExpr(op, "arith.ori", "arith.ori"); }
+void PTOCodegen::VisitExpr_(const ir::BitXorPtr& op) { VisitBinaryArithExpr(op, "arith.xori", "arith.xori"); }
+void PTOCodegen::VisitExpr_(const ir::BitShiftLeftPtr& op) {
+  VisitBinaryArithExpr(op, "arith.shli", "arith.shli");
+}
+void PTOCodegen::VisitExpr_(const ir::BitShiftRightPtr& op) {
+  // Use unsigned shift (shrui) for unsigned integer types, signed shift (shrsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.shrui" : "arith.shrsi";
+  VisitBinaryArithExpr(op, int_op, int_op);
+}
+
+// ========================================================================
+// Expression visitors - Other binary
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::FloatDivPtr& op) {
+  // Use unsigned division (divui) for unsigned integer types, signed division (divsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.divui" : "arith.divsi";
+  VisitBinaryArithExpr(op, int_op, "arith.divf");
+}
+void PTOCodegen::VisitExpr_(const ir::MinPtr& op) {
+  // Use unsigned min (minui) for unsigned integer types, signed min (minsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.minui" : "arith.minsi";
+  VisitBinaryArithExpr(op, int_op, "arith.minimumf");
+}
+void PTOCodegen::VisitExpr_(const ir::MaxPtr& op) {
+  // Use unsigned max (maxui) for unsigned integer types, signed max (maxsi) otherwise
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string int_op = dtype.IsUnsignedInt() ? "arith.maxui" : "arith.maxsi";
+  VisitBinaryArithExpr(op, int_op, "arith.maximumf");
+}
+
+// ========================================================================
+// Expression visitors - Unary
+// ========================================================================
+
+void PTOCodegen::VisitExpr_(const ir::NotPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
+  std::string src_type = GetTypeString(src_dtype);
+  std::string zero = NewTemp();
+  std::string result = NewTemp();
+  if (src_dtype.IsFloat()) {
+    Emit(zero + " = arith.constant 0.0 : " + src_type);
+    Emit(result + " = arith.cmpf oeq, " + src + ", " + zero + " : " + src_type);
+  } else {
+    Emit(zero + " = arith.constant 0 : " + src_type);
+    Emit(result + " = arith.cmpi eq, " + src + ", " + zero + " : " + src_type);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::NegPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string result = NewTemp();
+  if (dtype.IsFloat()) {
+    Emit(result + " = arith.negf " + src + " : " + type_str);
+  } else {
+    std::string zero = NewTemp();
+    Emit(zero + " = arith.constant 0 : " + type_str);
+    Emit(result + " = arith.subi " + zero + ", " + src + " : " + type_str);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::AbsPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string result = NewTemp();
+  if (dtype.IsFloat()) {
+    Emit(result + " = math.absf " + src + " : " + type_str);
+  } else {
+    Emit(result + " = math.absi " + src + " : " + type_str);
+  }
+  current_expr_value_ = result;
+}
+
+void PTOCodegen::VisitExpr_(const ir::BitNotPtr& op) {
+  VisitExpr(op->operand_);
+  std::string src = current_expr_value_;
+  ::pypto::DataType dtype = ir::GetScalarDtype(op);
+  std::string type_str = GetTypeString(dtype);
+  std::string all_ones = NewTemp();
+  Emit(all_ones + " = arith.constant -1 : " + type_str);
+  std::string result = NewTemp();
+  Emit(result + " = arith.xori " + src + ", " + all_ones + " : " + type_str);
   current_expr_value_ = result;
 }
 

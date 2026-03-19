@@ -623,7 +623,7 @@ class IRBuilder:
         blayout: ir.TileLayout = ir.TileLayout.row_major,
         slayout: ir.TileLayout = ir.TileLayout.none_box,
         fractal: int = 512,
-        pad: ir.TilePad = ir.TilePad.null,
+        pad: ir.PadValue = ir.PadValue.null,
         span: ir.Span | None = None,
     ) -> ir.TileView:
         """Create a TileView with normalized expressions.

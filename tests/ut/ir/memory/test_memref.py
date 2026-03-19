@@ -188,7 +188,7 @@ class TestTileView:
         assert tile_view.blayout == ir.TileLayout.row_major
         assert tile_view.slayout == ir.TileLayout.none_box
         assert tile_view.fractal == 512
-        assert tile_view.pad == ir.TilePad.null
+        assert tile_view.pad == ir.PadValue.null
 
     def test_tileview_set_new_fields(self):
         """Test setting blayout, slayout, fractal, and pad on TileView."""
@@ -201,12 +201,12 @@ class TestTileView:
         tile_view.blayout = ir.TileLayout.col_major
         tile_view.slayout = ir.TileLayout.row_major
         tile_view.fractal = 1024
-        tile_view.pad = ir.TilePad.zero
+        tile_view.pad = ir.PadValue.zero
 
         assert tile_view.blayout == ir.TileLayout.col_major
         assert tile_view.slayout == ir.TileLayout.row_major
         assert tile_view.fractal == 1024
-        assert tile_view.pad == ir.TilePad.zero
+        assert tile_view.pad == ir.PadValue.zero
 
 
 class TestTensorTypeWithMemRef:
@@ -971,7 +971,7 @@ class TestTileViewConstructor:
             ir.TileLayout.col_major,
             ir.TileLayout.row_major,
             256,
-            ir.TilePad.max,
+            ir.PadValue.max,
         )
 
         assert len(tv.valid_shape) == 2
@@ -979,7 +979,7 @@ class TestTileViewConstructor:
         assert tv.blayout == ir.TileLayout.col_major
         assert tv.slayout == ir.TileLayout.row_major
         assert tv.fractal == 256
-        assert tv.pad == ir.TilePad.max
+        assert tv.pad == ir.PadValue.max
 
     def test_tileview_constructor_default_new_fields(self):
         """Test TileView constructor uses correct defaults for new fields."""
@@ -993,16 +993,16 @@ class TestTileViewConstructor:
         assert tv.blayout == ir.TileLayout.row_major
         assert tv.slayout == ir.TileLayout.none_box
         assert tv.fractal == 512
-        assert tv.pad == ir.TilePad.null
+        assert tv.pad == ir.PadValue.null
 
     def test_tileview_all_pad_modes(self):
-        """Test TileView with all TilePad values."""
+        """Test TileView with all PadValue values."""
         span = ir.Span.unknown()
         valid_shape = [ir.ConstInt(8, DataType.INT64, span)]
         stride = [ir.ConstInt(1, DataType.INT64, span)]
         start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-        for pad in [ir.TilePad.null, ir.TilePad.zero, ir.TilePad.max, ir.TilePad.min]:
+        for pad in [ir.PadValue.null, ir.PadValue.zero, ir.PadValue.max, ir.PadValue.min]:
             tv = ir.TileView(valid_shape, stride, start_offset, pad=pad)
             assert tv.pad == pad
 
@@ -1051,38 +1051,38 @@ class TestTileLayout:
         assert layout_map[ir.TileLayout.col_major] == "col_major"
 
 
-class TestTilePad:
-    """Tests for TilePad enum."""
+class TestPadValue:
+    """Tests for PadValue enum."""
 
     def test_pad_values(self):
-        """Test all TilePad enum values exist."""
-        assert ir.TilePad.null is not None
-        assert ir.TilePad.zero is not None
-        assert ir.TilePad.max is not None
-        assert ir.TilePad.min is not None
+        """Test all PadValue enum values exist."""
+        assert ir.PadValue.null is not None
+        assert ir.PadValue.zero is not None
+        assert ir.PadValue.max is not None
+        assert ir.PadValue.min is not None
 
     def test_pad_equality(self):
-        """Test TilePad enum equality and inequality."""
-        assert ir.TilePad.null == ir.TilePad.null
-        assert ir.TilePad.zero == ir.TilePad.zero
-        assert ir.TilePad.max == ir.TilePad.max
-        assert ir.TilePad.min == ir.TilePad.min
-        assert ir.TilePad.null != ir.TilePad.zero
-        assert ir.TilePad.zero != ir.TilePad.max
-        assert ir.TilePad.max != ir.TilePad.min
+        """Test PadValue enum equality and inequality."""
+        assert ir.PadValue.null == ir.PadValue.null
+        assert ir.PadValue.zero == ir.PadValue.zero
+        assert ir.PadValue.max == ir.PadValue.max
+        assert ir.PadValue.min == ir.PadValue.min
+        assert ir.PadValue.null != ir.PadValue.zero
+        assert ir.PadValue.zero != ir.PadValue.max
+        assert ir.PadValue.max != ir.PadValue.min
 
     def test_pad_in_dict(self):
-        """Test using TilePad as dictionary keys."""
+        """Test using PadValue as dictionary keys."""
         pad_map = {
-            ir.TilePad.null: "null",
-            ir.TilePad.zero: "zero",
-            ir.TilePad.max: "max",
-            ir.TilePad.min: "min",
+            ir.PadValue.null: "null",
+            ir.PadValue.zero: "zero",
+            ir.PadValue.max: "max",
+            ir.PadValue.min: "min",
         }
-        assert pad_map[ir.TilePad.null] == "null"
-        assert pad_map[ir.TilePad.zero] == "zero"
-        assert pad_map[ir.TilePad.max] == "max"
-        assert pad_map[ir.TilePad.min] == "min"
+        assert pad_map[ir.PadValue.null] == "null"
+        assert pad_map[ir.PadValue.zero] == "zero"
+        assert pad_map[ir.PadValue.max] == "max"
+        assert pad_map[ir.PadValue.min] == "min"
 
 
 class TestPythonSyntaxPrinting:
@@ -1171,7 +1171,7 @@ class TestPythonSyntaxPrinting:
             ir.TileLayout.col_major,
             ir.TileLayout.row_major,
             1024,
-            ir.TilePad.zero,
+            ir.PadValue.zero,
         )
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Left)
@@ -1184,7 +1184,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.TileLayout.row_major" in printed
         assert "fractal=1024" in printed
         assert "pad=" in printed
-        assert "pl.TilePad.zero" in printed
+        assert "pl.PadValue.zero" in printed
 
     def test_tile_type_with_tileview_default_fields_print(self):
         """Test printing TileView omits default field values."""

@@ -579,27 +579,27 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(TensorLayout)) {
       stream_ << prefix_ << ".TensorLayout."
               << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
-    } else if (value.type() == typeid(TilePad)) {
-      auto pad = AnyCast<TilePad>(value, "printing kwarg: " + key);
-      stream_ << prefix_ << ".TilePad.";
+    } else if (value.type() == typeid(PadValue)) {
+      auto pad = AnyCast<PadValue>(value, "printing kwarg: " + key);
+      stream_ << prefix_ << ".PadValue.";
       switch (pad) {
-        case TilePad::null:
+        case PadValue::null:
           stream_ << "null";
           break;
-        case TilePad::zero:
+        case PadValue::zero:
           stream_ << "zero";
           break;
-        case TilePad::max:
+        case PadValue::max:
           stream_ << "max";
           break;
-        case TilePad::min:
+        case PadValue::min:
           stream_ << "min";
           break;
       }
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "TensorLayout, or TilePad, but got " +
+                      "TensorLayout, or PadValue, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }
@@ -1612,20 +1612,20 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
   }
 
   // pad — omit if null (default)
-  if (tile_view.pad != TilePad::null) {
+  if (tile_view.pad != PadValue::null) {
     maybe_comma();
-    oss << "pad=" << prefix_ << ".TilePad.";
+    oss << "pad=" << prefix_ << ".PadValue.";
     switch (tile_view.pad) {
-      case TilePad::null:
+      case PadValue::null:
         oss << "null";
         break;
-      case TilePad::zero:
+      case PadValue::zero:
         oss << "zero";
         break;
-      case TilePad::max:
+      case PadValue::max:
         oss << "max";
         break;
-      case TilePad::min:
+      case PadValue::min:
         oss << "min";
         break;
     }

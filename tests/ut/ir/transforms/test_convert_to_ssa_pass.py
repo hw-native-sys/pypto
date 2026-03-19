@@ -1333,6 +1333,135 @@ class TestEscapingVariables:
         After = passes.convert_to_ssa()(Before)
         passes.run_verifier()(After)
 
+    def test_nested_loop_local_temporaries_not_promoted(self):
+        """Loop-local temporaries redefined in a subsequent loop must not escape.
+
+        Regression test for issue #592: ConvertToSSA promoted loop-local
+        temporaries (k0, x_chunk) into iter_args when the same names appeared
+        in a subsequent loop, because UseCollector counted all recursive
+        references without checking that the name was locally redefined.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = x
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                for i in pl.range(4):
+                    tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    a = pl.add(a, tmp)
+                for j in pl.range(4):
+                    tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 2.0)
+                    b = pl.add(b, tmp)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a_0: pl.Tensor[[64], pl.FP32] = x_0
+                b_0: pl.Tensor[[64], pl.FP32] = pl.mul(x_0, 2.0)
+                for i_0, (a_iter_1,) in pl.range(0, 4, 1, init_values=(a_0,)):
+                    tmp_0: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                    a_2: pl.Tensor[[64], pl.FP32] = pl.add(a_iter_1, tmp_0)
+                    a_1 = pl.yield_(a_2)
+                for j_0, (b_iter_1,) in pl.range(0, 4, 1, init_values=(b_0,)):
+                    tmp_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 2.0)
+                    b_2: pl.Tensor[[64], pl.FP32] = pl.add(b_iter_1, tmp_1)
+                    b_1 = pl.yield_(b_2)
+                result_0: pl.Tensor[[64], pl.FP32] = pl.add(a_1, b_1)
+                return result_0
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_single_branch_escaping_var_gets_phi(self):
+        """Variable defined only in one if-branch inside a loop must still escape.
+
+        Regression test for issue #600: When CtrlFlowTransform lowers
+        ``continue`` into an if/else with an empty branch, variables defined
+        only in the else-branch were silently dropped by the IfStmt handler
+        because the phi-node logic required both branches to define the
+        variable. Pre-registering escaping vars as iter_args before body
+        conversion ensures the IfStmt handler sees them in current_version_
+        and creates a proper phi (pass-through in the empty branch, new
+        value in the defining branch).
+        """
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([64], DataType.FP32)
+        scalar_idx = ir.ScalarType(DataType.INDEX)
+
+        x = ir.Var("x", tensor_type, span)
+        c = ir.Var("c", tensor_type, span)
+        i = ir.Var("i", scalar_idx, span)
+        start = ir.ConstInt(0, DataType.INDEX, span)
+        stop = ir.ConstInt(4, DataType.INDEX, span)
+        step = ir.ConstInt(1, DataType.INDEX, span)
+
+        # Condition: i % 2 != 0 (the continue path)
+        two = ir.ConstInt(2, DataType.INDEX, span)
+        zero_idx = ir.ConstInt(0, DataType.INDEX, span)
+        mod_expr = ir.FloorMod(i, two, DataType.INDEX, span)
+        cond = ir.Ne(mod_expr, zero_idx, DataType.BOOL, span)
+
+        # else branch: out = add(x, c) — variable defined only here
+        out = ir.Var("out", tensor_type, span)
+        add_op = ir.Op("tensor.add")
+        add_call = ir.Call(add_op, [x, c], span)
+        else_body = ir.AssignStmt(out, add_call, span)
+
+        # then branch: pass (empty — from continue lowering)
+        then_body = ir.SeqStmts([], span)
+
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [], span)
+        for_stmt = ir.ForStmt(i, start, stop, step, [], if_stmt, [], span)
+        ret = ir.ReturnStmt([out], span)
+        func_body = ir.SeqStmts([for_stmt, ret], span)
+
+        func = ir.Function(
+            "kernel",
+            [(x, ir.ParamDirection.In), (c, ir.ParamDirection.Out)],
+            [tensor_type],
+            func_body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "test", span)
+
+        after = passes.convert_to_ssa()(program)
+        passes.run_verifier()(after)
+
+    def test_loop_local_temporaries_in_model_pattern(self):
+        """Real-world model pattern: k0/x_chunk loop-locals must not be promoted.
+
+        Regression test for issue #601: identical root cause to #592 but
+        reported from a production Qwen3 model. Variables like ``k0 = kb * K``
+        and ``x_chunk = cast(slice(...))`` are pure loop-local temporaries
+        recomputed each iteration — they must not appear in ``init_values``
+        or ``yield_``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                acc: pl.Tensor[[64], pl.FP32] = x
+                for i in pl.range(4):
+                    k0 = i * 8
+                    chunk: pl.Tensor[[64], pl.FP32] = pl.add(x, k0)
+                    acc = pl.add(acc, chunk)
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
+                return result
+
+        After = passes.convert_to_ssa()(Before)
+
+        # Verify loop-local temporaries are NOT promoted to iter_args
+        printed = ir.python_print(After)
+        assert "k0_iter" not in printed, "k0 should not be promoted to iter_arg"
+        assert "chunk_iter" not in printed, "chunk should not be promoted to iter_arg"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

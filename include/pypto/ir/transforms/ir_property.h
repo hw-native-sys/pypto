@@ -46,6 +46,7 @@ enum class IRProperty : uint64_t {
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   UseAfterDef,              ///< All variable uses are dominated by a definition
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   kCount                    ///< Sentinel (must be last)
 };
 

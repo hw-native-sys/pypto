@@ -55,6 +55,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "UseAfterDef";
     case IRProperty::HierarchyOutlined:
       return "HierarchyOutlined";
+    case IRProperty::StructuredCtrlFlow:
+      return "StructuredCtrlFlow";
     default:
       return "Unknown";
   }

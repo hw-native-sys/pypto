@@ -250,12 +250,8 @@ class PreconditionChecker : public IRVisitor {
 // Main transformation
 // ============================================================================
 
-/**
- * @brief Track original ND shapes for reshape-back before tile.store.
- */
 struct FlattenContext {
-  std::unordered_map<std::string, VarPtr> var_map;                  // old var name -> new 2D var
-  std::unordered_map<std::string, std::vector<ExprPtr>> nd_shapes;  // var name -> original ND shape
+  std::unordered_map<std::string, VarPtr> var_map;  // old var name -> new 2D var
 };
 
 /**
@@ -474,110 +470,82 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     const auto& op_name = call->op_->name_;
 
-    // ---- tile.load on >2D tile: keep load, insert reshape ----
-    // TODO(pypto): Fuse tile.load + tile.reshape into a single tile.load that
-    //       directly produces the 2D tile, instead of emitting two separate
-    //       instructions.  This requires extending tile.load to accept a
-    //       target shape that differs from the tensor shape.
+    // ---- tile.load on >2D tile: produce 2D tile directly ----
+    // tile.load semantics: ND tensor → 2D tile. No reshape needed.
     if (op_name == "tile.load") {
+      // Substitute args via ctx.var_map so all operand Vars reference the latest SSA values.
+      std::vector<ExprPtr> sub_args;
+      sub_args.reserve(call->args_.size());
+      for (const auto& arg : call->args_) {
+        sub_args.push_back(SubstituteExpr(arg, ctx.var_map));
+      }
+
       auto result_tile = As<TileType>(call->GetType());
       if (result_tile && result_tile->shape_.size() > 2) {
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, "tile.load result");
 
-        // Keep the original load as-is (interfaces with ND tensor)
-        std::string nd_name = assign->var_->name_hint_ + "_nd";
-        auto nd_var = std::make_shared<Var>(nd_name, call->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(nd_var, call, assign->span_));
-
-        // Record original ND shape
-        ctx.nd_shapes[assign->var_->name_hint_] = result_tile->shape_;
-
-        // Insert tile.reshape(nd_var, (merged, last))
-        auto shape_tuple = MakeShapeTupleFromInts({merged, last}, span);
-        auto reshape_call = op_registry.Create("tile.reshape", {nd_var, shape_tuple}, span);
-
-        auto flat_var =
-            std::make_shared<Var>(assign->var_->name_hint_, reshape_call->GetType(), assign->var_->span_);
-        result.push_back(std::make_shared<AssignStmt>(flat_var, reshape_call, assign->span_));
+        // Construct call with explicit 2D TileType (bypasses ND type inference).
+        auto flat_tile_type =
+            std::make_shared<TileType>(Make2DShapeExprs(merged, last, span), result_tile->dtype_,
+                                       std::nullopt, std::nullopt, std::nullopt);
+        auto flat_call =
+            std::make_shared<Call>(call->op_, sub_args, call->kwargs_, flat_tile_type, call->span_);
+        auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(flat_var, flat_call, assign->span_));
         ctx.var_map[assign->var_->name_hint_] = flat_var;
         continue;
       }
-      // ≤2D tile.load: pass through
-      result.push_back(stmt);
+      // ≤2D tile.load: honor any pending var_map substitutions
+      auto new_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
+      auto new_var =
+          std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+      result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+      ctx.var_map[assign->var_->name_hint_] = new_var;
       continue;
     }
 
-    // ---- tile.store: reshape back to ND before storing ----
-    // TODO(pypto): Fuse tile.reshape + tile.store into a single tile.store that
-    //       accepts a 2D tile and writes it directly to the ND tensor,
-    //       instead of emitting a reshape followed by a store.
+    // ---- tile.store: pass through, injecting shapes for ND tensors ----
+    // tile.store semantics: (flattened-)2D tile → ND tensor. No reshape needed.
+    // When the output tensor is ND (rank > 2), inject an explicit shapes tuple as
+    // args[3] so that the codegen can reconstruct the correct pto.partition_view.
+    // The shapes tuple is the tile's original shape left-padded with 1s to reach
+    // the tensor rank.  Examples:
+    //   tile [A,B,C] (ND, rank 3) → tensor rank 3: shapes = (A,B,C)       [no pad]
+    //   tile [A,B,C] (ND, rank 3) → tensor rank 4: shapes = (1,A,B,C)     [1 pad]
+    //   tile [H,W]   (2D, rank 2) → tensor rank 3: shapes = (1,H,W)       [1 pad]
+    // The original tile type is read BEFORE substitution so it still carries the
+    // pre-flatten ND shape.
+    // Signature: (tile, offsets, output_tensor[, shapes])
     if (op_name == "tile.store") {
-      // tile.store args: (tile, offsets, tensor)
-      if (call->args_.size() >= 3) {
-        auto subst_tile = SubstituteExpr(call->args_[0], ctx.var_map);
-        auto tile_type = As<TileType>(subst_tile->GetType());
+      auto orig_tile_type = As<TileType>(call->args_[0]->GetType());
 
-        // Determine the ND shape for reshape-back:
-        // 1. Prefer tracked ND shape from ctx.nd_shapes (set by tile.load/tile.create,
-        //    propagated through shape-preserving ops)
-        // 2. Fall back to output tensor shape (covers reduce ops and other cases
-        //    where the shape was not propagated)
-        const std::vector<ExprPtr>* nd_shape_ptr = nullptr;
-        std::string orig_tile_name;
-        if (auto var = As<Var>(call->args_[0])) {
-          orig_tile_name = var->name_hint_;
-          auto nd_it = ctx.nd_shapes.find(orig_tile_name);
-          if (nd_it != ctx.nd_shapes.end()) {
-            nd_shape_ptr = &nd_it->second;
-          }
-        }
-
-        // Fall back to tensor shape if no tracked ND shape
-        auto out_tensor_type = As<TensorType>(call->args_[2]->GetType());
-        if (!nd_shape_ptr && out_tensor_type) {
-          nd_shape_ptr = &out_tensor_type->shape_;
-        }
-
-        if (nd_shape_ptr && nd_shape_ptr->size() > 2 && tile_type && tile_type->shape_.size() <= 2) {
-          const auto& orig_shape = *nd_shape_ptr;
-
-          // Build ND shape values
-          std::vector<int64_t> nd_dims;
-          nd_dims.reserve(orig_shape.size());
-          for (const auto& dim_expr : orig_shape) {
-            nd_dims.push_back(GetStaticDim(dim_expr, "tile.store reshape-back"));
-          }
-
-          // Insert tile.reshape to restore ND shape
-          auto nd_shape_tuple = MakeShapeTupleFromInts(nd_dims, span);
-          auto reshape_back = op_registry.Create("tile.reshape", {subst_tile, nd_shape_tuple}, span);
-
-          std::string nd_name = (orig_tile_name.empty() ? assign->var_->name_hint_ : orig_tile_name) + "_nd";
-          auto nd_var = std::make_shared<Var>(nd_name, reshape_back->GetType(), assign->var_->span_);
-          result.push_back(std::make_shared<AssignStmt>(nd_var, reshape_back, assign->span_));
-
-          // Rebuild tile.store with the ND tile
-          std::vector<ExprPtr> new_store_args;
-          new_store_args.push_back(nd_var);
-          for (size_t i = 1; i < call->args_.size(); ++i) {
-            new_store_args.push_back(SubstituteExpr(call->args_[i], ctx.var_map));
-          }
-          auto new_store = op_registry.Create("tile.store", new_store_args, call->kwargs_, span);
-          auto store_var =
-              std::make_shared<Var>(assign->var_->name_hint_, new_store->GetType(), assign->var_->span_);
-          result.push_back(std::make_shared<AssignStmt>(store_var, new_store, assign->span_));
-          ctx.var_map[assign->var_->name_hint_] = store_var;
-          continue;
-        }
-      }
-
-      // No reshape needed — just substitute and pass through
       std::vector<ExprPtr> new_args;
-      new_args.reserve(call->args_.size());
+      new_args.reserve(call->args_.size() + 1);
+      // Push all original args (tile, offsets, output_tensor) with substitution
       for (const auto& arg : call->args_) {
         new_args.push_back(SubstituteExpr(arg, ctx.var_map));
       }
-      auto new_call = op_registry.Create("tile.store", new_args, call->kwargs_, span);
+      // Inject shapes tuple whenever the output tensor is ND (rank > 2).
+      // Codegen always requires args[3] in that case regardless of tile rank.
+      auto out_tensor_type = As<TensorType>(new_args[2]->GetType());
+      if (orig_tile_type && out_tensor_type && out_tensor_type->shape_.size() > 2) {
+        const size_t tensor_rank = out_tensor_type->shape_.size();
+        const size_t tile_rank = orig_tile_type->shape_.size();
+        std::vector<ExprPtr> shapes;
+        shapes.reserve(tensor_rank);
+        // Left-pad with 1s when tile rank < tensor rank.
+        for (size_t i = tile_rank; i < tensor_rank; ++i) {
+          shapes.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, span));
+        }
+        for (const auto& dim : orig_tile_type->shape_) {
+          shapes.push_back(dim);
+        }
+        new_args.push_back(std::make_shared<MakeTuple>(shapes, span));
+      }
+
+      // Construct call directly: store result type = output tensor type (args[2])
+      auto out_type = new_args[2]->GetType();
+      auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, out_type, call->span_);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
@@ -606,9 +574,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
         ctx.var_map[assign->var_->name_hint_] = flat_var;
-
-        // Record original ND shape for potential store
-        ctx.nd_shapes[assign->var_->name_hint_] = result_tile->shape_;
         continue;
       }
       // ≤2D: pass through
@@ -668,28 +633,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             (op_name.substr(0, 5) == "tile.")
                 ? op_registry.Create(op_name, new_args, call->kwargs_, span)
                 : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
+
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
         ctx.var_map[assign->var_->name_hint_] = new_var;
-
-        // Propagate ND shape for shape-preserving ops (so tile.store can reshape-back).
-        // Only propagate when the output shape matches the substituted input shape
-        // (element-wise ops). Reduce ops change shape and must NOT propagate.
-        // Note: we compare against new_args[0] (the substituted/flattened type), not
-        // input_var->GetType() (the original pre-flatten type).
-        if (!new_args.empty()) {
-          if (auto input_var = As<Var>(call->args_[0])) {
-            auto shape_it = ctx.nd_shapes.find(input_var->name_hint_);
-            if (shape_it != ctx.nd_shapes.end()) {
-              auto out_tile = As<TileType>(new_call->GetType());
-              auto in_tile = As<TileType>(new_args[0]->GetType());
-              if (out_tile && in_tile && out_tile->shape_.size() == in_tile->shape_.size()) {
-                ctx.nd_shapes[assign->var_->name_hint_] = shape_it->second;
-              }
-            }
-          }
-        }
       }
     }
   }
@@ -761,7 +709,8 @@ class TileOps2DVerifier : public IRVisitor {
     const auto& name = call->op_->name_;
     if (name.substr(0, 5) != "tile.") return;
 
-    // Skip ops that are expected to work with ND tiles (load/store interface with ND tensors)
+    // tile.load/tile.store are permitted to have any tile rank:
+    // load produces 2D tiles from ND tensors; store accepts 2D tiles and writes to ND tensors.
     if (name == "tile.load" || name == "tile.store" || name == "tile.reshape") return;
 
     // Check result type

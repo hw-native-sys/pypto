@@ -42,8 +42,9 @@ Per-statement handling:
 
 | Tile op | Transformation |
 | ------- | -------------- |
-| `tile.load` (>2D) | Keep load as-is, insert `tile.reshape` to 2D after |
-| `tile.store` (>2D) | Insert `tile.reshape` back to ND before store |
+| `tile.load` (>2D) | Change result type to 2D directly (load produces 2D tile from ND tensor) |
+| `tile.store` (ND tensor, >2D) | Inject original ND partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged |
+| `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
@@ -73,15 +74,17 @@ class After:
     @pl.function(type=pl.FunctionType.InCore)
     def main_incore_0(self, x: pl.Tensor[[2, 3, 4], pl.FP32],
                       out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-        x_tile_nd: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-        x_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.reshape(x_tile_nd, [6, 4])
+        x_tile: pl.Tile[[6, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
         y_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-        y_tile_nd: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.reshape(y_tile, [2, 3, 4])
-        out_0 = pl.store(y_tile_nd, [0, 0, 0], out_0)
+        out_0 = pl.store(y_tile, [0, 0, 0], out_0)
         return out_0
 ```
 
-The 3D tile `[2, 3, 4]` is flattened to `[6, 4]`. `tile.load` keeps its ND shape (interfacing with the tensor), and `tile.reshape` converts between ND and 2D. Before `tile.store`, the tile is reshaped back to ND.
+The 3D tile `[2, 3, 4]` is flattened to `[6, 4]`. `tile.load` directly produces a 2D tile —
+no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the ND tensor. For ND
+tensors (>2D), the pass injects the original partition `shapes` as an extra 4th operand into the
+transformed IR (e.g. `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`); this operand is only
+present in the transformed IR and is not part of the source DSL.
 
 ## Implementation
 

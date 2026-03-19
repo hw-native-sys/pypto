@@ -74,10 +74,10 @@ class After:
 
 ## Pipeline Position
 
-UnrollLoops runs **once** in both Default and PTOAS strategies, before SSA conversion:
+UnrollLoops runs **once** in both Default and PTOAS strategies, before control flow structuring:
 
 ```text
-UnrollLoops → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
+UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
 ```
 
 UnrollLoops expands non-chunked `pl.unroll()` loops (skipping chunked unroll loops which retain `chunk` for `SplitChunkedLoops` to handle later).

@@ -153,9 +153,9 @@ return out_1
 Pass ConvertToSSA();
 ```
 
-**Implementation**: `src/ir/transforms/convert_to_ssa.cpp`
+**Implementation**: `src/ir/transforms/convert_to_ssa_pass.cpp`
 
-- Uses IRMutator pattern to traverse and transform IR
+- Uses manual statement dispatch with explicit scope management
 - Maintains version maps for variable renaming
 - Inserts YieldStmt and manages return_vars/iter_args
 

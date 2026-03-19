@@ -238,15 +238,15 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         std::string pad_str;
         p->val.convert(pad_str);
         if (pad_str == "null") {
-          tile_view.pad = TilePad::null;
+          tile_view.pad = PadValue::null;
         } else if (pad_str == "zero") {
-          tile_view.pad = TilePad::zero;
+          tile_view.pad = PadValue::zero;
         } else if (pad_str == "max") {
-          tile_view.pad = TilePad::max;
+          tile_view.pad = PadValue::max;
         } else if (pad_str == "min") {
-          tile_view.pad = TilePad::min;
+          tile_view.pad = PadValue::min;
         } else {
-          CHECK(false) << "Unknown TilePad: " << pad_str;
+          CHECK(false) << "Unknown PadValue: " << pad_str;
         }
       }
     }

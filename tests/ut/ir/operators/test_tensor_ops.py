@@ -785,6 +785,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.rsqrt")
     assert ir.is_op_registered("tensor.cast")
     assert ir.is_op_registered("tensor.assemble")
+    assert ir.is_op_registered("tensor.fillpad")
     assert ir.is_op_registered("tensor.maximum")
     assert ir.is_op_registered("tensor.row_expand_mul")
     assert ir.is_op_registered("tensor.row_expand_div")
@@ -914,6 +915,33 @@ def test_tensor_slice_with_valid_shape():
     assert len(call.args) == 4
     assert result_type.tensor_view is not None
     assert len(result_type.tensor_view.valid_shape) == 2
+
+
+def test_tensor_fillpad_clears_valid_shape():
+    """Test tensor.fillpad materializes a full-valid tensor view."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_view = ir.TensorView(
+        stride=[],
+        layout=ir.TensorLayout.ND,
+        valid_shape=[dim8, ir.ConstInt(4, DataType.INT32, span)],
+    )
+    tensor_type = ir.TensorType([dim8, dim16], DataType.FP32, None, tensor_view)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.fillpad(tensor_var, pad_value=ir.PadValue.min)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.fillpad"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert len(result_type.tensor_view.valid_shape) == 2
+    assert result_type.tensor_view.valid_shape[0] == dim8
+    assert result_type.tensor_view.valid_shape[1] == dim16
 
 
 def test_tensor_reshape_with_valid_shape():

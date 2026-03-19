@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -37,729 +38,755 @@ namespace ir {
 
 namespace {
 
-// SSA naming strategy: each variable name (e.g. "tmp_0", "tmp_1") is treated
-// as a unique identity — no suffix stripping or base name normalization.
+// ═══════════════════════════════════════════════════════════════════════════
+// Collectors — Pre-analysis visitors for loop variable classification
+// ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * @brief Collects all assigned variable names in a statement.
- *
- * Used to pre-analyze loop bodies to find which outer variables are modified,
- * allowing us to create iter_args before visiting the body.
- */
 class AssignmentCollector : public IRVisitor {
  public:
-  std::set<std::string> assigned_vars;
-
-  void Collect(const StmtPtr& stmt) { VisitStmt(stmt); }
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    assigned_vars.insert(op->var_->name_hint_);
-    // Also visit the value in case of nested assignments
-    VisitExpr(op->value_);
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Don't recurse into nested for loops - they handle their own iter_args
-    // But we do need to record the loop variable
-    assigned_vars.insert(op->loop_var_->name_hint_);
-    // Visit the body to collect assignments
-    VisitStmt(op->body_);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    // Don't recurse into nested while loops - they handle their own iter_args
-    // Visit condition to collect any assignments (though unusual)
-    VisitExpr(op->condition_);
-    // Visit the body to collect assignments
-    VisitStmt(op->body_);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    // Visit both branches
-    VisitStmt(op->then_body_);
-    if (op->else_body_.has_value()) {
-      VisitStmt(*op->else_body_);
-    }
-  }
-
-  void VisitStmt_(const SeqStmtsPtr& op) override {
-    for (const auto& s : op->stmts_) {
-      VisitStmt(s);
-    }
-  }
-};
-
-/**
- * @brief Collects all variable names *used* (referenced) in a statement subtree.
- *
- * Used to determine which variables from a loop body are referenced in
- * subsequent statements, enabling precise escaping-variable detection.
- */
-class UseCollector : public IRVisitor {
- public:
-  std::set<std::string> used_vars;
-
+  std::set<std::string> assigned;
   void Collect(const StmtPtr& stmt) {
     if (stmt) VisitStmt(stmt);
   }
 
  protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    assigned.insert(op->var_->name_hint_);
+    VisitExpr(op->value_);
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // Don't record loop_var — it's scoped to the loop body, not an outer assignment
+    VisitStmt(op->body_);
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitStmt(op->body_);
+  }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+  }
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    for (const auto& s : op->stmts_) VisitStmt(s);
+  }
+};
+
+class TypeCollector : public IRVisitor {
+ public:
+  std::unordered_map<std::string, TypePtr> types;
+  void Collect(const StmtPtr& stmt) {
+    if (stmt) VisitStmt(stmt);
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override { types[op->var_->name_hint_] = op->var_->GetType(); }
+  void VisitStmt_(const ForStmtPtr& op) override { VisitStmt(op->body_); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitStmt(op->body_); }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
+  }
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    for (const auto& s : op->stmts_) VisitStmt(s);
+  }
+};
+
+class UseCollector : public IRVisitor {
+ public:
+  std::set<std::string> used;
+  void Collect(const StmtPtr& stmt) {
+    if (stmt) VisitStmt(stmt);
+  }
+  void CollectExpr(const ExprPtr& expr) {
+    if (expr) VisitExpr(expr);
+  }
+
+ protected:
   void VisitVarLike_(const VarPtr& op) override {
-    if (op) used_vars.insert(op->name_hint_);
+    if (op) used.insert(op->name_hint_);
     IRVisitor::VisitVarLike_(op);
   }
 };
 
-/**
- * @brief SSA Converter - Transforms non-SSA IR to SSA form
- *
- * This mutator converts IR with multiple assignments per variable to SSA form by:
- * 1. Renaming variables with version suffixes (x -> x_0, x_1, x_2)
- * 2. Adding phi nodes (return_vars + YieldStmt) for IfStmt control flow
- * 3. Converting loop-modified variables to iter_args + return_vars pattern
- * 4. Promoting variables first defined inside loops to iter_args + return_vars
- *    so they are accessible after the loop (escaping variables)
- */
-class SSAConverter : public IRMutator {
- public:
-  SSAConverter() = default;
+// ═══════════════════════════════════════════════════════════════════════════
+// Live-in analysis — computes variables needed from the outer scope
+//
+// Order-aware: a variable defined before use within a compound statement
+// is NOT counted as live-in. This prevents false escaping-var promotion
+// for loop-local temporaries (issue #592) while correctly detecting
+// variables used before reassignment (CodeRabbit review concern).
+// ═══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * @brief Convert a function to SSA form
-   */
-  FunctionPtr Convert(const FunctionPtr& func) {
-    // Store original function parameter info for Out-parameter matching
+// Forward declaration for mutual recursion
+static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts);
+
+static std::set<std::string> ComputeStmtLiveIn(const StmtPtr& stmt) {
+  if (!stmt) return {};
+
+  if (auto op = As<AssignStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->value_);
+    return uc.used;
+  }
+  if (auto op = As<EvalStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->expr_);
+    return uc.used;
+  }
+  if (auto op = As<ReturnStmt>(stmt)) {
+    UseCollector uc;
+    for (const auto& v : op->value_) uc.CollectExpr(v);
+    return uc.used;
+  }
+  if (auto op = As<YieldStmt>(stmt)) {
+    UseCollector uc;
+    for (const auto& v : op->value_) uc.CollectExpr(v);
+    return uc.used;
+  }
+  if (auto op = As<SeqStmts>(stmt)) {
+    return ComputeSeqLiveIn(op->stmts_);
+  }
+  if (auto op = As<ForStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->start_);
+    uc.CollectExpr(op->stop_);
+    uc.CollectExpr(op->step_);
+    for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+    if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    body_li.erase(op->loop_var_->name_hint_);
+    for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+    uc.used.insert(body_li.begin(), body_li.end());
+    return uc.used;
+  }
+  if (auto op = As<WhileStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->condition_);
+    for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    for (const auto& ia : op->iter_args_) body_li.erase(ia->name_hint_);
+    uc.used.insert(body_li.begin(), body_li.end());
+    return uc.used;
+  }
+  if (auto op = As<IfStmt>(stmt)) {
+    UseCollector uc;
+    uc.CollectExpr(op->condition_);
+    auto then_li = ComputeStmtLiveIn(op->then_body_);
+    uc.used.insert(then_li.begin(), then_li.end());
+    if (op->else_body_.has_value()) {
+      auto else_li = ComputeStmtLiveIn(*op->else_body_);
+      uc.used.insert(else_li.begin(), else_li.end());
+    }
+    return uc.used;
+  }
+  if (auto op = As<ScopeStmt>(stmt)) {
+    return ComputeStmtLiveIn(op->body_);
+  }
+  if (auto op = As<OpStmts>(stmt)) {
+    return ComputeSeqLiveIn(op->stmts_);
+  }
+  return {};
+}
+
+static std::set<std::string> ComputeSeqLiveIn(const std::vector<StmtPtr>& stmts) {
+  std::set<std::string> defined;
+  std::set<std::string> live_in;
+  for (const auto& s : stmts) {
+    auto stmt_li = ComputeStmtLiveIn(s);
+    for (const auto& n : stmt_li) {
+      if (!defined.count(n)) live_in.insert(n);
+    }
+    AssignmentCollector ac;
+    ac.Collect(s);
+    defined.insert(ac.assigned.begin(), ac.assigned.end());
+  }
+  return live_in;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSA Converter — Transforms non-SSA IR to SSA form
+//
+// Algorithm:
+//   1. Version each variable on every assignment (x → x_0, x_1, …)
+//   2. Insert IterArg/YieldStmt/return_var for loop-carried values
+//   3. Insert return_vars + YieldStmt phi nodes for IfStmt merges
+//   4. Promote escaping variables (defined inside loops, used after)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class SSAConverter {
+ public:
+  FunctionPtr ConvertFunction(const FunctionPtr& func) {
+    INTERNAL_CHECK(func) << "ConvertToSSA cannot run on null function";
     orig_params_ = func->params_;
     orig_param_directions_ = func->param_directions_;
 
-    // Initialize version counters for parameters
+    // Create versioned parameters
+    std::vector<VarPtr> new_params;
+    std::vector<ParamDirection> new_dirs;
     for (size_t i = 0; i < func->params_.size(); ++i) {
-      const auto& var = func->params_[i];
-      std::string base_name = var->name_hint_;
-      int version = NextVersion(base_name);
-      auto versioned_param = CreateVersionedVar(var, base_name, version);
-      current_version_[base_name] = versioned_param;
-      new_params_.push_back(versioned_param);
-      new_param_directions_.push_back(func->param_directions_[i]);
+      new_params.push_back(
+          AllocVersion(func->params_[i]->name_hint_, func->params_[i]->GetType(), func->params_[i]->span_));
+      new_dirs.push_back(func->param_directions_[i]);
     }
 
-    // Transform the function body
-    StmtPtr new_body = nullptr;
-    if (func->body_) {
-      new_body = VisitStmt(func->body_);
-    }
+    StmtPtr new_body = func->body_ ? ConvertStmt(func->body_) : nullptr;
 
-    // Create the new function with versioned parameters (preserve level/role)
-    return std::make_shared<Function>(func->name_, new_params_, new_param_directions_, func->return_types_,
-                                      new_body, func->span_, func->func_type_, func->level_, func->role_);
-  }
-
- protected:
-  // Override expression visitation to replace Var with current version
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    std::string base_name = op->name_hint_;
-    auto it = current_version_.find(base_name);
-    if (it != current_version_.end()) {
-      return it->second;
-    }
-    // Variable not found in current scope - return as-is
-    // This can happen for variables that are only defined once
-    return op;
-  }
-
-  ExprPtr VisitExpr_(const IterArgPtr& op) override {
-    // Visit the initValue first
-    auto new_init = VisitExpr(op->initValue_);
-
-    // IterArgs are handled specially - they become the current version within loop
-    std::string base_name = op->name_hint_;
-    auto it = current_version_.find(base_name);
-    if (it != current_version_.end()) {
-      // Return the current version (which should be the iter_arg itself)
-      return it->second;
-    }
-
-    // If no current version, create one
-    if (new_init != op->initValue_) {
-      return std::make_shared<IterArg>(op->name_hint_, op->GetType(), new_init, op->span_);
-    }
-    return op;
-  }
-
-  // Override assignment statement to create versioned variables
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    // First, visit the RHS expression (uses current versions)
-    auto new_value = VisitExpr(op->value_);
-
-    // Create a new versioned variable for LHS
-    std::string base_name = op->var_->name_hint_;
-    int version = NextVersion(base_name);
-    auto new_var = CreateVersionedVar(op->var_, base_name, version);
-
-    // Update current version mapping
-    current_version_[base_name] = new_var;
-
-    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
-  }
-
-  // Override IfStmt to handle phi nodes
-  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    // Visit condition first (in current scope)
-    auto new_condition = VisitExpr(op->condition_);
-
-    // Save current versions before branches
-    auto versions_before = current_version_;
-
-    // Visit then branch
-    EnterScope();
-    auto new_then = VisitStmt(op->then_body_);
-    auto versions_after_then = current_version_;
-    ExitScope();
-
-    // Restore and visit else branch
-    current_version_ = versions_before;
-    std::optional<StmtPtr> new_else;
-    std::unordered_map<std::string, VarPtr> versions_after_else;
-
-    if (op->else_body_.has_value()) {
-      EnterScope();
-      new_else = VisitStmt(*op->else_body_);
-      versions_after_else = current_version_;
-      ExitScope();
-    } else {
-      versions_after_else = versions_before;
-    }
-
-    // Find variables that diverged between branches (need phi nodes).
-    // Consider variables that existed before the if (re-assigned in a branch),
-    // AND variables that are new but defined in BOTH branches (both branches
-    // created the same base name independently).
-    std::vector<std::string> phi_vars;
-    std::set<std::string> checked_vars;
-
-    // Check variables from then branch
-    for (const auto& [base_name, var] : versions_after_then) {
-      checked_vars.insert(base_name);
-      auto before_it = versions_before.find(base_name);
-
-      if (before_it != versions_before.end()) {
-        // Variable existed before: check if either branch changed it
-        bool changed_in_then = (before_it->second != var);
-        auto else_it = versions_after_else.find(base_name);
-        bool changed_in_else = (else_it != versions_after_else.end() && before_it->second != else_it->second);
-
-        if (changed_in_then || changed_in_else) {
-          phi_vars.push_back(base_name);
-        }
-      } else {
-        // Variable is new (not in versions_before). If it exists in BOTH branches,
-        // it needs a phi node to merge the two independent definitions.
-        auto else_it = versions_after_else.find(base_name);
-        if (else_it != versions_after_else.end()) {
-          phi_vars.push_back(base_name);
-        }
-      }
-    }
-
-    // Check variables from else branch that weren't in then
-    for (const auto& [base_name, var] : versions_after_else) {
-      if (checked_vars.count(base_name)) continue;
-
-      auto before_it = versions_before.find(base_name);
-      // Skip variables not defined before the if (branch-local only in else)
-      if (before_it == versions_before.end()) continue;
-
-      if (before_it->second != var) {
-        phi_vars.push_back(base_name);
-      }
-    }
-
-    // Sort phi_vars for deterministic ordering across platforms
-    std::sort(phi_vars.begin(), phi_vars.end());
-
-    // If no variables diverged, just return the updated if statement
-    if (phi_vars.empty() && op->return_vars_.empty()) {
-      current_version_ = versions_before;
-      return std::make_shared<IfStmt>(new_condition, new_then, new_else, std::vector<VarPtr>{}, op->span_);
-    }
-
-    // Restore to pre-branch state before creating phi outputs
-    current_version_ = versions_before;
-
-    // Create return_vars and yields for phi nodes
-    std::vector<VarPtr> return_vars;
-    std::vector<ExprPtr> then_yields;
-    std::vector<ExprPtr> else_yields;
-
-    for (const auto& base_name : phi_vars) {
-      // Get versions from each branch
-      VarPtr then_var = versions_after_then.count(base_name) ? versions_after_then.at(base_name)
-                                                             : versions_before.at(base_name);
-      VarPtr else_var = versions_after_else.count(base_name) ? versions_after_else.at(base_name)
-                                                             : versions_before.at(base_name);
-
-      // Create phi output variable with new version
-      int phi_version = NextVersion(base_name);
-      auto phi_var = std::make_shared<Var>(base_name + "_" + std::to_string(phi_version), then_var->GetType(),
-                                           op->span_);
-
-      return_vars.push_back(phi_var);
-      then_yields.push_back(then_var);
-      else_yields.push_back(else_var);
-
-      // Update current version to phi output
-      current_version_[base_name] = phi_var;
-    }
-
-    // Preserve any existing return_vars (version them)
-    for (const auto& existing_rv : op->return_vars_) {
-      std::string base_name = existing_rv->name_hint_;
-      // Only add if not already in phi_vars
-      bool already_handled = false;
-      for (const auto& pv : phi_vars) {
-        if (pv == base_name) {
-          already_handled = true;
-          break;
-        }
-      }
-      if (!already_handled) {
-        int rv_version = NextVersion(base_name);
-        auto versioned_rv = std::make_shared<Var>(base_name + "_" + std::to_string(rv_version),
-                                                  existing_rv->GetType(), existing_rv->span_);
-        return_vars.push_back(versioned_rv);
-        current_version_[base_name] = versioned_rv;
-      }
-    }
-
-    // Append YieldStmt to branches
-    auto then_with_yield = AppendYield(new_then, then_yields, op->span_);
-    StmtPtr else_with_yield;
-    if (new_else.has_value()) {
-      else_with_yield = AppendYield(*new_else, else_yields, op->span_);
-    } else {
-      // Create an else branch with just the yield
-      else_with_yield = std::make_shared<YieldStmt>(else_yields, op->span_);
-    }
-
-    return std::make_shared<IfStmt>(new_condition, then_with_yield, std::make_optional(else_with_yield),
-                                    return_vars, op->span_);
-  }
-
-  // Override ForStmt to handle loop-carried and escaping variables
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Save future_uses_ before visiting children — nested SeqStmts will overwrite it
-    auto saved_future_uses = future_uses_;
-
-    // Visit range expressions in outer scope
-    auto new_start = VisitExpr(op->start_);
-    auto new_stop = VisitExpr(op->stop_);
-    auto new_step = VisitExpr(op->step_);
-
-    // Save outer scope versions
-    auto versions_before = current_version_;
-
-    // Process existing iter_args (visit their init values in outer scope)
-    std::vector<IterArgPtr> new_iter_args;
-    for (const auto& iter_arg : op->iter_args_) {
-      auto new_init = VisitExpr(iter_arg->initValue_);
-      auto new_ia =
-          std::make_shared<IterArg>(iter_arg->name_hint_, iter_arg->GetType(), new_init, iter_arg->span_);
-      new_iter_args.push_back(new_ia);
-    }
-
-    // PRE-ANALYSIS: Find which outer variables are assigned in the loop body.
-    // This allows us to create iter_args BEFORE visiting the body.
-    AssignmentCollector collector;
-    collector.Collect(op->body_);
-
-    // Identify loop-carried variables: assigned in body AND existed before the loop
-    std::string loop_var_base = op->loop_var_->name_hint_;
-    std::vector<std::string> loop_carried_vars;
-    for (const auto& assigned_name : collector.assigned_vars) {
-      // Skip loop variable
-      if (assigned_name == loop_var_base) continue;
-
-      // Skip existing iter_args
-      bool is_existing_iter_arg = false;
-      for (const auto& ia : op->iter_args_) {
-        if (ia->name_hint_ == assigned_name) {
-          is_existing_iter_arg = true;
-          break;
-        }
-      }
-      if (is_existing_iter_arg) continue;
-
-      // Check if variable existed before the loop
-      auto before_it = versions_before.find(assigned_name);
-      if (before_it != versions_before.end()) {
-        loop_carried_vars.push_back(assigned_name);
-      }
-    }
-
-    // Create iter_args for loop-carried variables BEFORE visiting the body
-    std::vector<VarPtr> return_vars;
-    for (const auto& base_name : loop_carried_vars) {
-      auto init_var = versions_before.at(base_name);
-      int ia_version = NextVersion(base_name);
-      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version),
-                                                init_var->GetType(), init_var, op->span_);
-      new_iter_args.push_back(iter_arg);
-
-      // Create return var for post-loop access
-      int rv_version = NextVersion(base_name);
-      auto return_var =
-          std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), init_var->GetType(), op->span_);
-      return_vars.push_back(return_var);
-    }
-
-    // Enter loop scope
-    EnterScope();
-
-    // Create versioned loop variable
-    int loop_var_version = NextVersion(loop_var_base);
-    auto new_loop_var = std::make_shared<Var>(loop_var_base + "_" + std::to_string(loop_var_version),
-                                              op->loop_var_->GetType(), op->loop_var_->span_);
-    current_version_[loop_var_base] = new_loop_var;
-
-    RegisterIterArgs(new_iter_args);
-
-    // Visit loop body - now it will correctly reference iter_args
-    auto new_body = VisitStmt(op->body_);
-    auto versions_after_body = current_version_;
-
-    // Exit loop scope
-    ExitScope();
-
-    // Restore current_version_ to pre-loop state to prevent scope leakage
-    // of loop-local variables (e.g. x_chunk defined inside loop should not
-    // be visible after the loop exits)
-    current_version_ = versions_before;
-
-    // Update outer scope to use return_vars for loop-carried variables
-    for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
-      current_version_[loop_carried_vars[i]] = return_vars[i];
-    }
-
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
-
-    // Handle escaping variables: variables first defined inside the loop body
-    // that may be used after the loop (e.g., out = tile.store(...) inside a loop
-    // followed by "return out" after the loop). These need iter_args + return_vars
-    // to properly escape the loop scope in SSA form.
-    auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars,
-                                          loop_var_base, new_iter_args, saved_future_uses);
-
-    for (const auto& base_name : escaping_vars) {
-      const auto& final_var = versions_after_body.at(base_name);
-      auto type = final_var->GetType();
-
-      // Find initial value: prefer Out parameter with matching type, fall back to any match
-      auto init_value = FindInitValueForEscapingVar(type, versions_before);
-      if (!init_value) {
-        // Last resort: use the final_var itself (may cause issues for zero-trip loops,
-        // but preserves correctness for non-zero-trip loops which is the common case)
-        init_value = final_var;
-      }
-
-      int ia_version = NextVersion(base_name);
-      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version), type,
-                                                init_value, op->span_);
-      new_iter_args.push_back(iter_arg);
-
-      int rv_version = NextVersion(base_name);
-      auto rv = std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), type, op->span_);
-      return_vars.push_back(rv);
-
-      // Register return_var in outer scope so post-loop references resolve correctly
-      current_version_[base_name] = rv;
-    }
-
-    // Collect yield values: first existing iter_args, then loop-carried, then escaping
-    std::vector<ExprPtr> yield_values;
-
-    // First, collect yields for existing (original) iter_args
-    if (auto yield_stmt = GetLastYieldStmt(new_body)) {
-      yield_values = yield_stmt->value_;
-    }
-
-    // Then add yield values for new loop-carried variables
-    for (const auto& base_name : loop_carried_vars) {
-      // Get the final version from within the loop
-      const auto& final_var = versions_after_body.at(base_name);
-      yield_values.push_back(final_var);
-    }
-
-    // Then add yield values for escaping variables
-    for (const auto& base_name : escaping_vars) {
-      const auto& final_var = versions_after_body.at(base_name);
-      yield_values.push_back(final_var);
-    }
-
-    // Copy existing return_vars (from explicit iter_args in original code)
-    for (const auto& rv : op->return_vars_) {
-      return_vars.push_back(rv);
-    }
-
-    // Update body with new yield
-    StmtPtr final_body = new_body;
-    if (!yield_values.empty()) {
-      final_body = ReplaceOrAppendYield(new_body, yield_values, op->span_);
-    }
-
-    return std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args, final_body,
-                                     return_vars, op->span_, op->kind_, op->chunk_size_, op->chunk_policy_,
-                                     op->loop_origin_);
-  }
-
-  // Override WhileStmt to handle loop-carried and escaping variables
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    // Save future_uses_ before visiting children — nested SeqStmts will overwrite it
-    auto saved_future_uses = future_uses_;
-
-    // Save outer scope versions
-    auto versions_before = current_version_;
-
-    // Process existing iter_args (visit their init values in outer scope)
-    std::vector<IterArgPtr> new_iter_args;
-    for (const auto& iter_arg : op->iter_args_) {
-      auto new_init = VisitExpr(iter_arg->initValue_);
-      auto new_ia =
-          std::make_shared<IterArg>(iter_arg->name_hint_, iter_arg->GetType(), new_init, iter_arg->span_);
-      new_iter_args.push_back(new_ia);
-    }
-
-    // PRE-ANALYSIS: Find which outer variables are assigned in the loop body
-    AssignmentCollector collector;
-    collector.Collect(op->body_);
-    // Also collect from condition (though unusual, it's possible)
-    collector.Collect(std::make_shared<EvalStmt>(op->condition_, op->span_));
-
-    // Identify loop-carried variables: assigned in body AND existed before the loop
-    std::vector<std::string> loop_carried_vars;
-    for (const auto& assigned_name : collector.assigned_vars) {
-      // Skip existing iter_args
-      bool is_existing_iter_arg = false;
-      for (const auto& ia : op->iter_args_) {
-        if (ia->name_hint_ == assigned_name) {
-          is_existing_iter_arg = true;
-          break;
-        }
-      }
-      if (is_existing_iter_arg) continue;
-
-      // Check if variable existed before the loop
-      auto before_it = versions_before.find(assigned_name);
-      if (before_it != versions_before.end()) {
-        loop_carried_vars.push_back(assigned_name);
-      }
-    }
-
-    // Create iter_args for loop-carried variables BEFORE visiting the body
-    std::vector<VarPtr> new_loop_carried_return_vars;
-    for (const auto& base_name : loop_carried_vars) {
-      auto init_var = versions_before.at(base_name);
-      int ia_version = NextVersion(base_name);
-      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version),
-                                                init_var->GetType(), init_var, op->span_);
-      new_iter_args.push_back(iter_arg);
-
-      // Create return var for post-loop access
-      int rv_version = NextVersion(base_name);
-      auto return_var =
-          std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), init_var->GetType(), op->span_);
-      new_loop_carried_return_vars.push_back(return_var);
-    }
-
-    // Enter loop scope
-    EnterScope();
-
-    RegisterIterArgs(new_iter_args);
-
-    // Visit condition - it will reference iter_args
-    auto new_condition = VisitExpr(op->condition_);
-
-    // Visit loop body - now it will correctly reference iter_args
-    auto new_body = VisitStmt(op->body_);
-    auto versions_after_body = current_version_;
-
-    // Exit loop scope
-    ExitScope();
-
-    // Restore current_version_ to pre-loop state to prevent scope leakage
-    current_version_ = versions_before;
-
-    // Build return_vars in same order as new_iter_args and yield_values:
-    // First existing return_vars, then new loop-carried return_vars
-    std::vector<VarPtr> return_vars;
-    for (const auto& rv : op->return_vars_) {
-      return_vars.push_back(rv);
-    }
-    for (const auto& rv : new_loop_carried_return_vars) {
-      return_vars.push_back(rv);
-    }
-
-    // Update outer scope to use return_vars for loop-carried variables
-    for (size_t i = 0; i < loop_carried_vars.size(); ++i) {
-      current_version_[loop_carried_vars[i]] = new_loop_carried_return_vars[i];
-    }
-
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
-
-    // Handle escaping variables (same as ForStmt — see comment there)
-    // WhileStmt has no loop_var, so pass empty string
-    auto escaping_vars = FindEscapingVars(versions_after_body, versions_before, collector.assigned_vars, "",
-                                          new_iter_args, saved_future_uses);
-
-    for (const auto& base_name : escaping_vars) {
-      const auto& final_var = versions_after_body.at(base_name);
-      auto type = final_var->GetType();
-
-      auto init_value = FindInitValueForEscapingVar(type, versions_before);
-      if (!init_value) {
-        init_value = final_var;
-      }
-
-      int ia_version = NextVersion(base_name);
-      auto iter_arg = std::make_shared<IterArg>(base_name + "_iter_" + std::to_string(ia_version), type,
-                                                init_value, op->span_);
-      new_iter_args.push_back(iter_arg);
-
-      int rv_version = NextVersion(base_name);
-      auto rv = std::make_shared<Var>(base_name + "_" + std::to_string(rv_version), type, op->span_);
-      return_vars.push_back(rv);
-
-      current_version_[base_name] = rv;
-    }
-
-    // Collect yield values: first existing iter_args, then loop-carried, then escaping
-    std::vector<ExprPtr> yield_values;
-
-    // First, collect yields for existing (original) iter_args
-    if (auto yield_stmt = GetLastYieldStmt(new_body)) {
-      yield_values = yield_stmt->value_;
-    }
-
-    // Then add yield values for new loop-carried variables
-    for (const auto& base_name : loop_carried_vars) {
-      // Get the final version from within the loop
-      const auto& final_var = versions_after_body.at(base_name);
-      yield_values.push_back(final_var);
-    }
-
-    // Then add yield values for escaping variables
-    for (const auto& base_name : escaping_vars) {
-      const auto& final_var = versions_after_body.at(base_name);
-      yield_values.push_back(final_var);
-    }
-
-    // Update body with new yield
-    StmtPtr final_body = new_body;
-    if (!yield_values.empty()) {
-      final_body = ReplaceOrAppendYield(new_body, yield_values, op->span_);
-    }
-
-    return std::make_shared<WhileStmt>(new_condition, new_iter_args, final_body, return_vars, op->span_);
-  }
-
-  // Override SeqStmts to compute future variable uses before processing each statement.
-  // This enables precise detection of escaping variables in loop handlers.
-  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
-    std::vector<StmtPtr> new_stmts;
-    for (size_t i = 0; i < op->stmts_.size(); ++i) {
-      // Before processing a loop statement, compute which variables are
-      // referenced in all subsequent statements (future uses).
-      if (i + 1 < op->stmts_.size()) {
-        future_uses_.clear();
-        UseCollector use_collector;
-        for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
-          use_collector.Collect(op->stmts_[j]);
-        }
-        future_uses_ = use_collector.used_vars;
-      } else {
-        future_uses_.clear();
-      }
-      new_stmts.push_back(VisitStmt(op->stmts_[i]));
-    }
-    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+    return std::make_shared<Function>(func->name_, new_params, new_dirs, func->return_types_, new_body,
+                                      func->span_, func->func_type_, func->level_, func->role_);
   }
 
  private:
-  // Version counter per base variable name
-  std::unordered_map<std::string, int> version_counter_;
+  // ── Expression substitution via lightweight IRMutator ──────────────
 
-  // Current version of each variable (base_name -> versioned VarPtr)
-  std::unordered_map<std::string, VarPtr> current_version_;
+  class ExprSubstituter : public IRMutator {
+   public:
+    explicit ExprSubstituter(const std::unordered_map<std::string, VarPtr>& versions) : versions_(versions) {}
 
-  // Scope stack for nested control flow
-  std::vector<std::unordered_map<std::string, VarPtr>> scope_stack_;
+   protected:
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = versions_.find(op->name_hint_);
+      return it != versions_.end() ? it->second : op;
+    }
+    ExprPtr VisitExpr_(const IterArgPtr& op) override {
+      auto it = versions_.find(op->name_hint_);
+      return it != versions_.end() ? it->second : op;
+    }
 
-  // New versioned parameters
-  std::vector<VarPtr> new_params_;
-  std::vector<ParamDirection> new_param_directions_;
+   private:
+    const std::unordered_map<std::string, VarPtr>& versions_;
+  };
 
-  // Original function parameter info (for Out-parameter matching)
-  std::vector<VarPtr> orig_params_;
-  std::vector<ParamDirection> orig_param_directions_;
+  ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(cur_).VisitExpr(e) : e; }
 
-  // Variable names used in statements after the current one (computed by SeqStmts override)
-  std::set<std::string> future_uses_;
+  TypePtr SubstType(const TypePtr& type) {
+    if (!type) return type;
+    if (auto t = As<TensorType>(type)) {
+      std::vector<ExprPtr> shape;
+      bool changed = false;
+      for (const auto& d : t->shape_) {
+        auto nd = SubstExpr(d);
+        if (nd != d) changed = true;
+        shape.push_back(nd);
+      }
+      if (changed) {
+        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, t->tensor_view_);
+      }
+      return type;
+    }
+    if (auto t = As<TileType>(type)) {
+      if (!t->tile_view_.has_value()) return type;
+      const auto& tv = t->tile_view_.value();
+      if (tv.valid_shape.empty()) return type;
+      std::vector<ExprPtr> vs;
+      bool changed = false;
+      for (const auto& v : tv.valid_shape) {
+        auto nv = SubstExpr(v);
+        if (nv != v) changed = true;
+        vs.push_back(nv);
+      }
+      if (!changed) return type;
+      TileView ntv = tv;
+      ntv.valid_shape = std::move(vs);
+      return std::make_shared<TileType>(t->shape_, t->dtype_, t->memref_, std::make_optional(std::move(ntv)),
+                                        t->memory_space_);
+    }
+    return type;
+  }
 
-  /**
-   * @brief Strip a generated "_iter_<digits>" suffix from an iter_arg name to recover
-   * the base variable name (e.g., "acc_iter_1" → "acc").
-   *
-   * Only strips if the name ends with "_iter_" followed by one or more digits.
-   * Names that merely contain "iter" as part of a word (e.g., "filter_data",
-   * "writer_iter_count") are left unchanged.
-   */
+  // ── Version management ─────────────────────────────────────────────
+
+  int NextVersion(const std::string& name) { return ver_[name]++; }
+
+  VarPtr AllocVersion(const std::string& name, const TypePtr& type, const Span& span) {
+    int v = NextVersion(name);
+    auto var = std::make_shared<Var>(name + "_" + std::to_string(v), SubstType(type), span);
+    cur_[name] = var;
+    return var;
+  }
+
   static std::string StripIterSuffix(const std::string& name) {
-    // Look for "_iter_" followed by digits at the end
-    size_t pos = name.rfind("_iter_");
+    auto pos = name.rfind("_iter_");
     if (pos == std::string::npos) return name;
-    // Verify everything after "_iter_" is digits
-    size_t after = pos + 6;  // length of "_iter_"
+    size_t after = pos + 6;
     if (after >= name.size()) return name;
     for (size_t i = after; i < name.size(); ++i) {
-      if (!std::isdigit(static_cast<unsigned char>(name[i]))) return name;
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+        return name;
+      }
     }
     return name.substr(0, pos);
   }
 
-  /**
-   * @brief Get next version number for a base name
-   */
-  int NextVersion(const std::string& base_name) {
-    int version = version_counter_[base_name];
-    version_counter_[base_name] = version + 1;
-    return version;
+  void RegisterIterArgs(const std::vector<IterArgPtr>& ias) {
+    for (const auto& ia : ias) {
+      std::string base = StripIterSuffix(ia->name_hint_);
+      cur_[base] = ia;
+      if (ia->name_hint_ != base) cur_[ia->name_hint_] = ia;
+    }
   }
 
-  /**
-   * @brief Find an initial value for an escaping variable's iter_arg.
-   *
-   * Searches the pre-loop variable versions for an Out/InOut parameter whose
-   * type matches the escaping variable's type. Falls back to any variable with
-   * a matching type.
-   */
-  VarPtr FindInitValueForEscapingVar(const TypePtr& target_type,
-                                     const std::unordered_map<std::string, VarPtr>& versions_before) {
-    // First pass: look for an Out/InOut parameter with matching type
-    for (size_t i = 0; i < orig_params_.size(); ++i) {
-      if (orig_param_directions_[i] == ParamDirection::Out ||
-          orig_param_directions_[i] == ParamDirection::InOut) {
-        auto it = versions_before.find(orig_params_[i]->name_hint_);
-        if (it != versions_before.end() && it->second->GetType() == target_type) {
-          return it->second;
+  void RegisterExistingReturnVars(const std::vector<IterArgPtr>& ias, const std::vector<VarPtr>& rvs) {
+    for (size_t i = 0; i < ias.size() && i < rvs.size(); ++i) {
+      cur_[StripIterSuffix(ias[i]->name_hint_)] = rvs[i];
+    }
+  }
+
+  // ── Statement dispatch ─────────────────────────────────────────────
+
+  StmtPtr ConvertStmt(const StmtPtr& s) {
+    if (!s) return s;
+    auto kind = s->GetKind();
+    if (kind == ObjectKind::AssignStmt) return ConvertAssign(As<AssignStmt>(s));
+    if (kind == ObjectKind::SeqStmts) return ConvertSeq(As<SeqStmts>(s));
+    if (kind == ObjectKind::ForStmt) return ConvertFor(As<ForStmt>(s));
+    if (kind == ObjectKind::WhileStmt) return ConvertWhile(As<WhileStmt>(s));
+    if (kind == ObjectKind::IfStmt) return ConvertIf(As<IfStmt>(s));
+    if (kind == ObjectKind::ReturnStmt) return ConvertReturn(As<ReturnStmt>(s));
+    if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
+    if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
+    if (kind == ObjectKind::ScopeStmt) return ConvertScope(As<ScopeStmt>(s));
+    if (kind == ObjectKind::OpStmts) return ConvertOps(As<OpStmts>(s));
+    return s;
+  }
+
+  // ── AssignStmt ─────────────────────────────────────────────────────
+
+  StmtPtr ConvertAssign(const AssignStmtPtr& op) {
+    auto val = SubstExpr(op->value_);
+    auto var = AllocVersion(op->var_->name_hint_, op->var_->GetType(), op->var_->span_);
+    return std::make_shared<AssignStmt>(var, val, op->span_);
+  }
+
+  // ── SeqStmts — computes future uses per-statement for escaping detection
+
+  StmtPtr ConvertSeq(const SeqStmtsPtr& op) {
+    size_t n = op->stmts_.size();
+
+    // Precompute suffix_needs[i] = variables needed from the outer scope by stmts[i..N-1].
+    // Uses order-aware live-in analysis: a variable defined before use within a compound
+    // statement is NOT counted as needed. Single backward pass, O(N * stmt_size).
+    std::vector<std::set<std::string>> suffix_needs(n + 1);
+    for (size_t j = n; j > 0; --j) {
+      auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1]);
+      AssignmentCollector ac;
+      ac.Collect(op->stmts_[j - 1]);
+      suffix_needs[j - 1] = live_in;
+      for (const auto& name : suffix_needs[j]) {
+        if (!ac.assigned.count(name)) {
+          suffix_needs[j - 1].insert(name);
         }
       }
     }
-    // Second pass: look for any pre-loop variable with matching type.
-    // Collect and sort by name for deterministic results across runs.
+
+    // Forward pass: convert each statement with correct future_needs_
+    std::vector<StmtPtr> out;
+    for (size_t i = 0; i < n; ++i) {
+      future_needs_ = (i + 1 < n) ? suffix_needs[i + 1] : std::set<std::string>{};
+      out.push_back(ConvertStmt(op->stmts_[i]));
+    }
+    return SeqStmts::Flatten(std::move(out), op->span_);
+  }
+
+  // ── ForStmt ────────────────────────────────────────────────────────
+
+  StmtPtr ConvertFor(const ForStmtPtr& op) {
+    auto saved_future_needs = future_needs_;
+
+    // Substitute range in outer scope
+    auto new_start = SubstExpr(op->start_);
+    auto new_stop = SubstExpr(op->stop_);
+    auto new_step = SubstExpr(op->step_);
+    auto before = cur_;
+
+    // Process existing iter_args (substitute init values in outer scope)
+    std::vector<IterArgPtr> ias;
+    for (const auto& ia : op->iter_args_) {
+      ias.push_back(
+          std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_));
+    }
+
+    // Pre-analysis: classify assigned variables
+    AssignmentCollector ac;
+    ac.Collect(op->body_);
+    std::string lv_name = op->loop_var_->name_hint_;
+
+    // Loop-carried: assigned in body AND existed before AND not loop_var/existing iter_arg
+    std::vector<std::string> carried;
+    for (const auto& n : ac.assigned) {
+      if (n == lv_name) continue;
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      if (before.count(n)) carried.push_back(n);
+    }
+
+    // Pre-detect escaping vars: assigned in body AND NOT existed before AND needed
+    // by future code (order-aware: used before redefined in the future sequence).
+    // Must be detected BEFORE body conversion so the IfStmt handler can see them
+    // in current_version_ (needed for single-branch phi creation, issue #600).
+    TypeCollector tc;
+    tc.Collect(op->body_);
+    std::vector<std::string> escaping;
+    for (const auto& n : ac.assigned) {
+      if (n == lv_name) continue;
+      if (before.count(n)) continue;
+      if (!saved_future_needs.count(n)) continue;
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      escaping.push_back(n);
+    }
+    std::sort(escaping.begin(), escaping.end());
+
+    // Create iter_args + return_vars for carried variables
+    std::vector<VarPtr> carried_rvs;
+    for (const auto& n : carried) {
+      auto init = before.at(n);
+      int iv = NextVersion(n);
+      ias.push_back(
+          std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), init->GetType(), init, op->span_));
+      int rv = NextVersion(n);
+      carried_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), init->GetType(), op->span_));
+    }
+
+    // Create iter_args + return_vars for escaping variables (pre-registered)
+    std::vector<VarPtr> esc_rvs;
+    for (const auto& n : escaping) {
+      auto type_it = tc.types.find(n);
+      if (type_it == tc.types.end()) continue;
+      auto type = type_it->second;
+      auto init = FindInitValue(type, before);
+      if (!init) {
+        // Last resort: create a placeholder using any variable with matching type
+        // This covers zero-trip loop cases
+        init = std::make_shared<Var>(n, type, op->span_);
+      }
+      int iv = NextVersion(n);
+      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
+      int rv = NextVersion(n);
+      auto rv_var = std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_);
+      esc_rvs.push_back(rv_var);
+    }
+
+    // Version loop variable and register iter_args (including escaping)
+    int lvv = NextVersion(lv_name);
+    auto new_lv = std::make_shared<Var>(lv_name + "_" + std::to_string(lvv), op->loop_var_->GetType(),
+                                        op->loop_var_->span_);
+    cur_[lv_name] = new_lv;
+    RegisterIterArgs(ias);
+
+    // Convert body — IfStmt handler now sees escaping vars in cur_ via iter_args
+    auto new_body = ConvertStmt(op->body_);
+    auto after = cur_;
+
+    // Restore outer scope, register return_vars
+    cur_ = before;
+    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
+    for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
+    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
+
+    // Build return_vars in iter_arg order: existing + carried + escaping
+    std::vector<VarPtr> all_rvs;
+    for (const auto& rv : op->return_vars_) all_rvs.push_back(rv);
+    for (const auto& rv : carried_rvs) all_rvs.push_back(rv);
+    for (const auto& rv : esc_rvs) all_rvs.push_back(rv);
+
+    // Build yields in matching order
+    std::vector<ExprPtr> yields;
+    if (auto y = ExtractYield(new_body)) yields = y->value_;
+    for (const auto& n : carried) yields.push_back(after.at(n));
+    for (const auto& n : escaping) {
+      auto it = after.find(n);
+      if (it != after.end()) {
+        yields.push_back(it->second);
+      }
+    }
+
+    StmtPtr body = new_body;
+    if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
+
+    return std::make_shared<ForStmt>(new_lv, new_start, new_stop, new_step, ias, body, all_rvs, op->span_,
+                                     op->kind_, op->chunk_size_, op->chunk_policy_, op->loop_origin_);
+  }
+
+  // ── WhileStmt ──────────────────────────────────────────────────────
+
+  StmtPtr ConvertWhile(const WhileStmtPtr& op) {
+    auto saved_future_needs = future_needs_;
+    auto before = cur_;
+
+    // Process existing iter_args
+    std::vector<IterArgPtr> ias;
+    for (const auto& ia : op->iter_args_) {
+      ias.push_back(
+          std::make_shared<IterArg>(ia->name_hint_, ia->GetType(), SubstExpr(ia->initValue_), ia->span_));
+    }
+
+    // Pre-analysis
+    AssignmentCollector ac;
+    ac.Collect(op->body_);
+
+    // Loop-carried classification
+    std::vector<std::string> carried;
+    for (const auto& n : ac.assigned) {
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      if (before.count(n)) carried.push_back(n);
+    }
+
+    // Pre-detect escaping vars (same logic as ForStmt — see issue #600 comment there)
+    TypeCollector tc;
+    tc.Collect(op->body_);
+    std::vector<std::string> escaping;
+    for (const auto& n : ac.assigned) {
+      if (before.count(n)) continue;
+      if (!saved_future_needs.count(n)) continue;
+      bool is_existing_ia = false;
+      for (const auto& ia : op->iter_args_) {
+        if (ia->name_hint_ == n) {
+          is_existing_ia = true;
+          break;
+        }
+      }
+      if (is_existing_ia) continue;
+      escaping.push_back(n);
+    }
+    std::sort(escaping.begin(), escaping.end());
+
+    // Create iter_args + return_vars for carried
+    std::vector<VarPtr> carried_rvs;
+    for (const auto& n : carried) {
+      auto init = before.at(n);
+      int iv = NextVersion(n);
+      ias.push_back(
+          std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), init->GetType(), init, op->span_));
+      int rv = NextVersion(n);
+      carried_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), init->GetType(), op->span_));
+    }
+
+    // Create iter_args + return_vars for escaping variables (pre-registered)
+    std::vector<VarPtr> esc_rvs;
+    for (const auto& n : escaping) {
+      auto type_it = tc.types.find(n);
+      if (type_it == tc.types.end()) continue;
+      auto type = type_it->second;
+      auto init = FindInitValue(type, before);
+      if (!init) init = std::make_shared<Var>(n, type, op->span_);
+      int iv = NextVersion(n);
+      ias.push_back(std::make_shared<IterArg>(n + "_iter_" + std::to_string(iv), type, init, op->span_));
+      int rv = NextVersion(n);
+      esc_rvs.push_back(std::make_shared<Var>(n + "_" + std::to_string(rv), type, op->span_));
+    }
+
+    // Register iter_args (including escaping), substitute condition, convert body
+    RegisterIterArgs(ias);
+    auto new_cond = SubstExpr(op->condition_);
+    auto new_body = ConvertStmt(op->body_);
+    auto after = cur_;
+
+    // Restore outer scope
+    cur_ = before;
+    for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
+    for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
+    RegisterExistingReturnVars(op->iter_args_, op->return_vars_);
+
+    // Build return_vars: existing + carried + escaping
+    std::vector<VarPtr> all_rvs;
+    for (const auto& rv : op->return_vars_) all_rvs.push_back(rv);
+    for (const auto& rv : carried_rvs) all_rvs.push_back(rv);
+    for (const auto& rv : esc_rvs) all_rvs.push_back(rv);
+
+    // Build yields
+    std::vector<ExprPtr> yields;
+    if (auto y = ExtractYield(new_body)) yields = y->value_;
+    for (const auto& n : carried) yields.push_back(after.at(n));
+    for (const auto& n : escaping) {
+      auto it = after.find(n);
+      if (it != after.end()) yields.push_back(it->second);
+    }
+
+    StmtPtr body = new_body;
+    if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
+
+    return std::make_shared<WhileStmt>(new_cond, ias, body, all_rvs, op->span_);
+  }
+
+  // ── IfStmt — phi node synthesis ────────────────────────────────────
+
+  StmtPtr ConvertIf(const IfStmtPtr& op) {
+    auto cond = SubstExpr(op->condition_);
+    auto before = cur_;
+
+    // Convert then branch
+    auto new_then = ConvertStmt(op->then_body_);
+    auto then_ver = cur_;
+
+    // Restore and convert else branch
+    cur_ = before;
+    std::optional<StmtPtr> new_else;
+    if (op->else_body_.has_value()) {
+      new_else = ConvertStmt(*op->else_body_);
+    }
+    auto else_ver = op->else_body_.has_value() ? cur_ : before;
+
+    // Find variables that diverged between branches
+    std::vector<std::string> phis;
+    std::set<std::string> seen;
+    for (const auto& [n, v] : then_ver) {
+      seen.insert(n);
+      auto bi = before.find(n);
+      if (bi != before.end()) {
+        bool then_changed = (bi->second != v);
+        auto ei = else_ver.find(n);
+        bool else_changed = (ei != else_ver.end() && bi->second != ei->second);
+        if (then_changed || else_changed) phis.push_back(n);
+      } else if (else_ver.count(n)) {
+        // New variable defined in BOTH branches needs a phi
+        phis.push_back(n);
+      }
+    }
+    for (const auto& [n, v] : else_ver) {
+      if (seen.count(n)) continue;
+      auto bi = before.find(n);
+      if (bi != before.end() && bi->second != v) phis.push_back(n);
+    }
+    std::sort(phis.begin(), phis.end());
+
+    // No divergence — return simple IfStmt
+    if (phis.empty() && op->return_vars_.empty()) {
+      cur_ = before;
+      return std::make_shared<IfStmt>(cond, new_then, new_else, std::vector<VarPtr>{}, op->span_);
+    }
+
+    // No new phis but existing return_vars (explicit SSA) — version return_vars, keep branch yields
+    if (phis.empty()) {
+      cur_ = before;
+      std::vector<VarPtr> return_vars;
+      for (const auto& rv : op->return_vars_) {
+        int v = NextVersion(rv->name_hint_);
+        auto nrv = std::make_shared<Var>(rv->name_hint_ + "_" + std::to_string(v), rv->GetType(), rv->span_);
+        return_vars.push_back(nrv);
+        cur_[rv->name_hint_] = nrv;
+      }
+      return std::make_shared<IfStmt>(cond, new_then, new_else, return_vars, op->span_);
+    }
+
+    // Create phi outputs
+    cur_ = before;
+    std::vector<VarPtr> return_vars;
+    std::vector<ExprPtr> then_yields, else_yields;
+
+    for (const auto& n : phis) {
+      VarPtr tv = then_ver.count(n) ? then_ver.at(n) : before.at(n);
+      VarPtr ev = else_ver.count(n) ? else_ver.at(n) : before.at(n);
+      int pv = NextVersion(n);
+      auto phi = std::make_shared<Var>(n + "_" + std::to_string(pv), tv->GetType(), op->span_);
+      return_vars.push_back(phi);
+      then_yields.push_back(tv);
+      else_yields.push_back(ev);
+      cur_[n] = phi;
+    }
+
+    // Preserve any existing return_vars not already handled as phis
+    for (const auto& rv : op->return_vars_) {
+      bool handled = false;
+      for (const auto& p : phis) {
+        if (p == rv->name_hint_) {
+          handled = true;
+          break;
+        }
+      }
+      if (!handled) {
+        int v = NextVersion(rv->name_hint_);
+        auto nrv = std::make_shared<Var>(rv->name_hint_ + "_" + std::to_string(v), rv->GetType(), rv->span_);
+        return_vars.push_back(nrv);
+        cur_[rv->name_hint_] = nrv;
+      }
+    }
+
+    // Append yields to branches
+    auto then_with_yield = ReplaceOrAppendYield(new_then, then_yields, op->span_);
+    StmtPtr else_with_yield;
+    if (new_else.has_value()) {
+      else_with_yield = ReplaceOrAppendYield(*new_else, else_yields, op->span_);
+    } else {
+      // No else branch: yield pre-if values directly (not wrapped in SeqStmts)
+      else_with_yield = std::make_shared<YieldStmt>(else_yields, op->span_);
+    }
+
+    return std::make_shared<IfStmt>(cond, then_with_yield, std::make_optional(else_with_yield), return_vars,
+                                    op->span_);
+  }
+
+  // ── Simple statements ──────────────────────────────────────────────
+
+  StmtPtr ConvertReturn(const ReturnStmtPtr& op) {
+    std::vector<ExprPtr> vals;
+    for (const auto& v : op->value_) vals.push_back(SubstExpr(v));
+    return std::make_shared<ReturnStmt>(vals, op->span_);
+  }
+
+  StmtPtr ConvertYield(const YieldStmtPtr& op) {
+    std::vector<ExprPtr> vals;
+    for (const auto& v : op->value_) vals.push_back(SubstExpr(v));
+    return std::make_shared<YieldStmt>(vals, op->span_);
+  }
+
+  StmtPtr ConvertEval(const EvalStmtPtr& op) {
+    auto e = SubstExpr(op->expr_);
+    return e != op->expr_ ? std::make_shared<EvalStmt>(e, op->span_) : op;
+  }
+
+  StmtPtr ConvertScope(const ScopeStmtPtr& op) {
+    auto body = ConvertStmt(op->body_);
+    return body != op->body_
+               ? std::make_shared<ScopeStmt>(op->scope_kind_, body, op->span_, op->level_, op->role_)
+               : op;
+  }
+
+  StmtPtr ConvertOps(const OpStmtsPtr& op) {
+    std::vector<StmtPtr> out;
+    bool changed = false;
+    for (const auto& s : op->stmts_) {
+      auto ns = ConvertStmt(s);
+      if (ns != s) changed = true;
+      out.push_back(ns);
+    }
+    return changed ? OpStmts::Flatten(std::move(out), op->span_) : op;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────
+
+  VarPtr FindInitValue(const TypePtr& type, const std::unordered_map<std::string, VarPtr>& pre) {
+    // Prefer Out/InOut parameter with matching type
+    for (size_t i = 0; i < orig_params_.size(); ++i) {
+      if (orig_param_directions_[i] == ParamDirection::Out ||
+          orig_param_directions_[i] == ParamDirection::InOut) {
+        auto it = pre.find(orig_params_[i]->name_hint_);
+        if (it != pre.end() && it->second->GetType() == type) return it->second;
+      }
+    }
+    // Fall back to any pre-loop variable with matching type (deterministic ordering)
     std::vector<std::pair<std::string, VarPtr>> candidates;
-    for (const auto& [name, var] : versions_before) {
-      if (var->GetType() == target_type) {
-        candidates.emplace_back(name, var);
+    for (const auto& [n, v] : pre) {
+      if (v->GetType() == type) {
+        candidates.emplace_back(n, v);
       }
     }
     if (!candidates.empty()) {
@@ -769,161 +796,11 @@ class SSAConverter : public IRMutator {
     return nullptr;
   }
 
-  /**
-   * @brief Identify variables first defined inside a loop body that escape to outer scope.
-   *
-   * A variable escapes if it is:
-   * 1. Present in versions_after_body but not in versions_before
-   * 2. Assigned inside the body (not inherited from nested constructs)
-   * 3. Actually referenced in subsequent statements (future_uses)
-   * 4. Not the loop variable or an already-handled iter_arg
-   */
-  std::vector<std::string> FindEscapingVars(
-      const std::unordered_map<std::string, VarPtr>& versions_after_body,
-      const std::unordered_map<std::string, VarPtr>& versions_before,
-      const std::set<std::string>& assigned_in_body, const std::string& loop_var_base,
-      const std::vector<IterArgPtr>& iter_args, const std::set<std::string>& future_uses) {
-    std::vector<std::string> escaping_vars;
-    for (const auto& [name, var] : versions_after_body) {
-      if (versions_before.count(name)) continue;
-      if (name == loop_var_base) continue;
-      if (!assigned_in_body.count(name)) continue;
-      // Only escape if actually used after the loop
-      if (!future_uses.count(name)) continue;
-      // Skip variables already handled as iter_args
-      bool is_iter_arg = false;
-      for (const auto& ia : iter_args) {
-        if (StripIterSuffix(ia->name_hint_) == name) {
-          is_iter_arg = true;
-          break;
-        }
-      }
-      if (is_iter_arg) continue;
-      escaping_vars.push_back(name);
+  static YieldStmtPtr ExtractYield(const StmtPtr& s) {
+    if (auto y = As<YieldStmt>(s)) {
+      return y;
     }
-    std::sort(escaping_vars.begin(), escaping_vars.end());
-    return escaping_vars;
-  }
-
-  /**
-   * @brief Substitute Var references in a type using current_version_.
-   *
-   * Handles:
-   * - TensorType::shape_ (e.g., Tensor[[M, N], FP32] → Tensor[[M_0, N_0], FP32])
-   * - TileType::tile_view.valid_shape
-   *
-   * This ensures all type-embedded Var references stay consistent after SSA renaming.
-   */
-  TypePtr SubstituteVarsInType(const TypePtr& type) {
-    if (!type) return type;
-
-    // Handle TensorType shapes
-    if (auto tensor_type = As<TensorType>(type)) {
-      std::vector<ExprPtr> new_shape;
-      bool changed = false;
-      for (const auto& dim : tensor_type->shape_) {
-        auto new_dim = VisitExpr(dim);
-        if (new_dim != dim) changed = true;
-        new_shape.push_back(new_dim);
-      }
-      if (changed) {
-        return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, tensor_type->memref_,
-                                            tensor_type->tensor_view_);
-      }
-      return type;
-    }
-
-    // Handle TileType tile_view.valid_shape
-    auto tile_type = As<TileType>(type);
-    if (!tile_type || !tile_type->tile_view_.has_value()) return type;
-
-    const auto& tv = tile_type->tile_view_.value();
-    if (tv.valid_shape.empty()) return type;
-
-    std::vector<ExprPtr> new_valid_shape;
-    bool changed = false;
-    for (const auto& vs : tv.valid_shape) {
-      auto new_vs = VisitExpr(vs);
-      if (new_vs != vs) changed = true;
-      new_valid_shape.push_back(new_vs);
-    }
-    if (!changed) return type;
-
-    TileView new_tile_view = tv;
-    new_tile_view.valid_shape = std::move(new_valid_shape);
-    return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                      std::make_optional(std::move(new_tile_view)), tile_type->memory_space_);
-  }
-
-  /**
-   * @brief Create a versioned variable from an original variable
-   *
-   * Also substitutes any Var references embedded in the variable's type
-   * (e.g., TileType::tile_view.valid_shape) using the current version map.
-   */
-  VarPtr CreateVersionedVar(const VarPtr& original, const std::string& base_name, int version) {
-    std::string versioned_name = base_name + "_" + std::to_string(version);
-    auto type = SubstituteVarsInType(original->GetType());
-    return std::make_shared<Var>(versioned_name, type, original->span_);
-  }
-
-  /**
-   * @brief Register iter_args in current_version_ under both their full name
-   * and stripped base name (e.g., "acc_iter_1" registers as both "acc_iter_1" and "acc").
-   */
-  void RegisterIterArgs(const std::vector<IterArgPtr>& iter_args) {
-    for (const auto& iter_arg : iter_args) {
-      std::string full_name = iter_arg->name_hint_;
-      std::string stripped_name = StripIterSuffix(full_name);
-      current_version_[stripped_name] = iter_arg;
-      if (full_name != stripped_name) {
-        current_version_[full_name] = iter_arg;
-      }
-    }
-  }
-
-  /**
-   * @brief Map existing iter_args' return_vars back into current_version_
-   * using the stripped base name.
-   */
-  void RegisterExistingReturnVars(const std::vector<IterArgPtr>& iter_args,
-                                  const std::vector<VarPtr>& return_vars) {
-    for (size_t i = 0; i < iter_args.size() && i < return_vars.size(); ++i) {
-      std::string base_name = StripIterSuffix(iter_args[i]->name_hint_);
-      current_version_[base_name] = return_vars[i];
-    }
-  }
-
-  /**
-   * @brief Enter a new scope
-   */
-  void EnterScope() { scope_stack_.push_back(current_version_); }
-
-  /**
-   * @brief Exit current scope
-   */
-  void ExitScope() {
-    if (!scope_stack_.empty()) {
-      scope_stack_.pop_back();
-    }
-  }
-
-  /**
-   * @brief Append a YieldStmt to a statement
-   */
-  StmtPtr AppendYield(const StmtPtr& stmt, const std::vector<ExprPtr>& values, const Span& span) {
-    if (values.empty()) return stmt;
-    return ReplaceOrAppendYield(stmt, values, span);
-  }
-
-  /**
-   * @brief Get the last YieldStmt from a statement (if any)
-   */
-  YieldStmtPtr GetLastYieldStmt(const StmtPtr& stmt) {
-    if (auto yield = As<YieldStmt>(stmt)) {
-      return yield;
-    }
-    if (auto seq = As<SeqStmts>(stmt)) {
+    if (auto seq = As<SeqStmts>(s)) {
       if (!seq->stmts_.empty()) {
         return As<YieldStmt>(seq->stmts_.back());
       }
@@ -931,46 +808,39 @@ class SSAConverter : public IRMutator {
     return nullptr;
   }
 
-  /**
-   * @brief Replace or append yield statement
-   */
-  StmtPtr ReplaceOrAppendYield(const StmtPtr& stmt, const std::vector<ExprPtr>& values, const Span& span) {
-    auto new_yield = std::make_shared<YieldStmt>(values, span);
-
-    if (auto seq = As<SeqStmts>(stmt)) {
-      if (!seq->stmts_.empty() && As<YieldStmt>(seq->stmts_.back())) {
-        // Replace last yield
-        std::vector<StmtPtr> new_stmts(seq->stmts_.begin(), seq->stmts_.end() - 1);
-        new_stmts.push_back(new_yield);
-        return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
+  static StmtPtr ReplaceOrAppendYield(const StmtPtr& s, const std::vector<ExprPtr>& vals, const Span& span) {
+    auto yield = std::make_shared<YieldStmt>(vals, span);
+    if (auto seq = As<SeqStmts>(s)) {
+      std::vector<StmtPtr> stmts = seq->stmts_;
+      bool has_trailing_yield = !stmts.empty() && As<YieldStmt>(stmts.back());
+      if (has_trailing_yield) {
+        stmts.pop_back();
       }
-      // Append yield
-      std::vector<StmtPtr> new_stmts = seq->stmts_;
-      new_stmts.push_back(new_yield);
-      return SeqStmts::Flatten(std::move(new_stmts), seq->span_);
+      stmts.push_back(yield);
+      return SeqStmts::Flatten(std::move(stmts), seq->span_);
     }
-
-    if (As<YieldStmt>(stmt)) {
-      return new_yield;
+    if (As<YieldStmt>(s)) {
+      return yield;
     }
-
-    // Wrap single statement and yield in SeqStmts
-    return SeqStmts::Flatten(std::vector<StmtPtr>{stmt, new_yield}, span);
+    return SeqStmts::Flatten({s, yield}, span);
   }
+
+  // ── State ──────────────────────────────────────────────────────────
+
+  std::unordered_map<std::string, VarPtr> cur_;  // name → latest version
+  std::unordered_map<std::string, int> ver_;     // name → next version number
+  std::set<std::string> future_needs_;           // vars needed (used-before-defined) in subsequent stmts
+  std::vector<VarPtr> orig_params_;              // original function params
+  std::vector<ParamDirection> orig_param_directions_;
 };
 
-/**
- * @brief Transform function: Convert a function to SSA form
- */
 FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "ConvertToSSA cannot run on null function";
   SSAConverter converter;
-  return converter.Convert(func);
+  return converter.ConvertFunction(func);
 }
 
 }  // namespace
 
-// Factory function
 namespace pass {
 Pass ConvertToSSA() {
   return CreateFunctionPass(TransformConvertToSSA, "ConvertToSSA", kConvertToSSAProperties);

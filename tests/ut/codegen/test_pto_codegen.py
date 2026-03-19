@@ -251,7 +251,7 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
 
     padded_view = ir.TileView()
     padded_view.valid_shape = [size, size]
-    padded_view.pad = ir.TilePad.max
+    padded_view.pad = ir.PadValue.max
     padded_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, padded_view, ir.MemorySpace.Vec)
     padded_tile = ir.Var("padded", padded_tile_type, span)
 
@@ -263,11 +263,11 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     fillpad_call = ir.Call(
         ir.Op("tile.fillpad"),
         [load_tile],
-        {"pad_value": ir.TilePad.max},
+        {"pad_value": ir.PadValue.max},
         padded_tile_type,
         span,
     )
-    assert fillpad_call.kwargs["pad_value"] == ir.TilePad.max
+    assert fillpad_call.kwargs["pad_value"] == ir.PadValue.max
     store_call = ir.Call(ir.Op("tile.store"), [padded_tile, offsets, output_tensor], result_var.type, span)
 
     body = ir.SeqStmts(

@@ -33,6 +33,7 @@ class IRProperty(Enum):
     TileMemoryInferred = ...
     BreakContinueValid = ...
     UseAfterDef = ...
+    StructuredCtrlFlow = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -246,6 +247,9 @@ def interchange_chunk_loops() -> Pass:
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
 
+def ctrl_flow_transform() -> Pass:
+    """Create a control flow structuring pass (eliminate break/continue)."""
+
 def convert_to_ssa() -> Pass:
     """Create an SSA conversion pass."""
 
@@ -353,6 +357,7 @@ __all__ = [
     "split_chunked_loops",
     "interchange_chunk_loops",
     "unroll_loops",
+    "ctrl_flow_transform",
     "convert_to_ssa",
     "outline_incore_scopes",
     "outline_cluster_scopes",
