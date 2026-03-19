@@ -47,12 +47,12 @@ from pypto.runtime import RunConfig, TensorSpec, run
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_init_inplace(
     oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-    li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
 ]:
     """Initialize inplace accumulators to zero (VECTOR)."""
     return oi, li, mi
@@ -61,7 +61,7 @@ def kernel_init_inplace(
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_qk_matmul(
     qi: pl.Tensor[[16, 128], pl.BF16],
-    kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+    kj: pl.Tensor[[128, 128], pl.BF16],
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
     """QK matmul: sij = qi @ kj.T (CUBE). kj transposed during load to L1."""
@@ -79,12 +79,12 @@ def kernel_softmax_prepare(
     sij: pl.Tensor[[16, 128], pl.FP32],
     scale: pl.Scalar[pl.FP32],
     out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.BF16],
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
 ]:
     """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
     s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
@@ -236,8 +236,7 @@ def build_paged_attention_program(
 
         # ── Orchestration function ──────────────────────────────────────────
         # Parameters: query, key_cache, value_cache, block_table, context_lens,
-        #             out, config (7 tensors) + size_query, size_key_cache,
-        #             size_value_cache (3 byte-size scalars)
+        #             out, config (7 tensors)
         @pl.function(type=pl.FunctionType.Orchestration)
         def paged_attention(
             self,
@@ -248,9 +247,6 @@ def build_paged_attention_program(
             context_lens: pl.Tensor[[batch], pl.INT32],
             out: pl.Tensor[[out_rows, head_dim], pl.FP32],
             config: pl.Tensor[[7], pl.INT64],
-            size_query: pl.Tensor[[1], pl.INT64],
-            size_key_cache: pl.Tensor[[1], pl.INT64],
-            size_value_cache: pl.Tensor[[1], pl.INT64],
         ) -> pl.Tensor[[out_rows, head_dim], pl.FP32]:
             """Paged attention orchestration.
 
@@ -477,11 +473,6 @@ def build_tensor_specs(
         0, max(block_table_flat_size, 1), size=(batch, max_num_blocks_per_req), dtype=torch.int32
     ).flatten()
 
-    # Byte sizes: BF16 tensors use 2 bytes per element
-    size_query = torch.tensor([query_rows * head_dim * 2], dtype=torch.int64)
-    size_key_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
-    size_value_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
-
     return [
         TensorSpec("query", [query_rows, head_dim], torch.bfloat16, init_value=torch.randn),
         TensorSpec("key_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
@@ -490,9 +481,6 @@ def build_tensor_specs(
         TensorSpec("context_lens", [batch], torch.int32, init_value=context_lens_data),
         TensorSpec("out", [query_rows, head_dim], torch.float32, is_output=True),
         TensorSpec("config", [7], torch.int64, init_value=config_data),
-        TensorSpec("size_query", [1], torch.int64, init_value=size_query),
-        TensorSpec("size_key_cache", [1], torch.int64, init_value=size_key_cache),
-        TensorSpec("size_value_cache", [1], torch.int64, init_value=size_value_cache),
     ]
 
 

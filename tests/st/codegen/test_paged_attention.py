@@ -380,7 +380,7 @@ class PagedAttentionTestCase(PTOTestCase):
         num_heads: int = 16,
         head_dim: int = 128,
         block_size: int = 128,
-        context_len: int = 8192,
+        context_len: int | list[int] = 8192,
         max_model_len: int = 32768,
         scale: float = 1.0,
         **kwargs,
@@ -416,7 +416,14 @@ class PagedAttentionTestCase(PTOTestCase):
         block_table = torch.randint(
             0, max(B * max_blocks, 1), size=(B, max_blocks), dtype=torch.int32
         ).flatten()
-        context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
+        if isinstance(self.context_len, list):
+            if len(self.context_len) != B:
+                raise ValueError(
+                    f"context_len list length {len(self.context_len)} does not match batch size B={B}"
+                )
+            context_lens = torch.tensor(self.context_len, dtype=torch.int32)
+        else:
+            context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
 
         return [
             TensorSpec("query", [B * H, D], DataType.BF16, init_value=torch.randn),
@@ -426,21 +433,6 @@ class PagedAttentionTestCase(PTOTestCase):
             TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
             TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
             TensorSpec("config", [7], DataType.INT64, init_value=config),
-            TensorSpec(
-                "size_query", [1], DataType.INT64, init_value=torch.tensor([B * H * D * 2], dtype=torch.int64)
-            ),
-            TensorSpec(
-                "size_key_cache",
-                [1],
-                DataType.INT64,
-                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
-            ),
-            TensorSpec(
-                "size_value_cache",
-                [1],
-                DataType.INT64,
-                init_value=torch.tensor([total_pool_rows * D * 2], dtype=torch.int64),
-            ),
         ]
 
     def get_program(self) -> Any:
