@@ -92,14 +92,20 @@ void BuildRenameMapForDefs(const std::vector<const DefNode*>& defs,
     name_counts[def->name_hint_]++;
   }
 
+  // Pre-pass: reserve names that are already unique so suffix generation
+  // for colliding names never picks a reserved name (e.g., defs [M, M, M_1]
+  // must not assign "M_1" to the second M when a real M_1 def exists).
   std::set<std::string> used_names;
   for (const DefNode* def : unique_defs) {
-    const std::string& base_name = def->name_hint_;
-    if (name_counts[base_name] == 1) {
-      used_names.insert(base_name);
-      if (include_unique_names) rename_map[def] = base_name;
-      continue;
+    if (name_counts[def->name_hint_] == 1) {
+      used_names.insert(def->name_hint_);
+      if (include_unique_names) rename_map[def] = def->name_hint_;
     }
+  }
+
+  for (const DefNode* def : unique_defs) {
+    const std::string& base_name = def->name_hint_;
+    if (name_counts[base_name] == 1) continue;  // Already handled above
 
     std::string candidate = base_name;
     int suffix = 0;
@@ -1471,6 +1477,10 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
           collect_vars_from_expr(dim);
         }
         collect_vars_from_expr(tile_type->tile_view_->start_offset);
+      }
+    } else if (auto tuple_type = As<TupleType>(type)) {
+      for (const auto& elem_type : tuple_type->types_) {
+        collect_from_type(elem_type);
       }
     }
   };
