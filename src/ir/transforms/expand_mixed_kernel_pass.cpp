@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -185,12 +186,8 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
 // Flatten body / make body helpers
 // ============================================================================
 
-std::vector<StmtPtr> FlattenBody(const StmtPtr& body) {
-  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(body)) {
-    return seq->stmts_;
-  }
-  return {body};
-}
+// Use the shared utility; local alias preserves call sites.
+const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
   if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
