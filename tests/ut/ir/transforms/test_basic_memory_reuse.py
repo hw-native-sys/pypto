@@ -7,40 +7,146 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for BasicMemoryReusePass using @pl.program with pl.Tile type."""
+"""Tests for BasicMemoryReusePass with pre-attached MemRefs (no init_mem_ref dependency)."""
 
-import pypto.language as pl
+import math
+
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tile
 from pypto.pypto_core import DataType
+
+_SPAN = ir.Span.unknown()
 
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure backend before each test (required by dependency analyzer)."""
+    """Configure backend before each test (required by DependencyAnalyzer)."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B_PTO)
     yield
     backend.reset_for_testing()
 
 
-def _iter_assign_stmts(func):
-    """Iterate all AssignStmt in function body (handles SeqStmts/OpStmts)."""
-    if not isinstance(func.body, ir.SeqStmts):
-        return
-    for child in func.body.stmts:
-        if isinstance(child, ir.OpStmts):
-            for stmt in child.stmts:
-                if isinstance(stmt, ir.AssignStmt):
-                    yield stmt
-        elif isinstance(child, ir.AssignStmt):
-            yield child
+_IDX = DataType.INDEX
+_FP32 = DataType.FP32
+_FP16 = DataType.FP16
+_BF16 = DataType.BF16
+_INT32 = DataType.INT32
+
+
+def _ci(val: int) -> ir.ConstInt:
+    """Create ConstInt with INDEX type."""
+    return ir.ConstInt(val, _IDX, _SPAN)
+
+
+def _dtype_bytes(dtype: DataType) -> int:
+    """Byte size per element for a given dtype."""
+    if dtype in (_FP32, _INT32):
+        return 4
+    if dtype in (_FP16, _BF16):
+        return 2
+    if dtype == DataType.INT64:
+        return 8
+    raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+class _MemRefAlloc:
+    """Auto-incrementing MemRef allocator for test IR construction."""
+
+    def __init__(self, start_id: int = 0) -> None:
+        self._next_id = start_id
+
+    def vec(self, shape: list[int], dtype: DataType) -> ir.MemRef:
+        """Create a Vec-space MemRef with unique ID."""
+        size = math.prod(shape) * _dtype_bytes(dtype)
+        mr = ir.MemRef(ir.MemorySpace.Vec, _ci(-1), size, self._next_id)
+        self._next_id += 1
+        return mr
+
+    def ddr(self, shape: list[int], dtype: DataType) -> ir.MemRef:
+        """Create a DDR-space MemRef with unique ID."""
+        size = math.prod(shape) * _dtype_bytes(dtype)
+        mr = ir.MemRef(ir.MemorySpace.DDR, _ci(-1), size, self._next_id)
+        self._next_id += 1
+        return mr
+
+
+def _tile_t(
+    shape: list[int], dtype: DataType, memref: ir.MemRef, space: ir.MemorySpace = ir.MemorySpace.Vec
+) -> ir.TileType:
+    """TileType with MemRef."""
+    return ir.TileType(shape, dtype, memref, None, space)
+
+
+def _tile_t_with_view(
+    shape: list[int],
+    dtype: DataType,
+    memref: ir.MemRef,
+    tile_view: ir.TileView,
+    space: ir.MemorySpace = ir.MemorySpace.Vec,
+) -> ir.TileType:
+    """TileType with MemRef and TileView."""
+    return ir.TileType(shape, dtype, memref, tile_view, space)
+
+
+def _tensor_t(shape: list[int], dtype: DataType, memref: ir.MemRef | None = None) -> ir.TensorType:
+    """TensorType with optional MemRef."""
+    if memref is not None:
+        return ir.TensorType(shape, dtype, memref)
+    return ir.TensorType(shape, dtype)
+
+
+def _build_program(build_fn):
+    """Build a Program by calling build_fn(ib, f, alloc) inside a function/program context.
+
+    Returns the constructed Program.
+    """
+    alloc = _MemRefAlloc()
+    ib = IRBuilder()
+    with ib.program("Test") as prog:
+        with ib.function("main") as f:
+            build_fn(ib, f, alloc)
+        prog.add_function(f.get_result())
+    return prog.get_result()
+
+
+def _run_reuse(program: ir.Program) -> ir.Function:
+    """Run basic_memory_reuse pass and return the first function."""
+    after = passes.basic_memory_reuse()(program)
+    return next(iter(after.functions.values()))
+
+
+# ---------------------------------------------------------------------------
+# Assertion helpers
+# ---------------------------------------------------------------------------
+
+
+def _iter_all_assign_stmts(stmt):
+    """Recursively iterate all AssignStmt in a statement tree."""
+    if isinstance(stmt, ir.AssignStmt):
+        yield stmt
+    elif isinstance(stmt, ir.SeqStmts):
+        for child in stmt.stmts:
+            yield from _iter_all_assign_stmts(child)
+    elif isinstance(stmt, ir.OpStmts):
+        for child in stmt.stmts:
+            yield from _iter_all_assign_stmts(child)
+    elif isinstance(stmt, ir.ForStmt):
+        yield from _iter_all_assign_stmts(stmt.body)
+    elif isinstance(stmt, ir.IfStmt):
+        yield from _iter_all_assign_stmts(stmt.then_body)
+        if stmt.else_body is not None:
+            yield from _iter_all_assign_stmts(stmt.else_body)
+    elif isinstance(stmt, ir.WhileStmt):
+        yield from _iter_all_assign_stmts(stmt.body)
 
 
 def _get_var_type(func, var_name):
-    """Extract ShapedType for a variable by name."""
-    for stmt in _iter_assign_stmts(func):
+    """Extract ShapedType for a variable by name (recursive search)."""
+    for stmt in _iter_all_assign_stmts(func.body):
         if stmt.var.name_hint == var_name:
             if isinstance(stmt.var.type, ir.ShapedType):
                 return stmt.var.type
@@ -65,21 +171,9 @@ def _assert_not_shares_memref(func, var_a, var_b):
     assert not type_a.shares_memref_with(type_b), f"{var_b} should NOT share MemRef with {var_a}"
 
 
-def _prepare_and_run_memory_reuse(program):
-    """Prepare IR with memrefs (test setup), then run the pass under test.
-
-    init_mem_ref() is test setup that attaches memrefs to tiles.
-    basic_memory_reuse() is the pass under test.
-    """
-    program = passes.init_mem_ref()(program)  # Test setup: attach memrefs
-    program = passes.basic_memory_reuse()(program)  # Pass under test
-    return list(program.functions.values())[0]
-
-
 def _assert_all_have_memrefs(func):
     """Assert all ShapedType variables have memrefs assigned."""
-    assert isinstance(func.body, ir.SeqStmts)
-    for stmt in _iter_assign_stmts(func):
+    for stmt in _iter_all_assign_stmts(func.body):
         if isinstance(stmt.var.type, ir.ShapedType):
             assert stmt.var.type.memref is not None, f"{stmt.var.name_hint} should have a memref"
 
@@ -87,7 +181,7 @@ def _assert_all_have_memrefs(func):
 def _count_alloc_stmts(func):
     """Count tile.alloc AssignStmt in the function body."""
     count = 0
-    for stmt in _iter_assign_stmts(func):
+    for stmt in _iter_all_assign_stmts(func.body):
         if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
             count += 1
     return count
@@ -96,7 +190,7 @@ def _count_alloc_stmts(func):
 def _get_alloc_memref_ids(func):
     """Get the set of MemRef id_ values from tile.alloc statements."""
     ids = set()
-    for stmt in _iter_assign_stmts(func):
+    for stmt in _iter_all_assign_stmts(func.body):
         if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
             memref = stmt.var
             assert isinstance(memref, ir.MemRef), "tile.alloc LHS must be MemRef"
@@ -108,208 +202,187 @@ class TestBasicMemoryReuse:
     """Tests for BasicMemoryReusePass with TileType variables."""
 
     def test_simple(self):
-        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent.
+        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent."""
 
-        Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,3], tile_d[3,4], tile_e[4,5]
-        Touching lifetimes (end == start) are non-overlapping, so tile_c reuses
-        tile_a at the boundary, and tile_d and tile_e continue the chain.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            input_b = f.param("input_b", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(5))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let(
+                "tile_b", tile.load(input_b, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, b_mr)
+            )
+            tile_c = ib.let("tile_c", tile.add(tile_a, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            tile_d = ib.let("tile_d", tile.mul(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "tile_a", "tile_d")
         _assert_shares_memref(func, "tile_a", "tile_e")
 
     def test_sequential(self):
-        """Sequential chain: all tiles reuse tile_a (producer-consumer at same statement).
+        """Sequential chain: all tiles reuse tile_a (producer-consumer at same statement)."""
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,3], tile_d[3,4], tile_e[4,5]
-        Each consumer's def equals its input's last_use, so all chain to tile_a.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(5))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "tile_b", "tile_d")
         _assert_shares_memref(func, "tile_c", "tile_e")
 
     def test_different_sizes(self):
-        """Different-shaped tiles cannot reuse each other's buffer.
+        """Different-shaped tiles cannot reuse each other's buffer."""
 
-        PTO codegen binds alloc_tile type to the buffer, so shape must match
-        exactly. tile_e (64x64) reuses tile_a (64x64); tile_f (32x32) reuses
-        tile_b (32x32); cross-shape reuse is forbidden despite sufficient size.
-        """
+        def build(ib, f, alloc):
+            in_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            in_b = f.param("input_b", ir.TensorType([32, 32], _FP32))
+            out_a_mr, out_b_mr = alloc.ddr([64, 64], _FP32), alloc.ddr([32, 32], _FP32)
+            out_a = f.param("output_a", _tensor_t([64, 64], _FP32, out_a_mr), direction=ir.ParamDirection.Out)
+            out_b = f.param("output_b", _tensor_t([32, 32], _FP32, out_b_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([32, 32], _FP32))
+            a_mr, b_mr, e_mr, f_mr = (
+                alloc.vec([64, 64], _FP32),
+                alloc.vec([32, 32], _FP32),
+                alloc.vec([64, 64], _FP32),
+                alloc.vec([32, 32], _FP32),
+            )
+            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr))
+            ib.let("_result_a", tile.store(tile_a, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, out_a_mr))
+            tile_b = ib.let("tile_b", tile.load(in_b, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, b_mr))
+            ib.let("_result_b", tile.store(tile_b, [0, 0], out_b), type=_tensor_t([32, 32], _FP32, out_b_mr))
+            tile_e = ib.let("tile_e", tile.load(in_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, e_mr))
+            tile_f = ib.let("tile_f", tile.load(in_b, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, f_mr))
+            ib.let("_result_e", tile.store(tile_e, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, out_a_mr))
+            result_f = ib.let(
+                "result_f", tile.store(tile_f, [0, 0], out_b), type=_tensor_t([32, 32], _FP32, out_b_mr)
+            )
+            ib.return_stmt(result_f)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[32, 32], pl.FP32],
-                output_a: pl.Tensor[[64, 64], pl.FP32],
-                output_b: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(input_b, [0, 0], [32, 32])
-                _result_b: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
-                # tile_a and tile_b are dead
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_f: pl.Tile[[32, 32], pl.FP32] = pl.load(input_b, [0, 0], [32, 32])
-                _result_e: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output_a)
-                result_f: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_f, [0, 0], output_b)
-                return result_f
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # Same shape reuses: tile_e (64x64) reuses tile_a (64x64)
         _assert_shares_memref(func, "tile_a", "tile_e")
-        # Same shape reuses: tile_f (32x32) reuses tile_b (32x32)
         _assert_shares_memref(func, "tile_b", "tile_f")
-        # Different shapes cannot reuse despite sufficient size
         _assert_not_shares_memref(func, "tile_a", "tile_f")
         _assert_not_shares_memref(func, "tile_b", "tile_e")
 
     def test_empty_function(self):
         """Empty function should not crash."""
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
-                return output
+        def build(ib, f, alloc):
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            ib.return_stmt(output)
 
-        After = passes.basic_memory_reuse()(Before)
-        func = list(After.functions.values())[0]
-
+        func = _run_reuse(_build_program(build))
         assert func is not None
         assert func.name == "main"
 
     def test_memref_sharing(self):
-        """Chain: all tiles reuse tile_a (producer-consumer at same statement).
+        """Chain: all tiles reuse tile_a (producer-consumer at same statement)."""
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,3], tile_d[3,4]
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            result = ib.let(
+                "result", tile.store(tile_d, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "tile_b", "tile_d")
 
     def test_with_dependencies(self):
-        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent.
+        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent."""
 
-        Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,3], tile_d[3,4], tile_e[4,5]
-        Same as test_simple — touching lifetimes form a non-overlapping chain.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            input_b = f.param("input_b", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(5))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let(
+                "tile_b", tile.load(input_b, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, b_mr)
+            )
+            tile_c = ib.let("tile_c", tile.add(tile_a, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "tile_a", "tile_d")
         _assert_shares_memref(func, "tile_a", "tile_e")
 
     def test_transitive_conflict(self):
-        """Transitive conflict: tile_c and tile_d must NOT share memory.
+        """Transitive conflict: tile_c and tile_d must NOT share memory."""
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_c[2,4], tile_d[3,4], tile_e[4,5]
-        tile_b reuses tile_a (touching at 1). tile_c reuses tile_a (touching at 2,
-        checked against tile_b which is also non-overlapping). tile_d cannot reuse
-        tile_a (conflict with tile_c[2,4]) or tile_b (same root, conflict with tile_c).
-        tile_e reuses tile_a (tile_c[2,4] touches tile_e[4,5] at 4).
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(5))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            tile_e = ib.let("tile_e", tile.add(tile_c, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_shares_memref(func, "tile_a", "tile_b")
         _assert_shares_memref(func, "tile_a", "tile_c")
@@ -317,42 +390,28 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_a", "tile_e")
 
     def test_multiple_memory_spaces(self):
-        """Memory reuse happens within the same memory space (UB tiles).
+        """Memory reuse happens within the same memory space (UB tiles)."""
 
-        Verifies that variables in DDR don't reuse UB memory and vice versa.
-        Parameters are in DDR, tiles are in UB.
+        def build(ib, f, alloc):
+            in_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            in_b = f.param("input_b", ir.TensorType([64, 64], _FP32))
+            out_a_mr, out_b_mr = alloc.ddr([64, 64], _FP32), alloc.ddr([64, 64], _FP32)
+            out_a = f.param("output_a", _tensor_t([64, 64], _FP32, out_a_mr), direction=ir.ParamDirection.Out)
+            out_b = f.param("output_b", _tensor_t([64, 64], _FP32, out_b_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr, c_mr, d_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr))
+            tile_b = ib.let("tile_b", tile.load(in_b, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_a, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
+            ib.let("_result_a", tile.store(tile_c, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, out_a_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            result_b = ib.let(
+                "result_b", tile.store(tile_d, [0, 0], out_b), type=_tensor_t([64, 64], _FP32, out_b_mr)
+            )
+            ib.return_stmt(result_b)
 
-        Lifetimes: tile_a[0,2], tile_b[1,2], tile_c[2,4], tile_d[4,5]
-        tile_d should reuse tile_a's UB memory.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output_a: pl.Tensor[[64, 64], pl.FP32],
-                output_b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                # Load creates UB tiles
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-                # Compute creates more UB tiles (tile_a and tile_b die here)
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_b)
-                # Store to first output (intermediate result)
-                _result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output_a)
-                # More UB computation (tile_c dies here)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
-                # Store final result
-                result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], output_b)
-                return result_b
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # tile_d should reuse UB memory from tile_a
         _assert_shares_memref(func, "tile_a", "tile_d")
 
 
@@ -365,16 +424,14 @@ def _build_program_with_allocs(tile_specs, op_specs):
             First op uses param "input_a" as arg; others reference earlier tile vars.
             Last op is always tile.store writing to param "output".
     """
-    span = ir.Span.unknown()
-    idx = DataType.INDEX
-    fp32 = DataType.FP32
-    shape = [ir.ConstInt(64, idx, span), ir.ConstInt(64, idx, span)]
+    span = _SPAN
+    shape = [_ci(64), _ci(64)]
     tile_size = 16384
 
-    memref_in = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, idx, span), tile_size, 0)
-    memref_out = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, idx, span), tile_size, 1)
-    tensor_in = ir.TensorType(shape, fp32, memref_in)
-    tensor_out = ir.TensorType(shape, fp32, memref_out)
+    memref_in = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, _IDX, span), tile_size, 0)
+    memref_out = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, _IDX, span), tile_size, 1)
+    tensor_in = ir.TensorType(shape, _FP32, memref_in)
+    tensor_out = ir.TensorType(shape, _FP32, memref_out)
 
     param_in = ir.Var("input_a", tensor_in, span)
     param_out = ir.Var("output", tensor_out, span)
@@ -384,25 +441,25 @@ def _build_program_with_allocs(tile_specs, op_specs):
     stmts = []
 
     for name, mid in tile_specs:
-        mr = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(-1, idx, span), tile_size, mid)
+        mr = ir.MemRef(ir.MemorySpace.Vec, _ci(-1), tile_size, mid)
         memref_map[name] = mr
-        tt = ir.TileType(shape, fp32, mr, None, ir.MemorySpace.Vec)
+        tt = ir.TileType(shape, _FP32, mr, None, ir.MemorySpace.Vec)
         var_map[name] = ir.Var(name, tt, span)
 
         alloc_call = ir.Call(
             ir.get_op("tile.alloc"),
             [
-                ir.ConstInt(ir.MemorySpace.Vec.value, idx, span),
-                ir.ConstInt(-1, idx, span),
-                ir.ConstInt(tile_size, idx, span),
-                ir.ConstInt(mid, idx, span),
+                ir.ConstInt(ir.MemorySpace.Vec.value, _IDX, span),
+                _ci(-1),
+                ir.ConstInt(tile_size, _IDX, span),
+                ir.ConstInt(mid, _IDX, span),
             ],
             span,
         )
         stmts.append(ir.AssignStmt(mr, alloc_call, span))
 
-    offsets = ir.MakeTuple([ir.ConstInt(0, idx, span), ir.ConstInt(0, idx, span)], span)
-    sizes = ir.MakeTuple([ir.ConstInt(64, idx, span), ir.ConstInt(64, idx, span)], span)
+    offsets = ir.MakeTuple([_ci(0), _ci(0)], span)
+    sizes = ir.MakeTuple([_ci(64), _ci(64)], span)
 
     for var_name, op_name, arg_names in op_specs:
         args = [var_map[a] for a in arg_names]
@@ -433,12 +490,7 @@ class TestAllocCleanup:
     """Tests for redundant tile.alloc removal after memory reuse."""
 
     def test_unused_alloc_removed_after_reuse(self):
-        """Alloc stmts for MemRefs replaced by reuse should be removed.
-
-        Lifetimes: tile_a[3,4], tile_b[4,5], tile_c[5,6]
-        With touching-lifetime reuse, tile_b reuses tile_a and tile_c
-        reuses tile_a (chain) → all share one MemRef → 1 alloc remains.
-        """
+        """Alloc stmts for MemRefs replaced by reuse should be removed."""
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
             op_specs=[
@@ -449,10 +501,10 @@ class TestAllocCleanup:
             ],
         )
 
-        assert _count_alloc_stmts(list(prog.functions.values())[0]) == 3
+        assert _count_alloc_stmts(next(iter(prog.functions.values()))) == 3
 
         after = passes.basic_memory_reuse()(prog)
-        func = list(after.functions.values())[0]
+        func = next(iter(after.functions.values()))
 
         assert _count_alloc_stmts(func) == 1, (
             f"Expected 1 alloc stmt after chain reuse, got {_count_alloc_stmts(func)}"
@@ -464,12 +516,7 @@ class TestAllocCleanup:
         assert tile_a_type.memref.id_ in alloc_ids
 
     def test_partial_reuse_with_overlapping_lifetimes(self):
-        """When some lifetimes truly overlap, partial reuse happens.
-
-        Lifetimes: tile_a[3,5], tile_b[4,5], tile_c[5,6]
-        tile_a and tile_b truly overlap ([3,5] vs [4,5]). tile_c touches tile_a
-        at 5 and reuses it → 2 allocs remain (tile_a and tile_b).
-        """
+        """When some lifetimes truly overlap, partial reuse happens."""
         prog = _build_program_with_allocs(
             tile_specs=[("tile_a", 10), ("tile_b", 11), ("tile_c", 12)],
             op_specs=[
@@ -480,10 +527,10 @@ class TestAllocCleanup:
             ],
         )
 
-        assert _count_alloc_stmts(list(prog.functions.values())[0]) == 3
+        assert _count_alloc_stmts(next(iter(prog.functions.values()))) == 3
 
         after = passes.basic_memory_reuse()(prog)
-        func = list(after.functions.values())[0]
+        func = next(iter(after.functions.values()))
 
         assert _count_alloc_stmts(func) == 2, (
             f"Expected 2 alloc stmts (tile_c reuses tile_a), got {_count_alloc_stmts(func)}"
@@ -491,69 +538,58 @@ class TestAllocCleanup:
 
 
 class TestDtypeCompatibility:
-    """Tests that tiles with different dtypes do NOT reuse each other's memory.
-
-    PTO codegen binds a single alloc_tile declaration (including dtype) to each
-    buffer. Reuse across different dtypes would cause the alloc_tile to carry
-    a wrong dtype, leading to incorrect hardware behaviour.
-    """
+    """Tests that tiles with different dtypes do NOT reuse each other's memory."""
 
     def test_cast_output_does_not_reuse(self):
-        """Cast changes dtype → no cross-dtype reuse; same-dtype tiles still reuse.
+        """Cast changes dtype: no cross-dtype reuse; same-dtype tiles still reuse."""
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_cast[2,3], tile_c[3,4]
-        tile_cast (BF16) cannot reuse tile_a/tile_b (FP32) due to dtype mismatch.
-        tile_c (BF16) reuses tile_cast (same dtype, last_use==def).
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr = alloc.vec([64, 64], _FP32), alloc.vec([64, 64], _FP32)
+            cast_mr, c_mr = alloc.vec([64, 64], _BF16), alloc.vec([64, 64], _BF16)
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_cast = ib.let("tile_cast", tile.cast(tile_b, _BF16), type=_tile_t([64, 64], _BF16, cast_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_cast, tile_cast), type=_tile_t([64, 64], _BF16, c_mr))
+            result = ib.let(
+                "result", tile.store(tile_c, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                tile_cast: pl.Tile[[64, 64], pl.BF16] = pl.cast(tile_b, target_type=pl.BF16)
-                tile_c: pl.Tile[[64, 64], pl.BF16] = pl.add(tile_cast, tile_cast)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_not_shares_memref(func, "tile_a", "tile_cast")
         _assert_not_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "tile_cast", "tile_c")
 
     def test_cast_among_regular_ops(self):
-        """Cross-dtype reuse forbidden; same-dtype tiles reuse within their group.
+        """Cross-dtype reuse forbidden; same-dtype tiles reuse within their group."""
 
-        Lifetimes: tile_a[0,1], tile_b[1,2], tile_cast[2,3], tile_d[3,4], tile_e[4,5]
-        tile_cast/tile_d/tile_e are BF16 and cannot reuse FP32 tile_a/tile_b.
-        tile_d and tile_e reuse tile_cast (same dtype, producer-consumer chain).
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, b_mr = alloc.vec([64, 64], _FP32), alloc.vec([64, 64], _FP32)
+            cast_mr, d_mr, e_mr = (alloc.vec([64, 64], _BF16) for _ in range(3))
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
+            tile_cast = ib.let("tile_cast", tile.cast(tile_b, _BF16), type=_tile_t([64, 64], _BF16, cast_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_cast, tile_cast), type=_tile_t([64, 64], _BF16, d_mr))
+            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _BF16, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                tile_cast: pl.Tile[[64, 64], pl.BF16] = pl.cast(tile_b, target_type=pl.BF16)
-                tile_d: pl.Tile[[64, 64], pl.BF16] = pl.add(tile_cast, tile_cast)
-                tile_e: pl.Tile[[64, 64], pl.BF16] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_not_shares_memref(func, "tile_a", "tile_cast")
         _assert_not_shares_memref(func, "tile_b", "tile_cast")
@@ -563,676 +599,588 @@ class TestDtypeCompatibility:
         _assert_shares_memref(func, "tile_cast", "tile_e")
 
 
-class TestFillpadCompatibility:
-    """Tests that fillpad output does NOT reuse input due to TileView differences.
+def _make_tile_view(valid_shape: list[int], pad: ir.PadValue = ir.PadValue.null) -> ir.TileView:
+    """Create a TileView with given valid_shape and pad (other fields use defaults)."""
+    vs = [_ci(v) for v in valid_shape]
+    return ir.TileView(vs, [], _ci(0), ir.TileLayout.row_major, ir.TileLayout.none_box, 512, pad)
 
-    fillpad expands valid_shape to full shape and sets a pad value, changing the
-    TileView attributes.  AreTileTypesCompatible detects these differences and
-    prevents unsafe in-place reuse that would confuse PTO codegen.
-    """
+
+class TestFillpadCompatibility:
+    """Tests that fillpad output does NOT reuse input due to TileView differences."""
 
     def test_fillpad_output_incompatible_with_input(self):
-        """fillpad changes valid_shape and pad → output cannot reuse input.
+        """fillpad changes valid_shape and pad: output cannot reuse input."""
 
-        tile_a: shape=[64,64], valid_shape=[48,64], pad=null
-        padded:  shape=[64,64], valid_shape=[64,64], pad=max
-        valid_shape and pad differ → no reuse.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, p_mr = alloc.vec([64, 64], _FP32), alloc.vec([64, 64], _FP32)
+            view_in = _make_tile_view([48, 64])
+            view_pad = _make_tile_view([64, 64], ir.PadValue.max)
+            tile_a = ib.let(
+                "tile_a",
+                tile.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64]),
+                type=_tile_t_with_view([64, 64], _FP32, a_mr, view_in),
+            )
+            padded = ib.let(
+                "padded",
+                tile.fillpad(tile_a, pad_value=ir.PadValue.max),
+                type=_tile_t_with_view([64, 64], _FP32, p_mr, view_pad),
+            )
+            result = ib.let(
+                "result", tile.store(padded, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
         _assert_not_shares_memref(func, "tile_a", "padded")
 
     def test_fillpad_different_pad_no_reuse(self):
-        """Two fillpad outputs with different pad values cannot reuse each other.
+        """Two fillpad outputs with different pad values cannot reuse each other."""
 
-        padded_max: valid_shape=[64,64], pad=max
-        padded_min: valid_shape=[64,64], pad=min
-        pad differs → no reuse between them, but their inputs can reuse each other.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            oa_mr, ob_mr = alloc.ddr([64, 64], _FP32), alloc.ddr([64, 64], _FP32)
+            out_a = f.param("output_a", _tensor_t([64, 64], _FP32, oa_mr), direction=ir.ParamDirection.Out)
+            out_b = f.param("output_b", _tensor_t([64, 64], _FP32, ob_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, pmax_mr, b_mr, pmin_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            view_in = _make_tile_view([48, 64])
+            view_max = _make_tile_view([64, 64], ir.PadValue.max)
+            view_min = _make_tile_view([64, 64], ir.PadValue.min)
+            tile_a = ib.let(
+                "tile_a",
+                tile.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64]),
+                type=_tile_t_with_view([64, 64], _FP32, a_mr, view_in),
+            )
+            padded_max = ib.let(
+                "padded_max",
+                tile.fillpad(tile_a, pad_value=ir.PadValue.max),
+                type=_tile_t_with_view([64, 64], _FP32, pmax_mr, view_max),
+            )
+            ib.let("_res_a", tile.store(padded_max, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, oa_mr))
+            tile_b = ib.let(
+                "tile_b",
+                tile.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64]),
+                type=_tile_t_with_view([64, 64], _FP32, b_mr, view_in),
+            )
+            padded_min = ib.let(
+                "padded_min",
+                tile.fillpad(tile_b, pad_value=ir.PadValue.min),
+                type=_tile_t_with_view([64, 64], _FP32, pmin_mr, view_min),
+            )
+            result = ib.let(
+                "result", tile.store(padded_min, [0, 0], out_b), type=_tensor_t([64, 64], _FP32, ob_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output_a: pl.Tensor[[64, 64], pl.FP32],
-                output_b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_max: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
-                _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_max, [0, 0], output_a)
-
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_min: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.PadValue.min)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_min, [0, 0], output_b)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # inputs share (same valid_shape=[48,64], same pad=null)
         _assert_shares_memref(func, "tile_a", "tile_b")
-        # fillpad outputs do NOT share (pad=max vs pad=min)
         _assert_not_shares_memref(func, "padded_max", "padded_min")
 
     def test_fillpad_same_pad_can_reuse(self):
-        """Two fillpad outputs with identical TileView attributes CAN reuse.
+        """Two fillpad outputs with identical TileView attributes CAN reuse."""
 
-        Both padded_a and padded_b: valid_shape=[64,64], pad=max → compatible → reuse.
-        """
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            oa_mr, ob_mr = alloc.ddr([64, 64], _FP32), alloc.ddr([64, 64], _FP32)
+            out_a = f.param("output_a", _tensor_t([64, 64], _FP32, oa_mr), direction=ir.ParamDirection.Out)
+            out_b = f.param("output_b", _tensor_t([64, 64], _FP32, ob_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, pa_mr, b_mr, pb_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            view_in = _make_tile_view([48, 64])
+            view_max = _make_tile_view([64, 64], ir.PadValue.max)
+            tile_a = ib.let(
+                "tile_a",
+                tile.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64]),
+                type=_tile_t_with_view([64, 64], _FP32, a_mr, view_in),
+            )
+            padded_a = ib.let(
+                "padded_a",
+                tile.fillpad(tile_a, pad_value=ir.PadValue.max),
+                type=_tile_t_with_view([64, 64], _FP32, pa_mr, view_max),
+            )
+            ib.let("_res_a", tile.store(padded_a, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, oa_mr))
+            tile_b = ib.let(
+                "tile_b",
+                tile.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64]),
+                type=_tile_t_with_view([64, 64], _FP32, b_mr, view_in),
+            )
+            padded_b = ib.let(
+                "padded_b",
+                tile.fillpad(tile_b, pad_value=ir.PadValue.max),
+                type=_tile_t_with_view([64, 64], _FP32, pb_mr, view_max),
+            )
+            result = ib.let(
+                "result", tile.store(padded_b, [0, 0], out_b), type=_tensor_t([64, 64], _FP32, ob_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                output_a: pl.Tensor[[64, 64], pl.FP32],
-                output_b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_a: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_a, pad_value=pl.PadValue.max)
-                _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_a, [0, 0], output_a)
-
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], valid_shapes=[48, 64])
-                padded_b: pl.Tile[[64, 64], pl.FP32] = pl.fillpad(tile_b, pad_value=pl.PadValue.max)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(padded_b, [0, 0], output_b)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # Same attributes → reuse allowed
         _assert_shares_memref(func, "tile_a", "tile_b")
         _assert_shares_memref(func, "padded_a", "padded_b")
 
 
 class TestViewOperationsMemoryReuse:
-    """Tests for view operations (reshape/view/transpose) with memory reuse."""
+    """Tests for view operations (reshape) with memory reuse."""
 
     def test_reshape_shares_memref_with_input(self):
         """Single reshape operation should share MemRef with input tile."""
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self, input_a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[4096, 1], pl.FP32] = pl.reshape(tile_a, [4096, 1])
-                tile_c: pl.Tile[[4096, 1], pl.FP32] = pl.add(tile_b, tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.reshape(tile_c, [64, 64])
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], output)
-                return result
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr = alloc.vec([64, 64], _FP32)
+            c_mr = alloc.vec([4096, 1], _FP32)
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            # reshape shares MemRef with input
+            tile_b = ib.let("tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
+            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([4096, 1], _FP32, c_mr))
+            # reshape shares MemRef with input
+            tile_d = ib.let("tile_d", tile.reshape(tile_c, [64, 64]), type=_tile_t([64, 64], _FP32, c_mr))
+            result = ib.let(
+                "result", tile.store(tile_d, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # tile_b should share MemRef with tile_a (view operation)
         _assert_shares_memref(func, "tile_a", "tile_b")
-        # tile_d should share MemRef with tile_c (view operation)
         _assert_shares_memref(func, "tile_c", "tile_d")
 
     def test_reshape_chain_shares_memref(self):
         """Chained reshapes should all share the same MemRef."""
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self, input_a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[4096, 1], pl.FP32] = pl.reshape(tile_a, [4096, 1])
-                tile_c: pl.Tile[[1, 4096], pl.FP32] = pl.reshape(tile_b, [1, 4096])
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.reshape(tile_c, [64, 64])
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_d, [0, 0], output)
-                return result
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr = alloc.vec([64, 64], _FP32)
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            tile_b = ib.let("tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
+            tile_c = ib.let("tile_c", tile.reshape(tile_b, [1, 4096]), type=_tile_t([1, 4096], _FP32, a_mr))
+            tile_d = ib.let("tile_d", tile.reshape(tile_c, [64, 64]), type=_tile_t([64, 64], _FP32, a_mr))
+            result = ib.let(
+                "result", tile.store(tile_d, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # All tiles in the chain should share the same MemRef
         _assert_shares_memref(func, "tile_a", "tile_b")
         _assert_shares_memref(func, "tile_b", "tile_c")
         _assert_shares_memref(func, "tile_c", "tile_d")
-        # Transitive: tile_a and tile_d should also share
         _assert_shares_memref(func, "tile_a", "tile_d")
 
     def test_reshape_not_broken_by_memory_reuse(self):
         """BasicMemoryReuse should propagate reuse to ALL variables sharing MemRef."""
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self, input_a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                # tile_c is dead before tile_a/tile_b are defined
-                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                _tile_d: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_c, tile_c)
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            c_mr, d_mr, a_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            # tile_c is dead before tile_a/tile_b are defined
+            tile_c = ib.let(
+                "tile_c", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, c_mr)
+            )
+            ib.let("_tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
+            # tile_a and _tile_b share MemRef (reshape = view alias)
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            ib.let("_tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
+            # BasicMemoryReuse: tile_a reuses tile_c → _tile_b also gets tile_c's MemRef
+            tile_e = ib.let("tile_e", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-                # tile_a and tile_b share MemRef (from InitMemRef)
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                _tile_b: pl.Tile[[4096, 1], pl.FP32] = pl.reshape(tile_a, [4096, 1])
-
-                # BasicMemoryReuse should identify: tile_a can reuse tile_c
-                # When tile_a reuses tile_c, tile_b should ALSO get tile_c's MemRef
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # Verify tile_a and tile_b still share MemRef (propagated reuse)
         _assert_shares_memref(func, "tile_a", "_tile_b")
-        # Verify both reused tile_c's buffer
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_shares_memref(func, "_tile_b", "tile_c")
 
     def test_reshape_shared_buffer_can_be_reused_after_all_dead(self):
         """After all aliases are dead, shared buffer can be reused."""
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self, input_a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                # tile_a and tile_b share MemRef
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                _tile_b: pl.Tile[[4096, 1], pl.FP32] = pl.reshape(tile_a, [4096, 1])
-                _tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-                # Both tile_a and tile_b are dead after this point
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
+            out_mr = alloc.ddr([64, 64], _FP32)
+            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([64, 64], _FP32))
+            a_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
+            # tile_a and _tile_b share MemRef
+            tile_a = ib.let(
+                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
+            )
+            ib.let("_tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
+            ib.let("_tile_c", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, c_mr))
+            # Both tile_a and _tile_b are dead → tile_d can reuse the shared buffer
+            tile_d = ib.let(
+                "tile_d", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, d_mr)
+            )
+            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
+            result = ib.let(
+                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-                # tile_d can reuse the shared buffer (tile_a/tile_b)
-                tile_d: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_e: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_d, tile_d)
-                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_e, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # tile_a and tile_b should still share MemRef
         _assert_shares_memref(func, "tile_a", "_tile_b")
-        # tile_d should reuse the shared buffer (either tile_a or tile_b, they're the same)
         _assert_shares_memref(func, "tile_d", "tile_a")
 
 
 class TestInplaceSafetyCheck:
     """Tests verifying that ops marked not_inplace_safe block producer-consumer reuse."""
 
+    def _build_simple_op_test(self, op_fn, shape, dtype):
+        """Build a simple load → op → store program for inplace safety tests."""
+
+        def build(ib, f, alloc):
+            input_a = f.param("input_a", ir.TensorType(shape, dtype))
+            out_mr = alloc.ddr(shape, dtype)
+            output = f.param("output", _tensor_t(shape, dtype, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType(shape, dtype))
+            a_mr, b_mr = alloc.vec(shape, dtype), alloc.vec(shape, dtype)
+            tile_a = ib.let("tile_a", tile.load(input_a, [0, 0], shape), type=_tile_t(shape, dtype, a_mr))
+            tile_b = ib.let("tile_b", op_fn(tile_a), type=_tile_t(shape, dtype, b_mr))
+            result = ib.let(
+                "result", tile.store(tile_b, [0, 0], output), type=_tensor_t(shape, dtype, out_mr)
+            )
+            ib.return_stmt(result)
+
+        return _run_reuse(_build_program(build))
+
     def test_inplace_unsafe_op_no_producer_consumer_reuse(self):
-        """tile.recip must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.recip does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.FP32],
-                output: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.recip(tile_a)
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        """tile.recip must NOT reuse its input's buffer."""
+        func = self._build_simple_op_test(tile.recip, [32, 32], _FP32)
         _assert_all_have_memrefs(func)
-        # tile.recip does not support in-place: tile_b must have its own MemRef
         _assert_not_shares_memref(func, "tile_a", "tile_b")
 
     def test_inplace_unsafe_op_allows_non_producer_consumer_reuse(self):
-        """tile.recip output does not share a buffer with its input (tile_x) in any case.
+        """tile.recip output must never share a buffer with its input."""
 
-        tile_c is freed strictly before tile_b's definition and tile_x occupies
-        tile_a's buffer.  The key correctness property is that tile_b (result of
-        recip(tile_x)) must never end up in the same buffer as tile_x regardless of
-        how many dead buffers are available for reuse.
-        """
+        def build(ib, f, alloc):
+            in_a = f.param("input_a", ir.TensorType([32, 32], _FP32))
+            in_c = f.param("input_c", ir.TensorType([32, 32], _FP32))
+            in_x = f.param("input_x", ir.TensorType([32, 32], _FP32))
+            out_mr = alloc.ddr([32, 32], _FP32)
+            output = f.param("output", _tensor_t([32, 32], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([32, 32], _FP32))
+            a_mr, c_mr, x_mr, b_mr = (alloc.vec([32, 32], _FP32) for _ in range(4))
+            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, a_mr))
+            ib.let("_s1", tile.store(tile_a, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr))
+            tile_c = ib.let("tile_c", tile.load(in_c, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, c_mr))
+            ib.let("_s2", tile.store(tile_c, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr))
+            tile_x = ib.let("tile_x", tile.load(in_x, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, x_mr))
+            tile_b = ib.let("tile_b", tile.recip(tile_x), type=_tile_t([32, 32], _FP32, b_mr))
+            result = ib.let(
+                "result", tile.store(tile_b, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.FP32],
-                input_c: pl.Tensor[[32, 32], pl.FP32],
-                input_x: pl.Tensor[[32, 32], pl.FP32],
-                output: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                # Two separate dead buffers before recip is called
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(input_a, [0, 0], [32, 32])
-                _s1: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_a, [0, 0], output)
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.load(input_c, [0, 0], [32, 32])
-                _s2: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                # tile_x reuses one of the dead buffers
-                tile_x: pl.Tile[[32, 32], pl.FP32] = pl.load(input_x, [0, 0], [32, 32])
-                # tile_b = recip(tile_x): inplace-unsafe, must not share buffer with tile_x
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.recip(tile_x)
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # Core correctness: tile.recip output must never share a buffer with its input
         _assert_not_shares_memref(func, "tile_x", "tile_b")
 
     def test_inplace_safe_op_allows_producer_consumer_reuse(self):
-        """tile.add (inplace-safe by default) CAN reuse its input's buffer.
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.add supports
-        in-place execution, so tile_b is allowed to reuse tile_a's MemRef.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.FP32],
-                output: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_a, tile_a)
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        """tile.add (inplace-safe) CAN reuse its input's buffer."""
+        func = self._build_simple_op_test(lambda t: tile.add(t, t), [32, 32], _FP32)
         _assert_all_have_memrefs(func)
-        # tile.add is inplace-safe: producer-consumer reuse is allowed
         _assert_shares_memref(func, "tile_a", "tile_b")
 
     def test_ands_no_producer_consumer_reuse(self):
-        """tile.ands must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.ands does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.ands(tile_a, 255)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        """tile.ands must NOT reuse its input's buffer."""
+        func = self._build_simple_op_test(lambda t: tile.ands(t, 255), [32, 32], _INT32)
         _assert_all_have_memrefs(func)
-        # tile.ands does not support in-place: tile_b must have its own MemRef
         _assert_not_shares_memref(func, "tile_a", "tile_b")
 
     def test_ors_no_producer_consumer_reuse(self):
-        """tile.ors must NOT reuse its input's buffer when last_use == def (src == dst).
-
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.ors does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.ors(tile_a, 255)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        """tile.ors must NOT reuse its input's buffer."""
+        func = self._build_simple_op_test(lambda t: tile.ors(t, 255), [32, 32], _INT32)
         _assert_all_have_memrefs(func)
-        # tile.ors does not support in-place: tile_b must have its own MemRef
         _assert_not_shares_memref(func, "tile_a", "tile_b")
 
     def test_xors_no_producer_consumer_reuse(self):
-        """tile.xors must NOT reuse its input's buffer when last_use == def (src == dst).
+        """tile.xors must NOT reuse its input's buffer."""
 
-        tile_a.last_use == tile_b.def (producer-consumer), but tile.xors does not
-        support in-place execution, so tile_b must get a distinct MemRef from tile_a.
-        tile_tmp is loaded from a separate tensor to ensure it has a MemRef assigned.
-        """
+        def build(ib, f, alloc):
+            in_a = f.param("input_a", ir.TensorType([32, 32], _INT32))
+            in_b = f.param("input_b", ir.TensorType([32, 32], _INT32))
+            out_mr = alloc.ddr([32, 32], _INT32)
+            output = f.param("output", _tensor_t([32, 32], _INT32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([32, 32], _INT32))
+            a_mr, tmp_mr, b_mr = (alloc.vec([32, 32], _INT32) for _ in range(3))
+            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [32, 32]), type=_tile_t([32, 32], _INT32, a_mr))
+            tile_tmp = ib.let(
+                "tile_tmp", tile.load(in_b, [0, 0], [32, 32]), type=_tile_t([32, 32], _INT32, tmp_mr)
+            )
+            tile_b = ib.let("tile_b", tile.xors(tile_a, 255, tile_tmp), type=_tile_t([32, 32], _INT32, b_mr))
+            result = ib.let(
+                "result", tile.store(tile_b, [0, 0], output), type=_tensor_t([32, 32], _INT32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.INT32],
-                input_b: pl.Tensor[[32, 32], pl.INT32],
-                output: pl.Tensor[[32, 32], pl.INT32],
-            ) -> pl.Tensor[[32, 32], pl.INT32]:
-                tile_a: pl.Tile[[32, 32], pl.INT32] = pl.load(input_a, [0, 0], [32, 32])
-                tile_tmp: pl.Tile[[32, 32], pl.INT32] = pl.load(input_b, [0, 0], [32, 32])
-                tile_b: pl.Tile[[32, 32], pl.INT32] = pl.xors(tile_a, 255, tile_tmp)
-                result: pl.Tensor[[32, 32], pl.INT32] = pl.store(tile_b, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # tile.xors does not support in-place: tile_b must have its own MemRef
         _assert_not_shares_memref(func, "tile_a", "tile_b")
 
     def test_inplace_unsafe_two_level_transitive_chain(self):
-        """tile.recip must not reuse a buffer occupied by its input via a two-level chain.
+        """tile.recip must not reuse a buffer occupied by its input via a two-level chain."""
 
-        Timeline (statement order):
-          stmt 0: tile_a = load(input_a)              tile_a.def=0, last_use=1
-          stmt 1: tile_b = add(tile_a, tile_a)        tile_b.def=1, last_use=2
-          stmt 2: _s1   = store(tile_b, output)       tile_b last use
-          stmt 3: tile_u = load(input_u)              tile_u.def=3, last_use=5
-          stmt 4: tile_d = add(tile_u, tile_u)        tile_d.def=4, last_use=6
-          stmt 5: _s2   = store(tile_u, output)       tile_u last use (> tile_d.def)
-          stmt 6: tile_c = recip(tile_d)              tile_c.def=6, recip is inplace-unsafe
-          stmt 7: result = store(tile_c, output)
+        def build(ib, f, alloc):
+            in_a = f.param("input_a", ir.TensorType([32, 32], _FP32))
+            in_u = f.param("input_u", ir.TensorType([32, 32], _FP32))
+            out_mr = alloc.ddr([32, 32], _FP32)
+            output = f.param("output", _tensor_t([32, 32], _FP32, out_mr), direction=ir.ParamDirection.Out)
+            f.return_type(ir.TensorType([32, 32], _FP32))
+            a_mr, b_mr, u_mr, d_mr, c_mr = (alloc.vec([32, 32], _FP32) for _ in range(5))
+            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, a_mr))
+            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([32, 32], _FP32, b_mr))
+            ib.let("_s1", tile.store(tile_b, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr))
+            tile_u = ib.let("tile_u", tile.load(in_u, [0, 0], [32, 32]), type=_tile_t([32, 32], _FP32, u_mr))
+            tile_d = ib.let("tile_d", tile.add(tile_u, tile_u), type=_tile_t([32, 32], _FP32, d_mr))
+            ib.let("_s2", tile.store(tile_u, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr))
+            tile_c = ib.let("tile_c", tile.recip(tile_d), type=_tile_t([32, 32], _FP32, c_mr))
+            result = ib.let(
+                "result", tile.store(tile_c, [0, 0], output), type=_tensor_t([32, 32], _FP32, out_mr)
+            )
+            ib.return_stmt(result)
 
-        Greedy reuse chain (without fix):
-          tile_b reuses tile_a  →  memref_users[tile_a] = [tile_b]
-          tile_u reuses tile_a  →  memref_users[tile_a] = [tile_b, tile_u]
-          tile_d cannot reuse tile_a (tile_u.last_use=5 > tile_d.def=4 → overlap)
-          tile_d reuses tile_b  →  memref_users[tile_b] = [tile_d]
-          tile_c tries tile_a: direct conflict (tile_a.last_use=1 != 6) and indirect
-          (tile_b.last_use=2!=6, tile_u.last_use=5!=6) both miss tile_d
-          BUG: tile_c reuses tile_a even though tile_d (= tile_a's physical buffer)
-          has last_use=6 == tile_c.def=6 → recip(tile_d) executes with src == dst.
-
-        After fix: tile_d is propagated into memref_users[tile_a] when it reuses
-        tile_b, so tile_d.last_use(6) == tile_c.def(6) is detected → reuse blocked.
-        """
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[32, 32], pl.FP32],
-                input_u: pl.Tensor[[32, 32], pl.FP32],
-                output: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                # tile_a: last use at stmt 1 (tile_b definition)
-                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(input_a, [0, 0], [32, 32])
-                # tile_b reuses tile_a (add is inplace-safe, producer-consumer OK)
-                tile_b: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_a, tile_a)
-                # tile_b last use at stmt 2
-                _s1: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_b, [0, 0], output)
-                # tile_u reuses tile_a (tile_b is done before stmt 3)
-                tile_u: pl.Tile[[32, 32], pl.FP32] = pl.load(input_u, [0, 0], [32, 32])
-                # tile_d reuses tile_b (tile_u overlap at stmt 5 blocks tile_a for tile_d)
-                tile_d: pl.Tile[[32, 32], pl.FP32] = pl.add(tile_u, tile_u)
-                # tile_u last use at stmt 5, which is AFTER tile_d.def (stmt 4)
-                _s2: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_u, [0, 0], output)
-                # tile_c = recip(tile_d): inplace-unsafe, must NOT share buffer with tile_d
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.recip(tile_d)
-                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_c, [0, 0], output)
-                return result
-
-        func = _prepare_and_run_memory_reuse(Before)
-
+        func = _run_reuse(_build_program(build))
         _assert_all_have_memrefs(func)
-        # tile.recip is inplace-unsafe: tile_c must not share a buffer with its input tile_d.
-        # tile_d physically occupies tile_a's buffer (via chain tile_d→tile_b→tile_a),
-        # so this also verifies that the two-level transitive chain is detected.
         _assert_not_shares_memref(func, "tile_d", "tile_c")
 
 
-def _iter_all_assign_stmts(stmt):
-    """Recursively iterate all AssignStmt in a statement tree (enters ForStmt/IfStmt/WhileStmt bodies)."""
-    if isinstance(stmt, ir.AssignStmt):
-        yield stmt
-    elif isinstance(stmt, ir.SeqStmts):
-        for child in stmt.stmts:
-            yield from _iter_all_assign_stmts(child)
-    elif isinstance(stmt, ir.OpStmts):
-        for child in stmt.stmts:
-            yield from _iter_all_assign_stmts(child)
-    elif isinstance(stmt, ir.ForStmt):
-        yield from _iter_all_assign_stmts(stmt.body)
-    elif isinstance(stmt, ir.IfStmt):
-        yield from _iter_all_assign_stmts(stmt.then_body)
-        if stmt.else_body is not None:
-            yield from _iter_all_assign_stmts(stmt.else_body)
-    elif isinstance(stmt, ir.WhileStmt):
-        yield from _iter_all_assign_stmts(stmt.body)
-
-
-def _get_var_type_recursive(func, var_name):
-    """Extract ShapedType for a variable by name, searching the full statement tree."""
-    for stmt in _iter_all_assign_stmts(func.body):
-        if stmt.var.name_hint == var_name:
-            if isinstance(stmt.var.type, ir.ShapedType):
-                return stmt.var.type
-    return None
-
-
-def _assert_not_shares_memref_recursive(func, var_a, var_b):
-    """Assert two variables do NOT share MemRef, searching the full statement tree."""
-    type_a = _get_var_type_recursive(func, var_a)
-    type_b = _get_var_type_recursive(func, var_b)
-    assert type_a is not None, f"{var_a} should have ShapedType"
-    assert type_b is not None, f"{var_b} should have ShapedType"
-    assert not type_a.shares_memref_with(type_b), f"{var_b} should NOT share MemRef with {var_a}"
+# ---------------------------------------------------------------------------
+# ForStmt yield fixup helpers and tests
+# ---------------------------------------------------------------------------
 
 
 def _find_first_for_stmt(stmt):
     """Return the first ForStmt found in a statement tree."""
     if isinstance(stmt, ir.ForStmt):
         return stmt
-    if isinstance(stmt, ir.SeqStmts):
+    if isinstance(stmt, (ir.SeqStmts, ir.OpStmts)):
         for child in stmt.stmts:
             found = _find_first_for_stmt(child)
             if found is not None:
                 return found
-    if isinstance(stmt, ir.OpStmts):
-        for child in stmt.stmts:
-            found = _find_first_for_stmt(child)
-            if found is not None:
-                return found
-    if isinstance(stmt, ir.ScopeStmt):
-        return _find_first_for_stmt(stmt.body)
-    if isinstance(stmt, ir.IfStmt):
-        found = _find_first_for_stmt(stmt.then_body)
-        if found is not None:
-            return found
-        if stmt.else_body is not None:
-            return _find_first_for_stmt(stmt.else_body)
-    if isinstance(stmt, ir.WhileStmt):
-        return _find_first_for_stmt(stmt.body)
     return None
 
 
-class TestYieldAndInitValueAliasing:
-    """Tests for yield and init_value aliasing prevention (issue #585)."""
+def _has_tile_move(stmt):
+    """Check if a statement tree contains a tile.move AssignStmt."""
+    for s in _iter_all_assign_stmts(stmt):
+        if isinstance(s.value, ir.Call) and s.value.op.name == "tile.move":
+            return True
+    return False
 
-    @pl.program
-    class _TestProgram:
-        """Shared program with two accumulators in a for-loop with yield."""
 
-        @pl.function
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32],
-            input_b: pl.Tensor[[64, 64], pl.FP32],
-            output: pl.Tensor[[64, 64], pl.FP32],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            gate_init: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-            up_init: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-            for _i, (gate_acc, up_acc) in pl.range(4, init_values=(gate_init, up_init)):
-                chunk: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                gate_new: pl.Tile[[64, 64], pl.FP32] = pl.add(gate_acc, chunk)
-                up_new: pl.Tile[[64, 64], pl.FP32] = pl.add(up_acc, chunk)
-                gate_out, _up_out = pl.yield_(gate_new, up_new)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(gate_out, [0, 0], output)
-            return result
+def _build_for_loop_program(init_mrs, yield_mrs, add_overlap=False, shape=None, dtype=None):
+    """Build a Program with a ForStmt whose initValue/yield can have different MemRefs.
 
-    def test_yield_prevents_aliasing_of_simultaneously_live_tiles(self):
-        """Two tile accumulators inside a loop, both yielded, must NOT share MemRef.
+    Args:
+        init_mrs: list of MemRef for each initValue/iter_arg (Group A).
+        yield_mrs: list of MemRef for each yield value/return_var (Group B).
+        add_overlap: if True, adds extra tile usage that prevents reuse between
+            iter_arg and yield value (forces tile.move insertion).
+    """
+    if shape is None:
+        shape = [64, 64]
+    if dtype is None:
+        dtype = _FP32
+    n_iters = len(init_mrs)
 
-        gate_new and up_new are both live at the yield point, so their lifetimes
-        overlap. Without the YieldStmt fix, the yield was silently skipped and
-        both tiles appeared dead, causing incorrect aliasing.
-        """
-        func = _prepare_and_run_memory_reuse(self._TestProgram)
+    # Seed allocator past the max incoming MemRef ID to avoid collisions
+    max_id = max(mr.id_ for mr in (*init_mrs, *yield_mrs))
+    alloc = _MemRefAlloc(start_id=max_id + 1)
+    input_tensor = ir.Var("input_tensor", ir.TensorType(shape, dtype), _SPAN)
 
-        # gate_new and up_new are both live at the yield → must NOT share MemRef
-        _assert_not_shares_memref_recursive(func, "gate_new", "up_new")
+    # Create init tiles (before loop)
+    init_tiles = []
+    init_stmts = []
+    for i, mr in enumerate(init_mrs):
+        init_tt = _tile_t(shape, dtype, mr)
+        init_tile = ir.Var(f"init_{i}", init_tt, _SPAN)
+        load_call = ir.Call(
+            ir.get_op("tile.load"),
+            [
+                input_tensor,
+                ir.MakeTuple([_ci(0)] * len(shape), _SPAN),
+                ir.MakeTuple([_ci(s) for s in shape], _SPAN),
+            ],
+            init_tt,
+            _SPAN,
+        )
+        init_stmts.append(ir.AssignStmt(init_tile, load_call, _SPAN))
+        init_tiles.append(init_tile)
 
-    def test_init_values_prevent_aliasing_of_loop_inputs(self):
-        """Two tiles used as init_values must NOT share MemRef.
+    # Create iter_args and return_vars
+    iter_args = []
+    return_vars = []
+    for i in range(n_iters):
+        ia = ir.IterArg(f"acc_{i}", _tile_t(shape, dtype, init_mrs[i]), init_tiles[i], _SPAN)
+        iter_args.append(ia)
+        rv = ir.Var(f"out_{i}", _tile_t(shape, dtype, yield_mrs[i]), _SPAN)
+        return_vars.append(rv)
 
-        gate_init and up_init are both consumed at the loop entry point as
-        init_values. Without the ForStmt init_value fix, these variables
-        appeared dead and got incorrectly aliased.
-        """
-        func = _prepare_and_run_memory_reuse(self._TestProgram)
+    # Build loop body
+    body_stmts = []
+    yield_values = []
+    for i in range(n_iters):
+        if add_overlap:
+            # Load a temporary tile to keep iter_arg alive past next_i's def,
+            # preventing reuse of iter_arg's MemRef by next_i.
+            extra_mr = alloc.vec(shape, dtype)
+            extra_var = ir.Var(f"extra_{i}", _tile_t(shape, dtype, extra_mr), _SPAN)
+            extra_call = ir.Call(ir.get_op("tile.add"), [iter_args[i], iter_args[i]], _SPAN)
+            body_stmts.append(ir.AssignStmt(extra_var, extra_call, _SPAN))
+            # next_i uses extra_i (iter_arg still alive via extra_i computation)
+            next_tt = _tile_t(shape, dtype, yield_mrs[i])
+            next_var = ir.Var(f"next_{i}", next_tt, _SPAN)
+            add_call = ir.Call(ir.get_op("tile.add"), [extra_var, iter_args[i]], next_tt, _SPAN)
+            body_stmts.append(ir.AssignStmt(next_var, add_call, _SPAN))
+        else:
+            next_tt = _tile_t(shape, dtype, yield_mrs[i])
+            next_var = ir.Var(f"next_{i}", next_tt, _SPAN)
+            add_call = ir.Call(ir.get_op("tile.add"), [iter_args[i], iter_args[i]], next_tt, _SPAN)
+            body_stmts.append(ir.AssignStmt(next_var, add_call, _SPAN))
+        yield_values.append(next_var)
 
-        # gate_init and up_init are both used as init_values → must NOT share MemRef
-        _assert_not_shares_memref_recursive(func, "gate_init", "up_init")
+    loop_body = ir.SeqStmts([ir.OpStmts(body_stmts, _SPAN), ir.YieldStmt(yield_values, _SPAN)], _SPAN)
 
-    def test_loop_fixup_rewrites_iter_arg_body_refs_and_removes_stale_alloc(self):
-        """Loop fixup should rewrite body IterArg refs to the reused init buffer."""
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), _SPAN)
+    loop_stmt = ir.ForStmt(loop_var, _ci(0), _ci(4), _ci(1), iter_args, loop_body, return_vars, _SPAN)
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                data: pl.Tensor[[16, 512], pl.FP32],
-                out: pl.Tensor[[16, 1], pl.FP32],
-            ) -> pl.Tensor[[16, 1], pl.FP32]:
-                acc_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
-                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                init_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_tile, 0.0)
-                for i, (acc_iter,) in pl.range(2, init_values=(init_tile,)):
-                    offset: pl.Scalar[pl.INDEX] = i * 256
-                    chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, offset], [16, 256])
-                    tmp: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
-                        [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                    )
-                    partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
-                    updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_iter, partial)
-                    updated_mv: pl.Tile[[16, 1], pl.FP32] = pl.tile.move(
-                        updated, target_memory=pl.MemorySpace.Vec
-                    )
-                    result = pl.yield_(updated_mv)
-                final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
-                return final
+    # Store first return_var and return
+    out_mr = alloc.ddr(shape, dtype)
+    out_tensor = ir.Var("output", _tensor_t(shape, dtype, out_mr), _SPAN)
+    store_call = ir.Call(
+        ir.get_op("tile.store"),
+        [return_vars[0], ir.MakeTuple([_ci(0)] * len(shape), _SPAN), out_tensor],
+        _tensor_t(shape, dtype, out_mr),
+        _SPAN,
+    )
+    result_var = ir.Var("result", _tensor_t(shape, dtype, out_mr), _SPAN)
+    store_stmt = ir.AssignStmt(result_var, store_call, _SPAN)
 
-        initialized = passes.init_mem_ref()(Before)
-        before_func = list(initialized.functions.values())[0]
-        before_alloc_count = _count_alloc_stmts(before_func)
+    body = ir.SeqStmts(
+        [
+            ir.OpStmts(init_stmts, _SPAN),
+            loop_stmt,
+            ir.OpStmts([store_stmt], _SPAN),
+            ir.ReturnStmt([result_var], _SPAN),
+        ],
+        _SPAN,
+    )
+    func = ir.Function(
+        "main",
+        [(input_tensor, ir.ParamDirection.In), (out_tensor, ir.ParamDirection.Out)],
+        [_tensor_t(shape, dtype)],
+        body,
+        _SPAN,
+    )
+    return ir.Program([func], "TestProgram", _SPAN)
 
-        After = passes.basic_memory_reuse()(initialized)
-        func = list(After.functions.values())[0]
+
+class TestForStmtYieldFixup:
+    """Tests for ForStmt yield fixup — ensuring all 4 loop-carry variables share one MemRef."""
+
+    def test_tile_move_inserted_when_memrefs_diverge(self):
+        """When initValue and yield value start with different MemRefs,
+        the pass should unify all loop-carry vars to share one MemRef."""
+        alloc = _MemRefAlloc()
+        init_mr = alloc.vec([64, 64], _FP32)
+        yield_mr = alloc.vec([64, 64], _FP32)
+        assert init_mr.id_ != yield_mr.id_, "precondition: MemRefs start different"
+        # add_overlap=True adds extra usage to prevent trivial producer-consumer reuse
+        prog = _build_for_loop_program([init_mr], [yield_mr], add_overlap=True)
+
+        after = passes.basic_memory_reuse()(prog)
+        func = next(iter(after.functions.values()))
 
         loop = _find_first_for_stmt(func.body)
-        assert loop is not None, "Expected a ForStmt in transformed function"
-        assert len(loop.iter_args) == 1
+        assert loop is not None
 
-        iter_arg = loop.iter_args[0]
-        assert isinstance(iter_arg.initValue, ir.Var)
-        assert isinstance(iter_arg.type, ir.ShapedType)
-        assert isinstance(iter_arg.initValue.type, ir.ShapedType)
-        assert iter_arg.type.shares_memref_with(iter_arg.initValue.type), (
-            "Loop-carried IterArg should share the initValue MemRef after fixup"
-        )
+        # After fixup: iter_arg, initValue, and return_var should all share one MemRef
+        ia = loop.iter_args[0]
+        assert isinstance(ia.initValue.type, ir.ShapedType)
+        assert isinstance(ia.type, ir.ShapedType)
+        assert ia.type.shares_memref_with(ia.initValue.type), "iter_arg should share initValue's MemRef"
 
-        after_alloc_count = _count_alloc_stmts(func)
-        assert after_alloc_count < before_alloc_count, (
-            f"Expected stale alloc cleanup after loop fixup, got before={before_alloc_count}, "
-            f"after={after_alloc_count}"
-        )
+        rv = loop.return_vars[0]
+        assert isinstance(rv.type, ir.ShapedType)
+        assert rv.type.shares_memref_with(ia.type), "return_var should share iter_arg's MemRef"
 
-    def test_return_prevents_aliasing_of_simultaneously_live_tiles(self):
-        """Two tiles both live at the return point must NOT share MemRef."""
+    def test_no_tile_move_when_memrefs_match(self):
+        """When initValue and yield value already share MemRef, no tile.move is needed."""
+        alloc = _MemRefAlloc()
+        shared_mr = alloc.vec([64, 64], _FP32)
+        prog = _build_for_loop_program([shared_mr], [shared_mr])
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[64, 64], pl.FP32],
-                input_b: pl.Tensor[[64, 64], pl.FP32],
-                output_a: pl.Tensor[[64, 64], pl.FP32],
-                output_b: pl.Tensor[[64, 64], pl.FP32],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
-                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.load(input_b, [0, 0], [64, 64])
-                result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
-                _result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
-                return result_a
+        after = passes.basic_memory_reuse()(prog)
+        func = next(iter(after.functions.values()))
 
-        func = _prepare_and_run_memory_reuse(Before)
+        loop = _find_first_for_stmt(func.body)
+        assert loop is not None
+        assert not _has_tile_move(loop.body), "No tile.move needed when MemRefs already match"
 
-        # tile_a and tile_b are both live (used in store) → must NOT share MemRef
-        _assert_not_shares_memref_recursive(func, "tile_a", "tile_b")
+        ia = loop.iter_args[0]
+        assert isinstance(ia.initValue.type, ir.ShapedType)
+        assert isinstance(ia.type, ir.ShapedType)
+        assert ia.type.shares_memref_with(ia.initValue.type)
 
-    def test_while_init_values_prevent_aliasing(self):
-        """Two tiles used as while-loop init_values must NOT share MemRef."""
+        rv = loop.return_vars[0]
+        assert isinstance(rv.type, ir.ShapedType)
+        assert rv.type.shares_memref_with(ia.type), "return_var should share iter_arg's MemRef"
 
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                input_a: pl.Tensor[[4], pl.FP32],
-                input_b: pl.Tensor[[4], pl.FP32],
-                output: pl.Tensor[[4], pl.FP32],
-            ) -> pl.Tensor[[4], pl.FP32]:
-                gate_init: pl.Tile[[4], pl.FP32] = pl.load(input_a, [0], [4])
-                up_init: pl.Tile[[4], pl.FP32] = pl.load(input_b, [0], [4])
-                n: pl.Scalar[pl.INT64] = 0
-                for gate_acc, up_acc in pl.while_(init_values=(gate_init, up_init)):
-                    pl.cond(n < 4)
-                    chunk: pl.Tile[[4], pl.FP32] = pl.load(input_a, [0], [4])
-                    gate_new: pl.Tile[[4], pl.FP32] = pl.add(gate_acc, chunk)
-                    up_new: pl.Tile[[4], pl.FP32] = pl.add(up_acc, chunk)
-                    _gate_out, _up_out = pl.yield_(gate_new, up_new)
-                result: pl.Tensor[[4], pl.FP32] = pl.store(_gate_out, [0], output)
-                return result
+    def test_multiple_iter_args_partial_mismatch(self):
+        """With 2 iter_args, tile.move inserted only for the mismatched pair."""
+        alloc = _MemRefAlloc()
+        # First iter_arg: MemRefs match (no move needed)
+        shared_mr = alloc.vec([64, 64], _FP32)
+        # Second iter_arg: MemRefs differ (move needed)
+        init_mr_2 = alloc.vec([64, 64], _FP32)
+        yield_mr_2 = alloc.vec([64, 64], _FP32)
 
-        func = _prepare_and_run_memory_reuse(Before)
+        prog = _build_for_loop_program([shared_mr, init_mr_2], [shared_mr, yield_mr_2], add_overlap=True)
 
-        # gate_init and up_init are both used as while-loop init_values → must NOT share MemRef
-        _assert_not_shares_memref_recursive(func, "gate_init", "up_init")
+        after = passes.basic_memory_reuse()(prog)
+        func = next(iter(after.functions.values()))
+
+        loop = _find_first_for_stmt(func.body)
+        assert loop is not None
+        assert len(loop.iter_args) == 2
+
+        # Both iter_args should share their initValue's MemRef, and return_vars should match
+        for i in range(2):
+            ia = loop.iter_args[i]
+            assert isinstance(ia.initValue.type, ir.ShapedType)
+            assert isinstance(ia.type, ir.ShapedType)
+            assert ia.type.shares_memref_with(ia.initValue.type), (
+                f"iter_arg[{i}] should share initValue's MemRef"
+            )
+            rv = loop.return_vars[i]
+            assert isinstance(rv.type, ir.ShapedType)
+            assert rv.type.shares_memref_with(ia.type), f"return_var[{i}] should share iter_arg's MemRef"
 
 
 if __name__ == "__main__":
