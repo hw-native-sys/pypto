@@ -200,6 +200,29 @@ class TestPythonPrinterProgram:
         except SyntaxError as e:
             pytest.fail(f"Printed code has invalid Python syntax: {e}")
 
+    def test_print_alloc_memref_names_in_tile_annotations(self):
+        """Use tile.alloc names in tile annotations when printing function bodies."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tile_a, tile_a)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(tile_b, [0, 0], out)
+                return result
+
+        after = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
+        code = after.as_python()
+
+        assert "pl.MemRefType = pl.tile.alloc(" in code
+        assert "pl.Tile[[64, 64], pl.FP32, mem_vec_" in code
+        assert "pl.Tile[[64, 64], pl.FP32, pl.MemRef(" not in code
+
 
 class TestPythonPrinterConstDtypeRoundtrip:
     """Tests for round-trip of constants with non-default dtypes."""

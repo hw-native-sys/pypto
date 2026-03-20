@@ -73,6 +73,43 @@ std::string CastModeToString(int mode) {
   }
 }
 
+template <typename DefNode>
+void BuildRenameMapForDefs(const std::vector<const DefNode*>& defs,
+                           std::unordered_map<const DefNode*, std::string>& rename_map,
+                           bool include_unique_names = false) {
+  rename_map.clear();
+
+  std::vector<const DefNode*> unique_defs;
+  unique_defs.reserve(defs.size());
+  std::unordered_set<const DefNode*> seen_defs;
+  for (const DefNode* def : defs) {
+    if (seen_defs.insert(def).second) unique_defs.push_back(def);
+  }
+
+  std::unordered_map<std::string, int> name_counts;
+  for (const DefNode* def : unique_defs) {
+    name_counts[def->name_hint_]++;
+  }
+
+  std::set<std::string> used_names;
+  for (const DefNode* def : unique_defs) {
+    const std::string& base_name = def->name_hint_;
+    if (name_counts[base_name] == 1) {
+      used_names.insert(base_name);
+      if (include_unique_names) rename_map[def] = base_name;
+      continue;
+    }
+
+    std::string candidate = base_name;
+    int suffix = 0;
+    while (!used_names.insert(candidate).second) {
+      ++suffix;
+      candidate = base_name + "_" + std::to_string(suffix);
+    }
+    rename_map[def] = candidate;
+  }
+}
+
 }  // namespace
 
 // Precedence mapping for each expression type
@@ -244,6 +281,11 @@ class IRPythonPrinter : public IRVisitor {
   // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
   std::unordered_map<const Var*, std::string> var_rename_map_;
 
+  // Per-function MemRef name map: MemRef pointer → printed alloc name.
+  // Built from tile.alloc definition sites so tile/tensor annotations can refer
+  // to the same named buffers instead of re-printing inline pl.MemRef(...).
+  std::unordered_map<const MemRef*, std::string> memref_rename_map_;
+
   // Helper methods
   std::string GetIndent() const;
   void IncreaseIndent();
@@ -252,9 +294,17 @@ class IRPythonPrinter : public IRVisitor {
   // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
   std::string GetVarName(const Var* var) const;
 
+  // Return the printed name for a MemRef when it is defined in the current
+  // function (for example by tile.alloc). Falls back to the original hint.
+  std::string GetMemRefName(const MemRef* memref) const;
+
   // Build var_rename_map_ for a function by scanning all Var def-sites in DFS pre-order.
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
   void BuildVarRenameMap(const FunctionPtr& func);
+
+  // Build memref_rename_map_ for a function from MemRef definition sites
+  // (currently tile.alloc assignments).
+  void BuildMemRefRenameMap(const FunctionPtr& func);
 
   // Print a statement block at current indent level.
   // SeqStmts/OpStmts are transparent containers - recursed into without extra indent.
@@ -423,7 +473,7 @@ void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << GetVarName(op.ge
 
 void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_hint_; }
 
-void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
+void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << GetMemRefName(op.get()); }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
@@ -1120,64 +1170,55 @@ static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& 
   }
 }
 
+// Collect MemRef definition sites in DFS pre-order for alloc name reuse.
+static void CollectMemRefDefsInOrder(const StmtPtr& stmt, std::vector<const MemRef*>& out) {
+  if (!stmt) return;
+  if (auto assign = As<AssignStmt>(stmt)) {
+    if (auto memref = As<MemRef>(assign->var_)) out.push_back(memref.get());
+  } else if (auto for_stmt = As<ForStmt>(stmt)) {
+    CollectMemRefDefsInOrder(for_stmt->body_, out);
+  } else if (auto if_stmt = As<IfStmt>(stmt)) {
+    CollectMemRefDefsInOrder(if_stmt->then_body_, out);
+    if (if_stmt->else_body_.has_value()) CollectMemRefDefsInOrder(*if_stmt->else_body_, out);
+  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+    CollectMemRefDefsInOrder(while_stmt->body_, out);
+  } else if (auto seq = As<SeqStmts>(stmt)) {
+    for (auto& s : seq->stmts_) CollectMemRefDefsInOrder(s, out);
+  } else if (auto ops = As<OpStmts>(stmt)) {
+    for (auto& s : ops->stmts_) CollectMemRefDefsInOrder(s, out);
+  } else if (auto scope = As<ScopeStmt>(stmt)) {
+    CollectMemRefDefsInOrder(scope->body_, out);
+  }
+}
+
 std::string IRPythonPrinter::GetVarName(const Var* var) const {
   auto it = var_rename_map_.find(var);
   if (it != var_rename_map_.end()) return it->second;
   return var->name_hint_;
 }
 
-void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
-  var_rename_map_.clear();
+std::string IRPythonPrinter::GetMemRefName(const MemRef* memref) const {
+  auto it = memref_rename_map_.find(memref);
+  if (it != memref_rename_map_.end()) return it->second;
+  return memref->name_hint_;
+}
 
+void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   // Collect all Var def-sites in DFS pre-order: params first, then body.
   std::vector<const Var*> defs;
   for (auto& p : func->params_) defs.push_back(p.get());
   if (func->body_) CollectVarDefsInOrder(func->body_, defs);
+  BuildRenameMapForDefs(defs, var_rename_map_);
+}
 
-  // Deduplicate by pointer (same Var object may appear as both param and assign target).
-  {
-    std::unordered_set<const Var*> seen;
-    std::vector<const Var*> unique_defs;
-    for (const Var* v : defs) {
-      if (seen.insert(v).second) unique_defs.push_back(v);
-    }
-    defs = std::move(unique_defs);
-  }
-
-  // Count occurrences of each name across distinct Var objects.
-  std::unordered_map<std::string, int> name_counts;
-  for (const Var* v : defs) name_counts[v->name_hint_]++;
-
-  // Assign printed names: unique names keep their original; duplicate names get suffixes.
-  std::set<std::string> used_names;
-  for (const Var* v : defs) {
-    if (name_counts[v->name_hint_] == 1) {
-      // No conflict — no rename map entry needed (GetVarName falls back to name_).
-      used_names.insert(v->name_hint_);
-    }
-  }
-  for (const Var* v : defs) {
-    if (name_counts[v->name_hint_] == 1) continue;  // Already handled above.
-    std::string candidate = v->name_hint_;
-    if (used_names.find(candidate) == used_names.end()) {
-      used_names.insert(candidate);
-      var_rename_map_[v] = candidate;
-    } else {
-      int suffix = 1;
-      while (true) {
-        candidate = v->name_hint_ + "_" + std::to_string(suffix);
-        if (used_names.find(candidate) == used_names.end()) {
-          used_names.insert(candidate);
-          var_rename_map_[v] = candidate;
-          break;
-        }
-        suffix++;
-      }
-    }
-  }
+void IRPythonPrinter::BuildMemRefRenameMap(const FunctionPtr& func) {
+  std::vector<const MemRef*> defs;
+  if (func->body_) CollectMemRefDefsInOrder(func->body_, defs);
+  BuildRenameMapForDefs(defs, memref_rename_map_, true);
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
+  BuildMemRefRenameMap(func);
   // Build rename map for this function to handle SSA name shadowing.
   BuildVarRenameMap(func);
 
@@ -1499,6 +1540,9 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 
 // Helper methods for MemRef and TileView printing
 std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
+  auto it = memref_rename_map_.find(&memref);
+  if (it != memref_rename_map_.end()) return it->second;
+
   std::ostringstream oss;
   oss << prefix_ << ".MemRef(";
 

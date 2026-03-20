@@ -753,6 +753,272 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
   return result;
 }
 
+class VarUseVisitor : public IRVisitor {
+ public:
+  explicit VarUseVisitor(const Var* target) : target_(target) {}
+
+  [[nodiscard]] bool Found() const { return found_; }
+  void CheckExpr(const ExprPtr& expr) { VisitExpr(expr); }
+  void CheckStmt(const StmtPtr& stmt) { VisitStmt(stmt); }
+
+ protected:
+  void VisitExpr(const ExprPtr& expr) override {
+    if (found_ || !expr) return;
+    IRVisitor::VisitExpr(expr);
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (found_ || !stmt) return;
+    IRVisitor::VisitStmt(stmt);
+  }
+
+  void VisitVarLike_(const VarPtr& op) override {
+    if (op.get() == target_) {
+      found_ = true;
+      return;
+    }
+  }
+
+  void VisitExpr_(const IterArgPtr& op) override { VisitVarLike_(op); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    VisitExpr(op->value_);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (!op) return;
+    VisitExpr(op->expr_);
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    if (!op) return;
+    for (const auto& value : op->value_) {
+      VisitExpr(value);
+      if (found_) return;
+    }
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    if (!op) return;
+    for (const auto& value : op->value_) {
+      VisitExpr(value);
+      if (found_) return;
+    }
+  }
+
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    if (!op) return;
+    for (const auto& stmt : op->stmts_) {
+      VisitStmt(stmt);
+      if (found_) return;
+    }
+  }
+
+  void VisitStmt_(const OpStmtsPtr& op) override {
+    if (!op) return;
+    for (const auto& stmt : op->stmts_) {
+      VisitStmt(stmt);
+      if (found_) return;
+    }
+  }
+
+  void VisitStmt_(const ScopeStmtPtr& op) override {
+    if (!op) return;
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    if (!op) return;
+    VisitExpr(op->condition_);
+    if (found_) return;
+    VisitStmt(op->then_body_);
+    if (found_ || !op->else_body_.has_value()) return;
+    VisitStmt(*op->else_body_);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (!op) return;
+    VisitExpr(op->start_);
+    if (found_) return;
+    VisitExpr(op->stop_);
+    if (found_) return;
+    VisitExpr(op->step_);
+    if (found_) return;
+    if (op->chunk_size_.has_value()) {
+      VisitExpr(*op->chunk_size_);
+      if (found_) return;
+    }
+    for (const auto& iter_arg : op->iter_args_) {
+      VisitExpr(iter_arg->initValue_);
+      if (found_) return;
+    }
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (!op) return;
+    VisitExpr(op->condition_);
+    if (found_) return;
+    for (const auto& iter_arg : op->iter_args_) {
+      VisitExpr(iter_arg->initValue_);
+      if (found_) return;
+    }
+    VisitStmt(op->body_);
+  }
+
+ private:
+  const Var* target_;
+  bool found_ = false;
+};
+
+bool ExprUsesVar(const ExprPtr& expr, const Var* target) {
+  if (!expr || !target) return false;
+  VarUseVisitor visitor(target);
+  visitor.CheckExpr(expr);
+  return visitor.Found();
+}
+
+bool StmtUsesVar(const StmtPtr& stmt, const Var* target) {
+  if (!stmt || !target) return false;
+  VarUseVisitor visitor(target);
+  visitor.CheckStmt(stmt);
+  return visitor.Found();
+}
+
+struct ReturnedAssembleLoopRewrite {
+  size_t stmt_index;
+  std::optional<size_t> dead_init_stmt_index;
+  ForStmtPtr new_for_stmt;
+  VarPtr new_return_var;
+};
+
+std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
+    const std::vector<StmtPtr>& stmts, const ExprPtr& ret_expr, const VarPtr& out_param,
+    const TensorTypePtr& out_tensor_type, const OpRegistry& op_registry) {
+  auto ret_var = As<Var>(ret_expr);
+  if (!ret_var) return std::nullopt;
+
+  for (size_t stmt_index = 0; stmt_index < stmts.size(); ++stmt_index) {
+    auto for_stmt = As<ForStmt>(stmts[stmt_index]);
+    if (!for_stmt || for_stmt->iter_args_.size() != 1 || for_stmt->return_vars_.size() != 1 ||
+        for_stmt->return_vars_[0].get() != ret_var.get()) {
+      continue;
+    }
+
+    const auto& old_iter_arg = for_stmt->iter_args_[0];
+    auto body_stmts = FlattenToStmts(for_stmt->body_);
+
+    AssignStmtPtr assemble_assign;
+    YieldStmtPtr yield_stmt;
+    for (const auto& body_stmt : body_stmts) {
+      auto assign = As<AssignStmt>(body_stmt);
+      if (assign) {
+        auto call = As<Call>(assign->value_);
+        bool is_target_assemble = false;
+        if (call && call->op_->name_ == "tile.assemble" && call->args_.size() == 3) {
+          if (auto iter = As<IterArg>(call->args_[0])) {
+            is_target_assemble = iter.get() == old_iter_arg.get();
+          } else if (auto var = As<Var>(call->args_[0])) {
+            is_target_assemble = var.get() == old_iter_arg.get();
+          }
+        }
+        if (is_target_assemble) {
+          if (assemble_assign) return std::nullopt;
+          auto assemble_call = As<Call>(assign->value_);
+          CHECK(assemble_call) << "Internal error: expected tile.assemble call in assemble loop rewrite";
+          if (ExprUsesVar(assemble_call->args_[1], old_iter_arg.get()) ||
+              ExprUsesVar(assemble_call->args_[2], old_iter_arg.get())) {
+            return std::nullopt;
+          }
+          assemble_assign = assign;
+          continue;
+        }
+      }
+
+      if (auto yield = As<YieldStmt>(body_stmt)) {
+        if (yield->value_.size() != 1 || yield_stmt) return std::nullopt;
+        yield_stmt = yield;
+        continue;
+      }
+
+      if (StmtUsesVar(body_stmt, old_iter_arg.get())) {
+        return std::nullopt;
+      }
+    }
+
+    if (!assemble_assign || !yield_stmt) return std::nullopt;
+
+    auto yielded_var = As<Var>(yield_stmt->value_[0]);
+    if (!yielded_var || yielded_var.get() != assemble_assign->var_.get()) {
+      return std::nullopt;
+    }
+
+    auto assemble_call = As<Call>(assemble_assign->value_);
+    CHECK(assemble_call) << "Internal error: expected tile.assemble call in assemble loop rewrite";
+
+    auto new_iter_arg =
+        std::make_shared<IterArg>(old_iter_arg->name_hint_, out_tensor_type, out_param, old_iter_arg->span_);
+    auto store_call = op_registry.Create(
+        "tile.store", {assemble_call->args_[1], assemble_call->args_[2], new_iter_arg}, assemble_call->span_);
+    auto store_var = std::make_shared<Var>(assemble_assign->var_->name_hint_, store_call->GetType(),
+                                           assemble_assign->var_->span_);
+
+    std::vector<StmtPtr> new_body_stmts;
+    new_body_stmts.reserve(body_stmts.size());
+    for (const auto& body_stmt : body_stmts) {
+      if (body_stmt == assemble_assign) {
+        new_body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, assemble_assign->span_));
+        continue;
+      }
+      if (body_stmt == yield_stmt) {
+        new_body_stmts.push_back(
+            std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, yield_stmt->span_));
+        continue;
+      }
+      new_body_stmts.push_back(body_stmt);
+    }
+
+    auto new_return_var = std::make_shared<Var>(for_stmt->return_vars_[0]->name_hint_, out_tensor_type,
+                                                for_stmt->return_vars_[0]->span_);
+    auto new_for_stmt = std::make_shared<ForStmt>(
+        for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+        std::vector<IterArgPtr>{new_iter_arg}, WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_),
+        std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
+        for_stmt->chunk_policy_, for_stmt->loop_origin_);
+
+    std::optional<size_t> dead_init_stmt_index;
+    if (auto init_var = As<Var>(old_iter_arg->initValue_)) {
+      bool has_other_uses = false;
+      for (size_t other_index = 0; other_index < stmts.size(); ++other_index) {
+        const StmtPtr& stmt_to_check = other_index == stmt_index ? new_for_stmt : stmts[other_index];
+        if (StmtUsesVar(stmt_to_check, init_var.get())) {
+          has_other_uses = true;
+          break;
+        }
+      }
+      if (!has_other_uses) {
+        for (size_t other_index = 0; other_index < stmts.size(); ++other_index) {
+          auto init_assign = As<AssignStmt>(stmts[other_index]);
+          if (init_assign && init_assign->var_.get() == init_var.get()) {
+            dead_init_stmt_index = other_index;
+            break;
+          }
+        }
+      }
+    }
+
+    return ReturnedAssembleLoopRewrite{
+        stmt_index,
+        dead_init_stmt_index,
+        new_for_stmt,
+        new_return_var,
+    };
+  }
+
+  return std::nullopt;
+}
+
 /**
  * @brief Transform an InCore function: insert loads, convert ops, insert stores
  *
@@ -853,6 +1119,19 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
         new_params.push_back(out_param);
         new_param_directions.push_back(ParamDirection::Out);
+
+        if (auto loop_rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,
+                                                                   orig_tensor_type, op_registry)) {
+          new_stmts[loop_rewrite->stmt_index] = loop_rewrite->new_for_stmt;
+          if (loop_rewrite->dead_init_stmt_index.has_value()) {
+            new_stmts.erase(new_stmts.begin() +
+                            static_cast<std::ptrdiff_t>(*loop_rewrite->dead_init_stmt_index));
+          }
+          new_return_types.push_back(orig_tensor_type);
+          new_return_exprs.push_back(loop_rewrite->new_return_var);
+          ++num_added_outputs;
+          continue;
+        }
 
         // Insert tile.store(tile, zeros, out_param)
         auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);

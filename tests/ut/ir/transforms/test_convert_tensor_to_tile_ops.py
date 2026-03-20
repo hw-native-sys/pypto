@@ -687,6 +687,133 @@ class TestConvertTensorToTileOps:
         assert "tile.assemble" in ir_str
         assert "tile.cast" in ir_str
 
+    def test_returned_assemble_loop_rewrites_to_store_inside_loop(self):
+        """Returned chunk-assembly loops should store to the Out tensor inside the loop.
+
+        Regression test: when a returned tensor is built by a loop-carried
+        `pl.assemble`, ConvertTensorToTileOps should rewrite that loop to carry
+        the synthetic Out tensor and emit `pl.store` inside the loop body,
+        instead of materializing a full local tile and only storing once after
+        the loop.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[1, 32], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                buf: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk: pl.Tensor[[1, 32], pl.FP32] = pl.slice(x, [1, 32], [0, 0])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(acc, chunk, [0, off])
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 32], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(out_0,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(x, [0, 0], [1, 32])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.store(chunk_tile, [0, off], acc)
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 32], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                out_0: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_returned_assemble_loop_keeps_live_init_assignment(self):
+        """Keep the init assignment when the rewritten loop body still references it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                buf: pl.Tensor[[1, 64], pl.FP32] = x
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk: pl.Tensor[[1, 32], pl.FP32] = pl.slice(buf, [1, 32], [0, off])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(acc, chunk, [0, off])
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        assert "buf: pl.Tensor[[1, 64], pl.FP32] = x" in after_src
+        assert "init_values=(buf,)" in after_src
+        assert "pl.tile.store(" in after_src
+
+    def test_returned_assemble_loop_treats_chunk_expr_as_iter_arg_use(self):
+        """Chunk expressions must count as loop-carried uses during rewrite checks."""
+
+        span = ir.Span.unknown()
+        idx_type = ir.ScalarType(DataType.INDEX)
+        small_tensor_type = ir.TensorType([1, 32], DataType.FP32)
+        large_tensor_type = ir.TensorType([1, 64], DataType.FP32)
+
+        x = ir.Var("x", small_tensor_type, span)
+        buf_init = ir.Var("buf_init", large_tensor_type, span)
+        loop_var = ir.Var("i", idx_type, span)
+        iter_arg = ir.IterArg("acc", large_tensor_type, buf_init, span)
+        yielded_var = ir.Var("acc_next", large_tensor_type, span)
+        return_var = ir.Var("result", large_tensor_type, span)
+        inner_loop_var = ir.Var("j", idx_type, span)
+
+        inner_loop = ir.ForStmt(
+            inner_loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [],
+            ir.OpStmts([], span),
+            [],
+            span,
+            chunk_size=iter_arg,
+        )
+        assemble_stmt = ir.AssignStmt(yielded_var, ir.op.tensor.assemble(iter_arg, x, [0, 0]), span)
+        outer_loop = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(2, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [iter_arg],
+            ir.SeqStmts([inner_loop, assemble_stmt, ir.YieldStmt([yielded_var], span)], span),
+            [return_var],
+            span,
+        )
+        func = ir.Function(
+            "main_incore_0",
+            [x, buf_init],
+            [large_tensor_type],
+            ir.SeqStmts([outer_loop, ir.ReturnStmt([return_var], span)], span),
+            span,
+            ir.FunctionType.InCore,
+        )
+        with pytest.raises(ValueError, match="tensor\\.assemble"):
+            passes.convert_tensor_to_tile_ops()(ir.Program([func], "ChunkUseProg", span))
+
     def test_no_spurious_loads_for_explicit_tile_ops(self):
         """Regression test for #334: no redundant Vec loads when params are consumed by tile ops only.
 
