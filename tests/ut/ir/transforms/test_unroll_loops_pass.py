@@ -198,8 +198,8 @@ class TestParserValidation:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                     for i, (acc,) in pl.unroll(3, init_values=(x,)):
-                        acc = pl.add(acc, 1.0)  # noqa: PLW2901
-                        acc = pl.yield_(acc)  # noqa: PLW2901
+                        acc = pl.add(acc, 1.0)
+                        acc = pl.yield_(acc)
                     return x
 
 

@@ -68,6 +68,7 @@ ignore = [
   "ANN401",  # flake8-annotations: any-type
   "PLR2004", # pylint: magic-value-comparison
   "PLR0911", # too many return statements
+  "PLW2901", # pylint: redefined-loop-variable (DSL reassignment pattern)
 ]
 fixable = ["ALL"]
 

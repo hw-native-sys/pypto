@@ -231,7 +231,7 @@ class TestWhileLoops:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                     c2: pl.Scalar[pl.INT64] = cnt + 1
-                    cnt, x_iter = pl.yield_(c2, y)  # noqa: PLW2901
+                    cnt, x_iter = pl.yield_(c2, y)
                 return x_iter
 
         After = passes.ctrl_flow_transform()(Before)
@@ -259,7 +259,7 @@ class TestWhileLoops:
                     if cnt > 5:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                    cnt, x_iter = pl.yield_(cnt + 1, y)  # noqa: PLW2901
+                    cnt, x_iter = pl.yield_(cnt + 1, y)
                 return x_iter
 
         After = passes.ctrl_flow_transform()(Before)
@@ -428,7 +428,7 @@ def test_continue_in_for():
                 if i < 5:
                     continue
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -451,7 +451,7 @@ def test_break_in_for():
                 if i > 5:
                     break
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -473,7 +473,7 @@ def test_break_and_continue_in_for():
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 if i > 7:
                     break
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -491,7 +491,7 @@ def test_no_break_continue_noop():
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -514,7 +514,7 @@ def test_continue_multiple_iter_args():
                     continue
                 a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)
                 b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)
-                a_iter, b_iter = pl.yield_(a_new, b_new)  # noqa: PLW2901
+                a_iter, b_iter = pl.yield_(a_new, b_new)
             return a_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -534,7 +534,7 @@ def test_continue_with_pre_continue_assignment():
                 if i < 5:
                     continue
                 z: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
-                x_iter = pl.yield_(z)  # noqa: PLW2901
+                x_iter = pl.yield_(z)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -553,7 +553,7 @@ def test_break_negative_step():
                 if i < 3:
                     break
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -572,7 +572,7 @@ def test_aic_function_type():
                 if i < 5:
                     continue
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -630,7 +630,7 @@ def test_multiple_continues_in_body():
                 if i > 8:
                     continue
                 z: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
-                x_iter = pl.yield_(z)  # noqa: PLW2901
+                x_iter = pl.yield_(z)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -651,7 +651,7 @@ def test_back_to_back_breaks():
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 if i > 5:
                     break
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -674,7 +674,7 @@ def test_break_then_continue():
                 if i < 3:
                     continue
                 z: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
-                x_iter = pl.yield_(z)  # noqa: PLW2901
+                x_iter = pl.yield_(z)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -699,7 +699,7 @@ def test_multiple_iter_args_with_break():
                     break
                 a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)
                 b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)
-                a_iter, b_iter = pl.yield_(a_new, b_new)  # noqa: PLW2901
+                a_iter, b_iter = pl.yield_(a_new, b_new)
             return a_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -722,7 +722,7 @@ def test_unconditional_break():
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 break
-                x_iter = pl.yield_(x_iter)  # noqa: PLW2901
+                x_iter = pl.yield_(x_iter)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -739,7 +739,7 @@ def test_unconditional_continue():
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 continue
-                x_iter = pl.yield_(x_iter)  # noqa: PLW2901
+                x_iter = pl.yield_(x_iter)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -764,8 +764,8 @@ def test_nested_loops_only_inner():
                     if j < 2:
                         continue
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -787,10 +787,10 @@ def test_both_outer_and_inner_loop_have_break():
                     if j > 3:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
                 if i > 2:
                     break
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -810,10 +810,10 @@ def test_nested_continue_outer_break_inner():
                     if j > 3:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
                 if i < 2:
                     continue
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -839,8 +839,8 @@ def test_nested_continue_both_loops():
                     if j < 2:
                         continue
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -864,8 +864,8 @@ def test_nested_break_and_continue_inner():
                     if j > 5:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -892,10 +892,10 @@ def test_nested_loop_both_have_break_and_continue():
                     if j > 5:
                         break
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
-                    x_inner = pl.yield_(y)  # noqa: PLW2901
+                    x_inner = pl.yield_(y)
                 if i > 2:
                     break
-                x_outer = pl.yield_(x_inner)  # noqa: PLW2901
+                x_outer = pl.yield_(x_inner)
             return x_outer
 
     After = passes.ctrl_flow_transform()(Before)
@@ -917,13 +917,13 @@ def test_three_level_nesting_break_at_each():
                         if k > 2:
                             break
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x_l3, x_l3)
-                        x_l3 = pl.yield_(y)  # noqa: PLW2901
+                        x_l3 = pl.yield_(y)
                     if j > 1:
                         break
-                    x_l2 = pl.yield_(x_l3)  # noqa: PLW2901
+                    x_l2 = pl.yield_(x_l3)
                 if i > 0:
                     break
-                x_l1 = pl.yield_(x_l2)  # noqa: PLW2901
+                x_l1 = pl.yield_(x_l2)
             return x_l1
 
     After = passes.ctrl_flow_transform()(Before)
@@ -948,7 +948,7 @@ def test_continue_in_else_branch():
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 else:
                     continue
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -968,7 +968,7 @@ def test_break_in_else_branch():
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 else:
                     break
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -990,7 +990,7 @@ def test_if_else_continue_then_break_else():
                     continue
                 elif i > 7:
                     break
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1013,7 +1013,7 @@ def test_normal_if_else_before_continue():
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_0)
                 if i < 2:
                     continue
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1034,7 +1034,7 @@ def test_deeply_nested_if_with_continue():
                         if i < 2:
                             continue
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1055,7 +1055,7 @@ def test_deeply_nested_if_with_break():
                         if i > 7:
                             break
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1080,7 +1080,7 @@ def test_multi_function_program():
                 if i > 5:
                     break
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
-                x_iter = pl.yield_(y)  # noqa: PLW2901
+                x_iter = pl.yield_(y)
             return x_iter
 
         @pl.function(type=pl.FunctionType.Orchestration)

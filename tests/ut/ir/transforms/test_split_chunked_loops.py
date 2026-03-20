@@ -323,8 +323,8 @@ class TestParserErrors:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.auto_incore():
                     for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
-                        s = pl.add(s, 1.0)  # noqa: PLW2901
-                        s = pl.yield_(s)  # noqa: PLW2901
+                        s = pl.add(s, 1.0)
+                        s = pl.yield_(s)
                 return x
 
     def test_chunk_zero_error(self):
