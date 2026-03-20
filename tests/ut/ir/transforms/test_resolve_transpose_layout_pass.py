@@ -35,16 +35,16 @@ class TestResolveTransposeLayoutBTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -60,16 +60,16 @@ class TestResolveTransposeLayoutBTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -92,16 +92,16 @@ class TestResolveTransposeLayoutBTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -117,16 +117,16 @@ class TestResolveTransposeLayoutBTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -153,16 +153,16 @@ class TestResolveTransposeLayoutATranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -178,16 +178,16 @@ class TestResolveTransposeLayoutATranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -214,16 +214,16 @@ class TestResolveTransposeLayoutABTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -239,16 +239,16 @@ class TestResolveTransposeLayoutABTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -271,16 +271,16 @@ class TestResolveTransposeLayoutABTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -296,16 +296,16 @@ class TestResolveTransposeLayoutABTranspose:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -332,16 +332,16 @@ class TestResolveTransposeLayoutNoOp:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -364,16 +364,16 @@ class TestResolveTransposeLayoutNoOp:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -421,16 +421,16 @@ class TestResolveTransposeLayoutNoOp:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Before)
@@ -457,16 +457,16 @@ class TestResolveTransposeLayoutMixed:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -482,16 +482,16 @@ class TestResolveTransposeLayoutMixed:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -514,16 +514,16 @@ class TestResolveTransposeLayoutMixed:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         @pl.program
         class Expected:
@@ -539,16 +539,16 @@ class TestResolveTransposeLayoutMixed:
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c = pl.store(tile_c, [0, 0], c)
-                return c
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c = self.matmul_incore(a, b, c)
-                return c
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
@@ -581,8 +581,8 @@ class TestResolveTransposeLayoutPartialLoad:
                 tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0, tile_k_l0)
-                out = pl.store(tile_c, [0, 0], out)
-                return out
+                out_store = pl.store(tile_c, [0, 0], out)
+                return out_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
@@ -591,8 +591,8 @@ class TestResolveTransposeLayoutPartialLoad:
                 key_cache: pl.Tensor[[128, 128], pl.BF16],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
-                out = self.kernel(a, key_cache, out)
-                return out
+                out_result = self.kernel(a, key_cache, out)
+                return out_result
 
         @pl.program
         class Expected:
@@ -610,8 +610,8 @@ class TestResolveTransposeLayoutPartialLoad:
                 tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0, tile_k_l0)
-                out = pl.store(tile_c, [0, 0], out)
-                return out
+                out_store = pl.store(tile_c, [0, 0], out)
+                return out_store
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
@@ -620,8 +620,8 @@ class TestResolveTransposeLayoutPartialLoad:
                 key_cache: pl.Tensor[[128, 128], pl.BF16, pl.DN],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
-                out = self.kernel(a, key_cache, out)
-                return out
+                out_result = self.kernel(a, key_cache, out)
+                return out_result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)

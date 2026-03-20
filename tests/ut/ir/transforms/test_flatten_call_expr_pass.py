@@ -275,7 +275,7 @@ class TestFlattenCallInIfCondition:
                 x: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(y, 1.0), z)
                 for i in pl.range(10):
                     if i > 5:
-                        result = pl.add(result, 1.0)
+                        _result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
                 # Nested call after if
                 a: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(b, 2.0), c)
                 return pl.add(x, a)
@@ -296,7 +296,7 @@ class TestFlattenCallInIfCondition:
                 x: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, z)
                 for i in pl.range(10):
                     if i > 5:
-                        result = pl.add(result, 1.0)
+                        _result: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
                 # Flattened: temp variable for second nested call
                 t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(b, 2.0)
                 a: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, c)

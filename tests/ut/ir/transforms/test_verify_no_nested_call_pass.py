@@ -152,9 +152,9 @@ def test_flatten_and_convert_to_ssa_pipeline():
     class NestedCallsWithReassignment:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            result = pl.add(pl.mul(x, 2.0), 1.0)
-            result = pl.add(result, 3.0)
-            return result
+            result: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), 1.0)
+            result_1: pl.Tensor[[64], pl.FP32] = pl.add(result, 3.0)
+            return result_1
 
     # Apply flatten then SSA conversion
     flatten_pass = passes.flatten_call_expr()

@@ -394,7 +394,10 @@ class ASTParser:
                     and value_expr.type.dtype == DataType.INDEX
                 ):
                     override_type = resolved
-        var = self.builder.let(var_name, value_expr, type=override_type, span=span)
+        # Reuse existing Var on reassignment (override_type is intentionally
+        # discarded — the Var's type was fixed at first definition; the SSA
+        # pass will create properly typed versioned copies later).
+        var = self._assign_or_let(var_name, value_expr, span, override_type)
 
         # Register in scope
         self.scope_manager.define_var(var_name, var, span=span)
@@ -402,6 +405,20 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
+
+    def _assign_or_let(
+        self,
+        var_name: str,
+        value_expr: ir.Expr,
+        span: ir.Span,
+        override_type: ir.Type | None = None,
+    ) -> ir.Var:
+        """Assign to existing Var if possible, otherwise create a new let binding."""
+        existing_var = self.scope_manager.lookup_var(var_name)
+        if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            self.builder.assign(existing_var, value_expr, span=span)
+            return existing_var
+        return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:
         """Parse regular assignment: var = value or tuple unpacking.
@@ -439,7 +456,7 @@ class ASTParser:
                             hint="Use simple variable names in tuple unpacking: a, b, c = func()",
                         )
                     item_expr = ir.TupleGetItemExpr(tuple_var, i, span)
-                    var = self.builder.let(elt.id, item_expr, span=span)
+                    var = self._assign_or_let(elt.id, item_expr, span)
                     self.scope_manager.define_var(elt.id, var, span=span)
                 return
 
@@ -473,7 +490,7 @@ class ASTParser:
                         return
 
                 value_expr = self.parse_expression(stmt.value)
-                var = self.builder.let(var_name, value_expr, span=span)
+                var = self._assign_or_let(var_name, value_expr, span)
                 self.scope_manager.define_var(var_name, var, span=span)
 
                 # Track buffer metadata for attribute access (e.g., pipe_buf.base)
@@ -1215,28 +1232,6 @@ class ASTParser:
             self._loop_kind_stack.pop()
             self.current_loop_builder = None
 
-    def _parse_if_else_branch(
-        self,
-        stmt: ast.If,
-        if_builder: Any,
-        should_leak: bool,
-        pre_if_parent_scope: dict | None,
-        post_then_parent_scope: dict | None,
-    ) -> None:
-        """Parse the else branch of an if statement and restore then-branch leaks."""
-        if should_leak and pre_if_parent_scope is not None:
-            self.scope_manager.scopes[-1] = dict(pre_if_parent_scope)
-        if_builder.else_()
-        self.scope_manager.enter_scope("else")
-        for else_stmt in stmt.orelse:
-            self.parse_statement(else_stmt)
-        self.scope_manager.exit_scope(leak_vars=should_leak)
-        # Re-apply then-branch leaks so they are visible after the if.
-        if should_leak and post_then_parent_scope is not None:
-            for name, val in post_then_parent_scope.items():
-                if name not in (pre_if_parent_scope or {}):
-                    self.scope_manager.scopes[-1][name] = val
-
     def parse_if_statement(self, stmt: ast.If) -> None:
         """Parse if statement with phi nodes.
 
@@ -1275,24 +1270,19 @@ class ASTParser:
                 # Determine if we should leak variables (no explicit yields)
                 should_leak = not bool(then_yield_vars)
 
-                # Snapshot parent scope before then branch so else branch
-                # does not see variables leaked from then branch.
-                pre_if_parent_scope = dict(self.scope_manager.scopes[-1]) if should_leak else None
-
                 # Parse then branch (yield types captured via _current_yield_types)
                 self.scope_manager.enter_scope("if")
                 for then_stmt in stmt.body:
                     self.parse_statement(then_stmt)
                 self.scope_manager.exit_scope(leak_vars=should_leak)
 
-                # Capture what then branch leaked into parent scope before restoring.
-                post_then_parent_scope = dict(self.scope_manager.scopes[-1]) if should_leak else None
-
                 # Parse else branch if present
                 if stmt.orelse:
-                    self._parse_if_else_branch(
-                        stmt, if_builder, should_leak, pre_if_parent_scope, post_then_parent_scope
-                    )
+                    if_builder.else_()
+                    self.scope_manager.enter_scope("else")
+                    for else_stmt in stmt.orelse:
+                        self.parse_statement(else_stmt)
+                    self.scope_manager.exit_scope(leak_vars=should_leak)
 
                 # Declare return vars AFTER parsing branches so captured yield types
                 # are available for unannotated yields (fixes issue #233 / #234)

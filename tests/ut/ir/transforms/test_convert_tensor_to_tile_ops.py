@@ -42,8 +42,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -89,8 +89,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.load(y, [0], [64])
                 z_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -132,8 +132,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 z_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(y_tile, y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(z_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -182,8 +182,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[32, 64], pl.FP16]) -> pl.Tensor[[32, 64], pl.FP16]:
@@ -219,8 +219,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.adds(x_tile, 1.0)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -256,8 +256,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.exp(x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -293,8 +293,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.neg(x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -330,8 +330,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.recip(x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -367,8 +367,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.sqrt(x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -414,8 +414,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand_mul(x_tile, rv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -465,8 +465,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand_div(x_tile, rv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -516,8 +516,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 cv_tile: pl.Tile[[1, 64], pl.FP16] = pl.load(cv, [0, 0], [1, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.col_expand_mul(x_tile, cv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -575,8 +575,8 @@ class TestConvertTensorToTileOps:
                     rhs, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=False
                 )
                 y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
-                out_0: pl.Tensor[[16, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -634,8 +634,8 @@ class TestConvertTensorToTileOps:
                     rhs, [0, 0], [128, 128], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 y_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
-                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -668,9 +668,9 @@ class TestConvertTensorToTileOps:
                 b: pl.Tensor[[1, 32], pl.FP32],
             ) -> pl.Tensor[[1, 64], pl.BF16]:
                 t: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
-                t = pl.assemble(t, a, [0, 0])
-                t = pl.assemble(t, b, [0, 32])
-                out: pl.Tensor[[1, 64], pl.BF16] = pl.cast(t, target_type=pl.BF16)
+                t_1: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(t, a, [0, 0])
+                t_2: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(t_1, b, [0, 32])
+                out: pl.Tensor[[1, 64], pl.BF16] = pl.cast(t_2, target_type=pl.BF16)
                 return out
 
             @pl.function
@@ -892,8 +892,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand_add(x_tile, rv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -943,8 +943,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand_sub(x_tile, rv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -994,8 +994,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 cv_tile: pl.Tile[[1, 64], pl.FP16] = pl.load(cv, [0, 0], [1, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.col_expand(x_tile, cv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1045,8 +1045,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 cv_tile: pl.Tile[[1, 64], pl.FP16] = pl.load(cv, [0, 0], [1, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.col_expand_sub(x_tile, cv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1096,8 +1096,8 @@ class TestConvertTensorToTileOps:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 cv_tile: pl.Tile[[1, 64], pl.FP16] = pl.load(cv, [0, 0], [1, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.col_expand_div(x_tile, cv_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1143,8 +1143,8 @@ class TestConvertTensorToTileOps:
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand(x_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1200,8 +1200,8 @@ class TestNestedControlFlow:
                 else:
                     y_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(x_tile, x_tile)
                     z = pl.yield_(y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
@@ -1239,8 +1239,8 @@ class TestNestedControlFlow:
             ) -> pl.Tensor[[64], pl.FP32]:
                 acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(acc_tile, acc_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -1293,8 +1293,8 @@ class TestNestedControlFlow:
                 else:
                     y_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(acc_tile, acc_tile)
                     z = pl.yield_(y_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(z, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
@@ -1358,8 +1358,8 @@ class TestGmLocalTensorConversion:
             ) -> pl.Tensor[[8, 32], pl.FP32]:
                 s_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
                 y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, s_tile)
-                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[16, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
@@ -1399,8 +1399,8 @@ class TestGmLocalTensorConversion:
                 t_tile: pl.Tile[[16, 64], pl.FP32] = pl.tile.create([16, 64], dtype=pl.FP32)
                 s_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.slice(t_tile, [8, 32], [0, 0])
                 y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, x_tile)
-                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
@@ -1451,8 +1451,8 @@ class TestGmLocalTensorConversion:
                     t_tile, [8, 32], [0, 0], valid_shape=[8, valid_n]
                 )
                 y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.add(s_tile, x_tile)
-                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1492,8 +1492,8 @@ class TestGmLocalTensorConversion:
             ) -> pl.Tensor[[8, 32], pl.FP32]:
                 x_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(x, [0, 0], [8, 32])
                 y_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.fillpad(x_tile, pad_value=pl.PadValue.min)
-                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[8, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[8, 32], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
@@ -1530,8 +1530,8 @@ class TestGmLocalTensorConversion:
             ) -> pl.Tensor[[4, 8], pl.FP32]:
                 s1_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(x, [0, 0], [16, 32])
                 s2_tile: pl.Tile[[4, 8], pl.FP32] = pl.tile.slice(s1_tile, [4, 8], [0, 0])
-                out_0: pl.Tensor[[4, 8], pl.FP32] = pl.store(s2_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[4, 8], pl.FP32] = pl.store(s2_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
@@ -1570,8 +1570,8 @@ class TestGmLocalTensorConversion:
                 s1_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(x, [0, 0], [32, 64])
                 s2_tile: pl.Tile[[8, 16], pl.FP32] = pl.tile.slice(s1_tile, [8, 16], [0, 0])
                 s3_tile: pl.Tile[[2, 4], pl.FP32] = pl.tile.slice(s2_tile, [2, 4], [0, 0])
-                out_0: pl.Tensor[[2, 4], pl.FP32] = pl.store(s3_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[2, 4], pl.FP32] = pl.store(s3_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[2, 4], pl.FP32]:
@@ -1610,8 +1610,8 @@ class TestGmLocalTensorConversion:
                 s1_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(x, [0, 0], [16, 32])
                 s2_tile: pl.Tile[[4, 8], pl.FP32] = pl.tile.slice(s1_tile, [4, 8], [0, 0])
                 y_tile: pl.Tile[[4, 8], pl.FP32] = pl.tile.add(s2_tile, s2_tile)
-                out_0: pl.Tensor[[4, 8], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[4, 8], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
@@ -1654,8 +1654,8 @@ class TestGmLocalTensorConversion:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
                 scale_tile: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
                 y_tile: pl.Tile[[64], pl.FP32] = pl.tile.muls(x_tile, scale_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1837,8 +1837,8 @@ class TestSliceMatmulConversion:
                     a, [0, 0], [16, 128], [16, 128], target_memory=pl.MemorySpace.Mat, transpose=False
                 )
                 result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, b_slice_tile)
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1903,8 +1903,8 @@ class TestSliceMatmulConversion:
                     transpose=False,
                 )
                 result_tile: pl.Tile[[1, 120], pl.FP32] = pl.matmul(lhs_mat, k_slice_tile)
-                out_0: pl.Tensor[[1, 120], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[1, 120], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(
@@ -1969,8 +1969,8 @@ class TestSliceMatmulConversion:
                     transpose=False,
                 )
                 result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(a_slice_tile, rhs_mat)
-                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function
             def main(

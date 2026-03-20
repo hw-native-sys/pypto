@@ -36,7 +36,8 @@ namespace {
 /// reflection to identify which Var fields are definition sites.
 class DeepCloneMutator : public IRMutator {
  public:
-  explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map) : expr_map_(var_map) {}
+  explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map, bool clone_def_vars)
+      : expr_map_(var_map), clone_def_vars_(clone_def_vars) {}
 
   /// Get the accumulated definition-site Var mapping (excludes non-Var substitutions).
   [[nodiscard]] std::unordered_map<const Var*, VarPtr> GetVarMap() const {
@@ -57,22 +58,22 @@ class DeepCloneMutator : public IRMutator {
   // the fresh copies during its map lookup.
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    PreRegisterDefFields(*op);
+    if (clone_def_vars_) PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    PreRegisterDefFields(*op);
+    if (clone_def_vars_) PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    PreRegisterDefFields(*op);
+    if (clone_def_vars_) PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    PreRegisterDefFields(*op);
+    if (clone_def_vars_) PreRegisterDefFields(*op);
     return IRMutator::VisitStmt_(op);
   }
 
@@ -150,12 +151,14 @@ class DeepCloneMutator : public IRMutator {
   }
 
   std::unordered_map<const Var*, ExprPtr> expr_map_;
+  bool clone_def_vars_;
 };
 
 }  // namespace
 
-DeepCloneResult DeepClone(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map) {
-  DeepCloneMutator mutator(var_map);
+DeepCloneResult DeepClone(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map,
+                          bool clone_def_vars) {
+  DeepCloneMutator mutator(var_map, clone_def_vars);
   auto cloned = mutator.VisitStmt(body);
   return {cloned, mutator.GetVarMap()};
 }

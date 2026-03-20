@@ -101,8 +101,8 @@ class TestPassthrough:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile = pl.load(x, [0], [64])
                 y_tile = pl.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
         ir.assert_structural_equal(After, Expected)
 
@@ -155,8 +155,8 @@ class TestPassthrough:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0_store
 
         ir.assert_structural_equal(After, Expected)
 
@@ -235,8 +235,8 @@ class TestSplitStructure:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -319,8 +319,8 @@ class TestCrossCoreBoundaries:
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
                 w_tile = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -391,8 +391,8 @@ class TestCrossCoreBoundaries:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -467,8 +467,8 @@ class TestCubeOpVariants:
                 d_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -525,8 +525,8 @@ class TestCubeOpVariants:
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0_store
 
         _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
 
@@ -597,8 +597,8 @@ class TestCubeOpVariants:
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -668,8 +668,8 @@ class TestCubeOpVariants:
                 d_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -726,8 +726,8 @@ class TestCubeOpVariants:
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0_store
 
         _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
 
@@ -814,8 +814,8 @@ class TestVectorOpClassification:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -887,8 +887,8 @@ class TestVectorOpClassification:
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
                 z_exp = pl.exp(z_vec)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -965,8 +965,8 @@ class TestRealisticPatterns:
                 )
                 exp_tile = pl.exp(z_vec)
                 sum_tile = pl.add(exp_tile, exp_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -1034,8 +1034,8 @@ class TestRealisticPatterns:
                 )
                 z_exp = pl.exp(z_vec)
                 z_mul = pl.mul(z_exp, z_exp)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -1124,8 +1124,8 @@ class TestMultipleInCore:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def compute_a_incore_0(
@@ -1162,8 +1162,8 @@ class TestMultipleInCore:
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def compute_b_incore_0(
@@ -1222,8 +1222,8 @@ class TestMultipleInCore:
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile = pl.load(x, [0], [64])
                 y_tile = pl.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.AIC)
             def mixed_incore_0_aic(
@@ -1249,8 +1249,8 @@ class TestMultipleInCore:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def mixed_incore_0(
@@ -1578,8 +1578,8 @@ class TestEdgeCases:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def compute_group(
@@ -1707,8 +1707,8 @@ class TestDCERegression:
                     )
                     acc_new = pl.tile.add(acc_iter, z_vec)
                     acc_out = pl.yield_(acc_new)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -1793,8 +1793,8 @@ class TestDCERegression:
                     )
                     acc_new = pl.tile.add(acc_iter, z_vec)
                     acc_out = pl.yield_(acc_new)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -1870,8 +1870,8 @@ class TestDCERegression:
                 )
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -1952,8 +1952,8 @@ class TestDCERegression:
                     up_new = pl.tile.add(up_iter, u_vec)
                     gate_out, up_out = pl.yield_(gate_new, up_new)
                 result = pl.tile.add(gate_out, up_out)
-                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[4, 32], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
 
         _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
@@ -2114,8 +2114,8 @@ class TestDCERegression:
                     else:
                         branch_out = pl.yield_(acc_iter)
                     acc_out = pl.yield_(branch_out)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -2201,8 +2201,8 @@ class TestDCERegression:
                     carried_next = pl.tile.add(tmp, tmp)
                     acc_out = pl.yield_(carried_next)
                 carried = acc_out
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(carried, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(carried, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
@@ -2298,8 +2298,8 @@ class TestDCERegression:
                         acc_else = pl.tile.add(acc_iter, z_pop_b)
                         branch_out = pl.yield_(acc_else)
                     acc_out = pl.yield_(branch_out)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
-                return out_0
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc_out, [0, 0], out_0)
+                return out_0_store
 
             @pl.function(type=pl.FunctionType.Group)
             def main_incore_0(
