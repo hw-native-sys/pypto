@@ -105,6 +105,101 @@ static bool ContainsComputeTensorOp(const StmtPtr& stmt) {
   return detector.Found();
 }
 
+/// Detects whether an expression tree contains any sub-expression with TensorType or TileType.
+class TensorOrTileTypedExprDetector : public IRVisitor {
+ public:
+  [[nodiscard]] bool Found() const { return found_; }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr || found_) return;
+    auto type = expr->GetType();
+    if (type) {
+      auto kind = type->GetKind();
+      if (kind == ObjectKind::TensorType || kind == ObjectKind::TileType) {
+        found_ = true;
+        return;
+      }
+    }
+    IRVisitor::VisitExpr(expr);
+  }
+
+ private:
+  bool found_ = false;
+};
+
+/// Returns true if stmt is an AssignStmt with a scalar-typed target variable
+/// and a value expression that involves no tensor/tile data.
+static bool IsPureScalarAssignment(const StmtPtr& stmt) {
+  if (!stmt) return false;
+
+  auto kind = stmt->GetKind();
+  if (kind == ObjectKind::AssignStmt) {
+    auto assign = std::static_pointer_cast<const AssignStmt>(stmt);
+    auto var_type = assign->var_->GetType();
+    if (!var_type || var_type->GetKind() != ObjectKind::ScalarType) return false;
+    TensorOrTileTypedExprDetector detector;
+    detector.VisitExpr(assign->value_);
+    return !detector.Found();
+  }
+
+  // An OpStmts is pure scalar only if every sub-statement is a pure scalar assignment.
+  if (kind == ObjectKind::OpStmts) {
+    auto op_stmts = std::static_pointer_cast<const OpStmts>(stmt);
+    for (const auto& s : op_stmts->stmts_) {
+      if (!IsPureScalarAssignment(s)) return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/// Expand an OpStmts that contains a mix of pure scalar and non-scalar assignments
+/// into individual sub-statements. Returns the original list if no expansion needed.
+static std::vector<StmtPtr> ExpandMixedOpStmts(const std::vector<StmtPtr>& stmts) {
+  bool needs_expansion = false;
+  for (const auto& s : stmts) {
+    if (s && s->GetKind() == ObjectKind::OpStmts && !IsPureScalarAssignment(s)) {
+      auto op_stmts = std::static_pointer_cast<const OpStmts>(s);
+      // Check if any sub-statement is a pure scalar assignment
+      for (const auto& sub : op_stmts->stmts_) {
+        if (IsPureScalarAssignment(sub)) {
+          needs_expansion = true;
+          break;
+        }
+      }
+      if (needs_expansion) break;
+    }
+  }
+  if (!needs_expansion) return stmts;
+
+  std::vector<StmtPtr> expanded;
+  expanded.reserve(stmts.size() * 2);
+  for (const auto& s : stmts) {
+    if (s && s->GetKind() == ObjectKind::OpStmts && !IsPureScalarAssignment(s)) {
+      auto op_stmts = std::static_pointer_cast<const OpStmts>(s);
+      bool has_scalar = false;
+      for (const auto& sub : op_stmts->stmts_) {
+        if (IsPureScalarAssignment(sub)) {
+          has_scalar = true;
+          break;
+        }
+      }
+      if (has_scalar) {
+        // Expand: push sub-statements individually
+        for (const auto& sub : op_stmts->stmts_) {
+          expanded.push_back(sub);
+        }
+      } else {
+        expanded.push_back(s);
+      }
+    } else {
+      expanded.push_back(s);
+    }
+  }
+  return expanded;
+}
+
 static bool ContainsChunkLoop(const StmtPtr& stmt) {
   if (!stmt) return false;
 
@@ -137,8 +232,10 @@ static bool ContainsChunkLoop(const StmtPtr& stmt) {
  * - compute tensor ops
  * - chunk loops that failed interchange or remain sequential
  *
- * Pure host-side groups such as a lone tensor.assemble/create/slice should stay
- * in orchestration rather than becoming tiny outlined InCore functions.
+ * The following stay in orchestration (not wrapped):
+ * - Pure host-side groups (tensor.assemble/create/slice)
+ * - Pure scalar assignments (e.g., index arithmetic like `offset = ob * 32`)
+ *   whose value expression contains no tensor/tile-typed sub-expressions
  */
 static bool NeedsInCoreWrapping(const StmtPtr& stmt) {
   if (!stmt) return false;
@@ -146,6 +243,7 @@ static bool NeedsInCoreWrapping(const StmtPtr& stmt) {
   auto kind = stmt->GetKind();
   if (kind == ObjectKind::YieldStmt || kind == ObjectKind::ReturnStmt) return false;
   if (ContainsInCoreScope(stmt)) return false;
+  if (IsPureScalarAssignment(stmt)) return false;
 
   return ContainsChunkLoop(stmt) || ContainsComputeTensorOp(stmt);
 }
@@ -200,6 +298,11 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   }
   if (!has_work) return body;
 
+  // Expand mixed OpStmts so scalar assignments can be classified individually.
+  // An OpStmts containing both scalar and tensor assignments would otherwise be
+  // wrapped as a unit, sweeping the scalar into InCore.
+  auto flat_stmts = ExpandMixedOpStmts(seq->stmts_);
+
   // Group consecutive wrappable statements and wrap each group in InCore
   std::vector<StmtPtr> result;
   std::vector<StmtPtr> pending;
@@ -211,7 +314,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
     pending.clear();
   };
 
-  for (const auto& s : seq->stmts_) {
+  for (const auto& s : flat_stmts) {
     if (NeedsInCoreWrapping(s)) {
       pending.push_back(s);
     } else {

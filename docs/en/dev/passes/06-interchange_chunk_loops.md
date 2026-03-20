@@ -145,7 +145,7 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 
 When `auto_incore` is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `ScopeStmt(InCore)` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
 
-Consecutive non-InCore statements are grouped into a single `ScopeStmt(InCore)`. Control flow statements (`YieldStmt`, `ReturnStmt`) are never wrapped.
+Consecutive non-InCore statements are grouped into a single `ScopeStmt(InCore)`. Control flow statements (`YieldStmt`, `ReturnStmt`) and pure scalar assignments (e.g., index arithmetic like `offset = ob * 32`) are never wrapped — they stay in the orchestration scope.
 
 **Example** — standalone op + parallel chunk:
 
