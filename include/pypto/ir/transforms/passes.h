@@ -147,12 +147,12 @@ Pass CreateProgramPass(std::function<ProgramPtr(const ProgramPtr&)> transform, c
 Pass InitMemRef();
 
 /**
- * @brief Create a basic memory reuse pass
+ * @brief Create a memory reuse pass
  *
  * Uses dependency analysis to identify memory reuse opportunities.
  * Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.
  */
-Pass BasicMemoryReuse();
+Pass MemoryReuse();
 
 /**
  * @brief Create an insert sync pass

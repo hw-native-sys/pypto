@@ -96,7 +96,7 @@ def generate_if_else_kernel_code(
     ]
 
     # If/else branches use basic_ops_only, so no matmul or reduction ops.
-    # This avoids BasicMemoryReuse bugs with buffer tracking inside IfStmt branches.
+    # This keeps branch code simple and avoids complex buffer allocation patterns.
     has_matmul = False
 
     # Generate input loads (no offset — if-only has no loop)
@@ -139,7 +139,7 @@ def _build_branch_lines(
     branch (for the store) and never crosses the if/else boundary.
 
     Branches use basic_ops_only (no matmul, no reductions requiring create_tile)
-    to avoid triggering BasicMemoryReuse buffer tracking bugs inside IfStmt.
+    to keep generated branch code simple and predictable.
 
     Args:
         gen: KernelGenerator instance (provides op code generation helpers)

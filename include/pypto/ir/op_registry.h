@@ -362,7 +362,7 @@ class OpRegistryEntry {
   [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
 
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
-  /// BasicMemoryReuse will skip producer-consumer reuse for such operations.
+  /// MemoryReuse will skip producer-consumer reuse for such operations.
   inline OpRegistryEntry& not_inplace_safe() {
     is_inplace_safe_ = false;
     return *this;

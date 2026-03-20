@@ -13,7 +13,7 @@
 - 插入屏障（bar_v、bar_m）实现全局同步
 - 管理事件 ID 和流水线掩码
 
-**使用时机**：在 InitMemRef 和 BasicMemoryReuse 之后、代码生成 (CodeGen) 之前运行。多流水线硬件正确执行所必需。
+**使用时机**：在 InitMemRef 和 MemoryReuse 之后、代码生成 (CodeGen) 之前运行。多流水线硬件正确执行所必需。
 
 ## API
 

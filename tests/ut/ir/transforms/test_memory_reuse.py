@@ -7,27 +7,17 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for BasicMemoryReusePass with pre-attached MemRefs (no init_mem_ref dependency)."""
+"""Tests for MemoryReusePass with pre-attached MemRefs (no init_mem_ref dependency)."""
 
 import math
 
 import pytest
-from pypto import backend, ir, passes
-from pypto.backend import BackendType
+from pypto import ir, passes
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tile
 from pypto.pypto_core import DataType
 
 _SPAN = ir.Span.unknown()
-
-
-@pytest.fixture(autouse=True)
-def _setup_backend():
-    """Configure backend before each test (required by DependencyAnalyzer)."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
-    yield
-    backend.reset_for_testing()
 
 
 _IDX = DataType.INDEX
@@ -114,8 +104,8 @@ def _build_program(build_fn):
 
 
 def _run_reuse(program: ir.Program) -> ir.Function:
-    """Run basic_memory_reuse pass and return the first function."""
-    after = passes.basic_memory_reuse()(program)
+    """Run memory_reuse pass and return the first function."""
+    after = passes.memory_reuse()(program)
     return next(iter(after.functions.values()))
 
 
@@ -198,8 +188,8 @@ def _get_alloc_memref_ids(func):
     return ids
 
 
-class TestBasicMemoryReuse:
-    """Tests for BasicMemoryReusePass with TileType variables."""
+class TestBasic:
+    """Core reuse logic: chain reuse, producer-consumer, size/shape, transitive conflicts."""
 
     def test_simple(self):
         """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent."""
@@ -306,61 +296,6 @@ class TestBasicMemoryReuse:
         assert func is not None
         assert func.name == "main"
 
-    def test_memref_sharing(self):
-        """Chain: all tiles reuse tile_a (producer-consumer at same statement)."""
-
-        def build(ib, f, alloc):
-            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
-            out_mr = alloc.ddr([64, 64], _FP32)
-            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
-            f.return_type(ir.TensorType([64, 64], _FP32))
-            a_mr, b_mr, c_mr, d_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
-            tile_a = ib.let(
-                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
-            )
-            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
-            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
-            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
-            result = ib.let(
-                "result", tile.store(tile_d, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
-            )
-            ib.return_stmt(result)
-
-        func = _run_reuse(_build_program(build))
-        _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_c")
-        _assert_shares_memref(func, "tile_b", "tile_d")
-
-    def test_with_dependencies(self):
-        """tile_c, tile_d, tile_e all chain-reuse tile_a; tile_b remains independent."""
-
-        def build(ib, f, alloc):
-            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
-            input_b = f.param("input_b", ir.TensorType([64, 64], _FP32))
-            out_mr = alloc.ddr([64, 64], _FP32)
-            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
-            f.return_type(ir.TensorType([64, 64], _FP32))
-            a_mr, b_mr, c_mr, d_mr, e_mr = (alloc.vec([64, 64], _FP32) for _ in range(5))
-            tile_a = ib.let(
-                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
-            )
-            tile_b = ib.let(
-                "tile_b", tile.load(input_b, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, b_mr)
-            )
-            tile_c = ib.let("tile_c", tile.add(tile_a, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
-            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
-            tile_e = ib.let("tile_e", tile.add(tile_d, tile_d), type=_tile_t([64, 64], _FP32, e_mr))
-            result = ib.let(
-                "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
-            )
-            ib.return_stmt(result)
-
-        func = _run_reuse(_build_program(build))
-        _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_c")
-        _assert_shares_memref(func, "tile_a", "tile_d")
-        _assert_shares_memref(func, "tile_a", "tile_e")
-
     def test_transitive_conflict(self):
         """Transitive conflict: tile_c and tile_d must NOT share memory."""
 
@@ -388,31 +323,6 @@ class TestBasicMemoryReuse:
         _assert_shares_memref(func, "tile_a", "tile_c")
         _assert_not_shares_memref(func, "tile_c", "tile_d")
         _assert_shares_memref(func, "tile_a", "tile_e")
-
-    def test_multiple_memory_spaces(self):
-        """Memory reuse happens within the same memory space (UB tiles)."""
-
-        def build(ib, f, alloc):
-            in_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
-            in_b = f.param("input_b", ir.TensorType([64, 64], _FP32))
-            out_a_mr, out_b_mr = alloc.ddr([64, 64], _FP32), alloc.ddr([64, 64], _FP32)
-            out_a = f.param("output_a", _tensor_t([64, 64], _FP32, out_a_mr), direction=ir.ParamDirection.Out)
-            out_b = f.param("output_b", _tensor_t([64, 64], _FP32, out_b_mr), direction=ir.ParamDirection.Out)
-            f.return_type(ir.TensorType([64, 64], _FP32))
-            a_mr, b_mr, c_mr, d_mr = (alloc.vec([64, 64], _FP32) for _ in range(4))
-            tile_a = ib.let("tile_a", tile.load(in_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr))
-            tile_b = ib.let("tile_b", tile.load(in_b, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, b_mr))
-            tile_c = ib.let("tile_c", tile.add(tile_a, tile_b), type=_tile_t([64, 64], _FP32, c_mr))
-            ib.let("_result_a", tile.store(tile_c, [0, 0], out_a), type=_tensor_t([64, 64], _FP32, out_a_mr))
-            tile_d = ib.let("tile_d", tile.add(tile_c, tile_c), type=_tile_t([64, 64], _FP32, d_mr))
-            result_b = ib.let(
-                "result_b", tile.store(tile_d, [0, 0], out_b), type=_tensor_t([64, 64], _FP32, out_b_mr)
-            )
-            ib.return_stmt(result_b)
-
-        func = _run_reuse(_build_program(build))
-        _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_d")
 
 
 def _build_program_with_allocs(tile_specs, op_specs):
@@ -503,7 +413,7 @@ class TestAllocCleanup:
 
         assert _count_alloc_stmts(next(iter(prog.functions.values()))) == 3
 
-        after = passes.basic_memory_reuse()(prog)
+        after = passes.memory_reuse()(prog)
         func = next(iter(after.functions.values()))
 
         assert _count_alloc_stmts(func) == 1, (
@@ -529,7 +439,7 @@ class TestAllocCleanup:
 
         assert _count_alloc_stmts(next(iter(prog.functions.values()))) == 3
 
-        after = passes.basic_memory_reuse()(prog)
+        after = passes.memory_reuse()(prog)
         func = next(iter(after.functions.values()))
 
         assert _count_alloc_stmts(func) == 2, (
@@ -537,37 +447,10 @@ class TestAllocCleanup:
         )
 
 
-class TestDtypeCompatibility:
+class TestDtype:
     """Tests that tiles with different dtypes do NOT reuse each other's memory."""
 
-    def test_cast_output_does_not_reuse(self):
-        """Cast changes dtype: no cross-dtype reuse; same-dtype tiles still reuse."""
-
-        def build(ib, f, alloc):
-            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
-            out_mr = alloc.ddr([64, 64], _FP32)
-            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
-            f.return_type(ir.TensorType([64, 64], _FP32))
-            a_mr, b_mr = alloc.vec([64, 64], _FP32), alloc.vec([64, 64], _FP32)
-            cast_mr, c_mr = alloc.vec([64, 64], _BF16), alloc.vec([64, 64], _BF16)
-            tile_a = ib.let(
-                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
-            )
-            tile_b = ib.let("tile_b", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, b_mr))
-            tile_cast = ib.let("tile_cast", tile.cast(tile_b, _BF16), type=_tile_t([64, 64], _BF16, cast_mr))
-            tile_c = ib.let("tile_c", tile.add(tile_cast, tile_cast), type=_tile_t([64, 64], _BF16, c_mr))
-            result = ib.let(
-                "result", tile.store(tile_c, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
-            )
-            ib.return_stmt(result)
-
-        func = _run_reuse(_build_program(build))
-        _assert_all_have_memrefs(func)
-        _assert_not_shares_memref(func, "tile_a", "tile_cast")
-        _assert_not_shares_memref(func, "tile_a", "tile_c")
-        _assert_shares_memref(func, "tile_cast", "tile_c")
-
-    def test_cast_among_regular_ops(self):
+    def test_cross_dtype_no_reuse_same_dtype_reuse(self):
         """Cross-dtype reuse forbidden; same-dtype tiles reuse within their group."""
 
         def build(ib, f, alloc):
@@ -605,7 +488,7 @@ def _make_tile_view(valid_shape: list[int], pad: ir.PadValue = ir.PadValue.null)
     return ir.TileView(vs, [], _ci(0), ir.TileLayout.row_major, ir.TileLayout.none_box, 512, pad)
 
 
-class TestFillpadCompatibility:
+class TestFillpad:
     """Tests that fillpad output does NOT reuse input due to TileView differences."""
 
     def test_fillpad_output_incompatible_with_input(self):
@@ -726,36 +609,8 @@ class TestFillpadCompatibility:
         _assert_shares_memref(func, "padded_a", "padded_b")
 
 
-class TestViewOperationsMemoryReuse:
+class TestViewOps:
     """Tests for view operations (reshape) with memory reuse."""
-
-    def test_reshape_shares_memref_with_input(self):
-        """Single reshape operation should share MemRef with input tile."""
-
-        def build(ib, f, alloc):
-            input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
-            out_mr = alloc.ddr([64, 64], _FP32)
-            output = f.param("output", _tensor_t([64, 64], _FP32, out_mr), direction=ir.ParamDirection.Out)
-            f.return_type(ir.TensorType([64, 64], _FP32))
-            a_mr = alloc.vec([64, 64], _FP32)
-            c_mr = alloc.vec([4096, 1], _FP32)
-            tile_a = ib.let(
-                "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
-            )
-            # reshape shares MemRef with input
-            tile_b = ib.let("tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
-            tile_c = ib.let("tile_c", tile.add(tile_b, tile_b), type=_tile_t([4096, 1], _FP32, c_mr))
-            # reshape shares MemRef with input
-            tile_d = ib.let("tile_d", tile.reshape(tile_c, [64, 64]), type=_tile_t([64, 64], _FP32, c_mr))
-            result = ib.let(
-                "result", tile.store(tile_d, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
-            )
-            ib.return_stmt(result)
-
-        func = _run_reuse(_build_program(build))
-        _assert_all_have_memrefs(func)
-        _assert_shares_memref(func, "tile_a", "tile_b")
-        _assert_shares_memref(func, "tile_c", "tile_d")
 
     def test_reshape_chain_shares_memref(self):
         """Chained reshapes should all share the same MemRef."""
@@ -785,7 +640,7 @@ class TestViewOperationsMemoryReuse:
         _assert_shares_memref(func, "tile_a", "tile_d")
 
     def test_reshape_not_broken_by_memory_reuse(self):
-        """BasicMemoryReuse should propagate reuse to ALL variables sharing MemRef."""
+        """MemoryReuse should propagate reuse to ALL variables sharing MemRef."""
 
         def build(ib, f, alloc):
             input_a = f.param("input_a", ir.TensorType([64, 64], _FP32))
@@ -803,7 +658,7 @@ class TestViewOperationsMemoryReuse:
                 "tile_a", tile.load(input_a, [0, 0], [64, 64]), type=_tile_t([64, 64], _FP32, a_mr)
             )
             ib.let("_tile_b", tile.reshape(tile_a, [4096, 1]), type=_tile_t([4096, 1], _FP32, a_mr))
-            # BasicMemoryReuse: tile_a reuses tile_c → _tile_b also gets tile_c's MemRef
+            # MemoryReuse: tile_a reuses tile_c → _tile_b also gets tile_c's MemRef
             tile_e = ib.let("tile_e", tile.add(tile_a, tile_a), type=_tile_t([64, 64], _FP32, e_mr))
             result = ib.let(
                 "result", tile.store(tile_e, [0, 0], output), type=_tensor_t([64, 64], _FP32, out_mr)
@@ -847,7 +702,7 @@ class TestViewOperationsMemoryReuse:
         _assert_shares_memref(func, "tile_d", "tile_a")
 
 
-class TestInplaceSafetyCheck:
+class TestInplaceOps:
     """Tests verifying that ops marked not_inplace_safe block producer-consumer reuse."""
 
     def _build_simple_op_test(self, op_fn, shape, dtype):
@@ -909,12 +764,6 @@ class TestInplaceSafetyCheck:
     def test_ands_no_producer_consumer_reuse(self):
         """tile.ands must NOT reuse its input's buffer."""
         func = self._build_simple_op_test(lambda t: tile.ands(t, 255), [32, 32], _INT32)
-        _assert_all_have_memrefs(func)
-        _assert_not_shares_memref(func, "tile_a", "tile_b")
-
-    def test_ors_no_producer_consumer_reuse(self):
-        """tile.ors must NOT reuse its input's buffer."""
-        func = self._build_simple_op_test(lambda t: tile.ors(t, 255), [32, 32], _INT32)
         _assert_all_have_memrefs(func)
         _assert_not_shares_memref(func, "tile_a", "tile_b")
 
@@ -1101,8 +950,8 @@ def _build_for_loop_program(init_mrs, yield_mrs, add_overlap=False, shape=None, 
     return ir.Program([func], "TestProgram", _SPAN)
 
 
-class TestForStmtYieldFixup:
-    """Tests for ForStmt yield fixup — ensuring all 4 loop-carry variables share one MemRef."""
+class TestYieldFixup:
+    """Yield fixup for ForStmt and IfStmt — ensuring loop-carry and return variables share correct MemRef."""
 
     def test_tile_move_inserted_when_memrefs_diverge(self):
         """When initValue and yield value start with different MemRefs,
@@ -1114,7 +963,7 @@ class TestForStmtYieldFixup:
         # add_overlap=True adds extra usage to prevent trivial producer-consumer reuse
         prog = _build_for_loop_program([init_mr], [yield_mr], add_overlap=True)
 
-        after = passes.basic_memory_reuse()(prog)
+        after = passes.memory_reuse()(prog)
         func = next(iter(after.functions.values()))
 
         loop = _find_first_for_stmt(func.body)
@@ -1136,7 +985,7 @@ class TestForStmtYieldFixup:
         shared_mr = alloc.vec([64, 64], _FP32)
         prog = _build_for_loop_program([shared_mr], [shared_mr])
 
-        after = passes.basic_memory_reuse()(prog)
+        after = passes.memory_reuse()(prog)
         func = next(iter(after.functions.values()))
 
         loop = _find_first_for_stmt(func.body)
@@ -1163,7 +1012,7 @@ class TestForStmtYieldFixup:
 
         prog = _build_for_loop_program([shared_mr, init_mr_2], [shared_mr, yield_mr_2], add_overlap=True)
 
-        after = passes.basic_memory_reuse()(prog)
+        after = passes.memory_reuse()(prog)
         func = next(iter(after.functions.values()))
 
         loop = _find_first_for_stmt(func.body)
@@ -1181,6 +1030,786 @@ class TestForStmtYieldFixup:
             rv = loop.return_vars[i]
             assert isinstance(rv.type, ir.ShapedType)
             assert rv.type.shares_memref_with(ia.type), f"return_var[{i}] should share iter_arg's MemRef"
+
+    def test_if_stmt_return_var_memref_patched(self):
+        """After reuse changes a branch variable's MemRef, the IfStmt's
+        return_var should be patched to reflect the updated MemRef."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        cond_param = ir.Var("cond_param", ir.ScalarType(DataType.INDEX), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # tile_a: dead before IfStmt
+        a_mr = alloc.vec(shape, _FP32)
+        a_tt = _tile_t(shape, _FP32, a_mr)
+        tile_a = ir.Var("tile_a", a_tt, span)
+        load_a = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            a_tt,
+            span,
+        )
+        # Consume tile_a immediately so it's dead before IfStmt
+        store_a = ir.Call(
+            ir.get_op("tile.store"),
+            [tile_a, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        store_a_var = ir.Var("store_a", _tensor_t(shape, _FP32, out_mr), span)
+
+        # Then branch: tile_b = load (could reuse tile_a's MemRef)
+        b_mr = alloc.vec(shape, _FP32)
+        b_tt = _tile_t(shape, _FP32, b_mr)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        load_b = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            b_tt,
+            span,
+        )
+        then_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_b, load_b, span)], span), ir.YieldStmt([tile_b], span)], span
+        )
+
+        # Else branch: tile_c = load (could also reuse tile_a)
+        c_mr = alloc.vec(shape, _FP32)
+        c_tt = _tile_t(shape, _FP32, c_mr)
+        tile_c = ir.Var("tile_c", c_tt, span)
+        load_c = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            c_tt,
+            span,
+        )
+        else_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_c, load_c, span)], span), ir.YieldStmt([tile_c], span)], span
+        )
+
+        # IfStmt with return_var (initially pointing to a different MemRef)
+        rv_mr = alloc.vec(shape, _FP32)
+        rv = ir.Var("if_result", _tile_t(shape, _FP32, rv_mr), span)
+        cond = ir.Lt(cond_param, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [rv], span)
+
+        # Store if_result
+        store_rv = ir.Call(
+            ir.get_op("tile.store"),
+            [rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts(
+                    [ir.AssignStmt(tile_a, load_a, span), ir.AssignStmt(store_a_var, store_a, span)], span
+                ),
+                if_stmt,
+                ir.OpStmts([ir.AssignStmt(result_var, store_rv, span)], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [
+                (input_tensor, ir.ParamDirection.In),
+                (cond_param, ir.ParamDirection.In),
+                (output, ir.ParamDirection.Out),
+            ],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_b and tile_c should reuse tile_a (tile_a is dead before IfStmt)
+        _assert_shares_memref(func_out, "tile_a", "tile_b")
+        _assert_shares_memref(func_out, "tile_b", "tile_c")
+
+        # After reuse, if_result's MemRef should be patched by YieldFixupMutator
+        # to match the then-branch yield value's MemRef (which is now tile_a's MemRef)
+        if_result_type = _get_var_type(func_out, "if_result")
+        tile_b_type = _get_var_type(func_out, "tile_b")
+        if if_result_type is not None and tile_b_type is not None:
+            assert if_result_type.shares_memref_with(tile_b_type), (
+                "if_result should share MemRef with tile_b after YieldFixupMutator patches it"
+            )
+
+
+class TestControlFlow:
+    """Tests for correct lifetime analysis across control flow boundaries."""
+
+    def test_var_used_in_nested_if_not_reused_in_loop(self):
+        """Variable defined before loop, used inside IfStmt within loop body,
+        must NOT have its MemRef reused by other loop-body variables."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        # Params
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # tile_a: defined before loop, used inside IfStmt in loop body
+        a_mr = alloc.vec(shape, _FP32)
+        tile_a_tt = _tile_t(shape, _FP32, a_mr)
+        tile_a = ir.Var("tile_a", tile_a_tt, span)
+        load_call = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            tile_a_tt,
+            span,
+        )
+        load_stmt = ir.AssignStmt(tile_a, load_call, span)
+
+        # Loop: for i in range(4)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+
+        # iter_arg: acc initialized with tile_a
+        acc_mr = alloc.vec(shape, _FP32)
+        acc_tt = _tile_t(shape, _FP32, acc_mr)
+        ia = ir.IterArg("acc", acc_tt, tile_a, span)
+
+        # Inside loop body:
+        #   if (i < 2):
+        #     tile_c = tile.add(acc, tile_a)   ← tile_a used here!
+        #     yield tile_c
+        #   else:
+        #     yield acc
+        c_mr = alloc.vec(shape, _FP32)
+        c_tt = _tile_t(shape, _FP32, c_mr)
+        tile_c = ir.Var("tile_c", c_tt, span)
+        add_call = ir.Call(ir.get_op("tile.add"), [ia, tile_a], c_tt, span)
+        then_assign = ir.AssignStmt(tile_c, add_call, span)
+
+        # Then branch: assign tile_c, yield tile_c
+        then_yield = ir.YieldStmt([tile_c], span)
+        then_body = ir.SeqStmts([ir.OpStmts([then_assign], span), then_yield], span)
+
+        # Else branch: yield acc
+        else_yield = ir.YieldStmt([ia], span)
+        else_body = else_yield
+
+        # IfStmt with return_var
+        if_rv_mr = alloc.vec(shape, _FP32)
+        if_rv = ir.Var("if_result", _tile_t(shape, _FP32, if_rv_mr), span)
+        cond = ir.Lt(loop_var, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [if_rv], span)
+
+        # Loop body: IfStmt then yield if_rv
+        loop_yield = ir.YieldStmt([if_rv], span)
+        loop_body = ir.SeqStmts([if_stmt, loop_yield], span)
+
+        # ForStmt
+        rv_mr = alloc.vec(shape, _FP32)
+        rv = ir.Var("loop_out", _tile_t(shape, _FP32, rv_mr), span)
+        for_stmt = ir.ForStmt(loop_var, _ci(0), _ci(4), _ci(1), [ia], loop_body, [rv], span)
+
+        # Store and return
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+        store_stmt = ir.AssignStmt(result_var, store_call, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts([load_stmt], span),
+                for_stmt,
+                ir.OpStmts([store_stmt], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [(input_tensor, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_a must NOT share MemRef with tile_c — tile_a is live through the loop
+        _assert_not_shares_memref(func_out, "tile_a", "tile_c")
+
+    def test_different_if_branches_can_share(self):
+        """Variables in different IfStmt branches should be able to share MemRef
+        since they have non-overlapping lifetimes."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # Create a scalar condition
+        cond_param = ir.Var("cond_param", ir.ScalarType(DataType.INDEX), span)
+
+        # Then branch: tile_b = tile.load(...)
+        b_mr = alloc.vec(shape, _FP32)
+        b_tt = _tile_t(shape, _FP32, b_mr)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        load_b = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            b_tt,
+            span,
+        )
+        then_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_b, load_b, span)], span), ir.YieldStmt([tile_b], span)], span
+        )
+
+        # Else branch: tile_c = tile.load(...)
+        c_mr = alloc.vec(shape, _FP32)
+        c_tt = _tile_t(shape, _FP32, c_mr)
+        tile_c = ir.Var("tile_c", c_tt, span)
+        load_c = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            c_tt,
+            span,
+        )
+        else_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_c, load_c, span)], span), ir.YieldStmt([tile_c], span)], span
+        )
+
+        # IfStmt with return_var
+        rv_mr = alloc.vec(shape, _FP32)
+        rv = ir.Var("if_result", _tile_t(shape, _FP32, rv_mr), span)
+        cond = ir.Lt(cond_param, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [rv], span)
+
+        # Store and return
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                if_stmt,
+                ir.OpStmts([ir.AssignStmt(result_var, store_call, span)], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [
+                (input_tensor, ir.ParamDirection.In),
+                (cond_param, ir.ParamDirection.In),
+                (output, ir.ParamDirection.Out),
+            ],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_b and tile_c are in different branches — they CAN share MemRef
+        _assert_shares_memref(func_out, "tile_b", "tile_c")
+
+    def test_loop_local_var_can_be_reused(self):
+        """Variables defined AND used entirely within a single loop iteration
+        can still be reused with other loop-local variables."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+
+        # Loop body: tile_x = load; tile_y = add(tile_x, tile_x); tile_z = add(tile_y, tile_y); yield tile_z
+        x_mr, y_mr, z_mr = alloc.vec(shape, _FP32), alloc.vec(shape, _FP32), alloc.vec(shape, _FP32)
+        x_tt, y_tt, z_tt = (
+            _tile_t(shape, _FP32, x_mr),
+            _tile_t(shape, _FP32, y_mr),
+            _tile_t(shape, _FP32, z_mr),
+        )
+        tile_x = ir.Var("tile_x", x_tt, span)
+        tile_y = ir.Var("tile_y", y_tt, span)
+        tile_z = ir.Var("tile_z", z_tt, span)
+
+        # Use a zero init for iter_arg
+        init_mr = alloc.vec(shape, _FP32)
+        init_tt = _tile_t(shape, _FP32, init_mr)
+        init_tile = ir.Var("init_tile", init_tt, span)
+        create_call = ir.Call(ir.get_op("tile.create"), [ir.ConstFloat(0.0, _FP32, span)], init_tt, span)
+        init_stmt = ir.AssignStmt(init_tile, create_call, span)
+
+        ia = ir.IterArg("acc", init_tt, init_tile, span)
+
+        load_call = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            x_tt,
+            span,
+        )
+        add_call_1 = ir.Call(ir.get_op("tile.add"), [tile_x, tile_x], y_tt, span)
+        add_call_2 = ir.Call(ir.get_op("tile.add"), [tile_y, tile_y], z_tt, span)
+
+        body_stmts: list[ir.AssignStmt | ir.EvalStmt] = [
+            ir.AssignStmt(tile_x, load_call, span),
+            ir.AssignStmt(tile_y, add_call_1, span),
+            ir.AssignStmt(tile_z, add_call_2, span),
+        ]
+        seq_items: list[ir.Stmt] = [ir.OpStmts(body_stmts, span), ir.YieldStmt([tile_z], span)]
+        loop_body = ir.SeqStmts(seq_items, span)
+
+        rv_mr = alloc.vec(shape, _FP32)
+        rv = ir.Var("loop_out", _tile_t(shape, _FP32, rv_mr), span)
+        for_stmt = ir.ForStmt(loop_var, _ci(0), _ci(4), _ci(1), [ia], loop_body, [rv], span)
+
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts([init_stmt], span),
+                for_stmt,
+                ir.OpStmts([ir.AssignStmt(result_var, store_call, span)], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [(input_tensor, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_x and tile_z should share MemRef (both loop-local, non-overlapping)
+        _assert_shares_memref(func_out, "tile_x", "tile_z")
+
+    def test_nested_for_loops_outer_var_extends_to_outer_end(self):
+        """Variable defined before nested loops, used in inner loop body —
+        lifetime must extend to the END of the OUTER loop (not just inner)."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # tile_a: defined before both loops
+        a_mr = alloc.vec(shape, _FP32)
+        a_tt = _tile_t(shape, _FP32, a_mr)
+        tile_a = ir.Var("tile_a", a_tt, span)
+        load_a = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            a_tt,
+            span,
+        )
+
+        # Inner loop: for j in range(4): tile_b = add(acc_inner, tile_a); yield tile_b
+        j_var = ir.Var("j", ir.ScalarType(DataType.INDEX), span)
+        init_inner_mr = alloc.vec(shape, _FP32)
+        init_inner_tt = _tile_t(shape, _FP32, init_inner_mr)
+        init_inner = ir.Var("init_inner", init_inner_tt, span)
+        create_inner = ir.Call(
+            ir.get_op("tile.create"), [ir.ConstFloat(0.0, _FP32, span)], init_inner_tt, span
+        )
+
+        ia_inner = ir.IterArg("acc_inner", init_inner_tt, init_inner, span)
+        b_mr = alloc.vec(shape, _FP32)
+        b_tt = _tile_t(shape, _FP32, b_mr)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        add_b = ir.Call(ir.get_op("tile.add"), [ia_inner, tile_a], b_tt, span)  # tile_a used in inner loop!
+
+        inner_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_b, add_b, span)], span), ir.YieldStmt([tile_b], span)], span
+        )
+        inner_rv_mr = alloc.vec(shape, _FP32)
+        inner_rv = ir.Var("inner_out", _tile_t(shape, _FP32, inner_rv_mr), span)
+        inner_for = ir.ForStmt(j_var, _ci(0), _ci(4), _ci(1), [ia_inner], inner_body, [inner_rv], span)
+
+        # Outer loop: for i in range(4): { inner_for; tile_d = add(acc_outer, inner_out); yield tile_d }
+        i_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        init_outer_mr = alloc.vec(shape, _FP32)
+        init_outer_tt = _tile_t(shape, _FP32, init_outer_mr)
+        init_outer = ir.Var("init_outer", init_outer_tt, span)
+        create_outer = ir.Call(
+            ir.get_op("tile.create"), [ir.ConstFloat(0.0, _FP32, span)], init_outer_tt, span
+        )
+
+        ia_outer = ir.IterArg("acc_outer", init_outer_tt, init_outer, span)
+        d_mr = alloc.vec(shape, _FP32)
+        d_tt = _tile_t(shape, _FP32, d_mr)
+        tile_d = ir.Var("tile_d", d_tt, span)
+        add_d = ir.Call(ir.get_op("tile.add"), [ia_outer, inner_rv], d_tt, span)
+
+        outer_body = ir.SeqStmts(
+            [inner_for, ir.OpStmts([ir.AssignStmt(tile_d, add_d, span)], span), ir.YieldStmt([tile_d], span)],
+            span,
+        )
+        outer_rv_mr = alloc.vec(shape, _FP32)
+        outer_rv = ir.Var("outer_out", _tile_t(shape, _FP32, outer_rv_mr), span)
+        outer_for = ir.ForStmt(i_var, _ci(0), _ci(4), _ci(1), [ia_outer], outer_body, [outer_rv], span)
+
+        # Store and return
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [outer_rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts(
+                    [
+                        ir.AssignStmt(tile_a, load_a, span),
+                        ir.AssignStmt(init_inner, create_inner, span),
+                        ir.AssignStmt(init_outer, create_outer, span),
+                    ],
+                    span,
+                ),
+                outer_for,
+                ir.OpStmts([ir.AssignStmt(result_var, store_call, span)], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [(input_tensor, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_a used in inner loop but defined outside outer loop → must NOT be reused
+        # by tile_b (inner loop body) or tile_d (outer loop body)
+        _assert_not_shares_memref(func_out, "tile_a", "tile_b")
+        _assert_not_shares_memref(func_out, "tile_a", "tile_d")
+
+    def test_if_without_else_branch(self):
+        """IfStmt with only then branch (no else) should not crash and
+        correctly track variable uses inside then body."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        cond_param = ir.Var("cond_param", ir.ScalarType(DataType.INDEX), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # tile_a defined before if
+        a_mr = alloc.vec(shape, _FP32)
+        a_tt = _tile_t(shape, _FP32, a_mr)
+        tile_a = ir.Var("tile_a", a_tt, span)
+        load_a = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            a_tt,
+            span,
+        )
+
+        # Then branch: tile_b = add(tile_a, tile_a); store(tile_b, ...)
+        b_mr = alloc.vec(shape, _FP32)
+        b_tt = _tile_t(shape, _FP32, b_mr)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        add_b = ir.Call(ir.get_op("tile.add"), [tile_a, tile_a], b_tt, span)
+        store_b = ir.Call(
+            ir.get_op("tile.store"),
+            [tile_b, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        store_b_var = ir.Var("store_b", _tensor_t(shape, _FP32, out_mr), span)
+        then_body = ir.OpStmts(
+            [ir.AssignStmt(tile_b, add_b, span), ir.AssignStmt(store_b_var, store_b, span)], span
+        )
+
+        cond = ir.Lt(cond_param, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, None, [], span)  # No else, no return_vars
+
+        # tile_c defined after if — tile_a should still be alive through IfStmt
+        c_mr = alloc.vec(shape, _FP32)
+        c_tt = _tile_t(shape, _FP32, c_mr)
+        tile_c = ir.Var("tile_c", c_tt, span)
+        add_c = ir.Call(ir.get_op("tile.add"), [tile_a, tile_a], c_tt, span)
+
+        store_c = ir.Call(
+            ir.get_op("tile.store"),
+            [tile_c, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts([ir.AssignStmt(tile_a, load_a, span)], span),
+                if_stmt,
+                ir.OpStmts(
+                    [ir.AssignStmt(tile_c, add_c, span), ir.AssignStmt(result_var, store_c, span)], span
+                ),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [
+                (input_tensor, ir.ParamDirection.In),
+                (cond_param, ir.ParamDirection.In),
+                (output, ir.ParamDirection.Out),
+            ],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_a is used both inside IfStmt (then branch) and after it → still alive
+        # tile_b (inside then) overlaps with tile_a → cannot reuse
+        _assert_not_shares_memref(func_out, "tile_a", "tile_b")
+        # tile_c is after tile_a's last use → can reuse tile_a (greedy first-fit)
+        _assert_shares_memref(func_out, "tile_a", "tile_c")
+
+    def test_for_with_if_multiple_vars_competing(self):
+        """ForStmt with IfStmt inside, multiple variables from before the loop
+        used inside the if — tests that ALL outer variables are correctly extended."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # Two tiles defined before the loop
+        a_mr, b_mr = alloc.vec(shape, _FP32), alloc.vec(shape, _FP32)
+        a_tt, b_tt = _tile_t(shape, _FP32, a_mr), _tile_t(shape, _FP32, b_mr)
+        tile_a = ir.Var("tile_a", a_tt, span)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        load_a = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            a_tt,
+            span,
+        )
+        load_b = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            b_tt,
+            span,
+        )
+
+        # Loop: for i in range(4)
+        i_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        init_mr = alloc.vec(shape, _FP32)
+        init_tt = _tile_t(shape, _FP32, init_mr)
+        init_tile = ir.Var("init_tile", init_tt, span)
+        create_init = ir.Call(ir.get_op("tile.create"), [ir.ConstFloat(0.0, _FP32, span)], init_tt, span)
+        ia = ir.IterArg("acc", init_tt, init_tile, span)
+
+        # Inside loop: if (i < 2): tile_c = add(tile_a, tile_b) else: tile_d = add(tile_b, tile_a)
+        c_mr, d_mr = alloc.vec(shape, _FP32), alloc.vec(shape, _FP32)
+        c_tt, d_tt = _tile_t(shape, _FP32, c_mr), _tile_t(shape, _FP32, d_mr)
+        tile_c = ir.Var("tile_c", c_tt, span)
+        tile_d = ir.Var("tile_d", d_tt, span)
+        add_c = ir.Call(ir.get_op("tile.add"), [tile_a, tile_b], c_tt, span)
+        add_d = ir.Call(ir.get_op("tile.add"), [tile_b, tile_a], d_tt, span)
+
+        then_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_c, add_c, span)], span), ir.YieldStmt([tile_c], span)], span
+        )
+        else_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_d, add_d, span)], span), ir.YieldStmt([tile_d], span)], span
+        )
+        if_rv_mr = alloc.vec(shape, _FP32)
+        if_rv = ir.Var("if_result", _tile_t(shape, _FP32, if_rv_mr), span)
+        cond = ir.Lt(i_var, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [if_rv], span)
+
+        # Yield if_result from loop
+        loop_body = ir.SeqStmts([if_stmt, ir.YieldStmt([if_rv], span)], span)
+        rv_mr = alloc.vec(shape, _FP32)
+        rv = ir.Var("loop_out", _tile_t(shape, _FP32, rv_mr), span)
+        for_stmt = ir.ForStmt(i_var, _ci(0), _ci(4), _ci(1), [ia], loop_body, [rv], span)
+
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [rv, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts(
+                    [
+                        ir.AssignStmt(tile_a, load_a, span),
+                        ir.AssignStmt(tile_b, load_b, span),
+                        ir.AssignStmt(init_tile, create_init, span),
+                    ],
+                    span,
+                ),
+                for_stmt,
+                ir.OpStmts([ir.AssignStmt(result_var, store_call, span)], span),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [(input_tensor, ir.ParamDirection.In), (output, ir.ParamDirection.Out)],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_a and tile_b are both used inside the nested IfStmt in the loop —
+        # their lifetimes extend to loop end, so tile_c and tile_d cannot reuse them
+        _assert_not_shares_memref(func_out, "tile_a", "tile_c")
+        _assert_not_shares_memref(func_out, "tile_a", "tile_d")
+        _assert_not_shares_memref(func_out, "tile_b", "tile_c")
+        _assert_not_shares_memref(func_out, "tile_b", "tile_d")
+        # tile_c and tile_d are in different branches — they CAN share
+        _assert_shares_memref(func_out, "tile_c", "tile_d")
+
+    def test_branch_local_var_does_not_leak(self):
+        """A variable defined and consumed entirely inside one IfStmt branch
+        should have a short lifetime and not block reuse after the IfStmt."""
+        span = _SPAN
+        shape = [64, 64]
+        alloc = _MemRefAlloc()
+
+        input_tensor = ir.Var("input_tensor", ir.TensorType(shape, _FP32), span)
+        cond_param = ir.Var("cond_param", ir.ScalarType(DataType.INDEX), span)
+        out_mr = alloc.ddr(shape, _FP32)
+        output = ir.Var("output", _tensor_t(shape, _FP32, out_mr), span)
+
+        # tile_a: loaded before if
+        a_mr = alloc.vec(shape, _FP32)
+        a_tt = _tile_t(shape, _FP32, a_mr)
+        tile_a = ir.Var("tile_a", a_tt, span)
+        load_a = ir.Call(
+            ir.get_op("tile.load"),
+            [input_tensor, ir.MakeTuple([_ci(0), _ci(0)], span), ir.MakeTuple([_ci(64), _ci(64)], span)],
+            a_tt,
+            span,
+        )
+
+        # Then branch: tile_b = add(tile_a, tile_a); yield tile_b
+        b_mr = alloc.vec(shape, _FP32)
+        b_tt = _tile_t(shape, _FP32, b_mr)
+        tile_b = ir.Var("tile_b", b_tt, span)
+        add_b = ir.Call(ir.get_op("tile.add"), [tile_a, tile_a], b_tt, span)
+        then_body = ir.SeqStmts(
+            [ir.OpStmts([ir.AssignStmt(tile_b, add_b, span)], span), ir.YieldStmt([tile_b], span)], span
+        )
+
+        # Else branch: yield tile_a (tile_a is the fallback)
+        else_body = ir.YieldStmt([tile_a], span)
+
+        if_rv_mr = alloc.vec(shape, _FP32)
+        if_rv = ir.Var("if_result", _tile_t(shape, _FP32, if_rv_mr), span)
+        cond = ir.Lt(cond_param, _ci(2), _IDX, span)
+        if_stmt = ir.IfStmt(cond, then_body, else_body, [if_rv], span)
+
+        # tile_e = add(if_result, if_result) — defined AFTER IfStmt
+        e_mr = alloc.vec(shape, _FP32)
+        e_tt = _tile_t(shape, _FP32, e_mr)
+        tile_e = ir.Var("tile_e", e_tt, span)
+        add_e = ir.Call(ir.get_op("tile.add"), [if_rv, if_rv], e_tt, span)
+
+        store_call = ir.Call(
+            ir.get_op("tile.store"),
+            [tile_e, ir.MakeTuple([_ci(0), _ci(0)], span), output],
+            _tensor_t(shape, _FP32, out_mr),
+            span,
+        )
+        result_var = ir.Var("result", _tensor_t(shape, _FP32, out_mr), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.OpStmts([ir.AssignStmt(tile_a, load_a, span)], span),
+                if_stmt,
+                ir.OpStmts(
+                    [ir.AssignStmt(tile_e, add_e, span), ir.AssignStmt(result_var, store_call, span)], span
+                ),
+                ir.ReturnStmt([result_var], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main",
+            [
+                (input_tensor, ir.ParamDirection.In),
+                (cond_param, ir.ParamDirection.In),
+                (output, ir.ParamDirection.Out),
+            ],
+            [ir.TensorType(shape, _FP32)],
+            body,
+            span,
+        )
+        prog = ir.Program([func], "Test", span)
+
+        after = passes.memory_reuse()(prog)
+        func_out = next(iter(after.functions.values()))
+
+        # tile_b is local to then-branch (last use at then-yield).
+        # tile_e is defined after IfStmt. tile_b's lifetime should NOT leak
+        # beyond the then-branch, so tile_e CAN reuse tile_a (tile_a's last use
+        # is in the else-yield which ends before tile_e's def)
+        _assert_shares_memref(func_out, "tile_a", "tile_e")
 
 
 if __name__ == "__main__":

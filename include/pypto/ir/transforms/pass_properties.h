@@ -122,7 +122,7 @@ inline const PassProperties kInitMemRefProperties{
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
-inline const PassProperties kBasicMemoryReuseProperties{
+inline const PassProperties kMemoryReuseProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
                  IRProperty::TileOps2D}};
 

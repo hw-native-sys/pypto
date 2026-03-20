@@ -62,7 +62,7 @@ class TestPassPipelineNoEnforcement:
     def test_run_succeeds_without_required_properties(self):
         """Test that Run succeeds even when required properties are not tracked."""
         pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.basic_memory_reuse())
+        pipeline.add_pass(passes.memory_reuse())
         program = _make_simple_program()
         result = pipeline.run(program)
         assert result is not None

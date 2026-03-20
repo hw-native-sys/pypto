@@ -568,8 +568,8 @@ class OpFuzzer:
                               chain will use that type.
             basic_ops_only: If True, only use basic element-wise ops (binary, scalar, unary).
                            Excludes reductions, row_expand, matmul, and other ops that allocate
-                           temporary buffers. Used for if/else branches where BasicMemoryReuse
-                           cannot track buffer usage inside IfStmt branches.
+                           temporary buffers. Used for if/else branches as a conservative
+                           constraint to keep generated programs simple.
         """
         self.op_usage_count = {}
         self.exp_count = 0
@@ -581,8 +581,8 @@ class OpFuzzer:
         # Decide pipe type: M-pipe (matrix) or V-pipe (vector)
         # Once chosen, all ops in this chain use the same pipe type
         if basic_ops_only:
-            # For if/else branches: only basic element-wise ops to avoid
-            # triggering BasicMemoryReuse bugs with buffer allocations
+            # For if/else branches: only basic element-wise ops to keep
+            # generated branch code simple and predictable
             prefer_matrix_ops = False
         elif prefer_matrix_ops is None:
             # Auto-select: use matrix ops with 1% probability (when available)

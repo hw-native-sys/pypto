@@ -31,7 +31,7 @@ class Pass;
  */
 enum class ReportType {
   Memory,  ///< Memory usage per MemorySpace
-  // Future: Timing, DependencyGraph, ...
+  // Future: Timing, ...
 };
 
 /**
