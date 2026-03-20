@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -648,34 +649,36 @@ class SSAConverter {
     }
     auto else_ver = op->else_body_.has_value() ? cur_ : before;
 
-    // Collect all variable keys from both branches into a deterministic order
+    // Convert to ordered maps for deterministic iteration
     // (avoids nondeterministic pointer-keyed unordered_map iteration)
     auto var_order = [](const Var* a, const Var* b) {
       if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
       return a->UniqueId() < b->UniqueId();
     };
-    std::set<const Var*, decltype(var_order)> all_keys(var_order);
-    for (const auto& [vp, v] : then_ver) all_keys.insert(vp);
-    for (const auto& [vp, v] : else_ver) all_keys.insert(vp);
+    using OrderedVarMap = std::map<const Var*, VarPtr, decltype(var_order)>;
+    OrderedVarMap then_ordered(then_ver.begin(), then_ver.end(), var_order);
+    OrderedVarMap else_ordered(else_ver.begin(), else_ver.end(), var_order);
 
     // Find variables that diverged between branches
     std::vector<const Var*> phis;
-    for (const Var* vp : all_keys) {
+    std::set<const Var*, decltype(var_order)> seen(var_order);
+    for (const auto& [vp, v] : then_ordered) {
+      seen.insert(vp);
       auto bi = before.find(vp);
-      auto ti = then_ver.find(vp);
-      auto ei = else_ver.find(vp);
-      bool in_then = (ti != then_ver.end());
-      bool in_else = (ei != else_ver.end());
-
       if (bi != before.end()) {
-        // Variable existed before — check if either branch changed it
-        bool then_changed = in_then && (bi->second != ti->second);
-        bool else_changed = in_else && (bi->second != ei->second);
+        bool then_changed = (bi->second != v);
+        auto ei = else_ver.find(vp);
+        bool else_changed = (ei != else_ver.end() && bi->second != ei->second);
         if (then_changed || else_changed) phis.push_back(vp);
-      } else if (in_then && in_else) {
+      } else if (else_ver.count(vp)) {
         // New variable defined in BOTH branches needs a phi
         phis.push_back(vp);
       }
+    }
+    for (const auto& [vp, v] : else_ordered) {
+      if (seen.count(vp)) continue;
+      auto bi = before.find(vp);
+      if (bi != before.end() && bi->second != v) phis.push_back(vp);
     }
 
     // No divergence — return simple IfStmt
