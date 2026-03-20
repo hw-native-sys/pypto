@@ -490,7 +490,22 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
       stream_ << "]";
 
-      stream_ << " : !pto.tensor_view<";
+      std::string layout_str = "nd";
+      if (tensor_type->tensor_view_.has_value()) {
+        switch (tensor_type->tensor_view_.value().layout) {
+          case ir::TensorLayout::DN:
+            layout_str = "dn";
+            break;
+          case ir::TensorLayout::NZ:
+            layout_str = "nz";
+            break;
+          case ir::TensorLayout::ND:
+            break;
+        }
+      }
+      stream_ << " {layout = #pto.layout<" << layout_str << ">}";
+
+      stream_ << ": !pto.tensor_view<";
       for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
         if (j > 0) stream_ << "x";
         stream_ << "?";

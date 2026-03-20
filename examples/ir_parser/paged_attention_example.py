@@ -47,12 +47,12 @@ from pypto.runtime import RunConfig, TensorSpec, run
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_init_inplace(
     oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-    li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
 ]:
     """Initialize inplace accumulators to zero (VECTOR)."""
     return oi, li, mi
@@ -61,7 +61,7 @@ def kernel_init_inplace(
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_qk_matmul(
     qi: pl.Tensor[[16, 128], pl.BF16],
-    kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+    kj: pl.Tensor[[128, 128], pl.BF16],
     output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
 ) -> pl.Tensor[[16, 128], pl.FP32]:
     """QK matmul: sij = qi @ kj.T (CUBE). kj transposed during load to L1."""
@@ -79,12 +79,12 @@ def kernel_softmax_prepare(
     sij: pl.Tensor[[16, 128], pl.FP32],
     scale: pl.Scalar[pl.FP32],
     out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.BF16],
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
 ]:
     """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
     s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
