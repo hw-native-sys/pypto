@@ -1985,6 +1985,100 @@ class TestSliceMatmulConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_loop_carried_tensor_param_marked_out(self):
+        """Loop-carried tensor output buffers should become pl.Out."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                buf: pl.Tensor[[1, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk: pl.Tensor[[1, 32], pl.FP32] = pl.slice(x, [1, 32], [0, 0])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(acc, chunk, [0, off])
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                buf: pl.Tensor[[1, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, buf)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                buf: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(x, [0, 0], [1, 32])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.store(chunk_tile, [0, off], acc)
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                buf: pl.Tensor[[1, 64], pl.FP32],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, buf)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_loop_carried_tensor_param_marked_inout(self):
+        """Loop-carried tensor buffers that are read before write should become pl.InOut."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, buf: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk: pl.Tensor[[1, 32], pl.FP32] = pl.slice(acc, [1, 32], [0, off])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(acc, chunk, [0, off])
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, buf: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(buf)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, buf: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(acc, [0, off], [1, 32])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.store(chunk_tile, [0, off], acc)
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, buf: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(buf)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

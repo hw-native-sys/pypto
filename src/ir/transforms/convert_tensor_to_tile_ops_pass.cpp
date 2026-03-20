@@ -330,6 +330,389 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
   return {};
 }
 
+ParamDirection MergeParamDirections(ParamDirection lhs, ParamDirection rhs) {
+  if (lhs == ParamDirection::InOut || rhs == ParamDirection::InOut) {
+    return ParamDirection::InOut;
+  }
+  if (lhs == ParamDirection::Out || rhs == ParamDirection::Out) {
+    return ParamDirection::Out;
+  }
+  return ParamDirection::In;
+}
+
+std::optional<size_t> GetWriteOnlyArgIndex(const std::string& op_name) {
+  if (op_name == "tile.store") {
+    return 2;
+  }
+  if (op_name == "tensor.assemble" || op_name == "tensor.write") {
+    return 0;
+  }
+  return std::nullopt;
+}
+
+class AliasReferenceVisitor : public IRVisitor {
+ public:
+  explicit AliasReferenceVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
+
+  [[nodiscard]] bool Found() const { return found_; }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    if (op && aliases_.count(op.get())) {
+      found_ = true;
+    }
+    IRVisitor::VisitVarLike_(op);
+  }
+
+ private:
+  const std::unordered_set<const Var*>& aliases_;
+  bool found_ = false;
+};
+
+class AliasReadVisitor : public IRVisitor {
+ public:
+  explicit AliasReadVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
+
+  [[nodiscard]] bool Found() const { return found_; }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    if (op && aliases_.count(op.get())) {
+      found_ = true;
+    }
+    IRVisitor::VisitVarLike_(op);
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (!op) return;
+
+    auto write_only_arg = GetWriteOnlyArgIndex(op->op_->name_);
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      if (write_only_arg.has_value() && i == *write_only_arg) {
+        continue;
+      }
+      VisitExpr(op->args_[i]);
+    }
+  }
+
+ private:
+  const std::unordered_set<const Var*>& aliases_;
+  bool found_ = false;
+};
+
+class AliasWriteVisitor : public IRVisitor {
+ public:
+  explicit AliasWriteVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
+
+  [[nodiscard]] bool Found() const { return found_; }
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    if (!op) return;
+
+    auto write_only_arg = GetWriteOnlyArgIndex(op->op_->name_);
+    if (write_only_arg.has_value() && *write_only_arg < op->args_.size()) {
+      AliasReferenceVisitor ref_visitor(aliases_);
+      ref_visitor.VisitExpr(op->args_[*write_only_arg]);
+      if (ref_visitor.Found()) {
+        found_ = true;
+      }
+    }
+
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      if (write_only_arg.has_value() && i == *write_only_arg) {
+        continue;
+      }
+      VisitExpr(op->args_[i]);
+    }
+  }
+
+ private:
+  const std::unordered_set<const Var*>& aliases_;
+  bool found_ = false;
+};
+
+bool ExprReferencesAlias(const ExprPtr& expr, const std::unordered_set<const Var*>& aliases) {
+  AliasReferenceVisitor visitor(aliases);
+  visitor.VisitExpr(expr);
+  return visitor.Found();
+}
+
+bool ExprReadsAlias(const ExprPtr& expr, const std::unordered_set<const Var*>& aliases) {
+  AliasReadVisitor visitor(aliases);
+  visitor.VisitExpr(expr);
+  return visitor.Found();
+}
+
+bool ExprWritesAlias(const ExprPtr& expr, const std::unordered_set<const Var*>& aliases) {
+  AliasWriteVisitor visitor(aliases);
+  visitor.VisitExpr(expr);
+  return visitor.Found();
+}
+
+bool ExprAliasesTrackedBuffer(const ExprPtr& expr, const std::unordered_set<const Var*>& aliases) {
+  if (auto iter_arg = As<IterArg>(expr)) {
+    return aliases.count(iter_arg.get()) > 0;
+  }
+  if (auto var = As<Var>(expr)) {
+    return aliases.count(var.get()) > 0;
+  }
+
+  auto call = As<Call>(expr);
+  if (!call) {
+    return false;
+  }
+
+  auto write_only_arg = GetWriteOnlyArgIndex(call->op_->name_);
+  return write_only_arg.has_value() && *write_only_arg < call->args_.size() &&
+         ExprReferencesAlias(call->args_[*write_only_arg], aliases);
+}
+
+struct BufferAccessInfo {
+  bool reads = false;
+  bool writes = false;
+};
+
+void CollectBufferAccessInStmts(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& aliases,
+                                BufferAccessInfo& access);
+
+void CollectBufferAccessInStmt(const StmtPtr& stmt, std::unordered_set<const Var*>& aliases,
+                               BufferAccessInfo& access) {
+  if (auto assign = As<AssignStmt>(stmt)) {
+    access.reads = access.reads || ExprReadsAlias(assign->value_, aliases);
+    access.writes = access.writes || ExprWritesAlias(assign->value_, aliases);
+    if (ExprAliasesTrackedBuffer(assign->value_, aliases)) {
+      aliases.insert(assign->var_.get());
+    }
+    return;
+  }
+
+  if (auto eval_stmt = As<EvalStmt>(stmt)) {
+    access.reads = access.reads || ExprReadsAlias(eval_stmt->expr_, aliases);
+    access.writes = access.writes || ExprWritesAlias(eval_stmt->expr_, aliases);
+    return;
+  }
+
+  if (auto seq = As<SeqStmts>(stmt)) {
+    CollectBufferAccessInStmts(seq->stmts_, aliases, access);
+    return;
+  }
+
+  if (auto op_stmts = As<OpStmts>(stmt)) {
+    CollectBufferAccessInStmts(op_stmts->stmts_, aliases, access);
+    return;
+  }
+
+  if (auto scope = As<ScopeStmt>(stmt)) {
+    auto body_stmts = FlattenToStmts(scope->body_);
+    CollectBufferAccessInStmts(body_stmts, aliases, access);
+    return;
+  }
+
+  if (auto if_stmt = As<IfStmt>(stmt)) {
+    access.reads = access.reads || ExprReadsAlias(if_stmt->condition_, aliases);
+    access.writes = access.writes || ExprWritesAlias(if_stmt->condition_, aliases);
+
+    auto then_aliases = aliases;
+    CollectBufferAccessInStmts(FlattenToStmts(if_stmt->then_body_), then_aliases, access);
+    if (if_stmt->else_body_.has_value()) {
+      auto else_aliases = aliases;
+      CollectBufferAccessInStmts(FlattenToStmts(*if_stmt->else_body_), else_aliases, access);
+    }
+    return;
+  }
+
+  if (auto for_stmt = As<ForStmt>(stmt)) {
+    access.reads = access.reads || ExprReadsAlias(for_stmt->start_, aliases);
+    access.reads = access.reads || ExprReadsAlias(for_stmt->stop_, aliases);
+    access.reads = access.reads || ExprReadsAlias(for_stmt->step_, aliases);
+
+    auto loop_aliases = aliases;
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      if (ExprAliasesTrackedBuffer(for_stmt->iter_args_[i]->initValue_, aliases)) {
+        loop_aliases.insert(for_stmt->iter_args_[i].get());
+        if (i < for_stmt->return_vars_.size()) {
+          aliases.insert(for_stmt->return_vars_[i].get());
+        }
+      }
+    }
+    CollectBufferAccessInStmts(FlattenToStmts(for_stmt->body_), loop_aliases, access);
+    return;
+  }
+
+  if (auto while_stmt = As<WhileStmt>(stmt)) {
+    auto loop_aliases = aliases;
+    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+      if (ExprAliasesTrackedBuffer(while_stmt->iter_args_[i]->initValue_, aliases)) {
+        loop_aliases.insert(while_stmt->iter_args_[i].get());
+        if (i < while_stmt->return_vars_.size()) {
+          aliases.insert(while_stmt->return_vars_[i].get());
+        }
+      }
+    }
+    access.reads = access.reads || ExprReadsAlias(while_stmt->condition_, loop_aliases);
+    access.writes = access.writes || ExprWritesAlias(while_stmt->condition_, loop_aliases);
+    CollectBufferAccessInStmts(FlattenToStmts(while_stmt->body_), loop_aliases, access);
+    return;
+  }
+}
+
+void CollectBufferAccessInStmts(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& aliases,
+                                BufferAccessInfo& access) {
+  for (const auto& stmt : stmts) {
+    CollectBufferAccessInStmt(stmt, aliases, access);
+  }
+}
+
+ParamDirection InferLoopCarriedDirection(const std::vector<StmtPtr>& body_stmts, const IterArgPtr& iter_arg) {
+  std::unordered_set<const Var*> aliases = {iter_arg.get()};
+  BufferAccessInfo access;
+  CollectBufferAccessInStmts(body_stmts, aliases, access);
+
+  if (!access.writes) {
+    return ParamDirection::In;
+  }
+  return access.reads ? ParamDirection::InOut : ParamDirection::Out;
+}
+
+const Var* ResolveAliasedParamFromExpr(const ExprPtr& expr,
+                                       const std::unordered_map<const Var*, const Var*>& alias_to_param) {
+  if (auto iter_arg = As<IterArg>(expr)) {
+    auto it = alias_to_param.find(iter_arg.get());
+    return it == alias_to_param.end() ? nullptr : it->second;
+  }
+  if (auto var = As<Var>(expr)) {
+    auto it = alias_to_param.find(var.get());
+    return it == alias_to_param.end() ? nullptr : it->second;
+  }
+
+  auto call = As<Call>(expr);
+  if (!call) {
+    return nullptr;
+  }
+
+  auto write_only_arg = GetWriteOnlyArgIndex(call->op_->name_);
+  if (!write_only_arg.has_value() || *write_only_arg >= call->args_.size()) {
+    return nullptr;
+  }
+  return ResolveAliasedParamFromExpr(call->args_[*write_only_arg], alias_to_param);
+}
+
+void CollectLoopCarriedTensorParamDirections(
+    const std::vector<StmtPtr>& stmts, std::unordered_map<const Var*, const Var*>& alias_to_param,
+    std::unordered_map<const Var*, ParamDirection>& inferred_param_directions) {
+  for (const auto& stmt : stmts) {
+    if (auto seq = As<SeqStmts>(stmt)) {
+      CollectLoopCarriedTensorParamDirections(seq->stmts_, alias_to_param, inferred_param_directions);
+      continue;
+    }
+
+    if (auto op_stmts = As<OpStmts>(stmt)) {
+      CollectLoopCarriedTensorParamDirections(op_stmts->stmts_, alias_to_param, inferred_param_directions);
+      continue;
+    }
+
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      CollectLoopCarriedTensorParamDirections(FlattenToStmts(scope->body_), alias_to_param,
+                                              inferred_param_directions);
+      continue;
+    }
+
+    if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto then_alias_to_param = alias_to_param;
+      CollectLoopCarriedTensorParamDirections(FlattenToStmts(if_stmt->then_body_), then_alias_to_param,
+                                              inferred_param_directions);
+      if (if_stmt->else_body_.has_value()) {
+        auto else_alias_to_param = alias_to_param;
+        CollectLoopCarriedTensorParamDirections(FlattenToStmts(*if_stmt->else_body_), else_alias_to_param,
+                                                inferred_param_directions);
+      }
+      continue;
+    }
+
+    if (auto assign = As<AssignStmt>(stmt)) {
+      if (const Var* source_param = ResolveAliasedParamFromExpr(assign->value_, alias_to_param)) {
+        alias_to_param[assign->var_.get()] = source_param;
+      }
+      continue;
+    }
+
+    if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto body_alias_to_param = alias_to_param;
+      std::vector<const Var*> iter_source_params(for_stmt->iter_args_.size(), nullptr);
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        const auto& iter_arg = for_stmt->iter_args_[i];
+        if (!As<TensorType>(iter_arg->GetType())) {
+          continue;
+        }
+
+        const Var* source_param = ResolveAliasedParamFromExpr(iter_arg->initValue_, alias_to_param);
+        if (!source_param) {
+          continue;
+        }
+
+        iter_source_params[i] = source_param;
+        body_alias_to_param[iter_arg.get()] = source_param;
+
+        auto inferred_direction = InferLoopCarriedDirection(FlattenToStmts(for_stmt->body_), iter_arg);
+        if (inferred_direction != ParamDirection::In) {
+          auto [it, inserted] = inferred_param_directions.emplace(source_param, inferred_direction);
+          if (!inserted) {
+            it->second = MergeParamDirections(it->second, inferred_direction);
+          }
+        }
+      }
+
+      CollectLoopCarriedTensorParamDirections(FlattenToStmts(for_stmt->body_), body_alias_to_param,
+                                              inferred_param_directions);
+
+      for (size_t i = 0; i < for_stmt->return_vars_.size() && i < iter_source_params.size(); ++i) {
+        if (iter_source_params[i]) {
+          alias_to_param[for_stmt->return_vars_[i].get()] = iter_source_params[i];
+        }
+      }
+      continue;
+    }
+
+    if (auto while_stmt = As<WhileStmt>(stmt)) {
+      auto body_alias_to_param = alias_to_param;
+      std::vector<const Var*> iter_source_params(while_stmt->iter_args_.size(), nullptr);
+      for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+        const auto& iter_arg = while_stmt->iter_args_[i];
+        if (!As<TensorType>(iter_arg->GetType())) {
+          continue;
+        }
+
+        const Var* source_param = ResolveAliasedParamFromExpr(iter_arg->initValue_, alias_to_param);
+        if (!source_param) {
+          continue;
+        }
+
+        iter_source_params[i] = source_param;
+        body_alias_to_param[iter_arg.get()] = source_param;
+
+        auto inferred_direction = InferLoopCarriedDirection(FlattenToStmts(while_stmt->body_), iter_arg);
+        if (inferred_direction != ParamDirection::In) {
+          auto [it, inserted] = inferred_param_directions.emplace(source_param, inferred_direction);
+          if (!inserted) {
+            it->second = MergeParamDirections(it->second, inferred_direction);
+          }
+        }
+      }
+
+      CollectLoopCarriedTensorParamDirections(FlattenToStmts(while_stmt->body_), body_alias_to_param,
+                                              inferred_param_directions);
+
+      for (size_t i = 0; i < while_stmt->return_vars_.size() && i < iter_source_params.size(); ++i) {
+        if (iter_source_params[i]) {
+          alias_to_param[while_stmt->return_vars_[i].get()] = iter_source_params[i];
+        }
+      }
+      continue;
+    }
+  }
+}
+
 /**
  * @brief Info about a tensor.slice result that feeds into a tensor.matmul operand.
  *
@@ -1098,6 +1481,27 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   std::vector<ParamDirection> new_param_directions = func->param_directions_;
   std::vector<TypePtr> new_return_types;
   size_t num_added_outputs = 0;
+
+  // Loop-carried tensor params can become write-only/read-write buffers after
+  // tensor.assemble lowers to tile.store, even when the function still returns
+  // a TensorType. Infer those directions before processing returned values.
+  std::unordered_map<const Var*, const Var*> alias_to_param;
+  alias_to_param.reserve(func->params_.size());
+  for (const auto& param : func->params_) {
+    if (As<TensorType>(param->GetType())) {
+      alias_to_param[param.get()] = param.get();
+    }
+  }
+
+  std::unordered_map<const Var*, ParamDirection> inferred_param_directions;
+  CollectLoopCarriedTensorParamDirections(new_stmts, alias_to_param, inferred_param_directions);
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    auto it = inferred_param_directions.find(func->params_[i].get());
+    if (it == inferred_param_directions.end()) {
+      continue;
+    }
+    new_param_directions[i] = MergeParamDirections(new_param_directions[i], it->second);
+  }
 
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
