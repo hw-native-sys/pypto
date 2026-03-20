@@ -366,6 +366,52 @@ class TestDynVarAndSSARename:
         src = Prog.as_python()
         assert 'N = pl.dynamic("N")' in src
 
+    def test_dyn_var_same_name_different_identity_disambiguated(self):
+        """Two distinct Var objects with same name_hint_ get disambiguated (issue #618)."""
+        span = ir.Span.unknown()
+        c64 = ir.ConstInt(64, DataType.INT64, span)
+        c128 = ir.ConstInt(128, DataType.INT64, span)
+        # Two distinct ir.Var objects both named "M"
+        var_m1 = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+        var_m2 = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+        assert var_m1 is not var_m2
+
+        x = ir.Var("x", ir.TensorType([var_m1, c64], DataType.FP32), span)
+        ret1 = ir.ReturnStmt([x], span)
+        func1 = ir.Function("func1", [x], [ir.TensorType([var_m1, c64], DataType.FP32)], ret1, span)
+
+        y = ir.Var("y", ir.TensorType([var_m2, c128], DataType.FP32), span)
+        ret2 = ir.ReturnStmt([y], span)
+        func2 = ir.Function("func2", [y], [ir.TensorType([var_m2, c128], DataType.FP32)], ret2, span)
+
+        prog = ir.Program([func1, func2], "TestProg", span)
+        src = prog.as_python()
+
+        # Both distinct vars should appear as separate pl.dynamic() declarations
+        lines = [line for line in src.splitlines() if "pl.dynamic" in line]
+        assert len(lines) == 2, f"Expected 2 pl.dynamic() declarations, got {len(lines)}: {lines}"
+        # One should be M, the other M_1
+        assert 'M = pl.dynamic("M")' in src
+        assert 'M_1 = pl.dynamic("M_1")' in src
+
+    def test_dyn_var_unique_names_not_disambiguated(self):
+        """Distinct Var objects with different names are not affected (issue #618)."""
+        span = ir.Span.unknown()
+        var_m = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+        var_n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+
+        x = ir.Var("x", ir.TensorType([var_m, var_n], DataType.FP32), span)
+        ret = ir.ReturnStmt([x], span)
+        func = ir.Function("main", [x], [ir.TensorType([var_m, var_n], DataType.FP32)], ret, span)
+        prog = ir.Program([func], "TestProg", span)
+        src = prog.as_python()
+
+        assert 'M = pl.dynamic("M")' in src
+        assert 'N = pl.dynamic("N")' in src
+        # No suffixed names
+        assert "M_1" not in src
+        assert "N_1" not in src
+
     def test_ssa_shadowed_vars_get_unique_names(self):
         @pl.program
         class Prog:

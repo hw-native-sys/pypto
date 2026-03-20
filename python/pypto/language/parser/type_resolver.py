@@ -106,6 +106,7 @@ class TypeResolver:
         expr_evaluator: ExprEvaluator,
         scope_lookup: Callable[[str], Any | None] | None = None,
         span_tracker: "SpanTracker | None" = None,
+        dyn_var_cache: dict[str, ir.Var] | None = None,
     ):
         """Initialize type resolver.
 
@@ -114,11 +115,15 @@ class TypeResolver:
             scope_lookup: Callback to look up variables in the parser scope
                 (for Scalar IR vars used in inline annotations)
             span_tracker: Optional span tracker for accurate source locations
+            dyn_var_cache: Optional shared cache mapping dynamic var names to ir.Var
+                objects. When provided, multiple TypeResolvers share the same cache,
+                ensuring the same DynVar produces the same ir.Var across functions
+                in a program.
         """
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
-        self._dyn_var_cache: dict[str, ir.Var] = {}
+        self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.

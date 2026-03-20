@@ -760,6 +760,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
             for func_def in func_defs:
                 _prescan_reserve_buffers(func_def, buffer_name_meta)
 
+            # Shared dyn_var_cache so all functions in this program share the same
+            # ir.Var objects for dynamic dimension variables (issue #618).
+            dyn_var_cache: dict[str, ir.Var] = {}
+
             for func_def in func_defs:
                 # Extract function type and level/role from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
@@ -779,6 +783,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                     strict_ssa=strict_ssa,
                     closure_vars=closure_vars,
                     buffer_name_meta=buffer_name_meta,
+                    dyn_var_cache=dyn_var_cache,
                 )
 
                 try:

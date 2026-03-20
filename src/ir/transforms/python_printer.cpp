@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -286,6 +287,11 @@ class IRPythonPrinter : public IRVisitor {
   // to the same named buffers instead of re-printing inline pl.MemRef(...).
   std::unordered_map<const MemRef*, std::string> memref_rename_map_;
 
+  // Program-level dyn var rename map: Var pointer → disambiguated printed name.
+  // Built once by VisitProgram for dynamic dimension variables used in type annotations.
+  // When two distinct Var* share the same name_hint_, they get unique suffixed names.
+  std::unordered_map<const Var*, std::string> dyn_var_rename_map_;
+
   // Helper methods
   std::string GetIndent() const;
   void IncreaseIndent();
@@ -322,6 +328,10 @@ class IRPythonPrinter : public IRVisitor {
 
   // Shape printing helper
   void PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape);
+
+  // Print an expression for use in type annotations (shapes, views).
+  // Uses GetVarName for Var nodes to pick up dyn_var_rename_map_ disambiguation.
+  std::string PrintExprForType(const ExprPtr& expr);
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
@@ -1194,6 +1204,8 @@ static void CollectMemRefDefsInOrder(const StmtPtr& stmt, std::vector<const MemR
 std::string IRPythonPrinter::GetVarName(const Var* var) const {
   auto it = var_rename_map_.find(var);
   if (it != var_rename_map_.end()) return it->second;
+  auto dyn_it = dyn_var_rename_map_.find(var);
+  if (dyn_it != dyn_var_rename_map_.end()) return dyn_it->second;
   return var->name_hint_;
 }
 
@@ -1408,35 +1420,45 @@ static std::vector<std::pair<GlobalVarPtr, FunctionPtr>> TopologicalSortFunction
   return sorted;
 }
 
-static std::set<std::string> CollectDynVarNames(const ProgramPtr& program) {
-  std::set<std::string> dyn_vars;
+static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const ProgramPtr& program) {
+  // Phase 1: Collect all distinct Var* pointers used as dynamic dims,
+  // preserving insertion order for deterministic output.
+  std::vector<const Var*> dyn_var_ptrs;
+  std::unordered_set<const Var*> seen_ptrs;
+
+  auto try_insert = [&](const Var* var) {
+    if (seen_ptrs.insert(var).second) {
+      dyn_var_ptrs.push_back(var);
+    }
+  };
+
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
     if (auto tensor_type = As<TensorType>(type)) {
       for (const auto& dim : tensor_type->shape_) {
-        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        if (auto var = As<Var>(dim)) try_insert(var.get());
       }
       if (tensor_type->tensor_view_.has_value()) {
         for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+          if (auto var = As<Var>(dim)) try_insert(var.get());
         }
         for (const auto& dim : tensor_type->tensor_view_->stride) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+          if (auto var = As<Var>(dim)) try_insert(var.get());
         }
       }
     } else if (auto tile_type = As<TileType>(type)) {
       for (const auto& dim : tile_type->shape_) {
-        if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+        if (auto var = As<Var>(dim)) try_insert(var.get());
       }
       if (tile_type->tile_view_.has_value()) {
         for (const auto& dim : tile_type->tile_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+          if (auto var = As<Var>(dim)) try_insert(var.get());
         }
         for (const auto& dim : tile_type->tile_view_->stride) {
-          if (auto var = As<Var>(dim)) dyn_vars.insert(var->name_hint_);
+          if (auto var = As<Var>(dim)) try_insert(var.get());
         }
         if (tile_type->tile_view_->start_offset) {
           if (auto var = As<Var>(tile_type->tile_view_->start_offset)) {
-            dyn_vars.insert(var->name_hint_);
+            try_insert(var.get());
           }
         }
       }
@@ -1474,7 +1496,14 @@ static std::set<std::string> CollectDynVarNames(const ProgramPtr& program) {
       collector.VisitStmt(func->body_);
     }
   }
-  return dyn_vars;
+
+  // Phase 2: Assign unique printed names, disambiguating collisions.
+  // Reuses the same rename logic as BuildVarRenameMap / BuildMemRefRenameMap.
+  // include_unique_names=true so VisitProgram can iterate the full map for
+  // pl.dynamic() declarations.
+  std::unordered_map<const Var*, std::string> result;
+  BuildRenameMapForDefs(dyn_var_ptrs, result, /*include_unique_names=*/true);
+  return result;
 }
 
 void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
@@ -1488,10 +1517,17 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     stream_ << "from pypto import language as " << prefix_ << "\n\n";
   }
 
-  // Emit pl.dynamic() declarations for dynamic shape variables used in function signatures
-  auto dyn_vars = CollectDynVarNames(program);
-  if (!dyn_vars.empty()) {
-    for (const auto& name : dyn_vars) {
+  // Emit pl.dynamic() declarations for dynamic shape variables used in function signatures.
+  // Uses pointer-identity-aware collection so distinct Var* with the same name_hint_
+  // get disambiguated printed names (issue #618).
+  dyn_var_rename_map_ = CollectDynVarMapping(program);
+  if (!dyn_var_rename_map_.empty()) {
+    // Sort by disambiguated name for deterministic output
+    std::vector<std::pair<const Var*, std::string>> sorted_dyn_vars(dyn_var_rename_map_.begin(),
+                                                                    dyn_var_rename_map_.end());
+    std::sort(sorted_dyn_vars.begin(), sorted_dyn_vars.end(),
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+    for (const auto& [var, name] : sorted_dyn_vars) {
       stream_ << name << " = " << prefix_ << ".dynamic(\"" << name << "\")\n";
     }
     stream_ << "\n";
@@ -1525,16 +1561,21 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
   DecreaseIndent();
 }
 
+std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
+  if (auto const_int = As<ConstInt>(expr)) {
+    return std::to_string(const_int->value_);
+  }
+  if (auto var = As<Var>(expr)) {
+    return GetVarName(var.get());
+  }
+  IRPythonPrinter temp_printer(prefix_);
+  return temp_printer.Print(expr);
+}
+
 void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape) {
   for (size_t i = 0; i < shape.size(); ++i) {
     if (i > 0) oss << ", ";
-    // For ConstInt shape dims, print raw value to avoid dtype annotations
-    if (auto const_int = As<ConstInt>(shape[i])) {
-      oss << const_int->value_;
-    } else {
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(shape[i]);
-    }
+    oss << PrintExprForType(shape[i]);
   }
 }
 
@@ -1589,8 +1630,7 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     oss << "valid_shape=[";
     for (size_t i = 0; i < tile_view.valid_shape.size(); ++i) {
       if (i > 0) oss << ", ";
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tile_view.valid_shape[i]);
+      oss << PrintExprForType(tile_view.valid_shape[i]);
     }
     oss << "]";
   }
@@ -1601,8 +1641,7 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     oss << "stride=[";
     for (size_t i = 0; i < tile_view.stride.size(); ++i) {
       if (i > 0) oss << ", ";
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tile_view.stride[i]);
+      oss << PrintExprForType(tile_view.stride[i]);
     }
     oss << "]";
   }
@@ -1611,8 +1650,7 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
   if (tile_view.start_offset) {
     maybe_comma();
     oss << "start_offset=";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tile_view.start_offset);
+    oss << PrintExprForType(tile_view.start_offset);
   }
 
   // blayout — omit if row_major (default)
@@ -1713,8 +1751,7 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
     oss << "valid_shape=[";
     for (size_t i = 0; i < tensor_view.valid_shape.size(); ++i) {
       if (i > 0) oss << ", ";
-      IRPythonPrinter temp_printer(prefix_);
-      oss << temp_printer.Print(tensor_view.valid_shape[i]);
+      oss << PrintExprForType(tensor_view.valid_shape[i]);
     }
     oss << "]";
   }
@@ -1733,8 +1770,7 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
   oss << "stride=[";
   for (size_t i = 0; i < tensor_view.stride.size(); ++i) {
     if (i > 0) oss << ", ";
-    IRPythonPrinter temp_printer(prefix_);
-    oss << temp_printer.Print(tensor_view.stride[i]);
+    oss << PrintExprForType(tensor_view.stride[i]);
   }
   oss << "]";
 

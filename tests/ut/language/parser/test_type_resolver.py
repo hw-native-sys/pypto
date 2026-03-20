@@ -678,6 +678,27 @@ class TestDynamicShapeIntegration:
         assert isinstance(param_type.shape[0], ir.Var)
         assert param_type.shape[0].name_hint == "M"
 
+    def test_program_dynvar_shared_across_functions(self):
+        """Same DynVar in multiple @pl.functions produces same ir.Var (issue #618)."""
+        M = pl.dynamic("M")
+
+        @pl.program
+        class MyProgram:
+            @pl.function
+            def func_a(self, x: pl.Tensor[[M, 64], pl.FP32]) -> pl.Tensor[[M, 64], pl.FP32]:
+                return x
+
+            @pl.function
+            def func_b(self, y: pl.Tensor[[M, 128], pl.FP32]) -> pl.Tensor[[M, 128], pl.FP32]:
+                return y
+
+        funcs = list(MyProgram.functions.values())
+        a_type = funcs[0].params[0].type
+        b_type = funcs[1].params[0].type
+        assert isinstance(a_type, ir.TensorType)
+        assert isinstance(b_type, ir.TensorType)
+        assert a_type.shape[0] is b_type.shape[0], "M should be the same ir.Var across functions in a program"
+
     # --- Parametrized testing (issue #163 primary use case) ---
 
     @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128), (256, 256)])

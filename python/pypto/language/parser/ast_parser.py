@@ -82,6 +82,7 @@ class ASTParser:
         strict_ssa: bool = False,
         closure_vars: dict[str, Any] | None = None,
         buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
+        dyn_var_cache: dict[str, ir.Var] | None = None,
     ):
         """Initialize AST parser.
 
@@ -97,6 +98,9 @@ class ASTParser:
             buffer_name_meta: Optional shared (func_name, buffer_name) → metadata registry for cross-function
                 import_peer_buffer resolution. When multiple functions in a @pl.program share this
                 dict, import_peer_buffer can resolve .base from a peer function's reserve_buffer.
+            dyn_var_cache: Optional shared cache mapping dynamic var names to ir.Var objects.
+                When multiple functions in a @pl.program share this dict, the same DynVar
+                produces the same ir.Var across functions.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -108,6 +112,7 @@ class ASTParser:
             expr_evaluator=self.expr_evaluator,
             scope_lookup=self.scope_manager.lookup_var,
             span_tracker=self.span_tracker,
+            dyn_var_cache=dyn_var_cache,
         )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
