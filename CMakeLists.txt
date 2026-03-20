@@ -146,9 +146,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
     src/ir/transforms/utils/deep_clone_utils.cpp
-    src/ir/transforms/utils/substitute_vars.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/visitor.cpp
 
     # IR - Reporter

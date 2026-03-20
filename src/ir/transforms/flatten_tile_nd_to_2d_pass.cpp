@@ -33,37 +33,22 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
 
+using transform_utils::FlattenToStmts;
+using transform_utils::SubstituteExpr;
+using transform_utils::WrapInSeqStmts;
+
 namespace {
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/**
- * @brief Unwrap a StmtPtr into a flat vector of statements.
- */
-std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
-  if (auto seq = As<SeqStmts>(stmt)) {
-    return seq->stmts_;
-  }
-  if (auto op_stmts = As<OpStmts>(stmt)) {
-    return op_stmts->stmts_;
-  }
-  return {stmt};
-}
-
-/**
- * @brief Wrap a vector of statements into a single SeqStmts node.
- */
-StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
-  return std::make_shared<SeqStmts>(stmts, span);
-}
 
 /**
  * @brief Check if a TileType has >2 dimensions.
@@ -121,46 +106,6 @@ ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& spa
 std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& span) {
   return {std::make_shared<ConstInt>(merged, DataType::INDEX, span),
           std::make_shared<ConstInt>(last, DataType::INDEX, span)};
-}
-
-/**
- * @brief Substitute variables in an expression using a pointer-identity map.
- */
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
-  if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var.get());
-    return (it != var_map.end()) ? it->second : expr;
-  }
-  if (auto call = As<Call>(expr)) {
-    std::vector<ExprPtr> new_args;
-    new_args.reserve(call->args_.size());
-    bool changed = false;
-    for (const auto& arg : call->args_) {
-      auto new_arg = SubstituteExpr(arg, var_map);
-      new_args.push_back(new_arg);
-      if (new_arg != arg) changed = true;
-    }
-    if (!changed) return expr;
-    return std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-  }
-  if (auto mt = As<MakeTuple>(expr)) {
-    std::vector<ExprPtr> new_elems;
-    new_elems.reserve(mt->elements_.size());
-    bool changed = false;
-    for (const auto& e : mt->elements_) {
-      auto ne = SubstituteExpr(e, var_map);
-      new_elems.push_back(ne);
-      if (ne != e) changed = true;
-    }
-    if (!changed) return expr;
-    return std::make_shared<MakeTuple>(new_elems, mt->span_);
-  }
-  if (auto tgi = As<TupleGetItemExpr>(expr)) {
-    auto new_tuple = SubstituteExpr(tgi->tuple_, var_map);
-    if (new_tuple == tgi->tuple_) return expr;
-    return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
-  }
-  return expr;
 }
 
 // ============================================================================

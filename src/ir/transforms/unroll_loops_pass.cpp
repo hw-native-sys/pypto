@@ -29,10 +29,12 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
-#include "pypto/ir/transforms/utils/substitute_vars.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 
 namespace pypto {
 namespace ir {
+
+using transform_utils::SubstituteStmt;
 
 namespace {
 
@@ -208,7 +210,7 @@ class LoopUnrollMutator : public IRMutator {
     for (const auto& stmt : op->stmts_) {
       StmtPtr cur = stmt;
       if (!pending_subst.empty()) {
-        cur = SubstituteVars(cur, pending_subst);
+        cur = SubstituteStmt(cur, pending_subst);
         changed = true;
       }
 

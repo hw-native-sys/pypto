@@ -27,11 +27,13 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/utils/substitute_vars.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+using transform_utils::SubstituteStmt;
 
 namespace {
 
@@ -137,7 +139,7 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
     return {func, {}};
   }
 
-  auto new_body = SubstituteVars(func->body_, substitutions);
+  auto new_body = SubstituteStmt(func->body_, substitutions);
 
   auto new_func =
       std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
@@ -220,7 +222,7 @@ FunctionPtr UpdateCallerFunction(
     return func;
   }
 
-  auto new_body = SubstituteVars(func->body_, substitutions);
+  auto new_body = SubstituteStmt(func->body_, substitutions);
 
   return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_);
