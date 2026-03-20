@@ -16,6 +16,8 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <utility>
+#include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
@@ -62,6 +64,93 @@ inline TypePtr CloneTypeWithMemRef(const TypePtr& type, const std::optional<MemR
         tile_memory_space_override.has_value() ? tile_memory_space_override : tile_type->memory_space_;
     return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, memref, tile_type->tile_view_,
                                       memory_space);
+  }
+
+  return type;
+}
+
+template <typename RemapExprFn>
+inline std::vector<ExprPtr> RemapTypeExprVector(const std::vector<ExprPtr>& exprs,
+                                                const RemapExprFn& remap_expr, bool& changed) {
+  std::vector<ExprPtr> new_exprs;
+  new_exprs.reserve(exprs.size());
+  for (const auto& expr : exprs) {
+    auto new_expr = remap_expr(expr);
+    if (new_expr.get() != expr.get()) {
+      changed = true;
+    }
+    new_exprs.push_back(std::move(new_expr));
+  }
+  return new_exprs;
+}
+
+template <typename RemapExprFn>
+inline std::optional<TensorView> RemapTensorViewExprs(const std::optional<TensorView>& tensor_view,
+                                                      const RemapExprFn& remap_expr, bool& changed) {
+  if (!tensor_view.has_value()) {
+    return tensor_view;
+  }
+  bool view_changed = false;
+  auto new_stride = RemapTypeExprVector(tensor_view->stride, remap_expr, view_changed);
+  auto new_valid_shape = RemapTypeExprVector(tensor_view->valid_shape, remap_expr, view_changed);
+  if (!view_changed) {
+    return tensor_view;
+  }
+  changed = true;
+  return TensorView(std::move(new_stride), tensor_view->layout, std::move(new_valid_shape));
+}
+
+template <typename RemapExprFn>
+inline std::optional<TileView> RemapTileViewExprs(const std::optional<TileView>& tile_view,
+                                                  const RemapExprFn& remap_expr, bool& changed) {
+  if (!tile_view.has_value()) {
+    return tile_view;
+  }
+  bool view_changed = false;
+  auto new_valid_shape = RemapTypeExprVector(tile_view->valid_shape, remap_expr, view_changed);
+  auto new_stride = RemapTypeExprVector(tile_view->stride, remap_expr, view_changed);
+  ExprPtr new_start_offset = tile_view->start_offset;
+  if (tile_view->start_offset) {
+    new_start_offset = remap_expr(tile_view->start_offset);
+    if (new_start_offset.get() != tile_view->start_offset.get()) {
+      view_changed = true;
+    }
+  }
+  if (!view_changed) {
+    return tile_view;
+  }
+  changed = true;
+  return TileView(std::move(new_valid_shape), std::move(new_stride), std::move(new_start_offset),
+                  tile_view->blayout, tile_view->slayout, tile_view->fractal, tile_view->pad);
+}
+
+template <typename RemapExprFn>
+inline TypePtr CloneTypeWithMemRefAndRemapExprs(
+    const TypePtr& type, const std::optional<MemRefPtr>& memref, const RemapExprFn& remap_expr,
+    std::optional<MemorySpace> tile_memory_space_override = std::nullopt) {
+  const bool memref_changed = GetTypeMemRef(type) != memref;
+  bool changed = memref_changed;
+
+  if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
+    auto new_shape = RemapTypeExprVector(tensor_type->shape_, remap_expr, changed);
+    auto new_tensor_view = RemapTensorViewExprs(tensor_type->tensor_view_, remap_expr, changed);
+    if (!changed) {
+      return type;
+    }
+    return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, memref,
+                                        std::move(new_tensor_view));
+  }
+
+  if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
+    auto memory_space =
+        tile_memory_space_override.has_value() ? tile_memory_space_override : tile_type->memory_space_;
+    auto new_shape = RemapTypeExprVector(tile_type->shape_, remap_expr, changed);
+    auto new_tile_view = RemapTileViewExprs(tile_type->tile_view_, remap_expr, changed);
+    if (!changed) {
+      return type;
+    }
+    return std::make_shared<TileType>(std::move(new_shape), tile_type->dtype_, memref,
+                                      std::move(new_tile_view), memory_space);
   }
 
   return type;

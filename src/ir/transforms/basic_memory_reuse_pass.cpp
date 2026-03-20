@@ -582,8 +582,8 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
         }
 
         // Create new TileType with shared MemRef
-        auto new_tile_type =
-            std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRef(curr_tile_type, source_memref));
+        auto new_tile_type = std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRefAndRemapExprs(
+            curr_tile_type, source_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }));
 
         // Create new Var
         auto new_var = std::make_shared<const Var>(op->var_->name_hint_, new_tile_type, op->var_->span_);
@@ -601,8 +601,10 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
               // Create new Var for shared variable with same reused MemRef
               auto shared_tile_type = As<TileType>(shared_var->GetType());
               if (shared_tile_type) {
-                auto new_shared_tile_type = std::dynamic_pointer_cast<const TileType>(
-                    CloneTypeWithMemRef(shared_tile_type, source_memref));
+                auto new_shared_tile_type =
+                    std::dynamic_pointer_cast<const TileType>(CloneTypeWithMemRefAndRemapExprs(
+                        shared_tile_type, source_memref,
+                        [this](const ExprPtr& expr) { return VisitExpr(expr); }));
                 auto new_shared_var = std::make_shared<const Var>(shared_var->name_hint_,
                                                                   new_shared_tile_type, shared_var->span_);
                 var_substitution_map_[shared_var] = new_shared_var;
@@ -698,7 +700,9 @@ class ForStmtYieldFixupMutator : public IRMutator {
       auto move_call = op_reg.Create("tile.move", {yield_var}, kwargs, yield_var->span_);
 
       // Create moved var with initValue's MemRef
-      auto moved_type = CloneTypeWithMemRef(yield_var->GetType(), init_memref, target_memory);
+      auto moved_type = CloneTypeWithMemRefAndRemapExprs(
+          yield_var->GetType(), init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+          target_memory);
       auto moved_var = std::make_shared<Var>(yield_var->name_hint_ + "_mv", moved_type, yield_var->span_);
 
       move_stmts.emplace_back(std::make_shared<AssignStmt>(moved_var, move_call, yield_var->span_));
@@ -751,7 +755,9 @@ class ForStmtYieldFixupMutator : public IRMutator {
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
         if (ia_memref.get() != init_memref.get()) {
-          auto new_ia_type = CloneTypeWithMemRef(ia_tile, init_memref, init_tile->GetMemorySpace());
+          auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
+              ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+              init_tile->GetMemorySpace());
           new_iter_args[i] =
               std::make_shared<IterArg>(for_stmt->iter_args_[i]->name_hint_, new_ia_type,
                                         for_stmt->iter_args_[i]->initValue_, for_stmt->iter_args_[i]->span_);
@@ -771,7 +777,9 @@ class ForStmtYieldFixupMutator : public IRMutator {
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
       if (rv_memref.get() != yield_memref.get()) {
-        auto new_rv_type = CloneTypeWithMemRef(rv_tile, yield_memref, yield_tile->GetMemorySpace());
+        auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
+            rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+            yield_tile->GetMemorySpace());
         new_return_vars[i] =
             std::make_shared<Var>(new_return_vars[i]->name_hint_, new_rv_type, new_return_vars[i]->span_);
         // Register old→new so downstream references (e.g., ReturnStmt) are updated
@@ -782,10 +790,16 @@ class ForStmtYieldFixupMutator : public IRMutator {
 
     if (!changed) return for_stmt;
 
+    auto patched_body = VisitStmt(for_stmt->body_);
+
+    for (const auto& old_iter_arg : for_stmt->iter_args_) {
+      var_remap_.erase(old_iter_arg.get());
+    }
+
     return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                     new_iter_args, for_stmt->body_, std::move(new_return_vars),
-                                     for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-                                     for_stmt->chunk_policy_, for_stmt->loop_origin_);
+                                     new_iter_args, patched_body, std::move(new_return_vars), for_stmt->span_,
+                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
+                                     for_stmt->loop_origin_);
   }
 
   // Replace YieldStmt in body and insert move AssignStmts before it.

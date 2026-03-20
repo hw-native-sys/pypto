@@ -81,17 +81,15 @@ std::string MakeStoreResultName(size_t index) {
 /**
  * @brief Update body_map for a loop iter_arg to shadow any outer scope mapping.
  *
- * If the iter_arg's type changed, maps the name to a new Var with the updated type
- * (for substitution). Otherwise, erases any outer mapping to prevent it from leaking
- * into the loop body.
+ * If the iter_arg's type changed, maps the old pointer to the new iter_arg
+ * (for substitution). Otherwise, erases any stale mapping for the old pointer.
  */
-void ShadowIterArgInBodyMap(std::unordered_map<std::string, VarPtr>& body_map,
-                            const IterArgPtr& orig_iter_arg, const IterArgPtr& new_iter_arg) {
-  if (new_iter_arg->GetType() != orig_iter_arg->GetType()) {
-    body_map[orig_iter_arg->name_hint_] =
-        std::make_shared<Var>(new_iter_arg->name_hint_, new_iter_arg->GetType(), new_iter_arg->span_);
+void ShadowIterArgInBodyMap(std::unordered_map<const Var*, VarPtr>& body_map, const IterArgPtr& orig_iter_arg,
+                            const IterArgPtr& new_iter_arg) {
+  if (new_iter_arg != orig_iter_arg) {
+    body_map[orig_iter_arg.get()] = new_iter_arg;
   } else {
-    body_map.erase(orig_iter_arg->name_hint_);
+    body_map.erase(orig_iter_arg.get());
   }
 }
 
@@ -115,7 +113,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
   explicit TensorArgsInConvertedOpsCollector(const OpConversionRegistry& conv_registry)
       : conv_registry_(conv_registry) {}
 
-  [[nodiscard]] const std::unordered_set<std::string>& GetUsed() const { return used_; }
+  [[nodiscard]] const std::unordered_set<const Var*>& GetUsed() const { return used_; }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -133,11 +131,10 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
         return;
       }
       for (const auto& arg : call->args_) {
-        // Check IterArg (subtype of Var) before Var
         if (auto iter_arg = As<IterArg>(arg)) {
-          if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg->name_hint_);
+          if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg.get());
         } else if (auto var = As<Var>(arg)) {
-          if (As<TensorType>(var->GetType())) used_.insert(var->name_hint_);
+          if (As<TensorType>(var->GetType())) used_.insert(var.get());
         }
       }
     }
@@ -146,7 +143,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
 
  private:
   const OpConversionRegistry& conv_registry_;
-  std::unordered_set<std::string> used_;
+  std::unordered_set<const Var*> used_;
 };
 
 /**
@@ -225,22 +222,21 @@ ExprPtr ReconstructUnaryExpr(ObjectKind kind, const ExprPtr& operand, DataType d
 }
 
 /**
- * @brief Substitute variables in an expression using a name-based map.
+ * @brief Substitute variables in an expression using a pointer-identity map.
  *
  * Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
  * TupleGetItemExpr to replace Var references.
  */
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<std::string, VarPtr>& var_map) {
-  // Check IterArg first (inherits Var but has different ObjectKind)
+ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
   if (auto iter_arg = As<IterArg>(expr)) {
-    auto it = var_map.find(iter_arg->name_hint_);
+    auto it = var_map.find(iter_arg.get());
     if (it != var_map.end()) {
       return it->second;
     }
     return expr;
   }
   if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var->name_hint_);
+    auto it = var_map.find(var.get());
     if (it != var_map.end()) {
       return it->second;
     }
@@ -352,24 +348,22 @@ struct MatmulSliceInfo {
  * Scans a flat list of statements to build a map from slice result variable names
  * to their matmul usage info (which side and transpose flag).
  */
-std::unordered_map<std::string, MatmulSliceInfo> PreScanSliceMatmulPatterns(
+std::unordered_map<const Var*, MatmulSliceInfo> PreScanSliceMatmulPatterns(
     const std::vector<StmtPtr>& stmts) {
-  // Collect variable names assigned from tensor.slice
-  std::unordered_set<std::string> slice_results;
+  std::unordered_set<const Var*> slice_results;
   for (const auto& stmt : stmts) {
     auto assign = As<AssignStmt>(stmt);
     if (!assign) continue;
     auto call = As<Call>(assign->value_);
     if (!call) continue;
     if (call->op_->name_ == "tensor.slice") {
-      slice_results.insert(assign->var_->name_hint_);
+      slice_results.insert(assign->var_.get());
     }
   }
   if (slice_results.empty()) return {};
 
-  std::unordered_map<std::string, MatmulSliceInfo> result;
+  std::unordered_map<const Var*, MatmulSliceInfo> result;
 
-  // Find tensor.matmul calls that consume slice results
   for (const auto& stmt : stmts) {
     auto assign = As<AssignStmt>(stmt);
     if (!assign) continue;
@@ -384,17 +378,15 @@ std::unordered_map<std::string, MatmulSliceInfo> PreScanSliceMatmulPatterns(
       if (k == "b_trans") b_trans = std::any_cast<bool>(v);
     }
 
-    // Check lhs (args[0])
     if (auto lhs_var = As<Var>(call->args_[0])) {
-      if (slice_results.count(lhs_var->name_hint_)) {
-        result[lhs_var->name_hint_] = MatmulSliceInfo{false, a_trans};
+      if (slice_results.count(lhs_var.get())) {
+        result[lhs_var.get()] = MatmulSliceInfo{false, a_trans};
       }
     }
 
-    // Check rhs (args[1])
     if (auto rhs_var = As<Var>(call->args_[1])) {
-      if (slice_results.count(rhs_var->name_hint_)) {
-        result[rhs_var->name_hint_] = MatmulSliceInfo{true, b_trans};
+      if (slice_results.count(rhs_var.get())) {
+        result[rhs_var.get()] = MatmulSliceInfo{true, b_trans};
       }
     }
   }
@@ -409,7 +401,7 @@ std::unordered_map<std::string, MatmulSliceInfo> PreScanSliceMatmulPatterns(
  * WhileStmt, ScopeStmt).
  */
 std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
-                                         std::unordered_map<std::string, VarPtr>& tensor_to_tile,
+                                         std::unordered_map<const Var*, VarPtr>& tensor_to_tile,
                                          const OpConversionRegistry& conv_registry,
                                          const OpRegistry& op_registry, const Span& span) {
   std::vector<StmtPtr> result;
@@ -495,7 +487,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, yield_types[i], rv->span_);
           new_return_vars.push_back(new_rv);
-          tensor_to_tile[rv->name_hint_] = new_rv;
+          tensor_to_tile[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -543,7 +535,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
           new_return_vars.push_back(new_rv);
-          tensor_to_tile[rv->name_hint_] = new_rv;
+          tensor_to_tile[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -592,7 +584,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
           new_return_vars.push_back(new_rv);
-          tensor_to_tile[rv->name_hint_] = new_rv;
+          tensor_to_tile[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -646,7 +638,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_hint_] = new_var;
+        tensor_to_tile[assign->var_.get()] = new_var;
       } else {
         result.push_back(stmt);
       }
@@ -662,7 +654,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_hint_] = new_var;
+        tensor_to_tile[assign->var_.get()] = new_var;
       } else {
         result.push_back(stmt);
       }
@@ -687,7 +679,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
-        tensor_to_tile[assign->var_->name_hint_] = new_var;
+        tensor_to_tile[assign->var_.get()] = new_var;
       } else {
         result.push_back(stmt);
       }
@@ -703,8 +695,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
 
     // Special handling: tensor.slice feeding into tensor.matmul
     // Generate tile.load(Mat, transpose=xx) instead of the default tile.load(Vec)
-    if (call->op_->name_ == "tensor.slice" && matmul_slice_targets.count(assign->var_->name_hint_)) {
-      const auto& info = matmul_slice_targets.at(assign->var_->name_hint_);
+    if (call->op_->name_ == "tensor.slice" && matmul_slice_targets.count(assign->var_.get())) {
+      const auto& info = matmul_slice_targets.at(assign->var_.get());
       const auto& input = substituted_args[0];
       auto tensor_type = As<TensorType>(input->GetType());
       if (tensor_type) {
@@ -737,7 +729,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         std::string tile_name = MakeTileValueName(assign->var_->name_hint_);
         auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(tile_var, load_call, assign->span_));
-        tensor_to_tile[assign->var_->name_hint_] = tile_var;
+        tensor_to_tile[assign->var_.get()] = tile_var;
         continue;
       }
     }
@@ -755,7 +747,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     std::string tile_name = MakeTileValueName(assign->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, conv_result.result->GetType(), assign->var_->span_);
     result.push_back(std::make_shared<AssignStmt>(tile_var, conv_result.result, assign->span_));
-    tensor_to_tile[assign->var_->name_hint_] = tile_var;
+    tensor_to_tile[assign->var_.get()] = tile_var;
   }
 
   return result;
@@ -777,8 +769,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto& op_registry = OpRegistry::GetInstance();
   const auto& span = func->span_;
 
-  // Map from tensor var name -> tile var for substitution
-  std::unordered_map<std::string, VarPtr> tensor_to_tile;
+  std::unordered_map<const Var*, VarPtr> tensor_to_tile;
 
   // New body statements
   std::vector<StmtPtr> new_stmts;
@@ -800,7 +791,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     // Only synthesise a default Vec load when the parameter is directly passed to an op
     // that has a registered tensor-to-tile converter.  If the function body already
     // uses the parameter via explicit tile ops (e.g. tile.load to Mat space), skip it.
-    if (params_used_by_converted_ops.find(var->name_hint_) == params_used_by_converted_ops.end()) {
+    if (params_used_by_converted_ops.find(var.get()) == params_used_by_converted_ops.end()) {
       continue;
     }
 
@@ -816,7 +807,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), span);
 
     new_stmts.push_back(std::make_shared<AssignStmt>(tile_var, load_call, span));
-    tensor_to_tile[var->name_hint_] = tile_var;
+    tensor_to_tile[var.get()] = tile_var;
   }
 
   // Phase 2: Walk body and convert tensor ops to tile ops (recursive for nested control flow)
@@ -905,7 +896,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
  * and adds them as extra arguments. Handles nested control flow.
  */
 std::vector<StmtPtr> UpdateCallSitesBody(
-    const std::vector<StmtPtr>& stmts, std::unordered_map<std::string, VarPtr>& var_map,
+    const std::vector<StmtPtr>& stmts, std::unordered_map<const Var*, VarPtr>& var_map,
     const std::unordered_map<std::string, size_t>& incore_added_outputs,
     const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs,
     const OpRegistry& op_registry, const Span& span, bool& changed) {
@@ -999,7 +990,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, yield_types[i], rv->span_);
           new_return_vars.push_back(new_rv);
-          var_map[rv->name_hint_] = new_rv;
+          var_map[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -1045,7 +1036,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
           new_return_vars.push_back(new_rv);
-          var_map[rv->name_hint_] = new_rv;
+          var_map[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -1091,7 +1082,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
           auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
           new_return_vars.push_back(new_rv);
-          var_map[rv->name_hint_] = new_rv;
+          var_map[rv.get()] = new_rv;
         } else {
           new_return_vars.push_back(rv);
         }
@@ -1116,12 +1107,11 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
-        var_map[assign->var_->name_hint_] = new_var;
+        var_map[assign->var_.get()] = new_var;
         changed = true;
       } else {
         result.push_back(stmt);
-        // Erase any stale mapping: this assignment redefines the variable
-        var_map.erase(assign->var_->name_hint_);
+        var_map.erase(assign->var_.get());
       }
       continue;
     }
@@ -1131,11 +1121,11 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
-        var_map[assign->var_->name_hint_] = new_var;
+        var_map[assign->var_.get()] = new_var;
         changed = true;
       } else {
         result.push_back(stmt);
-        var_map.erase(assign->var_->name_hint_);
+        var_map.erase(assign->var_.get());
       }
       continue;
     }
@@ -1145,11 +1135,11 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       if (value != assign->value_) {
         auto new_var = std::make_shared<Var>(assign->var_->name_hint_, value->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(new_var, value, assign->span_));
-        var_map[assign->var_->name_hint_] = new_var;
+        var_map[assign->var_.get()] = new_var;
         changed = true;
       } else {
         result.push_back(stmt);
-        var_map.erase(assign->var_->name_hint_);
+        var_map.erase(assign->var_.get());
       }
       continue;
     }
@@ -1203,7 +1193,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
     auto new_assign_var =
         std::make_shared<Var>(assign->var_->name_hint_, new_return_type, assign->var_->span_);
     result.push_back(std::make_shared<AssignStmt>(new_assign_var, new_call, assign->span_));
-    var_map[assign->var_->name_hint_] = new_assign_var;
+    var_map[assign->var_.get()] = new_assign_var;
     changed = true;
   }
 
@@ -1224,7 +1214,7 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
 
   auto body_stmts = FlattenToStmts(func->body_);
   bool changed = false;
-  std::unordered_map<std::string, VarPtr> var_map;
+  std::unordered_map<const Var*, VarPtr> var_map;
 
   auto new_stmts = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);

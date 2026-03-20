@@ -24,10 +24,10 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/substitute_vars.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -51,7 +51,7 @@ class TransposeLoadScanner : public IRVisitor {
  public:
   explicit TransposeLoadScanner(const std::vector<VarPtr>& params) {
     for (size_t i = 0; i < params.size(); ++i) {
-      param_name_to_index_[params[i]->name_hint_] = i;
+      param_ptr_to_index_[params[i].get()] = i;
     }
   }
 
@@ -65,8 +65,8 @@ class TransposeLoadScanner : public IRVisitor {
       if (transpose && !call->args_.empty()) {
         auto src_var = As<Var>(call->args_[0]);
         if (src_var) {
-          auto it = param_name_to_index_.find(src_var->name_hint_);
-          if (it != param_name_to_index_.end()) {
+          auto it = param_ptr_to_index_.find(src_var.get());
+          if (it != param_ptr_to_index_.end()) {
             size_t param_idx = it->second;
             if (visited_params_.count(param_idx) == 0) {
               visited_params_.insert(param_idx);
@@ -81,31 +81,9 @@ class TransposeLoadScanner : public IRVisitor {
   }
 
  private:
-  std::unordered_map<std::string, size_t> param_name_to_index_;
+  std::unordered_map<const Var*, size_t> param_ptr_to_index_;
   std::unordered_set<size_t> visited_params_;
   std::vector<TransposeParamInfo> results_;
-};
-
-// ---------------------------------------------------------------------------
-// Var substitution mutator: replaces Var references by name
-// ---------------------------------------------------------------------------
-
-class VarSubstitutionMutator : public IRMutator {
- public:
-  explicit VarSubstitutionMutator(std::unordered_map<std::string, VarPtr> substitutions)
-      : substitutions_(std::move(substitutions)) {}
-
- protected:
-  ExprPtr VisitExpr_(const VarPtr& var) override {
-    auto it = substitutions_.find(var->name_hint_);
-    if (it != substitutions_.end()) {
-      return it->second;
-    }
-    return var;
-  }
-
- private:
-  std::unordered_map<std::string, VarPtr> substitutions_;
 };
 
 // ---------------------------------------------------------------------------
@@ -128,7 +106,7 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
   }
 
   std::unordered_map<size_t, std::shared_ptr<const TensorType>> modified_params;
-  std::unordered_map<std::string, VarPtr> substitutions;
+  std::unordered_map<const Var*, VarPtr> substitutions;
   std::vector<VarPtr> new_params = func->params_;
 
   for (const auto& info : results) {
@@ -151,7 +129,7 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
 
     auto new_var = std::make_shared<Var>(old_param->name_hint_, new_tensor_type, old_param->span_);
     new_params[info.param_index] = new_var;
-    substitutions[old_param->name_hint_] = new_var;
+    substitutions[old_param.get()] = new_var;
     modified_params[info.param_index] = new_tensor_type;
   }
 
@@ -159,8 +137,7 @@ IncoreTransformResult TransformIncoreParams(const FunctionPtr& func) {
     return {func, {}};
   }
 
-  VarSubstitutionMutator mutator(std::move(substitutions));
-  auto new_body = mutator.VisitStmt(func->body_);
+  auto new_body = SubstituteVars(func->body_, substitutions);
 
   auto new_func =
       std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
@@ -185,8 +162,7 @@ class CallerArgCollector : public IRVisitor {
   explicit CallerArgCollector(const ModifiedMap& incore_modifications)
       : incore_modifications_(incore_modifications) {}
 
-  // var_name -> new TensorType (for variables that need updating in the caller)
-  const std::unordered_map<std::string, std::shared_ptr<const TensorType>>& GetVarUpdates() const {
+  const std::unordered_map<const Var*, std::shared_ptr<const TensorType>>& GetVarUpdates() const {
     return var_updates_;
   }
 
@@ -200,8 +176,8 @@ class CallerArgCollector : public IRVisitor {
         for (const auto& [param_idx, new_type] : it->second) {
           if (param_idx < call->args_.size()) {
             auto arg_var = As<Var>(call->args_[param_idx]);
-            if (arg_var && var_updates_.find(arg_var->name_hint_) == var_updates_.end()) {
-              var_updates_[arg_var->name_hint_] = new_type;
+            if (arg_var && var_updates_.find(arg_var.get()) == var_updates_.end()) {
+              var_updates_[arg_var.get()] = new_type;
             }
           }
         }
@@ -213,7 +189,7 @@ class CallerArgCollector : public IRVisitor {
 
  private:
   const ModifiedMap& incore_modifications_;
-  std::unordered_map<std::string, std::shared_ptr<const TensorType>> var_updates_;
+  std::unordered_map<const Var*, std::shared_ptr<const TensorType>> var_updates_;
 };
 
 FunctionPtr UpdateCallerFunction(
@@ -228,16 +204,15 @@ FunctionPtr UpdateCallerFunction(
     return func;
   }
 
-  // Build substitution map and update params
-  std::unordered_map<std::string, VarPtr> substitutions;
+  std::unordered_map<const Var*, VarPtr> substitutions;
   std::vector<VarPtr> new_params = func->params_;
 
   for (size_t i = 0; i < func->params_.size(); ++i) {
-    auto it = var_updates.find(func->params_[i]->name_hint_);
+    auto it = var_updates.find(func->params_[i].get());
     if (it != var_updates.end()) {
       auto new_var = std::make_shared<Var>(func->params_[i]->name_hint_, it->second, func->params_[i]->span_);
       new_params[i] = new_var;
-      substitutions[func->params_[i]->name_hint_] = new_var;
+      substitutions[func->params_[i].get()] = new_var;
     }
   }
 
@@ -245,8 +220,7 @@ FunctionPtr UpdateCallerFunction(
     return func;
   }
 
-  VarSubstitutionMutator mutator(std::move(substitutions));
-  auto new_body = mutator.VisitStmt(func->body_);
+  auto new_body = SubstituteVars(func->body_, substitutions);
 
   return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_);

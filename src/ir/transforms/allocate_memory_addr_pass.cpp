@@ -151,14 +151,15 @@ class MemRefUpdateMutator : public IRMutator {
 
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
     auto memref = GetTypeMemRef(type);
-    if (!memref.has_value()) {
-      return type;
+    auto new_memref = memref;
+    if (memref.has_value()) {
+      auto it = memref_map_.find(memref.value().get());
+      if (it != memref_map_.end()) {
+        new_memref = it->second;
+      }
     }
-    auto it = memref_map_.find(memref.value().get());
-    if (it != memref_map_.end()) {
-      return CloneTypeWithMemRef(type, it->second);
-    }
-    return type;
+    return CloneTypeWithMemRefAndRemapExprs(type, new_memref,
+                                            [this](const ExprPtr& expr) { return VisitExpr(expr); });
   }
 };
 

@@ -313,6 +313,49 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     assert "pad=0>" not in alloc_lines[0], f"Expected fillpad pad metadata to be preserved: {alloc_lines[0]}"
 
 
+def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
+    """Dynamic valid_shape scalars defined in-body should still reach alloc_tile."""
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    @pl.program
+    class DynamicValidShapeScalarProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def body_valid_shape(
+            self,
+            input: pl.Tensor[[1, 120], pl.FP32],
+            ctx_len: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[1, 120], pl.FP32],
+        ) -> pl.Tensor[[1, 120], pl.FP32]:
+            valid_len: pl.Scalar[pl.INDEX] = ctx_len + 0
+            tile: pl.Tile[[1, 120], pl.FP32] = pl.tile.load(
+                input,
+                [0, 0],
+                [1, 120],
+                [1, valid_len],
+                target_memory=pl.MemorySpace.Vec,
+                transpose=False,
+            )
+            result: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(tile, [0, 0], output)
+            return result
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    transformed_program = pm.run_passes(DynamicValidShapeScalarProgram)
+
+    codegen_inst = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
+    alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+
+    assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
+    assert "valid_col = %" in alloc_lines[0], (
+        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_lines[0]}"
+    )
+    assert "valid_col = %arg" not in alloc_lines[0], (
+        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_lines[0]}"
+    )
+
+
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
     backend.reset_for_testing()
