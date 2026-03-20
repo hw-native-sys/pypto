@@ -211,8 +211,7 @@ inline std::string StripLegacyBaseName(const std::string& name) {
     changed = false;
     if (strip_suffix(current, "_rv", 3) || strip_suffix(current, "_phi", 4) ||
         strip_suffix(current, "_iter", 5) || strip_suffix(current, "_tile", 5) ||
-        strip_suffix(current, "_tmp", 4) || strip_suffix(current, "_store", 6) ||
-        strip_suffix(current, "_out", 4) || strip_suffix(current, "_idx", 4) ||
+        strip_suffix(current, "_store", 6) || strip_suffix(current, "_idx", 4) ||
         strip_suffix(current, "_outer", 6) || strip_suffix(current, "_inner", 6) ||
         strip_suffix(current, "_rem", 4) || strip_suffix(current, "_ssa", 4) ||
         strip_suffix(current, "_store_ret", 10)) {
