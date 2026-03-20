@@ -2079,6 +2079,33 @@ class TestSliceMatmulConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_loop_carried_tensor_param_marked_inout_through_if_alias(self):
+        """Aliases yielded from IfStmt branches should still contribute to InOut inference."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, buf: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(buf,)):
+                    if i == 0:
+                        branch_acc: pl.Tensor[[1, 64], pl.FP32] = acc
+                        acc_alias = pl.yield_(branch_acc)
+                    else:
+                        branch_acc: pl.Tensor[[1, 64], pl.FP32] = acc
+                        acc_alias = pl.yield_(branch_acc)
+                    chunk: pl.Tensor[[1, 32], pl.FP32] = pl.slice(acc_alias, [1, 32], [0, 0])
+                    acc_next: pl.Tensor[[1, 64], pl.FP32] = pl.assemble(acc_alias, chunk, [0, 0])
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function
+            def main(self, buf: pl.Tensor[[1, 64], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(buf)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        assert "buf: pl.InOut[pl.Tensor[[1, 64], pl.FP32]]" in After.as_python()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

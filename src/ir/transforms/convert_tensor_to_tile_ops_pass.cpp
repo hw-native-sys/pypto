@@ -350,39 +350,110 @@ std::optional<size_t> GetWriteOnlyArgIndex(const std::string& op_name) {
   return std::nullopt;
 }
 
-class AliasReferenceVisitor : public IRVisitor {
+std::optional<std::vector<ExprPtr>> FindYieldValues(const std::vector<StmtPtr>& stmts) {
+  for (const auto& stmt : stmts) {
+    if (auto yield = As<YieldStmt>(stmt)) {
+      return yield->value_;
+    }
+    if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto found = FindYieldValues(FlattenToStmts(if_stmt->then_body_));
+      if (found.has_value()) return found;
+      if (if_stmt->else_body_.has_value()) {
+        found = FindYieldValues(FlattenToStmts(*if_stmt->else_body_));
+        if (found.has_value()) return found;
+      }
+    }
+    if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto found = FindYieldValues(FlattenToStmts(for_stmt->body_));
+      if (found.has_value()) return found;
+    }
+    if (auto while_stmt = As<WhileStmt>(stmt)) {
+      auto found = FindYieldValues(FlattenToStmts(while_stmt->body_));
+      if (found.has_value()) return found;
+    }
+    if (auto seq = As<SeqStmts>(stmt)) {
+      auto found = FindYieldValues(seq->stmts_);
+      if (found.has_value()) return found;
+    }
+    if (auto op_stmts = As<OpStmts>(stmt)) {
+      auto found = FindYieldValues(op_stmts->stmts_);
+      if (found.has_value()) return found;
+    }
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      auto found = FindYieldValues(FlattenToStmts(scope->body_));
+      if (found.has_value()) return found;
+    }
+  }
+  return std::nullopt;
+}
+
+void MergeAliases(std::unordered_set<const Var*>& aliases,
+                  const std::unordered_set<const Var*>& branch_aliases) {
+  aliases.insert(branch_aliases.begin(), branch_aliases.end());
+}
+
+void MergeAliasParamMapping(std::unordered_map<const Var*, const Var*>& alias_to_param, const Var* alias,
+                            const Var* source_param) {
+  if (!alias) {
+    return;
+  }
+
+  auto [it, inserted] = alias_to_param.emplace(alias, source_param);
+  if (!inserted && it->second != source_param) {
+    it->second = nullptr;
+  }
+}
+
+void MergeAliasParamMappings(std::unordered_map<const Var*, const Var*>& alias_to_param,
+                             const std::unordered_map<const Var*, const Var*>& branch_alias_to_param) {
+  for (const auto& [alias, source_param] : branch_alias_to_param) {
+    MergeAliasParamMapping(alias_to_param, alias, source_param);
+  }
+}
+
+class AliasVisitorBase : public IRVisitor {
  public:
-  explicit AliasReferenceVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
+  explicit AliasVisitorBase(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
 
   [[nodiscard]] bool Found() const { return found_; }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (found_ || !expr) {
+      return;
+    }
+    IRVisitor::VisitExpr(expr);
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (found_ || !stmt) {
+      return;
+    }
+    IRVisitor::VisitStmt(stmt);
+  }
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
     if (op && aliases_.count(op.get())) {
       found_ = true;
     }
-    IRVisitor::VisitVarLike_(op);
   }
 
- private:
   const std::unordered_set<const Var*>& aliases_;
   bool found_ = false;
+
+ private:
 };
 
-class AliasReadVisitor : public IRVisitor {
+class AliasReferenceVisitor : public AliasVisitorBase {
  public:
-  explicit AliasReadVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
+  using AliasVisitorBase::AliasVisitorBase;
+};
 
-  [[nodiscard]] bool Found() const { return found_; }
+class AliasReadVisitor : public AliasReferenceVisitor {
+ public:
+  using AliasReferenceVisitor::AliasReferenceVisitor;
 
  protected:
-  void VisitVarLike_(const VarPtr& op) override {
-    if (op && aliases_.count(op.get())) {
-      found_ = true;
-    }
-    IRVisitor::VisitVarLike_(op);
-  }
-
   void VisitExpr_(const CallPtr& op) override {
     if (!op) return;
 
@@ -394,17 +465,11 @@ class AliasReadVisitor : public IRVisitor {
       VisitExpr(op->args_[i]);
     }
   }
-
- private:
-  const std::unordered_set<const Var*>& aliases_;
-  bool found_ = false;
 };
 
-class AliasWriteVisitor : public IRVisitor {
+class AliasWriteVisitor : public AliasVisitorBase {
  public:
-  explicit AliasWriteVisitor(const std::unordered_set<const Var*>& aliases) : aliases_(aliases) {}
-
-  [[nodiscard]] bool Found() const { return found_; }
+  using AliasVisitorBase::AliasVisitorBase;
 
  protected:
   void VisitExpr_(const CallPtr& op) override {
@@ -416,6 +481,7 @@ class AliasWriteVisitor : public IRVisitor {
       ref_visitor.VisitExpr(op->args_[*write_only_arg]);
       if (ref_visitor.Found()) {
         found_ = true;
+        return;
       }
     }
 
@@ -428,8 +494,6 @@ class AliasWriteVisitor : public IRVisitor {
   }
 
  private:
-  const std::unordered_set<const Var*>& aliases_;
-  bool found_ = false;
 };
 
 bool ExprReferencesAlias(const ExprPtr& expr, const std::unordered_set<const Var*>& aliases) {
@@ -513,11 +577,31 @@ void CollectBufferAccessInStmt(const StmtPtr& stmt, std::unordered_set<const Var
     access.reads = access.reads || ExprReadsAlias(if_stmt->condition_, aliases);
     access.writes = access.writes || ExprWritesAlias(if_stmt->condition_, aliases);
 
-    auto then_aliases = aliases;
-    CollectBufferAccessInStmts(FlattenToStmts(if_stmt->then_body_), then_aliases, access);
+    const auto incoming_aliases = aliases;
+    auto then_stmts = FlattenToStmts(if_stmt->then_body_);
+    auto then_aliases = incoming_aliases;
+    CollectBufferAccessInStmts(then_stmts, then_aliases, access);
+    if (auto then_yields = FindYieldValues(then_stmts)) {
+      for (size_t i = 0; i < if_stmt->return_vars_.size() && i < then_yields->size(); ++i) {
+        if (ExprAliasesTrackedBuffer((*then_yields)[i], then_aliases)) {
+          aliases.insert(if_stmt->return_vars_[i].get());
+        }
+      }
+    }
+    MergeAliases(aliases, then_aliases);
+
     if (if_stmt->else_body_.has_value()) {
-      auto else_aliases = aliases;
-      CollectBufferAccessInStmts(FlattenToStmts(*if_stmt->else_body_), else_aliases, access);
+      auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
+      auto else_aliases = incoming_aliases;
+      CollectBufferAccessInStmts(else_stmts, else_aliases, access);
+      if (auto else_yields = FindYieldValues(else_stmts)) {
+        for (size_t i = 0; i < if_stmt->return_vars_.size() && i < else_yields->size(); ++i) {
+          if (ExprAliasesTrackedBuffer((*else_yields)[i], else_aliases)) {
+            aliases.insert(if_stmt->return_vars_[i].get());
+          }
+        }
+      }
+      MergeAliases(aliases, else_aliases);
     }
     return;
   }
@@ -619,13 +703,29 @@ void CollectLoopCarriedTensorParamDirections(
     }
 
     if (auto if_stmt = As<IfStmt>(stmt)) {
-      auto then_alias_to_param = alias_to_param;
-      CollectLoopCarriedTensorParamDirections(FlattenToStmts(if_stmt->then_body_), then_alias_to_param,
-                                              inferred_param_directions);
+      const auto incoming_alias_to_param = alias_to_param;
+      auto then_stmts = FlattenToStmts(if_stmt->then_body_);
+      auto then_alias_to_param = incoming_alias_to_param;
+      CollectLoopCarriedTensorParamDirections(then_stmts, then_alias_to_param, inferred_param_directions);
+      if (auto then_yields = FindYieldValues(then_stmts)) {
+        for (size_t i = 0; i < if_stmt->return_vars_.size() && i < then_yields->size(); ++i) {
+          MergeAliasParamMapping(alias_to_param, if_stmt->return_vars_[i].get(),
+                                 ResolveAliasedParamFromExpr((*then_yields)[i], then_alias_to_param));
+        }
+      }
+      MergeAliasParamMappings(alias_to_param, then_alias_to_param);
+
       if (if_stmt->else_body_.has_value()) {
-        auto else_alias_to_param = alias_to_param;
-        CollectLoopCarriedTensorParamDirections(FlattenToStmts(*if_stmt->else_body_), else_alias_to_param,
-                                                inferred_param_directions);
+        auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
+        auto else_alias_to_param = incoming_alias_to_param;
+        CollectLoopCarriedTensorParamDirections(else_stmts, else_alias_to_param, inferred_param_directions);
+        if (auto else_yields = FindYieldValues(else_stmts)) {
+          for (size_t i = 0; i < if_stmt->return_vars_.size() && i < else_yields->size(); ++i) {
+            MergeAliasParamMapping(alias_to_param, if_stmt->return_vars_[i].get(),
+                                   ResolveAliasedParamFromExpr((*else_yields)[i], else_alias_to_param));
+          }
+        }
+        MergeAliasParamMappings(alias_to_param, else_alias_to_param);
       }
       continue;
     }
