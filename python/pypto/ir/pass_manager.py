@@ -68,7 +68,7 @@ class PassManager:
                 ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
                 ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
                 ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+                ("MemoryReuse", lambda: passes.memory_reuse()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
             OptimizationStrategy.CCE: [
@@ -88,7 +88,7 @@ class PassManager:
                 # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
                 # Codegen already supports AIC/AIV/Group function types.
                 ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.basic_memory_reuse()),
+                ("MemoryReuse", lambda: passes.memory_reuse()),
                 ("InsertSync", lambda: passes.insert_sync()),
                 ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ],
@@ -172,8 +172,7 @@ class PassManager:
 
         # Use instrument for IR dumping -- verification handled by C++ pipeline.
         # We index self.pass_names (Python-side names from _register_passes) rather than
-        # _pass_obj.get_name() because registered names may differ from C++ names
-        # (e.g. "MemoryReuse" vs "BasicMemoryReuse").
+        # _pass_obj.get_name() because registered names may differ from C++ names.
         pass_index = 0
 
         def after_pass(_pass_obj: passes.Pass, program: core_ir.Program) -> None:

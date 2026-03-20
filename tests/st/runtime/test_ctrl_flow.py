@@ -18,12 +18,11 @@ This module validates code generation and execution for control flow patterns:
 
 Limitations:
     scf.if (if-else) inside InCore functions with tile operations is not yet
-    fully supported at runtime. The BasicMemoryReuse pass does not track
-    variable uses inside IfStmt branches, causing incorrect buffer reuse.
-    Additionally, the PTO codegen's ForStmt/IfStmt type inference only handles
-    ScalarType for iter_args/return_vars (TileType/TensorType fall through to
-    "index"). These limitations also affect break/continue tests since the
-    CtrlFlowTransform pass converts them into if-else + while constructs.
+    fully supported at runtime. The PTO codegen's ForStmt/IfStmt type inference
+    only handles ScalarType for iter_args/return_vars (TileType/TensorType fall
+    through to "index"). These limitations also affect break/continue tests
+    since the CtrlFlowTransform pass converts them into if-else + while
+    constructs.
 """
 
 from typing import Any

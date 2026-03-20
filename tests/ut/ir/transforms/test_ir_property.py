@@ -173,9 +173,9 @@ class TestPassPropertyAccessors:
         assert p.get_name() == "InitMemRef"
         assert p.get_produced_properties().contains(passes.IRProperty.HasMemRefs)
 
-    def test_basic_memory_reuse_requires_memrefs(self):
-        """Test BasicMemoryReuse requires HasMemRefs."""
-        p = passes.basic_memory_reuse()
+    def test_memory_reuse_requires_memrefs(self):
+        """Test MemoryReuse requires HasMemRefs."""
+        p = passes.memory_reuse()
         assert p.get_required_properties().contains(passes.IRProperty.HasMemRefs)
 
     def test_flatten_call_expr_requires_and_produces_ssa(self):
