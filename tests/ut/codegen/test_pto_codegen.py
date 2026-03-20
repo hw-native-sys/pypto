@@ -641,14 +641,14 @@ class TestGenerateArgUnpacking:
     def test_dynamic_tensor_extracts_shapes_dims(self):
         func = _get_dyn_incore_func()
         code, names = _generate_arg_unpacking(func)
-        # TH is dim 0 of first tensor a_0 — read from a_0_tensor->shapes[0]
-        assert "a_0_tensor->shapes[0]" in code
+        # TH is dim 0 of first tensor a_0 — read from a__ssa_v0_tensor->shapes[0]
+        assert "a__ssa_v0_tensor->shapes[0]" in code
         assert "int64_t TH" in code
-        # TW is dim 1 of first tensor a_0 — read from a_0_tensor->shapes[1]
-        assert "a_0_tensor->shapes[1]" in code
+        # TW is dim 1 of first tensor a_0 — read from a__ssa_v0_tensor->shapes[1]
+        assert "a__ssa_v0_tensor->shapes[1]" in code
         assert "int64_t TW" in code
         # dynamic dims appended after tensor params
-        assert names == ["a_0", "b_0", "output_0", "TH", "TW"]
+        assert names == ["a__ssa_v0", "b__ssa_v0", "output__ssa_v0", "TH", "TW"]
 
     def test_dynamic_tensor_deduplicates_vars(self):
         # TH and TW each appear in a__ssa_v0, b__ssa_v0, and output__ssa_v0 but should be extracted only once
@@ -694,13 +694,13 @@ class TestGenerateKernelWrapper:
         func = _get_dyn_incore_func()
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         # Forward call must include dynamic dims TH and TW after tensor args.
-        assert "dyn_func(a_0, b_0, output_0, TH, TW);" in wrapper
+        assert "dyn_func(a__ssa_v0, b__ssa_v0, output__ssa_v0, TH, TW);" in wrapper
 
     def test_dynamic_shape_shapes_extraction_in_wrapper(self):
         func = _get_dyn_incore_func()
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        assert "a_0_tensor->shapes[0]" in wrapper
-        assert "a_0_tensor->shapes[1]" in wrapper
+        assert "a__ssa_v0_tensor->shapes[0]" in wrapper
+        assert "a__ssa_v0_tensor->shapes[1]" in wrapper
 
 
 class TestGenerateSkipPtoas:

@@ -72,7 +72,7 @@ class TestCCECodegenBasics:
         assert "__gm__ TensorData*" in code
         assert "->buffer.addr" in code
         assert "union { uint64_t u64; float val; }" in code
-        assert "float input_b_0 =" in code
+        assert "float input_b__ssa_v0 =" in code
         assert "_gm_" in code  # Check for temp GlobalTensor names (e.g., output_0_gm_0)
 
         # Verify Tile type definitions are generated

@@ -31,12 +31,24 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
+
+/// Build an auto-named SSA version from a variable name and role.
+/// Preserves any existing auto-name structure (base + qualifier) while
+/// replacing the role and version: `x__q_ssa_v0` → `x__q_iter_v1`.
+static std::string BuildAutoNamedVersion(const std::string& name, const std::string& role, int version) {
+  auto parsed = auto_name::Parse(name);
+  if (parsed.has_auto_suffix && (parsed.role.has_value() || parsed.version.has_value())) {
+    return auto_name::BuildName(parsed.base_name, parsed.qualifier, role, version);
+  }
+  return auto_name::BuildName(name, "", role, version);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Collectors — Pre-analysis visitors for loop variable classification
@@ -294,10 +306,10 @@ class SSAConverter {
 
   // ── Version management ─────────────────────────────────────────────
 
-  VarPtr AllocVersion(const VarPtr& orig_var) {
+  VarPtr AllocVersion(const VarPtr& orig_var, const std::string& role = "ssa") {
     const Var* key = orig_var.get();
     int v = ver_[key]++;
-    auto var = std::make_shared<Var>(orig_var->name_hint_ + "_" + std::to_string(v),
+    auto var = std::make_shared<Var>(BuildAutoNamedVersion(orig_var->name_hint_, role, v),
                                      SubstType(orig_var->GetType()), orig_var->span_);
     cur_[key] = var;
     return var;
@@ -425,11 +437,11 @@ class SSAConverter {
     for (const auto& vp : carried) {
       auto init = before.at(vp);
       int iv = ver_[vp]++;
-      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
-                                              init, op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(vp->name_hint_, "iter", iv),
+                                              init->GetType(), init, op->span_));
       int rv = ver_[vp]++;
       carried_rvs.push_back(
-          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
+          std::make_shared<Var>(BuildAutoNamedVersion(vp->name_hint_, "rv", rv), init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
@@ -445,15 +457,15 @@ class SSAConverter {
         init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
       }
       int iv = ver_[vp]++;
-      ias.push_back(
-          std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init, op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(vp->name_hint_, "iter", iv), type, init,
+                                              op->span_));
       int rv = ver_[vp]++;
-      auto rv_var = std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_);
+      auto rv_var = std::make_shared<Var>(BuildAutoNamedVersion(vp->name_hint_, "rv", rv), type, op->span_);
       esc_rvs.push_back(rv_var);
     }
 
     // Version loop variable
-    auto new_lv = AllocVersion(op->loop_var_);
+    auto new_lv = AllocVersion(op->loop_var_, "idx");
 
     // Register iter_args: map ORIGINAL pointers → new iter_args for body substitution
     // Existing iter_args: body references original IterArg pointers
@@ -563,11 +575,11 @@ class SSAConverter {
     for (const auto& vp : carried) {
       auto init = before.at(vp);
       int iv = ver_[vp]++;
-      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
-                                              init, op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(vp->name_hint_, "iter", iv),
+                                              init->GetType(), init, op->span_));
       int rv = ver_[vp]++;
       carried_rvs.push_back(
-          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
+          std::make_shared<Var>(BuildAutoNamedVersion(vp->name_hint_, "rv", rv), init->GetType(), op->span_));
     }
 
     // Create iter_args + return_vars for escaping variables (pre-registered)
@@ -579,10 +591,11 @@ class SSAConverter {
       auto init = FindInitValue(type, before);
       if (!init) init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
       int iv = ver_[vp]++;
-      ias.push_back(
-          std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init, op->span_));
+      ias.push_back(std::make_shared<IterArg>(BuildAutoNamedVersion(vp->name_hint_, "iter", iv), type, init,
+                                              op->span_));
       int rv = ver_[vp]++;
-      esc_rvs.push_back(std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_));
+      esc_rvs.push_back(
+          std::make_shared<Var>(BuildAutoNamedVersion(vp->name_hint_, "rv", rv), type, op->span_));
     }
 
     // Register iter_args: map ORIGINAL pointers → new iter_args for body substitution
@@ -692,7 +705,7 @@ class SSAConverter {
       cur_ = before;
       std::vector<VarPtr> return_vars;
       for (const auto& rv : op->return_vars_) {
-        auto nrv = AllocVersion(rv);
+        auto nrv = AllocVersion(rv, "rv");
         return_vars.push_back(nrv);
       }
       return std::make_shared<IfStmt>(cond, new_then, new_else, return_vars, op->span_);
@@ -707,7 +720,8 @@ class SSAConverter {
       VarPtr tv = then_ver.count(vp) ? then_ver.at(vp) : before.at(vp);
       VarPtr ev = else_ver.count(vp) ? else_ver.at(vp) : before.at(vp);
       int pv = ver_[vp]++;
-      auto phi = std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(pv), tv->GetType(), op->span_);
+      auto phi =
+          std::make_shared<Var>(BuildAutoNamedVersion(vp->name_hint_, "phi", pv), tv->GetType(), op->span_);
       return_vars.push_back(phi);
       then_yields.push_back(tv);
       else_yields.push_back(ev);
@@ -718,7 +732,7 @@ class SSAConverter {
     for (const auto& rv : op->return_vars_) {
       bool handled = std::any_of(phis.begin(), phis.end(), [&](const Var* p) { return p == rv.get(); });
       if (!handled) {
-        auto nrv = AllocVersion(rv);
+        auto nrv = AllocVersion(rv, "rv");
         return_vars.push_back(nrv);
       }
     }
