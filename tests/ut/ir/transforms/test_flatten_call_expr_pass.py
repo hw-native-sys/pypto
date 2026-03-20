@@ -263,7 +263,13 @@ class TestFlattenCallInIfCondition:
         @pl.program
         class Before:
             @pl.function
-            def main(self, y_0: pl.Tensor[[64], pl.FP32], z_0: pl.Tensor[[64], pl.FP32], b_0: pl.Tensor[[64], pl.FP32], c_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def main(
+                self,
+                y_0: pl.Tensor[[64], pl.FP32],
+                z_0: pl.Tensor[[64], pl.FP32],
+                b_0: pl.Tensor[[64], pl.FP32],
+                c_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
                 result_0 = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
                 x_0 = pl.tensor.mul(pl.tensor.adds(y_0, 1.0), z_0)
                 for i_0, (result_iter_1,) in pl.range(10, init_values=(result_0,)):
@@ -279,7 +285,13 @@ class TestFlattenCallInIfCondition:
         @pl.program
         class Expected:
             @pl.function
-            def main(self, y_0: pl.Tensor[[64], pl.FP32], z_0: pl.Tensor[[64], pl.FP32], b_0: pl.Tensor[[64], pl.FP32], c_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def main(
+                self,
+                y_0: pl.Tensor[[64], pl.FP32],
+                z_0: pl.Tensor[[64], pl.FP32],
+                b_0: pl.Tensor[[64], pl.FP32],
+                c_0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
                 result_0 = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
                 _t0 = pl.tensor.adds(y_0, 1.0)
                 x_0 = pl.tensor.mul(_t0, z_0)

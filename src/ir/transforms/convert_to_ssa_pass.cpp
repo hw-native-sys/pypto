@@ -296,9 +296,8 @@ class SSAConverter {
   VarPtr AllocVersion(const VarPtr& orig_var) {
     const Var* key = orig_var.get();
     int v = ver_[key]++;
-    auto var =
-        std::make_shared<Var>(orig_var->name_hint_ + "_" + std::to_string(v), SubstType(orig_var->GetType()),
-                              orig_var->span_);
+    auto var = std::make_shared<Var>(orig_var->name_hint_ + "_" + std::to_string(v),
+                                     SubstType(orig_var->GetType()), orig_var->span_);
     cur_[key] = var;
     return var;
   }
@@ -386,8 +385,9 @@ class SSAConverter {
     std::vector<const Var*> carried;
     for (const auto& vp : ac.assigned) {
       if (vp == lv_ptr) continue;
-      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
-                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(), [&](const auto& ia) {
+        return static_cast<const Var*>(ia.get()) == vp;
+      });
       if (is_existing_ia) continue;
       if (before.count(vp)) carried.push_back(vp);
     }
@@ -408,8 +408,9 @@ class SSAConverter {
       if (vp == lv_ptr) continue;
       if (before.count(vp)) continue;
       if (!saved_future_needs.count(vp)) continue;
-      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
-                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(), [&](const auto& ia) {
+        return static_cast<const Var*>(ia.get()) == vp;
+      });
       if (is_existing_ia) continue;
       escaping.push_back(vp);
     }
@@ -424,7 +425,7 @@ class SSAConverter {
       auto init = before.at(vp);
       int iv = ver_[vp]++;
       ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
-                                               init, op->span_));
+                                              init, op->span_));
       int rv = ver_[vp]++;
       carried_rvs.push_back(
           std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
@@ -443,8 +444,8 @@ class SSAConverter {
         init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
       }
       int iv = ver_[vp]++;
-      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init,
-                                               op->span_));
+      ias.push_back(
+          std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init, op->span_));
       int rv = ver_[vp]++;
       auto rv_var = std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_);
       esc_rvs.push_back(rv_var);
@@ -527,8 +528,9 @@ class SSAConverter {
     // Loop-carried classification
     std::vector<const Var*> carried;
     for (const auto& vp : ac.assigned) {
-      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
-                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(), [&](const auto& ia) {
+        return static_cast<const Var*>(ia.get()) == vp;
+      });
       if (is_existing_ia) continue;
       if (before.count(vp)) carried.push_back(vp);
     }
@@ -544,8 +546,9 @@ class SSAConverter {
     for (const auto& vp : ac.assigned) {
       if (before.count(vp)) continue;
       if (!saved_future_needs.count(vp)) continue;
-      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(),
-                                        [&](const auto& ia) { return static_cast<const Var*>(ia.get()) == vp; });
+      bool is_existing_ia = std::any_of(op->iter_args_.begin(), op->iter_args_.end(), [&](const auto& ia) {
+        return static_cast<const Var*>(ia.get()) == vp;
+      });
       if (is_existing_ia) continue;
       escaping.push_back(vp);
     }
@@ -560,7 +563,7 @@ class SSAConverter {
       auto init = before.at(vp);
       int iv = ver_[vp]++;
       ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), init->GetType(),
-                                               init, op->span_));
+                                              init, op->span_));
       int rv = ver_[vp]++;
       carried_rvs.push_back(
           std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), init->GetType(), op->span_));
@@ -575,11 +578,10 @@ class SSAConverter {
       auto init = FindInitValue(type, before);
       if (!init) init = std::make_shared<Var>(vp->name_hint_, type, op->span_);
       int iv = ver_[vp]++;
-      ias.push_back(std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init,
-                                               op->span_));
+      ias.push_back(
+          std::make_shared<IterArg>(vp->name_hint_ + "_iter_" + std::to_string(iv), type, init, op->span_));
       int rv = ver_[vp]++;
-      esc_rvs.push_back(
-          std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_));
+      esc_rvs.push_back(std::make_shared<Var>(vp->name_hint_ + "_" + std::to_string(rv), type, op->span_));
     }
 
     // Register iter_args: map ORIGINAL pointers → new iter_args for body substitution
@@ -646,31 +648,35 @@ class SSAConverter {
     }
     auto else_ver = op->else_body_.has_value() ? cur_ : before;
 
+    // Collect all variable keys from both branches into a deterministic order
+    // (avoids nondeterministic pointer-keyed unordered_map iteration)
+    auto var_order = [](const Var* a, const Var* b) {
+      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
+      return a->UniqueId() < b->UniqueId();
+    };
+    std::set<const Var*, decltype(var_order)> all_keys(var_order);
+    for (const auto& [vp, v] : then_ver) all_keys.insert(vp);
+    for (const auto& [vp, v] : else_ver) all_keys.insert(vp);
+
     // Find variables that diverged between branches
     std::vector<const Var*> phis;
-    std::set<const Var*> seen;
-    for (const auto& [vp, v] : then_ver) {
-      seen.insert(vp);
+    for (const Var* vp : all_keys) {
       auto bi = before.find(vp);
+      auto ti = then_ver.find(vp);
+      auto ei = else_ver.find(vp);
+      bool in_then = (ti != then_ver.end());
+      bool in_else = (ei != else_ver.end());
+
       if (bi != before.end()) {
-        bool then_changed = (bi->second != v);
-        auto ei = else_ver.find(vp);
-        bool else_changed = (ei != else_ver.end() && bi->second != ei->second);
+        // Variable existed before — check if either branch changed it
+        bool then_changed = in_then && (bi->second != ti->second);
+        bool else_changed = in_else && (bi->second != ei->second);
         if (then_changed || else_changed) phis.push_back(vp);
-      } else if (else_ver.count(vp)) {
+      } else if (in_then && in_else) {
         // New variable defined in BOTH branches needs a phi
         phis.push_back(vp);
       }
     }
-    for (const auto& [vp, v] : else_ver) {
-      if (seen.count(vp)) continue;
-      auto bi = before.find(vp);
-      if (bi != before.end() && bi->second != v) phis.push_back(vp);
-    }
-    std::sort(phis.begin(), phis.end(), [](const Var* a, const Var* b) {
-      if (a->name_hint_ != b->name_hint_) return a->name_hint_ < b->name_hint_;
-      return a->UniqueId() < b->UniqueId();
-    });
 
     // No divergence — return simple IfStmt
     if (phis.empty() && op->return_vars_.empty()) {
@@ -707,8 +713,7 @@ class SSAConverter {
 
     // Preserve any existing return_vars not already handled as phis
     for (const auto& rv : op->return_vars_) {
-      bool handled = std::any_of(phis.begin(), phis.end(),
-                                  [&](const Var* p) { return p == rv.get(); });
+      bool handled = std::any_of(phis.begin(), phis.end(), [&](const Var* p) { return p == rv.get(); });
       if (!handled) {
         auto nrv = AllocVersion(rv);
         return_vars.push_back(nrv);
@@ -825,7 +830,7 @@ class SSAConverter {
   std::unordered_map<const Var*, VarPtr> cur_;  // orig Var → latest SSA version
   std::unordered_map<const Var*, int> ver_;     // orig Var → next version number
   std::set<const Var*> future_needs_;           // vars needed (used-before-defined) in subsequent stmts
-  std::vector<VarPtr> orig_params_;              // original function params
+  std::vector<VarPtr> orig_params_;             // original function params
   std::vector<ParamDirection> orig_param_directions_;
 };
 

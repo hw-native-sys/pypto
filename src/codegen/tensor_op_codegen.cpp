@@ -99,7 +99,7 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
   std::string cpp_type = result_type->dtype_.ToCTypeString();
 
   std::string result_var = codegen.GetCurrentResultTarget();
-  std::string ptr_expr = codegen.GetTensorDataPtr(input_name);
+  std::string ptr_expr = codegen.GetTensorDataPtr(op->args_[0]);
 
   // Extract indices from MakeTuple
   auto indices_tuple = As<MakeTuple>(op->args_[1]);
@@ -149,7 +149,7 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
   auto input_type = As<TensorType>(op->args_[0]->GetType());
   CHECK(input_type) << "tensor.write input must be TensorType";
 
-  std::string ptr_expr = codegen.GetTensorDataPtr(input_name);
+  std::string ptr_expr = codegen.GetTensorDataPtr(op->args_[0]);
 
   auto indices_tuple = As<MakeTuple>(op->args_[1]);
   CHECK(indices_tuple) << "tensor.write indices must be MakeTuple";
@@ -198,7 +198,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must be a variable";
 
-  std::string ext_input_name = codegen.GetExternalTensorName(input_name);
+  std::string ext_input_name = codegen.GetExternalTensorName(op->args_[0]);
   std::string result_var = codegen.GetCurrentResultTarget();
 
   // Extract shape elements from MakeTuple

@@ -395,11 +395,7 @@ class ASTParser:
                 ):
                     override_type = resolved
         existing_var = self.scope_manager.lookup_var(var_name)
-        if (
-            existing_var is not None
-            and type(existing_var) is ir.Var
-            and not self.scope_manager.strict_ssa
-        ):
+        if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
             # Reassignment: emit AssignStmt with existing Var, don't create new one
             self.builder.assign(existing_var, value_expr, span=span)
             var = existing_var
@@ -412,6 +408,14 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
+
+    def _assign_or_let(self, var_name: str, value_expr: ir.Expr, span: ir.Span) -> ir.Var:
+        """Assign to existing Var if possible, otherwise create a new let binding."""
+        existing_var = self.scope_manager.lookup_var(var_name)
+        if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            self.builder.assign(existing_var, value_expr, span=span)
+            return existing_var
+        return self.builder.let(var_name, value_expr, span=span)
 
     def parse_assignment(self, stmt: ast.Assign) -> None:
         """Parse regular assignment: var = value or tuple unpacking.
@@ -449,16 +453,7 @@ class ASTParser:
                             hint="Use simple variable names in tuple unpacking: a, b, c = func()",
                         )
                     item_expr = ir.TupleGetItemExpr(tuple_var, i, span)
-                    existing_var = self.scope_manager.lookup_var(elt.id)
-                    if (
-                        existing_var is not None
-                        and type(existing_var) is ir.Var
-                        and not self.scope_manager.strict_ssa
-                    ):
-                        self.builder.assign(existing_var, item_expr, span=span)
-                        var = existing_var
-                    else:
-                        var = self.builder.let(elt.id, item_expr, span=span)
+                    var = self._assign_or_let(elt.id, item_expr, span)
                     self.scope_manager.define_var(elt.id, var, span=span)
                 return
 
@@ -492,16 +487,7 @@ class ASTParser:
                         return
 
                 value_expr = self.parse_expression(stmt.value)
-                existing_var = self.scope_manager.lookup_var(var_name)
-                if (
-                    existing_var is not None
-                    and type(existing_var) is ir.Var
-                    and not self.scope_manager.strict_ssa
-                ):
-                    self.builder.assign(existing_var, value_expr, span=span)
-                    var = existing_var
-                else:
-                    var = self.builder.let(var_name, value_expr, span=span)
+                var = self._assign_or_let(var_name, value_expr, span)
                 self.scope_manager.define_var(var_name, var, span=span)
 
                 # Track buffer metadata for attribute access (e.g., pipe_buf.base)

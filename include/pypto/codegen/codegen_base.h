@@ -103,6 +103,12 @@ class CodegenBase : public ir::IRVisitor {
     throw ValueError("GetTensorDataPtr not implemented for this codegen");
   }
 
+  /// ExprPtr overload — enables pointer-based identity checks in subclasses.
+  /// Default: extracts name via TryGetVarName and delegates to string overload.
+  [[nodiscard]] virtual std::string GetTensorDataPtr(const ir::ExprPtr& expr) const {
+    return GetTensorDataPtr(TryGetVarName(expr));
+  }
+
   /**
    * @brief Get the external tensor name for a variable
    *
@@ -114,6 +120,12 @@ class CodegenBase : public ir::IRVisitor {
    * @return External tensor name (e.g., "ext_x" or "x")
    */
   [[nodiscard]] virtual std::string GetExternalTensorName(const std::string& name) const { return name; }
+
+  /// ExprPtr overload — enables pointer-based identity checks in subclasses.
+  /// Default: extracts name via TryGetVarName and delegates to string overload.
+  [[nodiscard]] virtual std::string GetExternalTensorName(const ir::ExprPtr& expr) const {
+    return GetExternalTensorName(TryGetVarName(expr));
+  }
 
   /**
    * @brief Get the runtime DataType enum string for generated code

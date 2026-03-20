@@ -36,7 +36,8 @@ namespace {
 /// reflection to identify which Var fields are definition sites.
 class DeepCloneMutator : public IRMutator {
  public:
-  explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map, bool clone_def_vars = true)
+  explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map,
+                            bool clone_def_vars = true)
       : expr_map_(var_map), clone_def_vars_(clone_def_vars) {}
 
   /// Get the accumulated definition-site Var mapping (excludes non-Var substitutions).
