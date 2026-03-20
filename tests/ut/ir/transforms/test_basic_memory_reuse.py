@@ -1065,6 +1065,8 @@ def _find_first_for_stmt(stmt):
             found = _find_first_for_stmt(child)
             if found is not None:
                 return found
+    if isinstance(stmt, ir.ScopeStmt):
+        return _find_first_for_stmt(stmt.body)
     if isinstance(stmt, ir.IfStmt):
         found = _find_first_for_stmt(stmt.then_body)
         if found is not None:

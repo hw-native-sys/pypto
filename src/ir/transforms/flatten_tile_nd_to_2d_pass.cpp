@@ -264,6 +264,14 @@ struct FlattenContext {
   }
 };
 
+VarPtr CreateFreshControlFlowReturnVar(const VarPtr& original_rv, const VarPtr& body_var,
+                                       FlattenContext& ctx) {
+  auto new_rv = std::make_shared<Var>(original_rv->name_hint_, body_var->GetType(), original_rv->span_);
+  ctx.Insert(original_rv, new_rv);
+  ctx.Insert(body_var, new_rv);
+  return new_rv;
+}
+
 /**
  * @brief Recursively transform statements, flattening >2D tile ops to 2D.
  */
@@ -340,8 +348,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       for (const auto& rv : if_stmt->return_vars_) {
         auto it = then_ctx.name_to_new_var.find(rv->name_hint_);
         if (it != then_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(it->second);
-          ctx.Insert(rv, it->second);
+          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
         } else {
           new_return_vars.push_back(rv);
         }
@@ -382,8 +389,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       for (const auto& rv : for_stmt->return_vars_) {
         auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
         if (it != body_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(it->second);
-          ctx.Insert(rv, it->second);
+          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
         } else {
           new_return_vars.push_back(rv);
         }
@@ -423,8 +429,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       for (const auto& rv : while_stmt->return_vars_) {
         auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
         if (it != body_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(it->second);
-          ctx.Insert(rv, it->second);
+          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
         } else {
           new_return_vars.push_back(rv);
         }
