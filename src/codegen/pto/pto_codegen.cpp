@@ -211,7 +211,19 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   body_section_.str("");
   body_section_.clear();
 
-  stream_ << "module {\n";
+  auto type = backend::GetBackendType();
+  std::string target_arch;
+  switch (type) {
+    case backend::BackendType::Ascend950:
+      target_arch = "a5";
+      break;
+    case backend::BackendType::Ascend910B_PTO:
+      target_arch = "a2a3";
+      break;
+    default:
+      CHECK(false) << "Unsupported backend type for PTO target_arch: " << static_cast<int>(type);
+  }
+  stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
     INTERNAL_CHECK(ir::IsInCoreType(func->func_type_))
@@ -332,7 +344,19 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(dyn_var, arg_name);
   }
 
-  stream_ << ") {\n";
+  stream_ << ")";
+  switch (func->func_type_) {
+    case ir::FunctionType::AIC:
+      stream_ << " attributes {pto.kernel_kind = #pto.kernel_kind<cube>}";
+      break;
+    case ir::FunctionType::AIV:
+      stream_ << " attributes {pto.kernel_kind = #pto.kernel_kind<vector>}";
+      break;
+    default:
+      // Other function types like InCore are not expected here and have no kernel_kind.
+      break;
+  }
+  stream_ << " {\n";
   indent_level_++;
 
   for (const auto& [var_key, memref_ptr] : var_to_memref_) {

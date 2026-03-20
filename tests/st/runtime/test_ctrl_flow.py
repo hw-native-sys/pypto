@@ -735,24 +735,28 @@ class TestCtrlFlowOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.skip(reason="PTOAS BUG")
     def test_while_loop_add_pto(self, test_runner):
         """Test while loop add with PTO backend (scf.while codegen)."""
         test_case = TestWhileLoopAdd()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
 
+    @pytest.mark.skip(reason="PTOAS BUG")
     def test_for_loop_break_pto(self, test_runner):
         """Test for loop with break using PTO backend."""
         test_case = TestForLoopBreak()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
 
+    @pytest.mark.skip(reason="PTOAS BUG")
     def test_for_loop_continue_pto(self, test_runner):
         """Test for loop with continue using PTO backend."""
         test_case = TestForLoopContinue()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
 
+    @pytest.mark.skip(reason="PTOAS BUG")
     def test_for_loop_break_continue_pto(self, test_runner):
         """Test for loop with break and continue using PTO backend."""
         test_case = TestForLoopBreakContinue()

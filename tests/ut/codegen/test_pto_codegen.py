@@ -159,7 +159,7 @@ def test_pto_codegen_basic_mlir_structure():
     mlir_code = _get_mlir_code(codegen.generate(transformed_program))
 
     # Verify MLIR module structure
-    assert "module {" in mlir_code
+    assert "module attributes {pto.target_arch =" in mlir_code
     assert "func.func @test_func" in mlir_code
     assert "return" in mlir_code
     assert "}" in mlir_code
