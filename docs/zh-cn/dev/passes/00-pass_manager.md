@@ -72,7 +72,7 @@ struct PassProperties {
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
-| BasicMemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
+| MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
 
@@ -322,7 +322,7 @@ Default 策略中，InCore 后半段流水线顺序为：
 4. `ResolveBackendOpLayouts`
 5. `ExpandMixedKernel`
 6. `InitMemRef`
-7. `BasicMemoryReuse`
+7. `MemoryReuse`
 8. `AllocateMemoryAddr`
 
 `ResolveBackendOpLayouts` 会根据 backend 注册的 layout 元数据修复受约束
@@ -339,7 +339,7 @@ from pypto.pypto_core import passes
 pipeline = passes.PassPipeline()
 pipeline.add_pass(passes.convert_to_ssa())
 pipeline.add_pass(passes.init_mem_ref())
-pipeline.add_pass(passes.basic_memory_reuse())
+pipeline.add_pass(passes.memory_reuse())
 
 # Execute
 result = pipeline.run(program)

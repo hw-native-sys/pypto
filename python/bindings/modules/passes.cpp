@@ -176,10 +176,11 @@ void BindPass(nb::module_& m) {
              "Initializes MemRef for all variables in functions.\n"
              "Sets memory space to UB by default, or DDR for tile.load/tile.store operands.");
 
-  passes.def("basic_memory_reuse", &pass::BasicMemoryReuse,
-             "Create a basic memory reuse pass\n\n"
-             "Uses dependency analysis to identify memory reuse opportunities.\n"
-             "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.");
+  passes.def("memory_reuse", &pass::MemoryReuse,
+             "Create a memory reuse pass\n\n"
+             "Uses lifetime analysis over the full IR to identify memory reuse opportunities.\n"
+             "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.\n"
+             "Handles nested control flow (for-loops, if/else branches) for accurate lifetime tracking.");
 
   passes.def("insert_sync", &pass::InsertSync,
              "Create an insert sync pass\n\n"

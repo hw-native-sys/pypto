@@ -1,4 +1,4 @@
-# BasicMemoryReuse Pass
+# MemoryReuse Pass
 
 利用依赖分析识别内存复用机会，并移除冗余的 alloc 操作。
 
@@ -21,12 +21,12 @@
 
 | C++ | Python | 级别 |
 | --- | ------ | ---- |
-| `pass::BasicMemoryReuse()` | `passes.basic_memory_reuse()` | 函数级 |
+| `pass::MemoryReuse()` | `passes.memory_reuse()` | 函数级 |
 
 **工厂函数**：
 
 ```cpp
-Pass BasicMemoryReuse();
+Pass MemoryReuse();
 ```
 
 **Python 用法**：
@@ -34,18 +34,19 @@ Pass BasicMemoryReuse();
 ```python
 from pypto.pypto_core import passes
 
-reuse_pass = passes.basic_memory_reuse()
+reuse_pass = passes.memory_reuse()
 program_optimized = reuse_pass(program)
 ```
 
 ## 算法
 
-1. **依赖图**：使用 `DependencyAnalyzer` 从数据流构建依赖图
-2. **生命周期分析**：计算每个变量的 def-use 链和活跃区间
-3. **干涉检查**：识别生命周期重叠的变量
-4. **MemRef 共享**：为同一内存空间中不干涉的变量分配相同的 MemRef 指针
-5. **ForStmt yield 修复**：确保 4 个循环携带变量（initValue、iter_arg、yield value、return_var）共享同一个 MemRef。InitMemRef 已保证 initValue==iter_arg 且 yield==return_var。此步骤确保 iter_arg==yield：若两者 MemRef 不同则在 yield 前插入 `tile.move`，然后将 4 个变量统一到同一个 MemRef（initValue 的）
-6. **移除冗余 alloc**：收集仍被 TileType 变量引用的所有 MemRef，然后移除不再使用的 `tile.alloc` 语句
+1. **生命周期分析**：遍历完整 IR 树（包括嵌套控制流体内的语句）通过 def-use 分析计算变量生命周期。在循环外定义但在循环内使用的变量，其生命周期会延展到循环结束（循环感知延展）
+2. **干涉检查**：识别生命周期重叠的变量
+3. **MemRef 共享**：为同一内存空间中不干涉的变量分配相同的 MemRef 指针
+4. **Yield 修复**：修复控制流返回变量的 MemRef 不一致：
+   - **ForStmt**：确保 4 个循环携带变量（initValue、iter_arg、yield value、return_var）共享同一个 MemRef。若 MemRef 不同则在 yield 前插入 `tile.move`
+   - **IfStmt**：修补 return_vars 使其 MemRef 与 yield value 一致
+5. **移除冗余 alloc**：收集仍被 TileType 变量引用的所有 MemRef，然后移除不再使用的 `tile.alloc` 语句
 
 **复用条件**：
 
@@ -113,26 +114,26 @@ tile_c: Tile[[64, 64], FP32, memref=...] = tile.add(tile_a, tile_b)
 **头文件**：`include/pypto/ir/transforms/passes.h`
 
 ```cpp
-Pass BasicMemoryReuse();
+Pass MemoryReuse();
 ```
 
-**实现文件**：`src/ir/transforms/basic_memory_reuse_pass.cpp`
+**实现文件**：`src/ir/transforms/memory_reuse_pass.cpp`
 
-- `DependencyAnalyzer` 构建依赖图
-- `ComputeLifetimesFromDependencies` 计算活跃区间
+- `LifetimeAnalyzer` 遍历完整 IR 树计算变量生命周期（包括嵌套控制流）
+- `ComputeLifetimes` 构建 MemRef 共享组和生命周期区间
 - `IdentifyReuseOpportunities` 查找复用候选
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
-- `ForStmtYieldFixupMutator` 在复用后 yield/iter_arg MemRef 不一致时插入 `tile.move`
+- `YieldFixupMutator` 修复 ForStmt/IfStmt 在复用后的 yield/return_var MemRef 不一致
 - `UsedMemRefCollector` 收集共享后仍被引用的 MemRef 指针
 - `RemoveUnusedAllocStatements` 从 `SeqStmts` 中过滤掉冗余的 `tile.alloc` 语句
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
 ```cpp
-passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimization");
+passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 ```
 
-**测试**：`tests/ut/ir/transforms/test_basic_memory_reuse.py`
+**测试**：`tests/ut/ir/transforms/test_memory_reuse.py`
 
 - 测试非重叠生命周期的 MemRef 共享复用
 - 测试重叠生命周期不复用
@@ -140,3 +141,4 @@ passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimiza
 - 测试大小兼容性
 - 测试切片操作的 MemRef 共享保持
 - 测试冗余 alloc 语句移除
+- 测试控制流生命周期分析（ForStmt 内嵌套 IfStmt、分支变量共享）

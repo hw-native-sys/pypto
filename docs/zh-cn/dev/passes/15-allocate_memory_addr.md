@@ -13,7 +13,7 @@
 - 更新所有变量类型 (Type) 中的 MemRef 地址
 - 使用分配的地址更新 `tile.alloc` 语句参数
 
-**使用时机**：在 BasicMemoryReuse 之后（以尊重共享的 MemRef）、代码生成 (CodeGen) 之前运行。内存管理流水线中的最终 Pass。
+**使用时机**：在 MemoryReuse 之后（以尊重共享的 MemRef）、代码生成 (CodeGen) 之前运行。内存管理流水线中的最终 Pass。
 
 ## API
 
@@ -54,7 +54,7 @@ program_with_addrs = alloc_pass(program)
 
 ## 示例
 
-### 之前（InitMemRef + BasicMemoryReuse 之后）
+### 之前（InitMemRef + MemoryReuse 之后）
 
 ```python
 # SeqStmts [

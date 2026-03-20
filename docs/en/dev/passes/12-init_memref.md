@@ -23,7 +23,7 @@ Memory space assignment rules:
 
 **Invalidates**: SSAForm (new MemRef variables are introduced).
 
-**When to use**: Run after SSA conversion, outlining, and block-op conversion. Required before BasicMemoryReuse, InsertSync, and AllocateMemoryAddr.
+**When to use**: Run after SSA conversion, outlining, and block-op conversion. Required before MemoryReuse, InsertSync, and AllocateMemoryAddr.
 
 ## API
 
@@ -107,7 +107,7 @@ ForStmt has four loop-carry related variables with specific MemRef sharing rules
 - Group A: initValue + iter_arg (same MemRef)
 - Group B: yield value + return_var (same MemRef)
 
-Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by BasicMemoryReuse (which inserts `tile.move` if needed).
+Group A and B may have different MemRefs. The yield-to-iter_arg mismatch is resolved later by MemoryReuse (which inserts `tile.move` if needed).
 
 ## Implementation
 

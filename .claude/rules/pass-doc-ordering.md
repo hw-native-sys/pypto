@@ -27,7 +27,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 12 | *(no doc yet)* | 12th pass (`ResolveTransposeLayout`) |
 | 13 | `13-expand_mixed_kernel.md` | 13th pass |
 | 14 | `14-init_memref.md` | 14th pass |
-| 15 | `15-basic_memory_reuse.md` | 15th pass |
+| 15 | `15-memory_reuse.md` | 15th pass |
 | 16 | `16-allocate_memory_addr.md` | 16th pass |
 | -- | `14-insert_sync.md` | CCE strategy only (not in Default) |
 | -- | `16-utility_passes.md` | Not in default strategy |

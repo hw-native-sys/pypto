@@ -13,7 +13,7 @@ This pass is the most complex transformation pass in PyPTO. It analyzes data dep
 - Insert barriers (bar_v, bar_m) for global synchronization
 - Manage event IDs and pipeline masks
 
-**When to use**: Run after InitMemRef and BasicMemoryReuse, before code generation. Required for correct multi-pipeline hardware execution.
+**When to use**: Run after InitMemRef and MemoryReuse, before code generation. Required for correct multi-pipeline hardware execution.
 
 ## API
 

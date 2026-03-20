@@ -203,8 +203,8 @@ class PassPipeline:
 def init_mem_ref() -> Pass:
     """Create an init memref pass."""
 
-def basic_memory_reuse() -> Pass:
-    """Create a basic memory reuse pass."""
+def memory_reuse() -> Pass:
+    """Create a memory reuse pass."""
 
 def insert_sync() -> Pass:
     """Create an insert sync pass."""
@@ -348,7 +348,7 @@ __all__ = [
     "PassContext",
     "PassPipeline",
     "init_mem_ref",
-    "basic_memory_reuse",
+    "memory_reuse",
     "insert_sync",
     "allocate_memory_addr",
     "VerificationError",

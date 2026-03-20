@@ -183,7 +183,7 @@ class TestCrossCoreTpushTpopCodegen:
             passes.resolve_transpose_layout,
             passes.resolve_backend_op_layouts,
             passes.init_mem_ref,
-            passes.basic_memory_reuse,
+            passes.memory_reuse,
             passes.allocate_memory_addr,
         ]:
             pipeline.add_pass(factory())
@@ -328,7 +328,7 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.infer_tile_memory_space())
         pipeline.add_pass(passes.expand_mixed_kernel())
         pipeline.add_pass(passes.init_mem_ref())
-        pipeline.add_pass(passes.basic_memory_reuse())
+        pipeline.add_pass(passes.memory_reuse())
         pipeline.add_pass(passes.allocate_memory_addr())
         optimized = pipeline.run(program)
 

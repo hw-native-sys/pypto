@@ -1,4 +1,4 @@
-# BasicMemoryReuse Pass
+# MemoryReuse Pass
 
 Uses dependency analysis to identify memory reuse opportunities and removes redundant alloc operations.
 
@@ -21,12 +21,12 @@ After applying MemRef sharing, the pass also **removes redundant `tile.alloc` st
 
 | C++ | Python | Level |
 | --- | ------ | ----- |
-| `pass::BasicMemoryReuse()` | `passes.basic_memory_reuse()` | Function-level |
+| `pass::MemoryReuse()` | `passes.memory_reuse()` | Function-level |
 
 **Factory function**:
 
 ```cpp
-Pass BasicMemoryReuse();
+Pass MemoryReuse();
 ```
 
 **Python usage**:
@@ -34,18 +34,19 @@ Pass BasicMemoryReuse();
 ```python
 from pypto.pypto_core import passes
 
-reuse_pass = passes.basic_memory_reuse()
+reuse_pass = passes.memory_reuse()
 program_optimized = reuse_pass(program)
 ```
 
 ## Algorithm
 
-1. **Dependency Graph**: Build dependency graph from data flow using `DependencyAnalyzer`
-2. **Lifetime Analysis**: Compute def-use chains and live ranges for each variable
-3. **Interference Check**: Identify variables with overlapping lifetimes
-4. **MemRef Sharing**: Assign same MemRef pointer to non-interfering variables in the same memory space
-5. **ForStmt yield fixup**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. InitMemRef guarantees initValue==iter_arg and yield==return_var. This step ensures iter_arg==yield by inserting `tile.move` before yield if their MemRefs differ, then patches all 4 variables to use the same MemRef (initValue's)
-6. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
+1. **Lifetime Analysis**: Walk the full IR tree (including nested control flow bodies) to compute variable lifetimes via def-use analysis. Variables defined outside a loop but used inside have their lifetime extended to the end of the loop (loop-aware extension)
+2. **Interference Check**: Identify variables with overlapping lifetimes
+3. **MemRef Sharing**: Assign same MemRef pointer to non-interfering variables in the same memory space
+4. **Yield fixup**: Fix MemRef mismatches in control flow return variables:
+   - **ForStmt**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. Inserts `tile.move` before yield if MemRefs differ
+   - **IfStmt**: Patch return_vars to match yield value's MemRef
+5. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
 
 **Reuse conditions**:
 
@@ -128,26 +129,26 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.load(...)
 **Header**: `include/pypto/ir/transforms/passes.h`
 
 ```cpp
-Pass BasicMemoryReuse();
+Pass MemoryReuse();
 ```
 
-**Implementation**: `src/ir/transforms/basic_memory_reuse_pass.cpp`
+**Implementation**: `src/ir/transforms/memory_reuse_pass.cpp`
 
-- `DependencyAnalyzer` builds the dependency graph
-- `ComputeLifetimesFromDependencies` calculates live ranges
+- `LifetimeAnalyzer` walks the full IR tree to compute variable lifetimes (including nested control flow)
+- `ComputeLifetimes` builds MemRef sharing groups and lifetime intervals
 - `IdentifyReuseOpportunities` finds reuse candidates
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
-- `ForStmtYieldFixupMutator` inserts `tile.move` when yield/iter_arg MemRefs diverge after reuse
+- `YieldFixupMutator` fixes ForStmt/IfStmt yield/return_var MemRef mismatches after reuse
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
 - `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from `SeqStmts`
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
 ```cpp
-passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimization");
+passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
 ```
 
-**Tests**: `tests/ut/ir/transforms/test_basic_memory_reuse.py`
+**Tests**: `tests/ut/ir/transforms/test_memory_reuse.py`
 
 - Tests non-overlapping lifetime reuse with MemRef sharing
 - Tests producer-consumer reuse (last_use == def at same statement)
@@ -157,3 +158,4 @@ passes.def("basic_memory_reuse", &pass::BasicMemoryReuse, "Memory reuse optimiza
 - Tests dtype compatibility (cross-dtype reuse blocked, same-dtype reuse allowed)
 - Tests view operation MemRef sharing preservation
 - Tests redundant alloc statement removal
+- Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)

@@ -13,7 +13,7 @@ This pass allocates concrete memory addresses for non-DDR MemRefs and updates th
 - Update MemRef addresses in all variable types
 - Update `tile.alloc` statement arguments with the allocated addresses
 
-**When to use**: Run after BasicMemoryReuse (to respect shared MemRefs) and before code generation. Final pass in memory management pipeline.
+**When to use**: Run after MemoryReuse (to respect shared MemRefs) and before code generation. Final pass in memory management pipeline.
 
 ## API
 
@@ -54,7 +54,7 @@ program_with_addrs = alloc_pass(program)
 
 ## Example
 
-### Before (after InitMemRef + BasicMemoryReuse)
+### Before (after InitMemRef + MemoryReuse)
 
 ```python
 # SeqStmts [

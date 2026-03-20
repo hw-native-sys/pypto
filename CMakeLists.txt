@@ -117,11 +117,10 @@ set(PYPTO_SOURCES
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
-    src/ir/transforms/basic_memory_reuse_pass.cpp
+    src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/ctrl_flow_transform_pass.cpp
-    src/ir/transforms/dependency_analyzer.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
     src/ir/transforms/init_memref.cpp

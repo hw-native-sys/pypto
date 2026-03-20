@@ -31,8 +31,6 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/dependency_analyzer.h"
-#include "pypto/ir/transforms/dependency_graph.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -56,25 +54,6 @@ struct LifetimeInterval {
 namespace {
 
 /**
- * @brief Assign topological order to all statements in basic blocks
- */
-std::map<StmtPtr, int> AssignDeclarationOrder(const std::vector<BasicBlock>& blocks) {
-  std::map<StmtPtr, int> order;
-  int current_order = 0;
-
-  // Traverse blocks in order and assign order to each statement
-  for (const auto& block : blocks) {
-    for (const auto& stmt : block.statements) {
-      order[stmt] = current_order++;
-    }
-  }
-
-  LOG_DEBUG << "Assigned declaration order to " << order.size() << " statements";
-
-  return order;
-}
-
-/**
  * @brief Result of lifetime computation
  */
 struct LifetimeAnalysisResult {
@@ -96,154 +75,196 @@ class VarUseCollector : public IRVisitor {
 };
 
 /**
- * @brief Collect variable uses from a list of expressions into var_use_stmts.
- */
-void CollectVarUsesFromExprs(const std::vector<ExprPtr>& exprs, const StmtPtr& stmt,
-                             std::map<VarPtr, std::vector<StmtPtr>>& var_use_stmts) {
-  VarUseCollector collector;
-  for (const auto& expr : exprs) {
-    collector.VisitExpr(expr);
-  }
-  for (const auto& used_var : collector.used_vars) {
-    var_use_stmts[used_var].push_back(stmt);
-  }
-}
-
-/**
- * @brief Find the first leaf statement in a statement subtree.
+ * @brief Full IR tree walker for lifetime analysis.
  *
- * Mirrors CollectStmtsInBlock logic: unwraps SeqStmts, skips
- * IfStmt/ForStmt/WhileStmt. Returns nullptr if no leaf is found.
- */
-StmtPtr FindFirstLeafStmt(const StmtPtr& stmt) {
-  if (!stmt) return nullptr;
-  if (auto seq = As<SeqStmts>(stmt)) {
-    for (const auto& sub : seq->stmts_) {
-      auto leaf = FindFirstLeafStmt(sub);
-      if (leaf) return leaf;
-    }
-    return nullptr;
-  }
-  if (IsA<IfStmt>(stmt) || IsA<ForStmt>(stmt) || IsA<WhileStmt>(stmt)) {
-    return nullptr;  // Control flow nodes are not leaf statements
-  }
-  return stmt;  // AssignStmt, EvalStmt, YieldStmt, ReturnStmt, etc.
-}
-
-/**
- * @brief Collect variables used as init_values in ForStmt/WhileStmt iter_args.
+ * Walks the entire IR tree (including nested control flow bodies) to
+ * assign sequential order to all leaf statements and collect variable
+ * definitions and uses.
  *
- * ForStmt/WhileStmt nodes are not flattened into basic blocks, so variables
- * used as IterArg::initValue_ are invisible to the block-based lifetime
- * analysis. This visitor walks the IR tree and associates each init_value
- * variable use with the first leaf statement in the loop body, ensuring
- * the variable's lifetime extends to the loop entry point.
+ * Two-phase design:
+ *   Phase 1 (Analyze): Walk tree, assign orders, collect raw var uses, record loop boundaries.
+ *   Phase 2 (ComputeEffectiveLastUse): For each var, extend lifetime to the end of any
+ *           enclosing loop where the var is defined before the loop.
  */
-class LoopInitValueCollector : public IRVisitor {
+class LifetimeAnalyzer : public IRVisitor {
  public:
-  /// Map from variable to list of statements where it is used as init_value
-  std::map<VarPtr, std::vector<StmtPtr>> init_value_uses;
+  struct Result {
+    std::vector<VarPtr> ordered_defs;        // TileType vars in definition order
+    std::map<VarPtr, int> var_def_order;     // var -> def order
+    std::map<VarPtr, int> var_last_use;      // var -> effective last use (with loop extension)
+    std::map<VarPtr, StmtPtr> var_def_stmt;  // var -> defining AssignStmt (for op name extraction)
+  };
+
+  Result Analyze(const StmtPtr& func_body) {
+    // Phase 1: Walk IR tree
+    if (func_body) {
+      VisitStmt(func_body);
+    }
+
+    // Phase 2: Apply loop-aware lifetime extension
+    auto effective_last_use = ComputeEffectiveLastUse();
+
+    return {std::move(ordered_defs_), std::move(var_def_order_), std::move(effective_last_use),
+            std::move(var_def_stmt_)};
+  }
 
  protected:
-  void VisitStmt_(const ForStmtPtr& op) override {
-    CollectIterArgUses(op->iter_args_, op->body_);
-    IRVisitor::VisitStmt_(op);
+  // Container statements: recurse into children
+  void VisitStmt_(const SeqStmtsPtr& op) override {
+    for (const auto& stmt : op->stmts_) {
+      VisitStmt(stmt);
+    }
   }
 
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    CollectIterArgUses(op->iter_args_, op->body_);
-    IRVisitor::VisitStmt_(op);
+  void VisitStmt_(const ScopeStmtPtr& op) override { VisitStmt(op->body_); }
+
+  // Leaf statements: assign order + collect defs/uses
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    int order = current_order_++;
+
+    // Record TileType variable definitions
+    auto tile_type = As<TileType>(op->var_->GetType());
+    if (tile_type) {
+      ordered_defs_.push_back(op->var_);
+      var_def_order_[op->var_] = order;
+      var_def_stmt_[op->var_] = op;
+    }
+
+    // Collect variable uses from value expression (for ALL AssignStmt)
+    CollectUsesFromExpr(op->value_, order);
   }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    int order = current_order_++;
+    CollectUsesFromExpr(op->expr_, order);
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override { CollectUsesFromValues(op->value_); }
+
+  void VisitStmt_(const ReturnStmtPtr& op) override { CollectUsesFromValues(op->value_); }
+
+  // Control flow: recurse into bodies with scope tracking
+  void VisitStmt_(const IfStmtPtr& op) override {
+    // Visit condition uses at the current order point (before branches)
+    CollectUsesFromExpr(op->condition_, current_order_);
+
+    // Visit then body first, else body second (sequential ordering)
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) {
+      VisitStmt(*op->else_body_);
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override { ProcessLoopBody(op->iter_args_, op->body_); }
+
+  void VisitStmt_(const WhileStmtPtr& op) override { ProcessLoopBody(op->iter_args_, op->body_); }
 
  private:
-  void CollectIterArgUses(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
-    if (iter_args.empty()) return;
+  int current_order_ = 0;
 
-    // Find the first leaf statement in the loop body to use as the anchor point
-    StmtPtr anchor = FindFirstLeafStmt(body);
-    if (!anchor) {
-      LOG_DEBUG << "No leaf statement found in loop body, init_value uses not anchored";
-      return;
+  // Loop boundaries recorded during Phase 1
+  struct LoopBoundary {
+    int start_order;
+    int end_order;
+  };
+  std::vector<LoopBoundary> loop_scopes_;
+
+  // Variable tracking (Phase 1)
+  std::vector<VarPtr> ordered_defs_;
+  std::map<VarPtr, int> var_def_order_;
+  std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
+  std::map<VarPtr, StmtPtr> var_def_stmt_;
+
+  void CollectUsesFromExpr(const ExprPtr& expr, int use_order) {
+    if (!expr) return;
+    VarUseCollector collector;
+    collector.VisitExpr(expr);
+    for (const auto& var : collector.used_vars) {
+      RecordRawUse(var, use_order);
     }
+  }
 
+  void CollectUsesFromValues(const std::vector<ExprPtr>& values) {
+    int order = current_order_++;
+    for (const auto& val : values) {
+      CollectUsesFromExpr(val, order);
+    }
+  }
+
+  void ProcessLoopBody(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
     for (const auto& iter_arg : iter_args) {
-      if (!iter_arg->initValue_) continue;
-      VarUseCollector collector;
-      collector.VisitExpr(iter_arg->initValue_);
-      for (const auto& used_var : collector.used_vars) {
-        init_value_uses[used_var].push_back(anchor);
+      if (iter_arg->initValue_) {
+        CollectUsesFromExpr(iter_arg->initValue_, current_order_);
       }
     }
+    int loop_start = current_order_;
+    VisitStmt(body);
+    int loop_end = current_order_ - 1;
+    loop_scopes_.push_back({loop_start, loop_end});
+  }
+
+  void RecordRawUse(const VarPtr& var, int use_order) {
+    if (!var_def_order_.count(var)) {
+      return;
+    }
+    if (var_raw_last_use_.count(var)) {
+      var_raw_last_use_[var] = std::max(var_raw_last_use_[var], use_order);
+    } else {
+      var_raw_last_use_[var] = use_order;
+    }
+  }
+
+  /**
+   * @brief Phase 2: Compute effective last use with loop-aware extension.
+   *
+   * For each variable, if it's used inside a loop body and defined before
+   * that loop, extend its lifetime to the end of the loop. This handles
+   * the case where the loop re-executes and the variable is needed again.
+   */
+  [[nodiscard]] std::map<VarPtr, int> ComputeEffectiveLastUse() const {
+    std::map<VarPtr, int> effective;
+
+    for (const auto& var : ordered_defs_) {
+      int def_order = var_def_order_.at(var);
+      int raw_last = var_raw_last_use_.count(var) ? var_raw_last_use_.at(var) : def_order;
+      int extended = raw_last;
+
+      // Check all loop scopes: if var is defined before the loop and
+      // has any use inside the loop [start, end], extend to loop end.
+      for (const auto& loop : loop_scopes_) {
+        if (def_order < loop.start_order && raw_last >= loop.start_order) {
+          // Variable is defined before loop and used inside it
+          extended = std::max(extended, loop.end_order);
+        }
+      }
+
+      effective[var] = extended;
+    }
+
+    return effective;
   }
 };
 
 /**
- * @brief Compute lifetime intervals from dependencies
+ * @brief Compute lifetime intervals by walking the full IR tree.
  *
- * This function identifies memory reuse opportunities using ONLY dependency
- * relationships (topological ordering), NOT execution timing simulation.
+ * Walks ALL statements
+ * including those inside nested control flow (IfStmt/ForStmt/WhileStmt bodies).
  */
-LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicBlock>& blocks,
-                                                        const std::vector<DependencyEdge>& dependencies,
-                                                        const StmtPtr& func_body) {
+LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
   std::vector<LifetimeInterval> lifetimes;
 
-  // Step 1: Assign topological order to all statements
-  auto stmt_order = AssignDeclarationOrder(blocks);
+  // Step 1: Walk full IR tree to collect variable defs, uses, and ordering
+  LifetimeAnalyzer analyzer;
+  auto result = analyzer.Analyze(func_body);
 
-  if (stmt_order.empty()) {
-    LOG_WARN << "Failed to compute topological order";
+  if (result.ordered_defs.empty()) {
     return {lifetimes, {}};
   }
 
-  // Step 2: Build maps: var -> defining stmt, var -> list of using stmts
-  // Use vectors to preserve original statement order
-  std::vector<VarPtr> ordered_vars;  // Variables in definition order
-  std::map<VarPtr, StmtPtr> var_def_stmt;
-  std::map<VarPtr, std::vector<StmtPtr>> var_use_stmts;
-
-  for (const auto& block : blocks) {
-    for (const auto& stmt : block.statements) {
-      // Check if this is an AssignStmt defining a TileType variable
-      if (auto assign = As<AssignStmt>(stmt)) {
-        auto tile_type = As<TileType>(assign->var_->GetType());
-        if (tile_type) {
-          ordered_vars.push_back(assign->var_);  // Preserve definition order
-          var_def_stmt[assign->var_] = stmt;
-        }
-
-        // Collect variables used in the value expression (for ALL AssignStmt, not just TileType)
-        // This ensures we capture uses in statements like: result = store(tile_e, ...)
-        CollectVarUsesFromExprs({assign->value_}, stmt, var_use_stmts);
-      } else if (auto eval_stmt = As<EvalStmt>(stmt)) {
-        CollectVarUsesFromExprs({eval_stmt->expr_}, stmt, var_use_stmts);
-      } else if (auto yield_stmt = As<YieldStmt>(stmt)) {
-        // Tiles yielded across loop iterations must remain live until the yield point
-        CollectVarUsesFromExprs(yield_stmt->value_, stmt, var_use_stmts);
-      } else if (auto return_stmt = As<ReturnStmt>(stmt)) {
-        // Tiles returned from the function must remain live until the return point
-        CollectVarUsesFromExprs(return_stmt->value_, stmt, var_use_stmts);
-      }
-    }
-  }
-
-  // Step 2a: Collect init_value uses from ForStmt/WhileStmt iter_args
-  // These are not flattened into basic blocks, so we walk the function body
-  if (func_body) {
-    LoopInitValueCollector init_collector;
-    init_collector.VisitStmt(func_body);
-    for (const auto& [used_var, stmts] : init_collector.init_value_uses) {
-      for (const auto& anchor_stmt : stmts) {
-        var_use_stmts[used_var].push_back(anchor_stmt);
-      }
-    }
-  }
-
-  // Step 2.5: Build MemRef sharing groups
-  // Variables that share the same MemRef object (via shared_ptr) should be treated
-  // as a single logical buffer with merged lifetime
+  // Step 2: Build MemRef sharing groups
   std::map<const MemRef*, std::vector<VarPtr>> memref_groups;
-  for (const auto& var : ordered_vars) {
+  for (const auto& var : result.ordered_defs) {
     auto tile_type = As<TileType>(var->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       const MemRef* memref_ptr = tile_type->memref_.value().get();
@@ -251,11 +272,9 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     }
   }
 
-  // Build reverse map: var -> all vars sharing same MemRef
   std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
   for (const auto& [memref_ptr, vars] : memref_groups) {
     if (vars.size() > 1) {
-      // Multiple variables share this MemRef
       for (const auto& var : vars) {
         var_sharing_groups[var] = vars;
       }
@@ -263,28 +282,26 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     }
   }
 
-  // Step 3: For each TileType variable with MemRef, compute lifetime (in definition order)
-  // For variables sharing MemRef, use MERGED lifetime
-  std::set<VarPtr> processed_vars;  // Track which vars we've already processed
+  // Step 3: Compute lifetime intervals (with MemRef sharing group merging)
+  std::set<VarPtr> processed_vars;
 
-  for (const auto& var : ordered_vars) {
+  for (const auto& var : result.ordered_defs) {
     if (processed_vars.count(var)) {
-      continue;  // Already processed as part of a sharing group
+      continue;
     }
 
     auto tile_type = As<TileType>(var->GetType());
     if (!tile_type || !tile_type->memref_.has_value()) {
-      continue;  // Skip variables without MemRef
+      continue;
     }
 
     const auto& memref = tile_type->memref_.value();
 
-    // Check if this variable shares MemRef with others
     std::vector<VarPtr> sharing_group;
     if (var_sharing_groups.count(var)) {
       sharing_group = var_sharing_groups[var];
     } else {
-      sharing_group = {var};  // Single variable
+      sharing_group = {var};
     }
 
     // Compute MERGED lifetime for all variables in the sharing group
@@ -292,30 +309,15 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     int max_last_use = INT_MIN;
 
     for (const auto& group_var : sharing_group) {
-      const auto& def_stmt = var_def_stmt[group_var];
-      int def_point = stmt_order[def_stmt];
-      int last_use = def_point;
+      int def_point = result.var_def_order.count(group_var) ? result.var_def_order.at(group_var) : 0;
+      int last_use = result.var_last_use.count(group_var) ? result.var_last_use.at(group_var) : def_point;
 
-      if (var_use_stmts.count(group_var)) {
-        LOG_DEBUG << "Variable " << group_var->name_hint_ << " has " << var_use_stmts[group_var].size()
-                  << " use statements";
-        for (const auto& use_stmt : var_use_stmts[group_var]) {
-          if (stmt_order.count(use_stmt)) {
-            int use_order = stmt_order[use_stmt];
-            LOG_DEBUG << "  Use at order " << use_order;
-            last_use = std::max(last_use, use_order);
-          }
-        }
-      } else {
-        LOG_DEBUG << "Variable " << group_var->name_hint_ << " has no recorded uses";
-      }
+      LOG_DEBUG << "Variable " << group_var->name_hint_ << " def=" << def_point << " last_use=" << last_use;
 
       min_def_point = std::min(min_def_point, def_point);
       max_last_use = std::max(max_last_use, last_use);
     }
 
-    // Create ONE lifetime interval for the entire sharing group
-    // Use the first variable as the representative
     LifetimeInterval interval;
     interval.variable = sharing_group[0];
     interval.def_point = min_def_point;
@@ -328,8 +330,8 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
     interval.size = memref->size_;
 
     // Extract the defining op name for use in the in-place safety check
-    if (var_def_stmt.count(sharing_group[0])) {
-      if (auto assign = As<AssignStmt>(var_def_stmt.at(sharing_group[0]))) {
+    if (result.var_def_stmt.count(sharing_group[0])) {
+      if (auto assign = As<AssignStmt>(result.var_def_stmt.at(sharing_group[0]))) {
         if (auto call = As<Call>(assign->value_)) {
           interval.def_op_name = call->op_->name_;
         }
@@ -338,7 +340,6 @@ LifetimeAnalysisResult ComputeLifetimesFromDependencies(const std::vector<BasicB
 
     lifetimes.push_back(interval);
 
-    // Mark all variables in the group as processed
     for (const auto& group_var : sharing_group) {
       processed_vars.insert(group_var);
     }
@@ -642,17 +643,19 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
 }
 
 /**
- * @brief Fix ForStmt yield/iter_arg MemRef mismatch after MemoryReuse.
+ * @brief Fix yield/return_var MemRef mismatch after MemoryReuse.
  *
- * MemoryReuse may assign different MemRefs to iter_arg and yield value.
- * Since yield value becomes the next iteration's iter_arg, they must use the
- * same buffer. When they differ, insert a tile.move before yield to copy the
- * yield value into the iter_arg's MemRef, and update return_var accordingly.
+ * Handles both ForStmt and IfStmt:
+ * - ForStmt: MemoryReuse may assign different MemRefs to iter_arg and yield value.
+ *   Since yield value becomes the next iteration's iter_arg, they must use the
+ *   same buffer. When they differ, insert a tile.move before yield.
+ * - IfStmt: MemoryReuse may change MemRefs of variables inside branches.
+ *   Patch return_vars to match the yield value's MemRef.
  */
-class ForStmtYieldFixupMutator : public IRMutator {
+class YieldFixupMutator : public IRMutator {
  public:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // First recurse into nested ForStmts
+    // First recurse into nested control flow
     auto result = IRMutator::VisitStmt_(op);
     auto for_stmt = As<ForStmt>(result);
     if (!for_stmt || for_stmt->iter_args_.empty()) return result;
@@ -726,6 +729,56 @@ class ForStmtYieldFixupMutator : public IRMutator {
         for_stmt->chunk_policy_, for_stmt->loop_origin_);
 
     return PatchIterArgsAndReturnVars(intermediate_for, new_yield);
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    // First recurse into nested control flow
+    auto result = IRMutator::VisitStmt_(op);
+    auto if_stmt = As<IfStmt>(result);
+    if (!if_stmt || if_stmt->return_vars_.empty()) return result;
+
+    // Find yield statements in each branch
+    auto then_yield = FindYieldStmt(if_stmt->then_body_);
+    auto else_yield = if_stmt->else_body_.has_value() ? FindYieldStmt(if_stmt->else_body_.value()) : nullptr;
+
+    // Patch return_vars to match yield value's MemRef
+    bool changed = false;
+    std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
+
+    for (size_t i = 0; i < new_return_vars.size(); ++i) {
+      // Get yield value's MemRef — try then-branch first, fall back to else-branch
+      VarPtr yield_var = nullptr;
+      if (then_yield && i < then_yield->value_.size()) {
+        yield_var = As<Var>(then_yield->value_[i]);
+      }
+      if (!yield_var && else_yield && i < else_yield->value_.size()) {
+        yield_var = As<Var>(else_yield->value_[i]);
+      }
+      if (!yield_var) continue;
+
+      auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
+      if (!yield_tile) continue;
+      auto yield_memref = GetDefinedMemRef(yield_tile);
+
+      auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
+      if (!rv_tile || !rv_tile->memref_.has_value()) continue;
+      auto rv_memref = GetDefinedMemRef(rv_tile);
+
+      if (rv_memref.get() != yield_memref.get()) {
+        auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
+            rv_tile, yield_memref, [this](const ExprPtr& e) { return VisitExpr(e); },
+            yield_tile->GetMemorySpace());
+        new_return_vars[i] =
+            std::make_shared<Var>(new_return_vars[i]->name_hint_, new_rv_type, new_return_vars[i]->span_);
+        var_remap_[if_stmt->return_vars_[i].get()] = new_return_vars[i];
+        changed = true;
+      }
+    }
+
+    if (!changed) return result;
+
+    return std::make_shared<IfStmt>(if_stmt->condition_, if_stmt->then_body_, if_stmt->else_body_,
+                                    std::move(new_return_vars), if_stmt->span_);
   }
 
  private:
@@ -873,45 +926,36 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Me
 /**
  * @brief Transform a function by identifying and applying memory reuse
  *
- * This transformation identifies memory reuse opportunities using ONLY dependency
- * relationships (topological ordering), NOT execution timing simulation.
+ * This transformation identifies memory reuse opportunities by walking the full
+ * IR tree to compute variable lifetimes, then applying greedy MemRef sharing.
  * Variables that can share memory will point to the same MemRef object.
  * After sharing, redundant alloc operations are removed.
  */
-FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "BasicMemoryReusePass cannot run on null function";
+FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
 
-  // Step 1: Use DependencyAnalyzer to get dependency graph
-  DependencyAnalyzer analyzer;
-  DependencyGraph graph = analyzer.Analyze(func);
-
-  if (graph.blocks.empty()) {
-    LOG_WARN << "No basic blocks found, skipping memory reuse";
-    return func;
-  }
-
-  // Step 2: Compute lifetimes based on dependency graph
-  auto analysis_result = ComputeLifetimesFromDependencies(graph.blocks, graph.dependencies, func->body_);
+  // Step 1: Compute lifetimes by walking full IR tree
+  auto analysis_result = ComputeLifetimes(func->body_);
 
   if (analysis_result.lifetimes.empty()) {
     LOG_WARN << "No TileType variables found, skipping memory reuse";
     return func;
   }
 
-  // Step 3: Identify reuse opportunities
+  // Step 2: Identify reuse opportunities
   auto reuse_map = IdentifyReuseOpportunities(analysis_result.lifetimes);
 
-  // Step 4: Apply MemRef sharing (skip if no reuse candidates)
+  // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   StmtPtr new_body = func->body_;
   if (!reuse_map.empty()) {
     new_body = ApplyMemRefSharing(func->body_, reuse_map, analysis_result.var_sharing_groups);
   }
 
-  // Step 5: Fix ForStmt yield/iter_arg MemRef mismatches by inserting tile.move
-  ForStmtYieldFixupMutator yield_fixup;
+  // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
+  YieldFixupMutator yield_fixup;
   new_body = yield_fixup.VisitStmt(new_body);
 
-  // Step 6: Remove alloc statements for MemRefs no longer in use
+  // Step 5: Remove alloc statements for MemRefs no longer in use
   UsedMemRefCollector used_collector;
   used_collector.VisitStmt(new_body);
   new_body = RemoveUnusedAllocStatements(new_body, used_collector.GetUsedPtrs());
@@ -923,9 +967,7 @@ FunctionPtr TransformBasicMemoryReuse(const FunctionPtr& func) {
 }  // namespace
 
 namespace pass {
-Pass BasicMemoryReuse() {
-  return CreateFunctionPass(TransformBasicMemoryReuse, "BasicMemoryReuse", kBasicMemoryReuseProperties);
-}
+Pass MemoryReuse() { return CreateFunctionPass(TransformMemoryReuse, "MemoryReuse", kMemoryReuseProperties); }
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto
