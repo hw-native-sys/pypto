@@ -1432,35 +1432,45 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
   };
 
+  // Walk an expression tree to find all Var nodes (handles both bare Var dims
+  // and complex expressions like M + 1 where Var is a sub-expression).
+  std::function<void(const ExprPtr&)> collect_vars_from_expr = [&](const ExprPtr& expr) {
+    if (!expr) return;
+    if (auto var = As<Var>(expr)) {
+      try_insert(var.get());
+    } else if (auto bin = As<BinaryExpr>(expr)) {
+      collect_vars_from_expr(bin->left_);
+      collect_vars_from_expr(bin->right_);
+    } else if (auto unary = As<UnaryExpr>(expr)) {
+      collect_vars_from_expr(unary->operand_);
+    }
+  };
+
   std::function<void(const TypePtr&)> collect_from_type = [&](const TypePtr& type) {
     if (auto tensor_type = As<TensorType>(type)) {
       for (const auto& dim : tensor_type->shape_) {
-        if (auto var = As<Var>(dim)) try_insert(var.get());
+        collect_vars_from_expr(dim);
       }
       if (tensor_type->tensor_view_.has_value()) {
         for (const auto& dim : tensor_type->tensor_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) try_insert(var.get());
+          collect_vars_from_expr(dim);
         }
         for (const auto& dim : tensor_type->tensor_view_->stride) {
-          if (auto var = As<Var>(dim)) try_insert(var.get());
+          collect_vars_from_expr(dim);
         }
       }
     } else if (auto tile_type = As<TileType>(type)) {
       for (const auto& dim : tile_type->shape_) {
-        if (auto var = As<Var>(dim)) try_insert(var.get());
+        collect_vars_from_expr(dim);
       }
       if (tile_type->tile_view_.has_value()) {
         for (const auto& dim : tile_type->tile_view_->valid_shape) {
-          if (auto var = As<Var>(dim)) try_insert(var.get());
+          collect_vars_from_expr(dim);
         }
         for (const auto& dim : tile_type->tile_view_->stride) {
-          if (auto var = As<Var>(dim)) try_insert(var.get());
+          collect_vars_from_expr(dim);
         }
-        if (tile_type->tile_view_->start_offset) {
-          if (auto var = As<Var>(tile_type->tile_view_->start_offset)) {
-            try_insert(var.get());
-          }
-        }
+        collect_vars_from_expr(tile_type->tile_view_->start_offset);
       }
     }
   };
@@ -1569,6 +1579,7 @@ std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
     return GetVarName(var.get());
   }
   IRPythonPrinter temp_printer(prefix_);
+  temp_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
   return temp_printer.Print(expr);
 }
 
