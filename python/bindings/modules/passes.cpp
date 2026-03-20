@@ -178,8 +178,9 @@ void BindPass(nb::module_& m) {
 
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"
-             "Uses dependency analysis to identify memory reuse opportunities.\n"
-             "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.");
+             "Uses lifetime analysis over the full IR to identify memory reuse opportunities.\n"
+             "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.\n"
+             "Handles nested control flow (for-loops, if/else branches) for accurate lifetime tracking.");
 
   passes.def("insert_sync", &pass::InsertSync,
              "Create an insert sync pass\n\n"

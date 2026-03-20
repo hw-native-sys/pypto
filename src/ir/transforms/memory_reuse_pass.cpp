@@ -745,16 +745,20 @@ class YieldFixupMutator : public IRMutator {
 
     // Find yield statements in each branch
     auto then_yield = FindYieldStmt(if_stmt->then_body_);
+    auto else_yield = if_stmt->else_body_.has_value() ? FindYieldStmt(if_stmt->else_body_.value()) : nullptr;
 
     // Patch return_vars to match yield value's MemRef
     bool changed = false;
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
-      // Get yield value's MemRef from then-branch (primary source)
+      // Get yield value's MemRef — try then-branch first, fall back to else-branch
       VarPtr yield_var = nullptr;
       if (then_yield && i < then_yield->value_.size()) {
         yield_var = As<Var>(then_yield->value_[i]);
+      }
+      if (!yield_var && else_yield && i < else_yield->value_.size()) {
+        yield_var = As<Var>(else_yield->value_[i]);
       }
       if (!yield_var) continue;
 
