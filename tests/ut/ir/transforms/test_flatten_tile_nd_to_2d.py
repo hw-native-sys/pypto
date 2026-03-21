@@ -27,10 +27,12 @@ def _load2d(
     """Create tile.load Call with explicit 2D TileType (bypasses op registry type inference).
 
     tile.load hardware semantics: ND tensor -> 2D tile. The pass changes the result type
-    directly to 2D without inserting a tile.reshape.
+    directly to 2D without inserting a tile.reshape, preserving tile_view and memory_space
+    from the original ND type.
     """
     nd_call = tile_ops.load(tensor, offsets, shapes, span=ir.Span.unknown())
-    flat_type = ir.TileType(flat_shape, dtype)
+    nd_type: ir.TileType = nd_call.type  # type: ignore[assignment]
+    flat_type = ir.TileType(flat_shape, dtype, tile_view=nd_type.tile_view, memory_space=nd_type.memory_space)
     return ir.Call(nd_call.op, list(nd_call.args), nd_call.kwargs, flat_type, nd_call.span)
 
 
@@ -1556,6 +1558,237 @@ class TestFlattenTileNdTo2DReduceAndCompute:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestFlattenTileNdTo2DControlFlow:
+    """Tests for FlattenTileNdTo2D with control-flow (ForStmt/IfStmt/WhileStmt).
+
+    Regression coverage for #648: return_vars must be matched by identity, not name_hint.
+    """
+
+    def test_for_stmt_tile_iter_arg(self):
+        """ForStmt with 3D tile iter_arg -> iter_arg and return_var flattened to 2D."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                t = pl.load(x, [0, 0, 0], [2, 3, 4])
+                for i in pl.range(4):
+                    t = pl.tile.add(t, t)
+                out_0 = pl.store(t, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+
+        # Verify: all tile ops in InCore functions use ≤2D tiles
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+        passes.verify_properties(props, After, "test_for_stmt_tile_iter_arg")
+
+    def test_for_stmt_tile_iter_arg_structural(self):
+        """ForStmt with 3D tile iter_arg -> structural equality check."""
+
+        # Before: SSA form with 3D tiles (built with IRBuilder for full control)
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                out_p = f.param(
+                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                t0 = ib.let("t", tile_ops.load(x, [0, 0, 0], [2, 3, 4]))
+                i = ib.var("i", ir.ScalarType(DataType.INT64))
+                with ib.for_loop(i, 0, 4, 1) as loop:
+                    acc = loop.iter_arg("acc", t0)
+                    loop.return_var("acc_out")
+                    r = ib.let("r", tile_ops.add(acc, acc))
+                    ib.emit(ir.YieldStmt([r], ir.Span.unknown()))
+                acc_out = loop.output()
+                out_r = ib.let("out_0", tile_ops.store(acc_out, [0, 0, 0], out_p))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                out = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [x, out], ir.Span.unknown()))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Before = prog.get_result()
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+
+        # Expected: same structure but with 2D tiles
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                out_p = f.param(
+                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                t0 = ib.let("t", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
+                i = ib.var("i", ir.ScalarType(DataType.INT64))
+                with ib.for_loop(i, 0, 4, 1) as loop:
+                    acc = loop.iter_arg("acc", t0)
+                    loop.return_var("acc_out")
+                    r = ib.let("r", tile_ops.add(acc, acc))
+                    ib.emit(ir.YieldStmt([r], ir.Span.unknown()))
+                acc_out = loop.output()
+                out_r = ib.let("out_0", tile_ops.store(acc_out, [0, 0, 0], out_p, [2, 3, 4]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                out = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [x, out], ir.Span.unknown()))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Expected = prog.get_result()
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_if_stmt_tile_return_var(self):
+        """IfStmt with 3D tile return_vars -> flattened to 2D via yield type matching."""
+
+        # Before: SSA form with IfStmt that yields 3D tiles
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                cond_param = f.param("cond", ir.ScalarType(DataType.BOOL))
+                out_p = f.param(
+                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+
+                t0 = ib.let("t", tile_ops.load(x, [0, 0, 0], [2, 3, 4]))
+
+                with ib.if_stmt(cond_param) as if_blk:
+                    if_blk.return_var("rv", ir.TileType([2, 3, 4], DataType.FP32))
+                    a = ib.let("a", tile_ops.add(t0, t0))
+                    ib.emit(ir.YieldStmt([a], ir.Span.unknown()))
+                    if_blk.else_()
+                    b = ib.let("b", tile_ops.mul(t0, t0))
+                    ib.emit(ir.YieldStmt([b], ir.Span.unknown()))
+                rv = if_blk.output()
+
+                out_r = ib.let("out_0", tile_ops.store(rv, [0, 0, 0], out_p))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                cond = f.param("cond", ir.ScalarType(DataType.BOOL))
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                out = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [x, cond, out], ir.Span.unknown()))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Before = prog.get_result()
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+
+        # Expected: same structure with 2D tiles
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                cond_param = f.param("cond", ir.ScalarType(DataType.BOOL))
+                out_p = f.param(
+                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+
+                load_call = _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32)
+                t0 = ib.let("t", load_call)
+
+                with ib.if_stmt(cond_param) as if_blk:
+                    # return_var type must match yield type (which includes tile_view from op_registry)
+                    if_blk.return_var("rv", load_call.type)
+                    a = ib.let("a", tile_ops.add(t0, t0))
+                    ib.emit(ir.YieldStmt([a], ir.Span.unknown()))
+                    if_blk.else_()
+                    b = ib.let("b", tile_ops.mul(t0, t0))
+                    ib.emit(ir.YieldStmt([b], ir.Span.unknown()))
+                rv = if_blk.output()
+
+                out_r = ib.let("out_0", tile_ops.store(rv, [0, 0, 0], out_p, [2, 3, 4]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
+                cond = f.param("cond", ir.ScalarType(DataType.BOOL))
+                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
+                out = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [x, cond, out], ir.Span.unknown()))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Expected = prog.get_result()
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_while_stmt_tile_iter_arg(self):
+        """WhileStmt with 3D tile iter_arg -> iter_arg and return_var flattened to 2D."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                t = pl.load(x, [0, 0, 0], [2, 3, 4])
+                cond = True
+                while cond:
+                    t = pl.tile.add(t, t)
+                    cond = False
+                out_0 = pl.store(t, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+
+        # Verify: all tile ops in InCore functions use ≤2D tiles
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+        passes.verify_properties(props, After, "test_while_stmt_tile_iter_arg")
 
 
 if __name__ == "__main__":

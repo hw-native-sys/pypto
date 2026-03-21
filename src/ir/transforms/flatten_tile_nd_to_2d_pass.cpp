@@ -127,6 +127,12 @@ std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& 
  * @brief Substitute variables in an expression using a pointer-identity map.
  */
 ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
+  // IterArg must be checked before Var: As<Var>() uses exact ObjectKind matching
+  // and won't match IterArg (which has ObjectKind::IterArg, not ObjectKind::Var).
+  if (auto iter_arg = As<IterArg>(expr)) {
+    auto it = var_map.find(iter_arg.get());
+    return (it != var_map.end()) ? it->second : expr;
+  }
   if (auto var = As<Var>(expr)) {
     auto it = var_map.find(var.get());
     return (it != var_map.end()) ? it->second : expr;
@@ -250,26 +256,39 @@ class PreconditionChecker : public IRVisitor {
 // ============================================================================
 
 struct FlattenContext {
-  std::unordered_map<const Var*, VarPtr> var_map;           // old Var* -> new 2D var
-  std::unordered_map<std::string, VarPtr> name_to_new_var;  // cross-scope return_var matching
+  std::unordered_map<const Var*, VarPtr> var_map;  // old Var* -> new 2D var
 
-  void Insert(const VarPtr& old_var, const VarPtr& new_var) {
-    var_map[old_var.get()] = new_var;
-    name_to_new_var[old_var->name_hint_] = new_var;
-  }
+  void Insert(const VarPtr& old_var, const VarPtr& new_var) { var_map[old_var.get()] = new_var; }
 
-  void Erase(const VarPtr& var) {
-    var_map.erase(var.get());
-    name_to_new_var.erase(var->name_hint_);
-  }
+  void Erase(const VarPtr& var) { var_map.erase(var.get()); }
 };
 
-VarPtr CreateFreshControlFlowReturnVar(const VarPtr& original_rv, const VarPtr& body_var,
-                                       FlattenContext& ctx) {
-  auto new_rv = std::make_shared<Var>(original_rv->name_hint_, body_var->GetType(), original_rv->span_);
-  ctx.Insert(original_rv, new_rv);
-  ctx.Insert(body_var, new_rv);
-  return new_rv;
+/**
+ * @brief Extract yield value types from the first YieldStmt found in a statement list.
+ *
+ * Recurses into SeqStmts and ScopeStmt to find yields in nested containers.
+ */
+std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
+  for (const auto& stmt : stmts) {
+    if (auto yield = As<YieldStmt>(stmt)) {
+      std::vector<TypePtr> types;
+      types.reserve(yield->value_.size());
+      for (const auto& val : yield->value_) {
+        types.push_back(val->GetType());
+      }
+      return types;
+    }
+    if (auto seq = As<SeqStmts>(stmt)) {
+      auto found = FindYieldTypes(seq->stmts_);
+      if (!found.empty()) return found;
+    }
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      auto body_stmts = FlattenToStmts(scope->body_);
+      auto found = FindYieldTypes(body_stmts);
+      if (!found.empty()) return found;
+    }
+  }
+  return {};
 }
 
 /**
@@ -342,13 +361,19 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         new_else_body = WrapInSeqStmts(new_else, (*if_stmt->else_body_)->span_);
       }
 
-      // Substitute return_vars using the branch contexts (name-based cross-scope matching)
+      // Update return_vars types based on yield types (positional matching)
+      auto yield_types = FindYieldTypes(new_then);
+      if (yield_types.empty() && new_else_body.has_value()) {
+        yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
+      }
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(if_stmt->return_vars_.size());
-      for (const auto& rv : if_stmt->return_vars_) {
-        auto it = then_ctx.name_to_new_var.find(rv->name_hint_);
-        if (it != then_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
+      for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+        const auto& rv = if_stmt->return_vars_[i];
+        if (i < yield_types.size() && yield_types[i] != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_hint_, yield_types[i], rv->span_);
+          new_return_vars.push_back(new_rv);
+          ctx.Insert(rv, new_rv);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -384,12 +409,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
 
+      // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(for_stmt->return_vars_.size());
-      for (const auto& rv : for_stmt->return_vars_) {
-        auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
-        if (it != body_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
+      for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+        const auto& rv = for_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          ctx.Insert(rv, new_rv);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -424,12 +452,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
 
+      // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(while_stmt->return_vars_.size());
-      for (const auto& rv : while_stmt->return_vars_) {
-        auto it = body_ctx.name_to_new_var.find(rv->name_hint_);
-        if (it != body_ctx.name_to_new_var.end()) {
-          new_return_vars.push_back(CreateFreshControlFlowReturnVar(rv, it->second, ctx));
+      for (size_t i = 0; i < while_stmt->return_vars_.size(); ++i) {
+        const auto& rv = while_stmt->return_vars_[i];
+        if (i < new_iter_args.size() && new_iter_args[i]->GetType() != rv->GetType()) {
+          auto new_rv = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
+          new_return_vars.push_back(new_rv);
+          ctx.Insert(rv, new_rv);
         } else {
           new_return_vars.push_back(rv);
         }
@@ -500,9 +531,10 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, "tile.load result");
 
         // Construct call with explicit 2D TileType (bypasses ND type inference).
+        // Preserve tile_view and memory_space from the original ND tile type.
         auto flat_tile_type =
             std::make_shared<TileType>(Make2DShapeExprs(merged, last, span), result_tile->dtype_,
-                                       std::nullopt, std::nullopt, std::nullopt);
+                                       std::nullopt, result_tile->tile_view_, result_tile->memory_space_);
         auto flat_call =
             std::make_shared<Call>(call->op_, sub_args, call->kwargs_, flat_tile_type, call->span_);
         auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);
