@@ -103,21 +103,20 @@ python examples/ir_parser/flash_attention_parsing.py
 
 ### Running Tests
 
-To run the test suite:
+To run unit tests:
 
 ```bash
 # Install with development dependencies
 pip install -e ".[dev]"
 
-# Run all tests
-pytest tests/
+# Run unit tests in parallel
+python -m pytest tests/ut -n auto --maxprocesses 8 -v
 
-# Run specific test file
-pytest tests/test_ir_builder.py
-
-# Run with verbose output
-pytest -v tests/
+# Run a specific unit test file
+python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 ```
+
+For system tests, see `tests/st/README.md`.
 
 ## License
 

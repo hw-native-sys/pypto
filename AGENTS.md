@@ -63,8 +63,8 @@ cmake --build build --parallel
 
 # Test
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
-python -m pytest tests/ut/ -v
-python -m pytest tests/ut/path/to/test_file.py -v
+python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
+python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 # Lint and type check
 ruff check .

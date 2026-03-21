@@ -79,7 +79,7 @@ jobs:
         pip install -v .[dev]
 
     - name: Test unit tests
-      run: pytest tests/ut -v
+      run: pytest tests/ut -n auto --maxprocesses 8 -v
 
   system-tests:
     runs-on: [self-hosted, linux, arm64, npu]

@@ -43,23 +43,20 @@ cmake --build build --parallel
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
 
 # 5. Run tests
-python -m pytest tests/ut/ -v
+python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
 ```
 
 ## Test Commands
 
 ```bash
 # Run all tests
-python -m pytest tests/ut/ -v
+python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
 
 # Run specific test file
-python -m pytest tests/ut/test_ir_basic.py -v
+python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 # Run specific test
-python -m pytest tests/ut/test_ir_basic.py::test_tensor_expr_creation -v
-
-# Run with coverage
-python -m pytest tests/ut/ --cov=pypto_core --cov-report=html
+python -m pytest tests/ut/core/test_error.py::TestErrorTypes::test_value_error_type -n auto --maxprocesses 8 -v
 ```
 
 ## Test Structure

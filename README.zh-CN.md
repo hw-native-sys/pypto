@@ -103,21 +103,20 @@ python examples/ir_parser/flash_attention_parsing.py
 
 ### 运行测试
 
-运行测试套件：
+运行单元测试：
 
 ```bash
 # 安装开发依赖
 pip install -e ".[dev]"
 
-# 运行所有测试
-pytest tests/
+# 并行运行单元测试
+python -m pytest tests/ut -n auto --maxprocesses 8 -v
 
-# 运行特定测试文件
-pytest tests/test_ir_builder.py
-
-# 以详细输出运行
-pytest -v tests/
+# 运行指定单元测试文件
+python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 ```
+
+系统测试请参见 `tests/st/README.md`。
 
 ## 许可证
 
