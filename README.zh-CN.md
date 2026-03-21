@@ -109,14 +109,11 @@ python examples/ir_parser/flash_attention_parsing.py
 # 安装开发依赖
 pip install -e ".[dev]"
 
-# 运行所有测试
-pytest tests/
+# 并行运行单元测试
+pytest tests/ut -n auto --maxprocesses 8 -v
 
-# 运行特定测试文件
-pytest tests/test_ir_builder.py
-
-# 以详细输出运行
-pytest -v tests/
+# 运行指定单元测试文件
+pytest tests/ut/path/to/test_file.py -n auto --maxprocesses 8 -v
 ```
 
 ## 许可证

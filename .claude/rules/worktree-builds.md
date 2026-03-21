@@ -26,7 +26,7 @@ cmake --build build --parallel
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
 
 # Run tests
-python -m pytest tests/ut/ -v
+python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
 ```
 
 ## When No C++ Changes Exist

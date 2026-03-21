@@ -109,14 +109,11 @@ To run the test suite:
 # Install with development dependencies
 pip install -e ".[dev]"
 
-# Run all tests
-pytest tests/
+# Run unit tests in parallel
+pytest tests/ut -n auto --maxprocesses 8 -v
 
-# Run specific test file
-pytest tests/test_ir_builder.py
-
-# Run with verbose output
-pytest -v tests/
+# Run a specific unit test file
+pytest tests/ut/path/to/test_file.py -n auto --maxprocesses 8 -v
 ```
 
 ## License

@@ -40,6 +40,7 @@ classifiers = [
 dev = [
     "pytest>=7.0.0",
     "pytest-forked>=1.0",
+    "pytest-xdist==3.8.0",
     "pyright==1.1.407",
     "ruff==0.14.8",
     "clang-tidy==21.1.0",
