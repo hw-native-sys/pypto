@@ -53,13 +53,10 @@ python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
 python -m pytest tests/ut/ -n auto --maxprocesses 8 -v
 
 # Run specific test file
-python -m pytest tests/ut/test_ir_basic.py -n auto --maxprocesses 8 -v
+python -m pytest tests/ut/core/test_error.py -n auto --maxprocesses 8 -v
 
 # Run specific test
-python -m pytest tests/ut/test_ir_basic.py::test_tensor_expr_creation -n auto --maxprocesses 8 -v
-
-# Run with coverage
-python -m pytest tests/ut/ -n auto --maxprocesses 8 --cov=pypto_core --cov-report=html
+python -m pytest tests/ut/core/test_error.py::TestErrorTypes::test_value_error_type -n auto --maxprocesses 8 -v
 ```
 
 ## Test Structure
