@@ -121,13 +121,13 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
 | `/` | FloatDiv | Arithmetic |
 | `**` | Pow | Arithmetic |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | Eq, Ne, Lt, Le, Gt, Ge | Comparison |
-| `and`, `or` | And, Or | Logical (short-circuit) |
+| `and`, `or` | And, Or | Logical |
 | `^` | Xor | Logical |
 | `&` | BitAnd | Bitwise |
 | `\|` | BitOr | Bitwise |
 | `<<`, `>>` | BitShiftLeft, BitShiftRight | Bitwise |
 
-**Note:** `and`/`or` use Python's short-circuit boolean operator syntax (`ast.BoolOp`). Chained expressions like `a and b and c` are folded left-to-right into `And(And(a, b), c)`. The corresponding factory functions are `ir.and_(lhs, rhs)` and `ir.or_(lhs, rhs)`.
+**Note:** `and`/`or` are parsed from Python's `ast.BoolOp` syntax. Chained expressions like `a and b and c` are folded left-to-right into `And(And(a, b), c)`. Unlike Python, IR `And`/`Or` nodes evaluate both operands (no short-circuit semantics). The corresponding IR factory functions are `ir.and_(lhs, rhs)` and `ir.or_(lhs, rhs)`.
 
 ### Unary Operations and Functions
 
