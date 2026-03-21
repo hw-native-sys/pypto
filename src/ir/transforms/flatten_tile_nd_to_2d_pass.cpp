@@ -531,10 +531,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, "tile.load result");
 
         // Construct call with explicit 2D TileType (bypasses ND type inference).
-        // Preserve tile_view and memory_space from the original ND tile type.
-        auto flat_tile_type =
-            std::make_shared<TileType>(Make2DShapeExprs(merged, last, span), result_tile->dtype_,
-                                       std::nullopt, result_tile->tile_view_, result_tile->memory_space_);
+        // Create a 2D tile_view and preserve memory_space for type consistency
+        // with downstream ops (op_registry always adds tile_view + memory_space).
+        auto flat_shape_exprs = Make2DShapeExprs(merged, last, span);
+        std::optional<TileView> flat_tile_view;
+        if (result_tile->tile_view_.has_value()) {
+          flat_tile_view = TileView(flat_shape_exprs, /*stride=*/{}, /*start_offset=*/nullptr);
+        }
+        auto flat_tile_type = std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_, std::nullopt,
+                                                         flat_tile_view, result_tile->memory_space_);
         auto flat_call =
             std::make_shared<Call>(call->op_, sub_args, call->kwargs_, flat_tile_type, call->span_);
         auto flat_var = std::make_shared<Var>(assign->var_->name_hint_, flat_tile_type, assign->var_->span_);

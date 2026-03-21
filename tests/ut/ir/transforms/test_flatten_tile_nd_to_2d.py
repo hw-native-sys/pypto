@@ -31,8 +31,11 @@ def _load2d(
     from the original ND type.
     """
     nd_call = tile_ops.load(tensor, offsets, shapes, span=ir.Span.unknown())
-    nd_type: ir.TileType = nd_call.type  # type: ignore[assignment]
-    flat_type = ir.TileType(flat_shape, dtype, tile_view=nd_type.tile_view, memory_space=nd_type.memory_space)
+    # Create a reference 2D tile.load to get the correct type (with proper tile_view + memory_space)
+    ref_tensor = ir.Var("_ref", ir.TensorType(flat_shape, dtype), ir.Span.unknown())
+    ref_offsets = [0] * len(flat_shape)
+    ref_call = tile_ops.load(ref_tensor, ref_offsets, flat_shape, span=ir.Span.unknown())
+    flat_type: ir.TileType = ref_call.type  # type: ignore[assignment]
     return ir.Call(nd_call.op, list(nd_call.args), nd_call.kwargs, flat_type, nd_call.span)
 
 
