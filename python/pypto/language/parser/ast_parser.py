@@ -1606,6 +1606,8 @@ class ASTParser:
             return self.parse_tuple_literal(expr)
         elif isinstance(expr, ast.Subscript):
             return self.parse_subscript(expr)
+        elif isinstance(expr, ast.BoolOp):
+            return self.parse_boolop(expr)
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported expression type: {type(expr).__name__}",
@@ -1818,6 +1820,37 @@ class ASTParser:
                 return ir.ConstFloat(-operand.value, operand.dtype, span)
 
         return op_map[op_type](operand, span)
+
+    def parse_boolop(self, boolop: ast.BoolOp) -> ir.Expr:
+        """Parse boolean operation (and/or).
+
+        Chains multiple values with left-to-right associativity:
+        ``a and b and c`` becomes ``And(And(a, b), c)``.
+
+        Args:
+            boolop: BoolOp AST node
+
+        Returns:
+            IR boolean expression
+        """
+        span = self.span_tracker.get_span(boolop)
+        op_map: dict[type, Any] = {
+            ast.And: ir.and_,
+            ast.Or: ir.or_,
+        }
+        op_type = type(boolop.op)
+        if op_type not in op_map:
+            raise UnsupportedFeatureError(
+                f"Unsupported boolean operator: {op_type.__name__}",
+                span=span,
+                hint="Use 'and' or 'or'",
+            )
+        ir_op = op_map[op_type]
+        values = [self.parse_expression(v) for v in boolop.values]
+        result = values[0]
+        for val in values[1:]:
+            result = ir_op(result, val, span)
+        return result
 
     def parse_call(self, call: ast.Call) -> ir.Expr:
         """Parse function call.
@@ -2970,13 +3003,12 @@ class ASTParser:
                                 if isinstance(elt, ast.Name):
                                     yield_vars.append((elt.id, None))
 
-            # Recursively scan nested if statements
+            # Skip nested if statements — each nested if's yields are
+            # its own return_vars, handled by parse_if_statement when
+            # it processes that specific if node. Recursing would
+            # incorrectly count inner yields as outer return_vars.
             elif isinstance(stmt, ast.If):
-                yield_vars.extend(self._scan_for_yields(stmt.body))
-                if stmt.orelse:
-                    # Only take yields from else if they match then branch
-                    # For simplicity, just take from then branch
-                    pass
+                pass
 
         return yield_vars
 

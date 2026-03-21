@@ -539,6 +539,14 @@ inline ExprPtr MakeNot(const ExprPtr& operand, const Span& span = Span::unknown(
   return std::make_shared<Not>(operand, DataType::BOOL, span);
 }
 
+inline ExprPtr MakeAnd(const ExprPtr& left, const ExprPtr& right, const Span& span = Span::unknown()) {
+  return std::make_shared<And>(left, right, DataType::BOOL, span);
+}
+
+inline ExprPtr MakeOr(const ExprPtr& left, const ExprPtr& right, const Span& span = Span::unknown()) {
+  return std::make_shared<Or>(left, right, DataType::BOOL, span);
+}
+
 }  // namespace ir
 }  // namespace pypto
 

@@ -2836,6 +2836,12 @@ def bit_not(operand: Expr, span: Span = ...) -> Expr:
 def not_(operand: Expr, span: Span = ...) -> Expr:
     """Logical not operator (not operand)."""
 
+def and_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
+    """Logical and operator (lhs and rhs)."""
+
+def or_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
+    """Logical or operator (lhs or rhs)."""
+
 def min_(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Minimum operator (min(lhs, rhs))."""
 
