@@ -291,9 +291,9 @@ class TestWhileLoops:
                         brk: pl.Scalar[pl.BOOL] = True
                         cnt_phi, x_phi = pl.yield_(cnt, x_iter)
                     else:
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                        c2: pl.Scalar[pl.INT64] = cnt + 1  # noqa: F841
-                        cnt_phi, x_phi = pl.yield_(cnt, x_iter)
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                        c2: pl.Scalar[pl.INT64] = cnt + 1
+                        cnt_phi, x_phi = pl.yield_(c2, y)
                     cnt, x_iter = pl.yield_(cnt_phi, x_phi)
                 return x_iter
 
@@ -332,8 +332,8 @@ class TestWhileLoops:
                         brk: pl.Scalar[pl.BOOL] = True
                         cnt_phi, x_phi = pl.yield_(cnt, x_iter)
                     else:
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                        cnt_phi, x_phi = pl.yield_(cnt + 1, x_iter)
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                        cnt_phi, x_phi = pl.yield_(cnt + 1, y)
                     cnt, x_iter = pl.yield_(cnt_phi, x_phi)
                 return x_iter
 
@@ -593,8 +593,8 @@ def test_continue_in_for():
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 x_iter: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
             return x_iter
 
@@ -628,8 +628,8 @@ def test_break_in_for():
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
@@ -664,19 +664,19 @@ def _build_break_and_continue_expected() -> ir.Program:
                     ir.And(ir.Lt(i_idx, _ci(10), _BOOL, _SPAN), ir.Not(brk, _BOOL, _SPAN), _BOOL, _SPAN)
                 )
 
-                # outer if: i_idx < 3  # noqa: F841
+                # outer if: i_idx < 3
                 with ib.if_stmt(ir.Lt(i_idx, _ci(3), _BOOL, _SPAN)) as if_outer:
                     if_outer.return_var("phi2", tt)
                     ib.emit(ir.YieldStmt([x_iter], _SPAN))
                     if_outer.else_()
-                    y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))  # noqa: F841
+                    y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))
                     # inner if: i_idx > 7
                     with ib.if_stmt(ir.Gt(i_idx, _ci(7), _BOOL, _SPAN)) as if_inner:
                         if_inner.return_var("phi1", tt)
                         ib.assign(brk, _cb(True))
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        ib.emit(ir.YieldStmt([y], _SPAN))
                         if_inner.else_()
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        ib.emit(ir.YieldStmt([y], _SPAN))
                     phi1 = if_inner.output(0)
                     ib.emit(ir.YieldStmt([phi1], _SPAN))
                 phi2 = if_outer.output(0)
@@ -761,9 +761,9 @@ def test_continue_multiple_iter_args():
                 if i < 5:
                     a_phi, b_phi = pl.yield_(a_iter, b_iter)
                 else:
-                    a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)  # noqa: F841
-                    b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)  # noqa: F841
-                    a_phi, b_phi = pl.yield_(a_iter, b_iter)
+                    a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)
+                    b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)
+                    a_phi, b_phi = pl.yield_(a_new, b_new)
                 a_iter, b_iter = pl.yield_(a_phi, b_phi)
             return a_iter
 
@@ -795,8 +795,8 @@ def test_continue_with_pre_continue_assignment():
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    z: pl.Tensor[[64], pl.FP32] = pl.add(y, y)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    z: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(z)
                 x_iter: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
             return x_iter
 
@@ -825,13 +825,13 @@ def test_break_negative_step():
             i_idx: pl.Scalar[pl.INDEX] = 10
             brk: pl.Scalar[pl.BOOL] = False
             for (x_iter,) in pl.while_(init_values=(x_0,)):
-                pl.cond(i_idx < 0 and not brk)
+                pl.cond(i_idx > 0 and not brk)
                 if i_idx < 3:
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + -1
@@ -863,8 +863,8 @@ def test_aic_function_type():
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 x_iter: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
             return x_iter
 
@@ -960,8 +960,8 @@ def _build_multiple_continues_expected() -> ir.Program:
                         if_inner.return_var("phi1", tt)
                         ib.emit(ir.YieldStmt([x_iter], _SPAN))
                         if_inner.else_()
-                        ib.let("z", ir.Call(ir.Op("tensor.add"), [y, y], tt, _SPAN))
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        z = ib.let("z", ir.Call(ir.Op("tensor.add"), [y, y], tt, _SPAN))
+                        ib.emit(ir.YieldStmt([z], _SPAN))
                     phi1 = if_inner.output(0)
                     ib.emit(ir.YieldStmt([phi1], _SPAN))
                 phi2 = if_outer.output(0)
@@ -1023,14 +1023,14 @@ def _build_back_to_back_breaks_expected() -> ir.Program:
                     ib.assign(brk, _cb(True))
                     ib.emit(ir.YieldStmt([x_iter], _SPAN))
                     if_outer.else_()
-                    y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))  # noqa: F841
+                    y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))
                     # inner if: i_idx > 5
                     with ib.if_stmt(ir.Gt(i_idx, _ci(5), _BOOL, _SPAN)) as if_inner:
                         if_inner.return_var("phi1", tt)
                         ib.assign(brk, _cb(True))
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        ib.emit(ir.YieldStmt([y], _SPAN))
                         if_inner.else_()
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        ib.emit(ir.YieldStmt([y], _SPAN))
                     phi1 = if_inner.output(0)
                     ib.emit(ir.YieldStmt([phi1], _SPAN))
                 phi2 = if_outer.output(0)
@@ -1101,8 +1101,8 @@ def _build_break_then_continue_expected() -> ir.Program:  # noqa: F841
                         if_inner.return_var("phi1", tt)
                         ib.emit(ir.YieldStmt([x_iter], _SPAN))
                         if_inner.else_()
-                        z = ib.let("z", ir.Call(ir.Op("tensor.add"), [y, y], tt, _SPAN))  # noqa: F841
-                        ib.emit(ir.YieldStmt([x_iter], _SPAN))
+                        z = ib.let("z", ir.Call(ir.Op("tensor.add"), [y, y], tt, _SPAN))
+                        ib.emit(ir.YieldStmt([z], _SPAN))
                     phi1 = if_inner.output(0)  # noqa: F841
                     # NOTE: yields x_iter, not phi1
                     ib.emit(ir.YieldStmt([x_iter], _SPAN))
@@ -1177,9 +1177,9 @@ def test_multiple_iter_args_with_break():
                     brk: pl.Scalar[pl.BOOL] = True
                     a_phi, b_phi = pl.yield_(a_iter, b_iter)
                 else:
-                    a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)  # noqa: F841
-                    b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)  # noqa: F841
-                    a_phi, b_phi = pl.yield_(a_iter, b_iter)
+                    a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)
+                    b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)
+                    a_phi, b_phi = pl.yield_(a_new, b_new)
                 a_iter, b_iter = pl.yield_(a_phi, b_phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
@@ -1282,8 +1282,8 @@ def test_nested_loops_only_inner():
                     if j < 2:
                         phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                     else:
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                        phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                        phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                     x_inner: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
                 x_outer: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
             return x_outer
@@ -1329,8 +1329,8 @@ def test_both_outer_and_inner_loop_have_break():
                         brk_i: pl.Scalar[pl.BOOL] = True
                         x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                     else:
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                        x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                        x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                     x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)  # noqa: F841
                     if not brk_i:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
@@ -1380,8 +1380,8 @@ def test_nested_continue_outer_break_inner():
                         brk_i: pl.Scalar[pl.BOOL] = True
                         x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                     else:
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                        x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                        x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                     x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)  # noqa: F841
                     if not brk_i:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
@@ -1427,8 +1427,8 @@ def test_nested_continue_both_loops():
                         if j < 2:
                             x_inner_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                         else:
-                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                            x_inner_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                            x_inner_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                         x_inner: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_phi)
                     x_outer_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                 x_outer: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer_phi)
@@ -1473,8 +1473,8 @@ def test_nested_break_and_continue_inner():
                             brk_i: pl.Scalar[pl.BOOL] = True
                             x_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                         else:
-                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                            x_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                            x_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                         x_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi1)
                     x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi2)
                     if not brk_i:
@@ -1531,8 +1531,8 @@ def test_nested_loop_both_have_break_and_continue():
                                 brk_i: pl.Scalar[pl.BOOL] = True
                                 i_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                             else:
-                                y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)  # noqa: F841
-                                i_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                                y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
+                                i_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                             i_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(i_phi1)
                         i_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(i_phi2)  # noqa: F841
                         if not brk_i:
@@ -1595,8 +1595,8 @@ def test_three_level_nesting_break_at_each():
                             brk3: pl.Scalar[pl.BOOL] = True  # noqa: F841
                             l3_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l3)
                         else:
-                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_l3, x_l3)  # noqa: F841
-                            l3_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l3)
+                            y: pl.Tensor[[64], pl.FP32] = pl.add(x_l3, x_l3)
+                            l3_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                         l3_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l3_phi)  # noqa: F841
                         if not brk3:
                             k_idx: pl.Scalar[pl.INDEX] = k_idx + 1
@@ -1647,8 +1647,8 @@ def test_continue_in_else_branch():
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i > 5:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 else:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 x_iter: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
@@ -1682,8 +1682,8 @@ def test_break_in_else_branch():
             for (x_iter,) in pl.while_(init_values=(x_0,)):
                 pl.cond(i_idx < 10 and not brk)
                 if i_idx < 7:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 else:
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
@@ -1992,8 +1992,8 @@ def test_multi_function_program():
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                 x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
@@ -2034,8 +2034,8 @@ def test_pipeline_integration():
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
-                    x_new: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)  # noqa: F841
-                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
+                    x_new: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_new)
                 x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(phi)
             return x_rv
 
