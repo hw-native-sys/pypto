@@ -88,7 +88,7 @@ for i in pl.range(start, stop, step):
 ```python
 i = start
 __break_N: bool = False
-while i < stop and not __break_N:
+while i < stop and not __break_N:       # i > stop for negative step
     A
     if cond:
         __break_N = True
@@ -104,7 +104,7 @@ while i < stop and not __break_N:
 | 方面 | 行为 |
 | ---- | ---- |
 | Break 标志命名 | `__break_N`，其中 N 为唯一计数器 |
-| While 条件 | `And(original_condition, Not(__break_N))` |
+| While 条件 | 正步长：`And(i < stop, Not(__break_N))`；负步长：`And(i > stop, Not(__break_N))` |
 | 迭代器推进 | 由 `if not __break_N` 保护，防止在 break 点之后继续推进 |
 | WhileStmt 的 break | 相同模式，但无需 for-to-while 转换 |
 
