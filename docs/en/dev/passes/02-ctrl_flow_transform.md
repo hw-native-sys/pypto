@@ -88,7 +88,7 @@ for i in pl.range(start, stop, step):
 ```python
 i = start
 __break_N: bool = False
-while i < stop and not __break_N:
+while i < stop and not __break_N:       # i > stop for negative step
     A
     if cond:
         __break_N = True
@@ -104,7 +104,7 @@ Key details:
 | Aspect | Behavior |
 | ------ | -------- |
 | Break flag naming | `__break_N` where N is a unique counter |
-| While condition | `And(original_condition, Not(__break_N))` |
+| While condition | `And(i < stop, Not(__break_N))` for positive step; `And(i > stop, Not(__break_N))` for negative step |
 | Iterator advancement | Guarded by `if not __break_N` to prevent advancing past the break point |
 | WhileStmt break | Same pattern but without the for-to-while conversion |
 

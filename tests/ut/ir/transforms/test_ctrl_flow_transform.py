@@ -520,6 +520,10 @@ def test_continue_multiple_iter_args():
     After = passes.ctrl_flow_transform()(Before)
     printed = After.as_python()
     assert not _has_bare_keyword(printed, "continue")
+    # Bug 1 regression: normal (else) branch must yield the new values (a_new, b_new),
+    # not the original iter_args (a_iter, b_iter).
+    else_part = printed.split("else:")[-1]
+    assert "tensor.add" in else_part, "Normal branch must contain the add computation"
 
 
 def test_continue_with_pre_continue_assignment():
@@ -540,6 +544,10 @@ def test_continue_with_pre_continue_assignment():
     After = passes.ctrl_flow_transform()(Before)
     printed = After.as_python()
     assert not _has_bare_keyword(printed, "continue")
+    # Bug 1 regression: normal (else) branch must yield z (the new value),
+    # not x_iter (the original iter_arg).
+    else_part = printed.split("else:")[-1]
+    assert "tensor.add" in else_part, "Normal branch must contain the add computation"
 
 
 def test_break_negative_step():
@@ -559,6 +567,11 @@ def test_break_negative_step():
     After = passes.ctrl_flow_transform()(Before)
     printed = After.as_python()
     assert not _has_bare_keyword(printed, "break")
+    # Bug 2 regression: negative step must produce ">" condition, not "<".
+    assert ">" in printed, "Negative step loop must use '>' comparison"
+    # Bug 1 regression: normal (else) branch must yield y (the new value).
+    else_part = printed.split("else:")[-1]
+    assert "tensor.add" in else_part, "Normal branch must contain the add computation"
 
 
 def test_aic_function_type():
