@@ -121,11 +121,13 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
 | `/` | FloatDiv | 算术 |
 | `**` | Pow | 算术 |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | Eq, Ne, Lt, Le, Gt, Ge | 比较 |
-| `and`, `or` | And, Or | 逻辑 |
+| `and`, `or` | And, Or | 逻辑 (短路求值) |
 | `^` | Xor | 逻辑 |
 | `&` | BitAnd | 位运算 |
 | `\|` | BitOr | 位运算 |
 | `<<`, `>>` | BitShiftLeft, BitShiftRight | 位运算 |
+
+**注意:** `and`/`or` 使用 Python 的短路布尔运算符语法 (`ast.BoolOp`)。链式表达式如 `a and b and c` 从左到右折叠为 `And(And(a, b), c)`。对应的工厂函数为 `ir.and_(lhs, rhs)` 和 `ir.or_(lhs, rhs)`。
 
 ### 一元操作和函数
 
