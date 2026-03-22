@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -39,17 +40,19 @@ namespace {
  */
 class NoRedundantBlocksVerifier : public IRVisitor {
  public:
-  explicit NoRedundantBlocksVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  explicit NoRedundantBlocksVerifier(std::vector<Diagnostic>& diagnostics,
+                                     std::string rule_name = "NoRedundantBlocks")
+      : diagnostics_(diagnostics), rule_name_(std::move(rule_name)) {}
 
   void VisitStmt_(const SeqStmtsPtr& op) override {
     if (!op) return;
     if (op->stmts_.size() == 1) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_name_, 0,
                                 "SeqStmts with single child should be unwrapped", op->span_);
     }
     for (const auto& stmt : op->stmts_) {
       if (As<SeqStmts>(stmt)) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_name_, 0,
                                   "SeqStmts contains nested SeqStmts", stmt->span_);
       }
     }
@@ -58,6 +61,7 @@ class NoRedundantBlocksVerifier : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  std::string rule_name_;
 };
 
 }  // namespace
@@ -70,7 +74,7 @@ class NormalizedStmtPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     // NormalizedStmtStructure now only ensures flat SeqStmts (no nested SeqStmts).
     // The NoRedundantBlocks check covers this.
-    NoRedundantBlocksVerifier verifier(diagnostics);
+    NoRedundantBlocksVerifier verifier(diagnostics, GetName());
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
       verifier.VisitStmt(func->body_);

@@ -336,6 +336,20 @@ def test_no_nested_seq_stmt_invalid():
     assert any(d.rule_name == "NoRedundantBlocks" for d in diagnostics)
 
 
+def test_normalized_stmt_structure_diagnostics_keep_property_name():
+    """NormalizedStmtStructure diagnostics should keep their own property name."""
+    program = _make_nested_seq_stmt_program(nested=True)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.NormalizedStmtStructure)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
+    assert any(d.rule_name == "NormalizedStmtStructure" for d in diagnostics)
+    assert all(d.rule_name != "NoRedundantBlocks" for d in diagnostics)
+
+
 def test_verification_instrument_checks_structural_before_pass():
     """Test VerificationInstrument checks structural properties before a pass.
 

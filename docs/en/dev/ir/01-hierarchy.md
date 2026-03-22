@@ -12,7 +12,7 @@ This document provides a complete reference of all IR node types, organized by c
 <param_direction> ::= "In" | "Out" | "InOut"
 <type_list>  ::= <type> { "," <type> }
 
-<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
+<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <return_stmt> | <yield_stmt>
                | <eval_stmt> | <seq_stmts> | <scope_stmt>
                | <break_stmt> | <continue_stmt>
 
@@ -29,6 +29,7 @@ This document provides a complete reference of all IR node types, organized by c
                  [ <return_assignments> ]
 
 <yield_stmt> ::= "yield" [ <var_list> ]
+<return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
 <scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
@@ -346,7 +347,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 10 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **Statements** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

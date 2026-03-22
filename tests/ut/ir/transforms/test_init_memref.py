@@ -401,6 +401,38 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
     assert cast(ir.ConstInt, external_tile_type.memref.addr_).value == -1
 
 
+def test_init_memref_single_stmt_body_prepends_alloc():
+    """InitMemRef prepends allocs even when the function body is a single statement."""
+    span = ir.Span.unknown()
+
+    input_tensor = ir.Var("input_tensor", ir.TensorType([64, 64], ir.DataType.FP32), span)
+    tile_loaded = ir.Var(
+        "tile_loaded", ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec), span
+    )
+
+    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, _ci(0), _ci(0), _ci(64), _ci(64)], span)
+    body = ir.AssignStmt(tile_loaded, load_call, span)
+
+    func = ir.Function("test_func", [(input_tensor, ir.ParamDirection.In)], [], body, span)
+    program = ir.Program([func], "test_program", span)
+
+    after = passes.init_mem_ref()(program)
+    result_func = list(after.functions.values())[0]
+
+    assert isinstance(result_func.body, ir.SeqStmts)
+    assert len(result_func.body.stmts) == 2
+    assert isinstance(result_func.body.stmts[0], ir.AssignStmt)
+    assert isinstance(result_func.body.stmts[0].value, ir.Call)
+    assert result_func.body.stmts[0].value.op.name == "tile.alloc"
+    assert isinstance(result_func.body.stmts[1], ir.AssignStmt)
+    assert result_func.body.stmts[1].var.name_hint == "tile_loaded"
+
+    allocs = _get_alloc_stmts(result_func)
+    assert len(allocs) == 1
+    assert allocs[0].value.op.name == "tile.alloc"
+    assert allocs[0].var.name_hint.startswith("mem_vec_")
+
+
 def _find_yield_stmt(stmt):
     """Recursively find YieldStmt in a statement tree."""
     if isinstance(stmt, ir.YieldStmt):

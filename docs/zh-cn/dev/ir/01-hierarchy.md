@@ -12,7 +12,7 @@
 <param_direction> ::= "In" | "Out" | "InOut"
 <type_list>  ::= <type> { "," <type> }
 
-<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
+<stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <return_stmt> | <yield_stmt>
                | <eval_stmt> | <seq_stmts> | <scope_stmt>
                | <break_stmt> | <continue_stmt>
 
@@ -29,6 +29,7 @@
                  [ <return_assignments> ]
 
 <yield_stmt> ::= "yield" [ <var_list> ]
+<return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
 <scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
@@ -346,7 +347,7 @@ add_func = program.get_function("add")  # Access by name
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |
-| **语句** | 10 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **语句** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **类型** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **函数** | 2 | Function, Program |
 

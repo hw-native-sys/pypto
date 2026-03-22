@@ -550,19 +550,23 @@ StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) 
   return std::make_shared<AssignStmt>(memref, alloc_call, Span::unknown());
 }
 
-// Insert alloc statements at the beginning of a SeqStmts body
+// Insert alloc statements at the beginning of a function body.
 StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
   if (alloc_stmts.empty()) return body;
 
-  auto seq = As<SeqStmts>(body);
-  if (!seq || seq->stmts_.empty()) return body;
-
-  // Prepend alloc statements directly into the SeqStmts
   std::vector<StmtPtr> new_seq_stmts;
   new_seq_stmts.insert(new_seq_stmts.end(), alloc_stmts.begin(), alloc_stmts.end());
-  new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
 
-  return std::make_shared<SeqStmts>(new_seq_stmts, body->span_);
+  const Span& span = body ? body->span_ : alloc_stmts.front()->span_;
+  if (body) {
+    if (auto seq = As<SeqStmts>(body)) {
+      new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
+    } else {
+      new_seq_stmts.push_back(body);
+    }
+  }
+
+  return SeqStmts::Flatten(std::move(new_seq_stmts), span);
 }
 
 /**
