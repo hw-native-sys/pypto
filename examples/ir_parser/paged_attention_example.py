@@ -47,12 +47,12 @@ from pypto.runtime import RunConfig, TensorSpec, run
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_init_inplace(
     oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-    li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32, pl.DN],
 ]:
     """Initialize inplace accumulators to zero (VECTOR)."""
     return oi, li, mi
