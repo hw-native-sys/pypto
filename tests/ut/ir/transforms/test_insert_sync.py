@@ -821,6 +821,80 @@ def test_for_cross_iteration():
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
+def test_for_cross_iteration_wait_moves_past_scalar_stmt():
+    """Cross-iteration sync_dst moves past scalar op-like siblings before yield."""
+    span = _span
+    dim64 = ir.ConstInt(64, DataType.INT64, span)
+
+    memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 302)
+    memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 303)
+
+    input_tensor = ir.Var("input", ir.TensorType([64, 64], DataType.FP32), span)
+    tile_a = ir.Var(
+        "tile_a", ir.TileType([dim64, dim64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec), span
+    )
+    tile_b = ir.Var(
+        "tile_b", ir.TileType([dim64, dim64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec), span
+    )
+    scalar_tmp = ir.Var("scalar_tmp", ir.ScalarType(DataType.INT32), span)
+
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INT32), span)
+    start = ir.ConstInt(0, DataType.INT32, span)
+    stop = ir.ConstInt(4, DataType.INT32, span)
+    step = ir.ConstInt(1, DataType.INT32, span)
+
+    for_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
+            ir.AssignStmt(scalar_tmp, ir.ConstInt(1, DataType.INT32, span), span),
+            ir.YieldStmt([], span),
+        ],
+        span,
+    )
+    body = ir.SeqStmts(
+        [ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span), ir.ReturnStmt(span)], span
+    )
+    func = ir.Function(
+        "test_cross_iteration_scalar_tail", [input_tensor], [], body, span, ir.FunctionType.InCore
+    )
+    Before = ir.Program([func], "test_program", span)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_CCE)
+    After = passes.insert_sync()(Before)
+
+    expected_for_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            make_bar_v(),
+            ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
+            make_sync_src(V, MTE2, 0),
+            ir.AssignStmt(scalar_tmp, ir.ConstInt(1, DataType.INT32, span), span),
+            make_sync_dst(V, MTE2, 0),
+            ir.YieldStmt([], span),
+        ],
+        span,
+    )
+    expected_body = ir.SeqStmts(
+        [
+            ir.ForStmt(loop_var, start, stop, step, [], expected_for_body, [], span),
+            ir.ReturnStmt(span),
+        ],
+        span,
+    )
+    expected_func = ir.Function(
+        "test_cross_iteration_scalar_tail", [input_tensor], [], expected_body, span, ir.FunctionType.InCore
+    )
+    Expected = ir.Program([expected_func], "test_program", span)
+
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
 def test_for_cross_iteration_mte3_to_mte2():
     """Test InsertSyncPass for cross-iteration dependencies with load-add-store pattern.
 

@@ -56,11 +56,32 @@ def _get_param_types(func):
     return result
 
 
+def _first_function(program):
+    """Get the first function from a Program."""
+    return next(iter(program.functions.values()))
+
+
+def _is_tile_alloc_assign(stmt):
+    """Return True if stmt is an AssignStmt wrapping a tile.alloc call."""
+    return (
+        isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == "tile.alloc"
+    )
+
+
+def _assert_leading_allocs(func, count):
+    """Assert that the first count statements in the body are tile.alloc assigns."""
+    assert isinstance(func.body, ir.SeqStmts)
+    assert len(func.body.stmts) >= count
+    assert all(_is_tile_alloc_assign(stmt) for stmt in func.body.stmts[:count])
+
+
 def _get_alloc_stmts(func):
     """Get tile.alloc AssignStmts from function body."""
     allocs = []
     for stmt in _iter_assign_stmts(func):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
+        if _is_tile_alloc_assign(stmt):
             allocs.append(stmt)
     return allocs
 
@@ -96,11 +117,10 @@ def test_init_memref_simple():
             return result
 
     After = passes.init_mem_ref()(Before)
-    func = list(After.functions.values())[0]
+    func = _first_function(After)
 
     # Verify body is normalized and allocs are prepended directly to the body
-    assert isinstance(func.body, ir.SeqStmts)
-    assert isinstance(func.body.stmts[0], ir.AssignStmt)
+    _assert_leading_allocs(func, 3)
 
     # Verify param MemRefs: all DDR, addr=-1, size=16384
     param_types = _get_param_types(func)
@@ -170,11 +190,10 @@ def test_init_memref_matmul():
             return result
 
     After = passes.init_mem_ref()(Before)
-    func = list(After.functions.values())[0]
+    func = _first_function(After)
 
     # Verify normalized structure
-    assert isinstance(func.body, ir.SeqStmts)
-    assert isinstance(func.body.stmts[0], ir.AssignStmt)
+    _assert_leading_allocs(func, 5)
 
     # Verify param MemRefs: all DDR
     param_types = _get_param_types(func)
@@ -321,7 +340,7 @@ def test_init_memref_tile_with_preset_memory_space():
 
     # Run InitMemRefPass
     after = passes.init_mem_ref()(program)
-    result_func = list(after.functions.values())[0]
+    result_func = _first_function(after)
 
     # Collect TileTypes from all TileType vars (TileType exposes .memory_space)
     tile_types = _get_tile_types(result_func)
@@ -383,7 +402,7 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
     program = ir.Program([func], "test_program", span)
 
     after = passes.init_mem_ref()(program)
-    result_func = list(after.functions.values())[0]
+    result_func = _first_function(after)
 
     add_stmt = next(
         stmt
@@ -417,7 +436,7 @@ def test_init_memref_single_stmt_body_prepends_alloc():
     program = ir.Program([func], "test_program", span)
 
     after = passes.init_mem_ref()(program)
-    result_func = list(after.functions.values())[0]
+    result_func = _first_function(after)
 
     assert isinstance(result_func.body, ir.SeqStmts)
     assert len(result_func.body.stmts) == 2
@@ -500,7 +519,7 @@ def test_init_memref_for_stmt_loop_carry_memref_relationships():
     program = ir.Program([func], "test_program", span)
 
     after = passes.init_mem_ref()(program)
-    result_func = list(after.functions.values())[0]
+    result_func = _first_function(after)
 
     loop_after = cast(
         ir.ForStmt,

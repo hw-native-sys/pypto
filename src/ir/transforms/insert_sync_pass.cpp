@@ -345,10 +345,10 @@ class SyncInserter {
 
   void ProcessLeafStmt(const StmtPtr& leaf_stmt, MemRefSummary& state) {
     Position current_pos = ctx_.CurrentPosition();
+    ctx_.RegisterLeaf(current_pos, leaf_stmt);
+
     auto [reads, writes] = GetLeafMemRefs(leaf_stmt);
     if (reads.empty() && writes.empty()) return;
-
-    ctx_.RegisterLeaf(current_pos, leaf_stmt);
 
     // RAW + WAW
     auto sync_against_writers = [&](const std::set<MemRefPtr>& memrefs) {
@@ -654,7 +654,7 @@ class SyncInserter {
       // Cross-iteration(same scope, wait <= set), Move wait to end of iteration.
       if (pair.set_position.IsInSameScope(pair.wait_position) &&
           (pair.wait_position.IsBefore(pair.set_position) || pair.wait_position == pair.set_position)) {
-        pair.wait_position = pair.set_position;
+        pair.wait_position = EndOfSiblingOpGroup(pair.set_position);
         pair.wait_after = true;
         continue;
       }
