@@ -142,62 +142,7 @@ static bool IsPureScalarAssignment(const StmtPtr& stmt) {
     return !detector.Found();
   }
 
-  // An OpStmts is pure scalar only if every sub-statement is a pure scalar assignment.
-  if (kind == ObjectKind::OpStmts) {
-    auto op_stmts = std::static_pointer_cast<const OpStmts>(stmt);
-    for (const auto& s : op_stmts->stmts_) {
-      if (!IsPureScalarAssignment(s)) return false;
-    }
-    return true;
-  }
-
   return false;
-}
-
-/// Expand an OpStmts that contains a mix of pure scalar and non-scalar assignments
-/// into individual sub-statements. Returns the original list if no expansion needed.
-static std::vector<StmtPtr> ExpandMixedOpStmts(const std::vector<StmtPtr>& stmts) {
-  bool needs_expansion = false;
-  for (const auto& s : stmts) {
-    if (s && s->GetKind() == ObjectKind::OpStmts && !IsPureScalarAssignment(s)) {
-      auto op_stmts = std::static_pointer_cast<const OpStmts>(s);
-      // Check if any sub-statement is a pure scalar assignment
-      for (const auto& sub : op_stmts->stmts_) {
-        if (IsPureScalarAssignment(sub)) {
-          needs_expansion = true;
-          break;
-        }
-      }
-      if (needs_expansion) break;
-    }
-  }
-  if (!needs_expansion) return stmts;
-
-  std::vector<StmtPtr> expanded;
-  expanded.reserve(stmts.size() * 2);
-  for (const auto& s : stmts) {
-    if (s && s->GetKind() == ObjectKind::OpStmts && !IsPureScalarAssignment(s)) {
-      auto op_stmts = std::static_pointer_cast<const OpStmts>(s);
-      bool has_scalar = false;
-      for (const auto& sub : op_stmts->stmts_) {
-        if (IsPureScalarAssignment(sub)) {
-          has_scalar = true;
-          break;
-        }
-      }
-      if (has_scalar) {
-        // Expand: push sub-statements individually
-        for (const auto& sub : op_stmts->stmts_) {
-          expanded.push_back(sub);
-        }
-      } else {
-        expanded.push_back(s);
-      }
-    } else {
-      expanded.push_back(s);
-    }
-  }
-  return expanded;
 }
 
 static bool ContainsChunkLoop(const StmtPtr& stmt) {
@@ -298,11 +243,6 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   }
   if (!has_work) return body;
 
-  // Expand mixed OpStmts so scalar assignments can be classified individually.
-  // An OpStmts containing both scalar and tensor assignments would otherwise be
-  // wrapped as a unit, sweeping the scalar into InCore.
-  auto flat_stmts = ExpandMixedOpStmts(seq->stmts_);
-
   // Group consecutive wrappable statements and wrap each group in InCore
   std::vector<StmtPtr> result;
   std::vector<StmtPtr> pending;
@@ -314,7 +254,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
     pending.clear();
   };
 
-  for (const auto& s : flat_stmts) {
+  for (const auto& s : seq->stmts_) {
     if (NeedsInCoreWrapping(s)) {
       pending.push_back(s);
     } else {

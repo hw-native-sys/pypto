@@ -42,12 +42,12 @@ program_flat = flatten_pass(program)
 2. **Extract to Temps**: Create temporary variables (named like `t__tmp_v0`, `t__tmp_v1`, etc.)
 3. **Insert AssignStmt**: Add assignment statements before the original statement
 4. **Replace with Var**: Replace nested call with temporary variable reference
-5. **Handle Control Flow**: For if/for statements, insert into last OpStmts or create new one
+5. **Handle Control Flow**: For if/for statements, insert extracted temporaries directly before the control-flow node in the enclosing `SeqStmts`
 
 **Extraction locations**:
 
 - Before AssignStmt/EvalStmt: Insert directly before
-- Before IfStmt/ForStmt: Insert into last OpStmts in preceding SeqStmts, or create new OpStmts
+- Before IfStmt/ForStmt: Insert as sibling statements in the enclosing `SeqStmts`
 
 ## Example
 

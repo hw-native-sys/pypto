@@ -1153,7 +1153,7 @@ def _get_mismatch_path(lhs, rhs) -> str:
 class TestAssertStructuralEqualPath:
     """Tests for error path format: field names with transparent container folding.
 
-    Program, SeqStmts, and OpStmts are transparent containers: their field
+    Program and SeqStmts are transparent containers: their field
     names are suppressed so that vector/map accessors attach directly to the
     parent context.
 
@@ -1340,41 +1340,6 @@ class TestAssertStructuralEqualPath:
         assert "at:" in path
         assert "['main'].body[0].var" in path  # mismatch in var_ field
         assert "SeqStmts" not in path
-        assert "AssignStmt" not in path
-
-    def test_path_opstmts_transparent(self):
-        """OpStmts is also transparent → double folding: body[0][1]"""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x = ir.Var("x", ir.ScalarType(dtype), span)
-        y = ir.Var("y", ir.ScalarType(dtype), span)
-        x2 = ir.Var("x", ir.ScalarType(dtype), span)
-        y2 = ir.Var("y", ir.ScalarType(dtype), span)
-
-        op1 = ir.OpStmts(
-            [
-                ir.AssignStmt(x, ir.ConstInt(1, dtype, span), span),
-                ir.AssignStmt(y, ir.ConstInt(2, dtype, span), span),
-            ],
-            span,
-        )
-        prog1 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([op1], span), span)], "test", span)
-
-        op2 = ir.OpStmts(
-            [
-                ir.AssignStmt(x2, ir.ConstInt(1, dtype, span), span),
-                ir.AssignStmt(y2, ir.ConstInt(999, dtype, span), span),
-            ],
-            span,
-        )  # differs
-        prog2 = ir.Program([ir.Function("main", [], [], ir.SeqStmts([op2], span), span)], "test", span)
-
-        path = _get_mismatch_path(prog1, prog2)
-
-        assert "at:" in path
-        assert "['main'].body[0][1]" in path  # double transparent folding
-        assert "SeqStmts" not in path
-        assert "OpStmts" not in path
         assert "AssignStmt" not in path
 
     def test_path_function_params(self):

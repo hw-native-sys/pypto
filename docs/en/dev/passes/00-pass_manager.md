@@ -32,7 +32,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `TypeChecked` | IR has passed type checking |
 | `NoNestedCalls` | No nested call expressions |
 | `NormalizedStmtStructure` | Statement structure normalized |
-| `NoRedundantBlocks` | No single-child or nested SeqStmts/OpStmts |
+| `NoRedundantBlocks` | No single-child or nested SeqStmts |
 | `SplitIncoreOrch` | InCore scopes outlined into separate functions |
 | `ClusterOutlined` | Cluster scopes outlined into Group functions |
 | `HasMemRefs` | MemRef objects initialized on variables |

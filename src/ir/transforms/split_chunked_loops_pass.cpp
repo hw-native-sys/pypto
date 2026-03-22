@@ -108,13 +108,6 @@ static void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
       CollectDefVars(scope->body_, result);
       break;
     }
-    case ObjectKind::OpStmts: {
-      auto ops = std::static_pointer_cast<const OpStmts>(stmt);
-      for (const auto& s : ops->stmts_) {
-        CollectDefVars(s, result);
-      }
-      break;
-    }
     default:
       // YieldStmt, ReturnStmt, EvalStmt, BreakStmt, ContinueStmt — no DEFs
       break;
@@ -165,13 +158,6 @@ static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::st
     case ObjectKind::ScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
       CollectDeclaredNames(scope->body_, result);
-      break;
-    }
-    case ObjectKind::OpStmts: {
-      auto ops = std::static_pointer_cast<const OpStmts>(stmt);
-      for (const auto& s : ops->stmts_) {
-        CollectDeclaredNames(s, result);
-      }
       break;
     }
     default:

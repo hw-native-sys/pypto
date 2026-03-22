@@ -16,7 +16,6 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -34,50 +33,8 @@ namespace ir {
 namespace {
 
 /**
- * @brief Checks that consecutive AssignStmt/EvalStmt in SeqStmts are wrapped
- * in OpStmts.
- */
-class NormalizedStmtVerifier : public IRVisitor {
- public:
-  explicit NormalizedStmtVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
-
-  void CheckBody(const StmtPtr& body, const std::string& context, const Span& span) {
-    if (!body) return;
-    auto seq = As<SeqStmts>(body);
-    if (!seq) {
-      // Single-statement body is valid (no SeqStmts wrapper needed)
-      return;
-    }
-    for (const auto& stmt : seq->stmts_) {
-      if (As<AssignStmt>(stmt) || As<EvalStmt>(stmt)) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NormalizedStmtStructure", 0,
-                                  context + " SeqStmts contains unwrapped AssignStmt/EvalStmt", stmt->span_);
-      }
-    }
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    if (!op) return;
-    CheckBody(op->then_body_, "IfStmt then", op->span_);
-    if (op->else_body_.has_value()) {
-      CheckBody(op->else_body_.value(), "IfStmt else", op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    if (!op) return;
-    CheckBody(op->body_, "ForStmt", op->span_);
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  std::vector<Diagnostic>& diagnostics_;
-};
-
-/**
- * @brief Checks that no SeqStmts/OpStmts has a single child (should be
- * unwrapped) and no SeqStmts/OpStmts contains a nested instance of itself
+ * @brief Checks that no SeqStmts has a single child (should be
+ * unwrapped) and no SeqStmts contains a nested instance of itself
  * (should be flattened).
  */
 class NoRedundantBlocksVerifier : public IRVisitor {
@@ -99,19 +56,6 @@ class NoRedundantBlocksVerifier : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const OpStmtsPtr& op) override {
-    if (!op) return;
-    // Note: single-child OpStmts is valid (needed by NormalizedStmtStructure
-    // which wraps bare ops in OpStmts). Only nested OpStmts is redundant.
-    for (const auto& stmt : op->stmts_) {
-      if (As<OpStmts>(stmt)) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoRedundantBlocks", 0,
-                                  "OpStmts contains nested OpStmts", stmt->span_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
  private:
   std::vector<Diagnostic>& diagnostics_;
 };
@@ -124,13 +68,12 @@ class NormalizedStmtPropertyVerifierImpl : public PropertyVerifier {
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
+    // NormalizedStmtStructure now only ensures flat SeqStmts (no nested SeqStmts).
+    // The NoRedundantBlocks check covers this.
+    NoRedundantBlocksVerifier verifier(diagnostics);
     for (const auto& [gv, func] : program->functions_) {
-      if (!func) continue;
-      NormalizedStmtVerifier verifier(diagnostics);
-      verifier.CheckBody(func->body_, "Function '" + func->name_ + "'", func->span_);
-      if (func->body_) {
-        verifier.VisitStmt(func->body_);
-      }
+      if (!func || !func->body_) continue;
+      verifier.VisitStmt(func->body_);
     }
   }
 };

@@ -267,7 +267,6 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const ScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
-  void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
   void VisitStmt_(const ContinueStmtPtr& op) override;
@@ -319,7 +318,7 @@ class IRPythonPrinter : public IRVisitor {
   void BuildMemRefRenameMap(const FunctionPtr& func);
 
   // Print a statement block at current indent level.
-  // SeqStmts/OpStmts are transparent containers - recursed into without extra indent.
+  // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
   // Statement body visitor with SSA-style handling
@@ -1057,25 +1056,11 @@ void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
   }
 }
 
-void IRPythonPrinter::VisitStmt_(const OpStmtsPtr& op) {
-  for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    PrintStmtBlock(op->stmts_[i]);
-    if (i < op->stmts_.size() - 1) {
-      stream_ << "\n";
-    }
-  }
-}
-
 void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     for (size_t i = 0; i < seq->stmts_.size(); ++i) {
       PrintStmtBlock(seq->stmts_[i]);
       if (i < seq->stmts_.size() - 1) stream_ << "\n";
-    }
-  } else if (auto ops = As<OpStmts>(stmt)) {
-    for (size_t i = 0; i < ops->stmts_.size(); ++i) {
-      PrintStmtBlock(ops->stmts_[i]);
-      if (i < ops->stmts_.size() - 1) stream_ << "\n";
     }
   } else {
     stream_ << GetIndent();
@@ -1179,8 +1164,6 @@ static void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& 
     CollectVarDefsInOrder(while_stmt->body_, out);
   } else if (auto seq = As<SeqStmts>(stmt)) {
     for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
-  } else if (auto ops = As<OpStmts>(stmt)) {
-    for (auto& s : ops->stmts_) CollectVarDefsInOrder(s, out);
   } else if (auto scope = As<ScopeStmt>(stmt)) {
     CollectVarDefsInOrder(scope->body_, out);
   }
@@ -1200,8 +1183,6 @@ static void CollectMemRefDefsInOrder(const StmtPtr& stmt, std::vector<const MemR
     CollectMemRefDefsInOrder(while_stmt->body_, out);
   } else if (auto seq = As<SeqStmts>(stmt)) {
     for (auto& s : seq->stmts_) CollectMemRefDefsInOrder(s, out);
-  } else if (auto ops = As<OpStmts>(stmt)) {
-    for (auto& s : ops->stmts_) CollectMemRefDefsInOrder(s, out);
   } else if (auto scope = As<ScopeStmt>(stmt)) {
     CollectMemRefDefsInOrder(scope->body_, out);
   }

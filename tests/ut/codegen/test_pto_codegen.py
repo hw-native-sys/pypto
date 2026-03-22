@@ -271,7 +271,7 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
 
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
+            ir.SeqStmts(
                 [
                     ir.AssignStmt(load_tile, load_call, span),
                     ir.AssignStmt(padded_tile, fillpad_call, span),

@@ -18,14 +18,24 @@ from pypto.ir import MemorySpace
 
 
 def _iter_assign_stmts(func):
-    """Iterate all AssignStmt in function body (handles SeqStmts/OpStmts)."""
-    if not isinstance(func.body, ir.SeqStmts):
-        return
-    for child in func.body.stmts:
-        if isinstance(child, ir.OpStmts):
-            yield from (s for s in child.stmts if isinstance(s, ir.AssignStmt))
-        elif isinstance(child, ir.AssignStmt):
-            yield child
+    """Iterate all AssignStmt in function body."""
+
+    def _visit(stmt):
+        if isinstance(stmt, ir.AssignStmt):
+            yield stmt
+        elif isinstance(stmt, ir.SeqStmts):
+            for child in stmt.stmts:
+                yield from _visit(child)
+        elif isinstance(stmt, ir.ForStmt):
+            yield from _visit(stmt.body)
+        elif isinstance(stmt, ir.IfStmt):
+            yield from _visit(stmt.then_body)
+            if stmt.else_body is not None:
+                yield from _visit(stmt.else_body)
+        elif isinstance(stmt, ir.WhileStmt):
+            yield from _visit(stmt.body)
+
+    yield from _visit(func.body)
 
 
 def _get_tile_types(func):
@@ -67,7 +77,7 @@ def test_init_memref_simple():
     Also verifies:
         - addr=-1 (unallocated) for all MemRefs
         - tile.alloc statements are created for non-DDR MemRefs
-        - Body is wrapped in SeqStmts/OpStmts structure
+        - Alloc statements are prepended directly to the function body's SeqStmts
     """
 
     @pl.program
@@ -88,9 +98,9 @@ def test_init_memref_simple():
     After = passes.init_mem_ref()(Before)
     func = list(After.functions.values())[0]
 
-    # Verify body is normalized (SeqStmts > OpStmts structure)
+    # Verify body is normalized and allocs are prepended directly to the body
     assert isinstance(func.body, ir.SeqStmts)
-    assert isinstance(func.body.stmts[0], ir.OpStmts)
+    assert isinstance(func.body.stmts[0], ir.AssignStmt)
 
     # Verify param MemRefs: all DDR, addr=-1, size=16384
     param_types = _get_param_types(func)
@@ -164,7 +174,7 @@ def test_init_memref_matmul():
 
     # Verify normalized structure
     assert isinstance(func.body, ir.SeqStmts)
-    assert isinstance(func.body.stmts[0], ir.OpStmts)
+    assert isinstance(func.body.stmts[0], ir.AssignStmt)
 
     # Verify param MemRefs: all DDR
     param_types = _get_param_types(func)
@@ -221,11 +231,7 @@ def test_init_memref_rejects_dynamic_tile_shape():
 
     tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"aiv_idx": 0}, dynamic_tile_type, span)
     body = ir.SeqStmts(
-        [
-            ir.OpStmts([ir.AssignStmt(dynamic_tile, tpop_call, span)], span),
-            ir.ReturnStmt([dynamic_tile], span),
-        ],
-        span,
+        [ir.AssignStmt(dynamic_tile, tpop_call, span), ir.ReturnStmt([dynamic_tile], span)], span
     )
     func = ir.Function("test_func", [], [dynamic_tile_type], body, span)
     program = ir.Program([func], "test_program", span)
@@ -300,7 +306,7 @@ def test_init_memref_tile_with_preset_memory_space():
     return_stmt = ir.ReturnStmt([result_var], span)
 
     body = ir.SeqStmts(
-        [ir.OpStmts([load_stmt, tpop_stmt, tpop_left_stmt, add_stmt, store_stmt], span), return_stmt],
+        [load_stmt, tpop_stmt, tpop_left_stmt, add_stmt, store_stmt, return_stmt],
         span,
     )
 
@@ -359,14 +365,9 @@ def test_init_memref_untracked_tile_defaults_to_ddr():
 
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_loaded, load_call, span),
-                    ir.AssignStmt(tile_sum, add_call, span),
-                    ir.AssignStmt(result_var, store_call, span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_loaded, load_call, span),
+            ir.AssignStmt(tile_sum, add_call, span),
+            ir.AssignStmt(result_var, store_call, span),
             ir.ReturnStmt([result_var], span),
         ],
         span,
@@ -404,7 +405,7 @@ def _find_yield_stmt(stmt):
     """Recursively find YieldStmt in a statement tree."""
     if isinstance(stmt, ir.YieldStmt):
         return stmt
-    if isinstance(stmt, (ir.SeqStmts, ir.OpStmts)):
+    if isinstance(stmt, ir.SeqStmts):
         for child in stmt.stmts:
             result = _find_yield_stmt(child)
             if result:
@@ -445,7 +446,7 @@ def test_init_memref_for_stmt_loop_carry_memref_relationships():
     next_stmt = ir.AssignStmt(next_tile, ir.Call(ir.Op("tile.add"), [iter_arg, other_tile], span), span)
     return_var = ir.Var("acc_out", ir.TileType([64, 64], ir.DataType.FP32), span)
 
-    loop_body = ir.SeqStmts([ir.OpStmts([next_stmt], span), ir.YieldStmt([next_tile], span)], span)
+    loop_body = ir.SeqStmts([next_stmt, ir.YieldStmt([next_tile], span)], span)
     loop_stmt = ir.ForStmt(
         ir.Var("i", ir.ScalarType(ir.DataType.INDEX), span),
         _ci(0),
@@ -456,9 +457,7 @@ def test_init_memref_for_stmt_loop_carry_memref_relationships():
         [return_var],
         span,
     )
-    body = ir.SeqStmts(
-        [ir.OpStmts([init_stmt, other_stmt], span), loop_stmt, ir.ReturnStmt([return_var], span)], span
-    )
+    body = ir.SeqStmts([init_stmt, other_stmt, loop_stmt, ir.ReturnStmt([return_var], span)], span)
     func = ir.Function(
         "test_func",
         [(input_tensor, ir.ParamDirection.In)],

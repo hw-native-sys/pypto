@@ -555,7 +555,7 @@ class StructuralEqualImpl {
 
   // Path tracking hooks called by FieldIterator::VisitFieldImpl for each field.
   // PushFieldName pushes ".name" only when not inside a transparent container.
-  // Transparent containers (Program, SeqStmts, OpStmts) suppress their own field
+  // Transparent containers (Program, SeqStmts) suppress their own field
   // names so that their vector/map element accessors ([i] / ['key']) attach directly
   // to the parent field name, producing paths like body[1] instead of body.stmts[1].
   void PushFieldName(const char* name) {
@@ -667,7 +667,7 @@ class StructuralEqualImpl {
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
   std::vector<std::string> path_;  // Only used in assert mode
-  int transparent_depth_ = 0;      // Depth inside transparent containers (Program/SeqStmts/OpStmts)
+  int transparent_depth_ = 0;      // Depth inside transparent containers (Program/SeqStmts)
 };
 
 // Type dispatch macro for generic field-based comparison.
@@ -688,7 +688,7 @@ class StructuralEqualImpl {
     }                                                                      \
   }
 
-// Dispatch macro for transparent container nodes (Program, SeqStmts, OpStmts).
+// Dispatch macro for transparent container nodes (Program, SeqStmts).
 // Increments transparent_depth_ so that their field names are suppressed in the path,
 // allowing vector/map element accessors ([i] / ['key']) to attach directly to the
 // parent field name: e.g., body[1] instead of body.stmts[1].
@@ -757,7 +757,6 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(WhileStmt)
   EQUAL_DISPATCH(ScopeStmt)
   EQUAL_DISPATCH_TRANSPARENT(SeqStmts)
-  EQUAL_DISPATCH_TRANSPARENT(OpStmts)
   EQUAL_DISPATCH(EvalStmt)
   EQUAL_DISPATCH(BreakStmt)
   EQUAL_DISPATCH(ContinueStmt)

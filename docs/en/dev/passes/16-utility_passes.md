@@ -11,9 +11,9 @@ These utility passes handle IR normalization and cleanup tasks:
 
 These are typically used internally by other passes or for specific normalization needs.
 
-## SeqStmts::Flatten / OpStmts::Flatten
+## SeqStmts::Flatten
 
-Static helper methods for creating well-formed `SeqStmts` and `OpStmts` nodes. Code that constructs `SeqStmts` should prefer `Flatten()` to satisfy the `NoRedundantBlocks` structural property. `OpStmts` may be constructed directly when wrapping bare `AssignStmt`/`EvalStmt` as a single-child group.
+Static helper method for creating well-formed `SeqStmts` nodes. Code that constructs `SeqStmts` should prefer `Flatten()` to satisfy the `NoRedundantBlocks` structural property.
 
 ### SeqStmts::Flatten
 
@@ -29,15 +29,6 @@ static StmtPtr SeqStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
 | `Flatten({}, span)` | `SeqStmts({})` |
 
 Nested `SeqStmts` children are absorbed (flattened). Single-child results are unwrapped.
-
-### OpStmts::Flatten
-
-```cpp
-// Signature (include/pypto/ir/stmt.h)
-static StmtPtr OpStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
-```
-
-Same flattening and unwrapping logic for `OpStmts`.
 
 ### Usage in IRMutator
 
@@ -59,12 +50,10 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 
 `NoRedundantBlocks` is a **structural property** — verified at pipeline start and expected to hold at all times. It checks:
 
-| Check | SeqStmts | OpStmts |
-| ----- | -------- | ------- |
-| Single-child (should unwrap) | yes | no* |
-| Nested (should flatten) | yes | yes |
-
-*Single-child `OpStmts` is valid — `NormalizeStmtStructure` wraps bare ops in `OpStmts`.
+| Check | SeqStmts |
+| ----- | -------- |
+| Single-child (should unwrap) | yes |
+| Nested (should flatten) | yes |
 
 ---
 
@@ -78,9 +67,9 @@ Ensures IR is in a normalized form with consistent structure.
 
 Normalizes statement structure by:
 
-1. Wrapping consecutive AssignStmt/EvalStmt in OpStmts
-2. Flattening nested SeqStmts
-3. Unwrapping single-child SeqStmts
+1. Flattening nested `SeqStmts`
+2. Unwrapping single-child `SeqStmts`
+3. Leaving `AssignStmt`/`EvalStmt` as direct children of `SeqStmts`
 
 ### API
 
@@ -90,10 +79,9 @@ Normalizes statement structure by:
 
 ### Algorithm
 
-1. **Group Operations**: Wrap consecutive AssignStmt/EvalStmt in OpStmts
-2. **Flatten Nesting**: Absorb nested SeqStmts into the parent
-3. **Unwrap Single-child**: Return single child directly (no redundant SeqStmts wrapper)
-4. **Preserve Control Flow**: Keep IfStmt/ForStmt/WhileStmt unwrapped
+1. **Flatten Nesting**: Absorb nested `SeqStmts` into the parent
+2. **Unwrap Single-child**: Return single child directly (no redundant `SeqStmts` wrapper)
+3. **Preserve Control Flow**: Keep `IfStmt`/`ForStmt`/`WhileStmt` bodies otherwise unchanged
 
 ### Example
 
@@ -108,7 +96,7 @@ def func(...):
 
 ```python
 def func(...):
-    OpStmts([AssignStmt(x, 1)])  # Body is OpStmts directly (not wrapped in SeqStmts)
+    AssignStmt(x, 1)  # Single-child SeqStmts is unwrapped
 ```
 
 **Before**:
@@ -125,7 +113,8 @@ SeqStmts([
 
 ```python
 SeqStmts([
-    OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]),  # Wrapped in OpStmts
+    AssignStmt(a, 1),
+    AssignStmt(b, 2),
     IfStmt(...)
 ])
 ```
@@ -197,7 +186,7 @@ verified_program = verifier(program)  # Throws if nested calls found
 
 | Pass | When to Use |
 | ---- | ----------- |
-| **NormalizeStmtStructure** | Before passes that expect consistent SeqStmts/OpStmts structure |
+| **NormalizeStmtStructure** | Before passes that expect flat `SeqStmts` structure |
 | **VerifyNoNestedCall** | After FlattenCallExpr to ensure correctness |
 
 ## Implementation Files

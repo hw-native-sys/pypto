@@ -59,7 +59,7 @@ program_optimized = reuse_pass(program)
 
 **Alloc cleanup**:
 
-After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses OpStmts blocks and removes any `tile.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs. Empty OpStmts blocks are removed entirely.
+After MemRef sharing, some MemRef objects become unreferenced (their variables now point to a different shared MemRef). The pass traverses the surrounding `SeqStmts` and removes any `tile.alloc` `AssignStmt` whose LHS MemRef pointer is not in the set of still-used MemRefs.
 
 ## Example
 
@@ -68,7 +68,7 @@ After MemRef sharing, some MemRef objects become unreferenced (their variables n
 **Before** (after InitMemRef):
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
 mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
 mem_vec_2: MemRefType = tile.alloc(Vec, -1, 16384, 2)
@@ -82,7 +82,7 @@ tile_c: Tile[[64, 64], FP32, memref=mem_vec_2] = tile.load(...)
 **After** (tile_c reuses mem_vec_0 from tile_a, alloc for mem_vec_2 removed):
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
 mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
 # mem_vec_2 alloc removed — no longer referenced
@@ -114,7 +114,7 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.muls(tile_a, 0.0)
 When a variable is still alive **after** another variable's definition (last_use > def), their lifetimes truly overlap and they cannot share memory:
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)
 mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)
 tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
@@ -139,7 +139,7 @@ Pass BasicMemoryReuse();
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
 - `ForStmtYieldFixupMutator` inserts `tile.move` when yield/iter_arg MemRefs diverge after reuse
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
-- `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from OpStmts
+- `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from `SeqStmts`
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 

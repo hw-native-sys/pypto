@@ -44,8 +44,8 @@ namespace {
  * Nested calls are extracted into temporary variables and inserted as
  * AssignStmt before the statement containing the nested call.
  *
- * For if/for statements, extracted statements are inserted into the
- * last OpStmts before the if/for, or a new OpStmts is created if needed.
+ * For if/for statements, extracted statements are inserted directly before
+ * the if/for as siblings in the enclosing SeqStmts.
  */
 class FlattenCallExprMutator : public IRMutator {
  public:
@@ -53,7 +53,6 @@ class FlattenCallExprMutator : public IRMutator {
 
   // Statement visitors
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
-  StmtPtr VisitStmt_(const OpStmtsPtr& op) override;
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
@@ -181,56 +180,15 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const SeqStmtsPtr& op) {
 
     auto new_stmt = VisitStmt(stmt);
 
-    // If there are pending statements, insert them into an OpStmts before the current stmt
-    if (!pending_stmts_.empty()) {
-      // Find the last OpStmts before current position
-      int last_opstmts_idx = -1;
-      for (int j = static_cast<int>(new_stmts.size()) - 1; j >= 0; --j) {
-        if (As<OpStmts>(new_stmts[j])) {
-          last_opstmts_idx = j;
-          break;
-        }
-      }
-
-      if (last_opstmts_idx >= 0) {
-        // Append pending stmts to the existing OpStmts
-        auto old_opstmts = As<OpStmts>(new_stmts[last_opstmts_idx]);
-        std::vector<StmtPtr> merged = old_opstmts->stmts_;
-        merged.insert(merged.end(), pending_stmts_.begin(), pending_stmts_.end());
-        new_stmts[last_opstmts_idx] = std::make_shared<const OpStmts>(merged, old_opstmts->span_);
-      } else {
-        // No preceding OpStmts found, create a new one
-        new_stmts.push_back(std::make_shared<const OpStmts>(pending_stmts_, new_stmt->span_));
-      }
+    // Add all pending statements directly as siblings before the current stmt
+    for (const auto& pending : pending_stmts_) {
+      new_stmts.push_back(pending);
     }
 
     new_stmts.push_back(new_stmt);
   }
 
   return std::make_shared<SeqStmts>(new_stmts, op->span_);
-}
-
-StmtPtr FlattenCallExprMutator::VisitStmt_(const OpStmtsPtr& op) {
-  std::vector<StmtPtr> new_stmts;
-
-  for (const auto& stmt : op->stmts_) {
-    pending_stmts_.clear();
-
-    auto new_stmt = VisitStmt(stmt);
-
-    // Insert extracted statements (all AssignStmt, compatible with OpStmts)
-    for (const auto& pending : pending_stmts_) {
-      new_stmts.push_back(pending);
-    }
-    // Insert the original statement
-    new_stmts.push_back(new_stmt);
-  }
-
-  // Clear pending_stmts_ after processing all statements
-  // This prevents temporaries from leaking out of OpStmts
-  pending_stmts_.clear();
-
-  return std::make_shared<const OpStmts>(new_stmts, op->span_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const IfStmtPtr& op) {
@@ -383,7 +341,7 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CastPtr& op) { return ProcessUn
  * @brief Transform a function by flattening nested call expressions
  *
  * Pipeline:
- * 1. NormalizeStmtStructure - ensure bodies are SeqStmts, ops wrapped in OpStmts
+ * 1. NormalizeStmtStructure - ensure bodies are SeqStmts (no nested SeqStmts)
  * 2. FlattenCallExprMutator - extract nested calls into temporaries
  */
 FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {

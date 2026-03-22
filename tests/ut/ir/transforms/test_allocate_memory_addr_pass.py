@@ -13,11 +13,11 @@ from pypto import ir, passes
 
 
 def _iter_all_stmts(func):
-    """Iterate all AssignStmt/EvalStmt in function body (handles SeqStmts/OpStmts)."""
+    """Iterate all AssignStmt/EvalStmt in function body (handles SeqStmts)."""
     if not isinstance(func.body, ir.SeqStmts):
         return
     for child in func.body.stmts:
-        if isinstance(child, ir.OpStmts):
+        if isinstance(child, ir.SeqStmts):
             yield from child.stmts
         elif isinstance(child, (ir.AssignStmt, ir.EvalStmt)):
             yield child
@@ -190,12 +190,12 @@ def test_allocate_memory_addr_empty_function():
     assert optimized_func.name == "main"
 
 
-def test_allocate_memory_addr_alloc_in_first_opstmts():
-    """Test that alloc operations are placed in the first OpStmts.
+def test_allocate_memory_addr_allocs_are_prepended_to_body():
+    """Test that alloc operations are prepended directly to the function body.
 
     Verifies that:
-    1. Alloc statements are inside an OpStmts
-    2. Alloc statements come before other statements in the same OpStmts
+    1. Alloc statements are direct children of the top-level SeqStmts
+    2. Alloc statements come before other statements in that SeqStmts
     """
 
     @pl.program
@@ -215,12 +215,10 @@ def test_allocate_memory_addr_alloc_in_first_opstmts():
     optimized_func = list(optimized_program.functions.values())[0]
 
     assert isinstance(optimized_func.body, ir.SeqStmts)
-    first_child = optimized_func.body.stmts[0]
-    assert isinstance(first_child, ir.OpStmts), "First child of SeqStmts should be OpStmts"
 
-    # Within the first OpStmts, alloc statements should come first
+    # Alloc statements should come first in the top-level SeqStmts
     found_non_alloc = False
-    for stmt in first_child.stmts:
+    for stmt in optimized_func.body.stmts:
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
             if stmt.value.op.name == "tile.alloc":
                 assert not found_non_alloc, "Alloc statements should precede non-alloc statements"

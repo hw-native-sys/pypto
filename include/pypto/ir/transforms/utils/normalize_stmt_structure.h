@@ -20,17 +20,10 @@ namespace pypto::ir {
  * @brief Normalize statement structure in IR
  *
  * This utility ensures IR is in a normalized form:
- * 1. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts
- * 2. Single-child SeqStmts are unwrapped (no redundant nesting)
- * 3. No nested SeqStmts (SeqStmts as child of SeqStmts)
+ * 1. Single-child SeqStmts are unwrapped (no redundant nesting)
+ * 2. No nested SeqStmts (SeqStmts as child of SeqStmts)
  *
  * Example transformations:
- *   Function body = AssignStmt(x, 1)
- *   => Function body = OpStmts([AssignStmt(x, 1)])
- *
- *   SeqStmts([AssignStmt(a, 1), AssignStmt(b, 2), IfStmt(...)])
- *   => SeqStmts([OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]), IfStmt(...)])
- *
  *   SeqStmts([ReturnStmt(x)])
  *   => ReturnStmt(x)
  *

@@ -11,9 +11,9 @@
 
 这些 Pass 通常由其他 Pass 内部使用，或用于特定的规范化需求。
 
-## SeqStmts::Flatten / OpStmts::Flatten
+## SeqStmts::Flatten
 
-用于创建格式正确的 `SeqStmts` 和 `OpStmts` 节点的静态辅助方法。构造 `SeqStmts` 时应优先使用 `Flatten()` 以满足 `NoRedundantBlocks` 结构属性。`OpStmts` 在用于将裸 `AssignStmt`/`EvalStmt` 包装为单子节点时可直接构造。
+用于创建格式正确的 `SeqStmts` 节点的静态辅助方法。构造 `SeqStmts` 时应优先使用 `Flatten()` 以满足 `NoRedundantBlocks` 结构属性。
 
 ### SeqStmts::Flatten
 
@@ -29,15 +29,6 @@ static StmtPtr SeqStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
 | `Flatten({}, span)` | `SeqStmts({})` |
 
 嵌套的 `SeqStmts` 子节点会被吸收（展平）。单子节点结果会被解包。
-
-### OpStmts::Flatten
-
-```cpp
-// 签名 (include/pypto/ir/stmt.h)
-static StmtPtr OpStmts::Flatten(std::vector<StmtPtr> stmts, Span span);
-```
-
-对 `OpStmts` 使用相同的展平和解包逻辑。
 
 ### 在 IRMutator 中的使用
 
@@ -59,12 +50,10 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 
 `NoRedundantBlocks` 是一个 **结构属性** — 在流水线开始时验证，预期始终成立。检查项：
 
-| 检查 | SeqStmts | OpStmts |
-| ---- | -------- | ------- |
-| 单子节点（应解包） | 是 | 否* |
-| 嵌套（应展平） | 是 | 是 |
-
-*单子节点 `OpStmts` 是合法的 — `NormalizeStmtStructure` 将裸操作包装在 `OpStmts` 中。
+| 检查 | SeqStmts |
+| ---- | -------- |
+| 单子节点（应解包） | 是 |
+| 嵌套（应展平） | 是 |
 
 ---
 
@@ -78,9 +67,9 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 
 通过以下方式规范化语句结构：
 
-1. 将连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
-2. 展平嵌套的 SeqStmts
-3. 解包单子节点的 SeqStmts
+1. 展平嵌套的 `SeqStmts`
+2. 解包单子节点的 `SeqStmts`
+3. 让 `AssignStmt`/`EvalStmt` 直接作为 `SeqStmts` 的子节点
 
 ### API
 
@@ -90,10 +79,9 @@ return std::make_shared<SeqStmts>(new_stmts, op->span_);
 
 ### 算法
 
-1. **分组操作**：将连续的 AssignStmt/EvalStmt 包装在 OpStmts 中
-2. **展平嵌套**：将嵌套的 SeqStmts 吸收到父节点中
-3. **解包单子节点**：直接返回单个子节点（不使用冗余的 SeqStmts 包装）
-4. **保留控制流**：保持 IfStmt/ForStmt/WhileStmt 不被包装
+1. **展平嵌套**：将嵌套的 `SeqStmts` 吸收到父节点中
+2. **解包单子节点**：直接返回单个子节点（不使用冗余的 `SeqStmts` 包装）
+3. **保留控制流**：保持 `IfStmt`/`ForStmt`/`WhileStmt` 的主体结构
 
 ### 示例
 
@@ -108,7 +96,7 @@ def func(...):
 
 ```python
 def func(...):
-    OpStmts([AssignStmt(x, 1)])  # Body is OpStmts directly (not wrapped in SeqStmts)
+    AssignStmt(x, 1)  # 单子节点 SeqStmts 会被解包
 ```
 
 **之前**：
@@ -125,7 +113,8 @@ SeqStmts([
 
 ```python
 SeqStmts([
-    OpStmts([AssignStmt(a, 1), AssignStmt(b, 2)]),  # Wrapped in OpStmts
+    AssignStmt(a, 1),
+    AssignStmt(b, 2),
     IfStmt(...)
 ])
 ```
@@ -197,7 +186,7 @@ verified_program = verifier(program)  # Throws if nested calls found
 
 | Pass | 使用时机 |
 | ---- | -------- |
-| **NormalizeStmtStructure** | 在需要一致 SeqStmts/OpStmts 结构的 Pass 之前 |
+| **NormalizeStmtStructure** | 在需要扁平 `SeqStmts` 结构的 Pass 之前 |
 | **VerifyNoNestedCall** | 在 FlattenCallExpr 之后确保正确性 |
 
 ## 实现文件

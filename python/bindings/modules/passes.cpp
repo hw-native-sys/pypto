@@ -45,7 +45,7 @@ void BindPass(nb::module_& m) {
       .value("TypeChecked", IRProperty::TypeChecked, "IR has passed type checking")
       .value("NoNestedCalls", IRProperty::NoNestedCalls, "No nested call expressions")
       .value("NormalizedStmtStructure", IRProperty::NormalizedStmtStructure, "Statement structure normalized")
-      .value("NoRedundantBlocks", IRProperty::NoRedundantBlocks, "No single-child or nested SeqStmts/OpStmts")
+      .value("NoRedundantBlocks", IRProperty::NoRedundantBlocks, "No single-child or nested SeqStmts")
       .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
       .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
       .value("IncoreTileOps", IRProperty::IncoreTileOps,

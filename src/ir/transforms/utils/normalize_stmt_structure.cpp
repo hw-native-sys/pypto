@@ -28,9 +28,8 @@ namespace pypto::ir {
  * @brief Mutator that normalizes statement structure
  *
  * This mutator ensures:
- * 1. Consecutive AssignStmt/EvalStmt in SeqStmts are wrapped in OpStmts
- * 2. Nested SeqStmts are flattened
- * 3. Single-child SeqStmts are unwrapped
+ * 1. Nested SeqStmts are flattened
+ * 2. Single-child SeqStmts are unwrapped
  */
 class NormalizeStmtStructureMutator : public IRMutator {
  public:
@@ -46,20 +45,13 @@ class NormalizeStmtStructureMutator : public IRMutator {
   /**
    * @brief Normalize a body statement
    *
-   * Normalizes the body content (wrapping consecutive AssignStmt/EvalStmt in
-   * OpStmts). Single-child SeqStmts are unwrapped to avoid redundant nesting.
+   * Normalizes the body content. Single-child SeqStmts are unwrapped to avoid
+   * redundant nesting.
    *
    * @param body Input body statement
    * @return Normalized statement
    */
   StmtPtr NormalizeBody(const StmtPtr& body);
-
-  /**
-   * @brief Check if a statement is AssignStmt or EvalStmt
-   */
-  [[nodiscard]] bool IsOpStmt(const StmtPtr& stmt) const {
-    return As<AssignStmt>(stmt) || As<EvalStmt>(stmt);
-  }
 };
 
 StmtPtr NormalizeStmtStructureMutator::NormalizeBody(const StmtPtr& body) {
@@ -68,36 +60,12 @@ StmtPtr NormalizeStmtStructureMutator::NormalizeBody(const StmtPtr& body) {
 
   // If it's already a SeqStmts, it will be normalized by VisitStmt_(SeqStmtsPtr)
   // (which also unwraps single-child SeqStmts)
-  if (As<SeqStmts>(visited_body)) {
-    return visited_body;
-  }
-
-  // Single statement body: wrap bare AssignStmt/EvalStmt in OpStmts,
-  // otherwise return as-is (no redundant SeqStmts wrapper)
-  if (IsOpStmt(visited_body)) {
-    return std::make_shared<const OpStmts>(std::vector<StmtPtr>{visited_body}, visited_body->span_);
-  }
   return visited_body;
 }
 
 StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const SeqStmtsPtr& op) {
   std::vector<StmtPtr> new_stmts;
-  std::vector<StmtPtr> current_group;  // Group of consecutive AssignStmt/EvalStmt
   bool changed = false;
-
-  auto add_stmt = [&](const StmtPtr& s) {
-    if (IsOpStmt(s)) {
-      current_group.push_back(s);
-    } else {
-      if (!current_group.empty()) {
-        auto op_stmts = std::make_shared<const OpStmts>(current_group, current_group[0]->span_);
-        new_stmts.push_back(op_stmts);
-        current_group.clear();
-        changed = true;
-      }
-      new_stmts.push_back(s);
-    }
-  };
 
   for (const auto& stmt : op->stmts_) {
     auto new_stmt = VisitStmt(stmt);
@@ -109,18 +77,11 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const SeqStmtsPtr& op) {
     if (auto nested_seq = As<SeqStmts>(new_stmt)) {
       changed = true;
       for (const auto& inner : nested_seq->stmts_) {
-        add_stmt(inner);
+        new_stmts.push_back(inner);
       }
     } else {
-      add_stmt(new_stmt);
+      new_stmts.push_back(new_stmt);
     }
-  }
-
-  // Flush remaining group
-  if (!current_group.empty()) {
-    auto op_stmts = std::make_shared<const OpStmts>(current_group, current_group[0]->span_);
-    new_stmts.push_back(op_stmts);
-    changed = true;
   }
 
   // Unwrap single-child even if content didn't change
@@ -196,12 +157,6 @@ FunctionPtr NormalizeStmtStructure(const FunctionPtr& func) {
 
   NormalizeStmtStructureMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
-
-  // Wrap bare AssignStmt/EvalStmt in OpStmts.
-  // Single-statement bodies remain unwrapped (no redundant SeqStmts).
-  if (!As<SeqStmts>(new_body) && (As<AssignStmt>(new_body) || As<EvalStmt>(new_body))) {
-    new_body = std::make_shared<const OpStmts>(std::vector<StmtPtr>{new_body}, new_body->span_);
-  }
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_);

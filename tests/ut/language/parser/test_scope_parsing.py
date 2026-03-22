@@ -37,7 +37,7 @@ class TestScopeParsing:
         assert main_func.name == "main"
 
         # Verify the body contains a ScopeStmt
-        # The body should be SeqStmts containing OpStmts with ScopeStmt
+        # The body should be SeqStmts containing ScopeStmt
         assert isinstance(main_func.body, ir.SeqStmts)
 
     def test_parse_nested_operations_in_scope(self):

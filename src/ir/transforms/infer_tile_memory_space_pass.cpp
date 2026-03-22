@@ -60,10 +60,6 @@ YieldStmtPtr FindLoopExitYield(const StmtPtr& body) {
     if (seq->stmts_.empty()) return nullptr;
     return FindLoopExitYield(seq->stmts_.back());
   }
-  if (auto ops = As<OpStmts>(body)) {
-    if (ops->stmts_.empty()) return nullptr;
-    return FindLoopExitYield(ops->stmts_.back());
-  }
   return As<YieldStmt>(body);
 }
 
@@ -286,13 +282,6 @@ class TileMemorySpaceMutator : public IRMutator {
     auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);
     if (!changed) return op;
     return std::make_shared<SeqStmts>(std::move(new_stmts), op->span_);
-  }
-
-  StmtPtr VisitStmt_(const OpStmtsPtr& op) override {
-    bool changed = false;
-    auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);
-    if (!changed) return op;
-    return std::make_shared<OpStmts>(std::move(new_stmts), op->span_);
   }
 
  private:

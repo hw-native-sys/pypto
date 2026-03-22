@@ -555,23 +555,6 @@ static IRNodePtr DeserializeSeqStmts(const msgpack::object& fields_obj, msgpack:
   return std::make_shared<SeqStmts>(stmts, span);
 }
 
-// Deserialize OpStmts
-static IRNodePtr DeserializeOpStmts(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                    DeserializerContext& ctx) {
-  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-
-  std::vector<StmtPtr> stmts;
-  auto stmts_obj = GET_FIELD_OBJ("stmts");
-  if (stmts_obj.type == msgpack::type::ARRAY) {
-    for (uint32_t i = 0; i < stmts_obj.via.array.size; ++i) {
-      stmts.push_back(
-          std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(stmts_obj.via.array.ptr[i], zone)));
-    }
-  }
-
-  return std::make_shared<OpStmts>(stmts, span);
-}
-
 // Deserialize EvalStmt
 static IRNodePtr DeserializeEvalStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -775,7 +758,6 @@ static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
 static TypeRegistrar _scope_stmt_registrar("ScopeStmt", DeserializeScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
-static TypeRegistrar _op_stmts_registrar("OpStmts", DeserializeOpStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
 static TypeRegistrar _continue_stmt_registrar("ContinueStmt", DeserializeContinueStmt);

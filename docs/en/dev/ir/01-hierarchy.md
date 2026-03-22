@@ -13,7 +13,7 @@ This document provides a complete reference of all IR node types, organized by c
 <type_list>  ::= <type> { "," <type> }
 
 <stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
-               | <eval_stmt> | <seq_stmts> | <op_stmts> | <scope_stmt>
+               | <eval_stmt> | <seq_stmts> | <scope_stmt>
                | <break_stmt> | <continue_stmt>
 
 <assign_stmt> ::= <var> "=" <expr>
@@ -31,7 +31,6 @@ This document provides a complete reference of all IR node types, organized by c
 <yield_stmt> ::= "yield" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<op_stmts>   ::= <assign_stmt> { ";" <assign_stmt> }
 <scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
@@ -154,7 +153,6 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
-| **OpStmts** | `stmts_` | Assignment statement sequence |
 | **BreakStmt** | *(none)* | Exit loop |
 | **ContinueStmt** | *(none)* | Skip to next loop iteration |
 
@@ -348,7 +346,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts, BreakStmt, ContinueStmt |
+| **Statements** | 10 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

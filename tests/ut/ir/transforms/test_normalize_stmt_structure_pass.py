@@ -10,12 +10,11 @@
 """Unit tests for NormalizeStmtStructure pass.
 
 This pass normalizes IR structure by:
-1. Wrapping consecutive AssignStmt/EvalStmt in OpStmts
-2. Unwrapping single-child SeqStmts (no redundant nesting)
-3. Preventing nested SeqStmts (SeqStmts as child of SeqStmts)
+1. Unwrapping single-child SeqStmts (no redundant nesting)
+2. Preventing nested SeqStmts (SeqStmts as child of SeqStmts)
 
-Tests use IR Builder to create before/expected programs (SeqStmts and OpStmts
-are not directly exposed in the Python DSL). Each test compares pass output
+Tests use IR Builder to create before/expected programs (SeqStmts
+is not directly exposed in the Python DSL). Each test compares pass output
 with expected IR via assert_structural_equal.
 """
 
@@ -53,8 +52,8 @@ def test_normalize_simple_function():
         span,
     )
 
-    # Build Expected IR: Function body is OpStmts([assign])
-    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
+    # Build Expected IR: Function body is the assign statement directly
+    # (single-child SeqStmts is unwrapped, so body is the assign directly)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
@@ -72,7 +71,7 @@ def test_normalize_simple_function():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.OpStmts([assign_expected], span),
+                assign_expected,
                 span,
             )
         ],
@@ -86,7 +85,7 @@ def test_normalize_simple_function():
 
 
 def test_normalize_seqstmts_with_bare_assigns():
-    """Test normalizing SeqStmts containing bare AssignStmt (should be wrapped in OpStmts)."""
+    """Test normalizing SeqStmts containing bare AssignStmt (statements stay as direct children)."""
     span = ir.Span.unknown()
 
     # Build Before IR: SeqStmts([assign1, assign2]) - bare assigns
@@ -127,8 +126,8 @@ def test_normalize_seqstmts_with_bare_assigns():
         span,
     )
 
-    # Build Expected IR: OpStmts([assign1, assign2])
-    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
+    # Build Expected IR: SeqStmts([assign1, assign2])
+    # (assigns remain as direct children of SeqStmts)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     a_expected = ir.Var("a", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     b_expected = ir.Var("b", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
@@ -158,7 +157,7 @@ def test_normalize_seqstmts_with_bare_assigns():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.OpStmts([assign1_expected, assign2_expected], span),
+                ir.SeqStmts([assign1_expected, assign2_expected], span),
                 span,
             )
         ],
@@ -201,8 +200,8 @@ def test_idempotence():
         span,
     )
 
-    # Build Expected IR: Function body is OpStmts([assign])
-    # (single-child SeqStmts is unwrapped, so body is OpStmts directly)
+    # Build Expected IR: Function body is the assign statement directly
+    # (single-child SeqStmts is unwrapped, so body is the assign directly)
     x_expected = ir.Var("x", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span)
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
@@ -220,7 +219,7 @@ def test_idempotence():
                 "main",
                 [x_expected],
                 [ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)],
-                ir.OpStmts([assign_expected], span),
+                assign_expected,
                 span,
             )
         ],

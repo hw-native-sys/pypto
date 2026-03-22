@@ -66,7 +66,7 @@ PyPTO IR 使用高效的 **基于 Kind 的类型识别机制**，避免 C++ RTTI
 | **表达式** | Var, IterArg, Call, TupleGetItemExpr, ConstInt, ConstFloat, ConstBool |
 | **二元运算** | Add, Sub, Mul, FloorDiv, FloorMod, FloatDiv, Min, Max, Pow, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, BitAnd, BitOr, BitXor, BitShiftLeft, BitShiftRight |
 | **一元运算** | Abs, Neg, Not, BitNot, Cast |
-| **语句** | AssignStmt, IfStmt, YieldStmt, ReturnStmt, ForStmt, SeqStmts, OpStmts, EvalStmt |
+| **语句** | AssignStmt, IfStmt, YieldStmt, ReturnStmt, ForStmt, SeqStmts, EvalStmt |
 | **类型** | UnknownType, ScalarType, ShapedType, TensorType, TileType, TupleType, PipeType |
 | **其他** | Function, Program, Op, GlobalVar |
 

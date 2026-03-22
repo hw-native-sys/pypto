@@ -42,7 +42,7 @@ namespace ir {
  * Key features:
  * - One-time analysis: Build the map once, query multiple times
  * - Root statements have no parent (GetParent returns nullptr)
- * - Handles all statement types: SeqStmts, OpStmts, IfStmt, ForStmt, etc.
+ * - Handles all statement types: SeqStmts, IfStmt, ForStmt, etc.
  * - Thread-safe for read operations after BuildMap completes
  *
  * Note: The analysis becomes invalid after IR transformations. Call BuildMap again
@@ -59,7 +59,7 @@ class ParentStmtAnalysis : public IRVisitor {
    * @param func The function to analyze (can be nullptr, resulting in empty map)
    *
    * Parent relationships established:
-   * - For SeqStmts/OpStmts: Each child statement's parent is the SeqStmts/OpStmts
+   * - For SeqStmts: Each child statement's parent is the SeqStmts
    * - For IfStmt: then_body and else_body (if present) have IfStmt as parent
    * - For ForStmt: body has ForStmt as parent
    * - Root statement (function->body_) has no parent

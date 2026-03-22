@@ -101,9 +101,7 @@ PropertyVerifierPtr CreateNormalizedStmtPropertyVerifier();
  * @brief Factory function for creating NoRedundantBlocks property verifier
  *
  * Verifies that no SeqStmts has exactly one child (should be unwrapped),
- * and no SeqStmts/OpStmts contains a nested instance of itself (should be
- * flattened). Single-child OpStmts is allowed (NormalizeStmtStructure wraps
- * bare ops in OpStmts).
+ * and no SeqStmts contains a nested SeqStmts (should be flattened).
  * @return Shared pointer to NoRedundantBlocks PropertyVerifier
  */
 PropertyVerifierPtr CreateNoRedundantBlocksPropertyVerifier();

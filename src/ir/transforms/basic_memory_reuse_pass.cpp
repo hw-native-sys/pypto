@@ -112,20 +112,13 @@ void CollectVarUsesFromExprs(const std::vector<ExprPtr>& exprs, const StmtPtr& s
 /**
  * @brief Find the first leaf statement in a statement subtree.
  *
- * Mirrors CollectStmtsInBlock logic: unwraps SeqStmts/OpStmts, skips
+ * Mirrors CollectStmtsInBlock logic: unwraps SeqStmts, skips
  * IfStmt/ForStmt/WhileStmt. Returns nullptr if no leaf is found.
  */
 StmtPtr FindFirstLeafStmt(const StmtPtr& stmt) {
   if (!stmt) return nullptr;
   if (auto seq = As<SeqStmts>(stmt)) {
     for (const auto& sub : seq->stmts_) {
-      auto leaf = FindFirstLeafStmt(sub);
-      if (leaf) return leaf;
-    }
-    return nullptr;
-  }
-  if (auto op_stmts = As<OpStmts>(stmt)) {
-    for (const auto& sub : op_stmts->stmts_) {
       auto leaf = FindFirstLeafStmt(sub);
       if (leaf) return leaf;
     }
@@ -803,16 +796,14 @@ class ForStmtYieldFixupMutator : public IRMutator {
   }
 
   // Replace YieldStmt in body and insert move AssignStmts before it.
-  // Body structure is typically SeqStmts([OpStmts([...assigns...]), YieldStmt]).
-  // Move stmts go into the OpStmts (they are AssignStmts), yield is replaced at SeqStmts level.
+  // Body structure is typically SeqStmts([...assigns..., YieldStmt]).
+  // Move stmts go directly into the SeqStmts before the yield.
   static StmtPtr InsertMovesAndReplaceYield(const StmtPtr& body, const YieldStmtPtr& new_yield,
                                             const std::vector<StmtPtr>& move_stmts) {
     if (As<YieldStmt>(body)) {
       // Body is just a yield — wrap moves + yield in SeqStmts
       std::vector<StmtPtr> stmts;
-      if (!move_stmts.empty()) {
-        stmts.push_back(std::make_shared<OpStmts>(move_stmts, body->span_));
-      }
+      stmts.insert(stmts.end(), move_stmts.begin(), move_stmts.end());
       stmts.push_back(new_yield);
       return std::make_shared<SeqStmts>(stmts, body->span_);
     }
@@ -820,10 +811,8 @@ class ForStmtYieldFixupMutator : public IRMutator {
       std::vector<StmtPtr> new_children;
       for (const auto& child : seq->stmts_) {
         if (As<YieldStmt>(child)) {
-          // Insert move stmts as OpStmts before the new yield
-          if (!move_stmts.empty()) {
-            new_children.push_back(std::make_shared<OpStmts>(move_stmts, child->span_));
-          }
+          // Insert move stmts directly before the new yield
+          new_children.insert(new_children.end(), move_stmts.begin(), move_stmts.end());
           new_children.push_back(new_yield);
         } else {
           new_children.push_back(child);
@@ -861,7 +850,7 @@ bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const MemRef*>& used_
   return used_ptrs.find(memref.get()) == used_ptrs.end();
 }
 
-// Remove unused alloc statements from OpStmts within a SeqStmts body
+// Remove unused alloc statements from a SeqStmts body
 StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const MemRef*>& used_ptrs) {
   auto seq = As<SeqStmts>(body);
   if (!seq) return body;
@@ -870,28 +859,11 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Me
   bool changed = false;
 
   for (const auto& child : seq->stmts_) {
-    if (auto op_stmts = As<OpStmts>(child)) {
-      std::vector<StmtPtr> filtered;
-      for (const auto& stmt : op_stmts->stmts_) {
-        if (IsUnusedAllocStmt(stmt, used_ptrs)) {
-          changed = true;
-          continue;
-        }
-        filtered.push_back(stmt);
-      }
-      if (filtered.empty()) {
-        changed = true;
-        continue;
-      }
-      if (filtered.size() != op_stmts->stmts_.size()) {
-        new_seq_stmts.push_back(std::make_shared<OpStmts>(filtered, child->span_));
-        changed = true;
-      } else {
-        new_seq_stmts.push_back(child);
-      }
-    } else {
-      new_seq_stmts.push_back(child);
+    if (IsUnusedAllocStmt(child, used_ptrs)) {
+      changed = true;
+      continue;
     }
+    new_seq_stmts.push_back(child);
   }
 
   if (!changed) return body;

@@ -48,12 +48,12 @@ program_with_memrefs = init_pass(program)
 
 ## 算法
 
-1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 SeqStmts/OpStmts 结构
+1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
 2. **分析用法**：遍历函数体，确定每个变量的内存空间
 3. **初始化 MemRef**：创建 MemRef 对象（addr=-1）并附加到变量类型
 4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
-6. **插入到第一个 OpStmts**：将 alloc 语句前置到函数体的第一个 OpStmts 中
+6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
 
 ## 示例
 
@@ -75,13 +75,11 @@ def main(
     output: Tensor[[64, 64], FP32, MemRef(space=DDR, addr=-1, id=1)],
 ):
     # SeqStmts [
-    #   OpStmts [
     mem_vec_2: MemRefType = tile.alloc(Vec, -1, 16384, 2)
     mem_vec_3: MemRefType = tile.alloc(Vec, -1, 16384, 3)
     tile_a: Tile[[64, 64], FP32, memref=mem_vec_2] = tile.load(input_a, [0, 0], [64, 64])
     tile_b: Tile[[64, 64], FP32, memref=mem_vec_3] = tile.add(tile_a, tile_a)
     result: Tensor[[64, 64], FP32, memref=mem_ddr_1] = tile.store(tile_b, [0, 0], output)
-    #   ]
     #   ReturnStmt [result]
     # ]
 ```
@@ -91,7 +89,7 @@ def main(
 - `addr=-1` 表示地址尚未分配（稍后由 AllocateMemoryAddr 完成）
 - DDR MemRef（参数）不会生成 `tile.alloc` 语句
 - `tile.store` 结果与输出张量参数共享 MemRef
-- Alloc 语句放置在第一个 OpStmts 的开头
+- Alloc 语句放置在函数体顶层 `SeqStmts` 的开头
 
 ## ForStmt 循环携带变量
 
@@ -138,6 +136,6 @@ passes.def("init_mem_ref", &pass::InitMemRef, "Initialize MemRef for variables")
 - 测试内存空间分配（Vec、Mat、Left、Right、Acc、DDR）
 - 测试所有 MemRef 的 addr=-1
 - 测试为非 DDR MemRef 创建 tile.alloc 语句
-- 测试规范化的 SeqStmts/OpStmts 结构
+- 测试规范化后的 `SeqStmts` 结构
 - 测试 tile.store 结果与输出参数共享 MemRef
 - 测试 ForStmt 循环携带变量的 MemRef 关系（initValue/iter_arg 共享，yield/return_var 共享）

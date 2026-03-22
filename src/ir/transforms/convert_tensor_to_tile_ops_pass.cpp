@@ -53,9 +53,6 @@ std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     return seq->stmts_;
   }
-  if (auto op_stmts = As<OpStmts>(stmt)) {
-    return op_stmts->stmts_;
-  }
   return {stmt};
 }
 
@@ -440,13 +437,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       continue;
     }
 
-    // OpStmts: recurse into children (same structure as SeqStmts)
-    if (auto op_stmts = As<OpStmts>(stmt)) {
-      auto inner = TransformIncoreBody(op_stmts->stmts_, tensor_to_tile, conv_registry, op_registry, span);
-      result.insert(result.end(), inner.begin(), inner.end());
-      continue;
-    }
-
     // ScopeStmt: recurse into body (transparent scope, defs leak through)
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
@@ -808,14 +798,6 @@ class VarUseVisitor : public IRVisitor {
   }
 
   void VisitStmt_(const SeqStmtsPtr& op) override {
-    if (!op) return;
-    for (const auto& stmt : op->stmts_) {
-      VisitStmt(stmt);
-      if (found_) return;
-    }
-  }
-
-  void VisitStmt_(const OpStmtsPtr& op) override {
     if (!op) return;
     for (const auto& stmt : op->stmts_) {
       VisitStmt(stmt);
@@ -1216,14 +1198,6 @@ std::vector<StmtPtr> UpdateCallSitesBody(
     if (auto seq = As<SeqStmts>(stmt)) {
       auto inner = UpdateCallSitesBody(seq->stmts_, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
-      result.insert(result.end(), inner.begin(), inner.end());
-      continue;
-    }
-
-    // OpStmts: recurse (same structure as SeqStmts)
-    if (auto op_stmts = As<OpStmts>(stmt)) {
-      auto inner = UpdateCallSitesBody(op_stmts->stmts_, var_map, incore_added_outputs,
-                                       transformed_incore_funcs, op_registry, span, changed);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }

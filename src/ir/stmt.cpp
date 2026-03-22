@@ -11,27 +11,6 @@
 
 #include "pypto/ir/stmt.h"
 
-#include <cstddef>
-#include <utility>
-#include <vector>
-
-#include "pypto/core/logging.h"
-#include "pypto/ir/core.h"
-#include "pypto/ir/span.h"
-
 namespace pypto {
-namespace ir {
-
-OpStmts::OpStmts(std::vector<StmtPtr> stmts, Span span) : Stmt(std::move(span)), stmts_(std::move(stmts)) {
-  // Validate that all statements are AssignStmt or EvalStmt
-  for (size_t i = 0; i < stmts_.size(); ++i) {
-    const auto& stmt = stmts_[i];
-    INTERNAL_CHECK(stmt) << "OpStmts has null statement at index " << i;
-    auto kind = stmt->GetKind();
-    INTERNAL_CHECK(kind == ObjectKind::AssignStmt || kind == ObjectKind::EvalStmt)
-        << "OpStmts only accepts AssignStmt or EvalStmt, but got " << stmt->TypeName() << " at index " << i;
-  }
-}
-
-}  // namespace ir
+namespace ir {}  // namespace ir
 }  // namespace pypto

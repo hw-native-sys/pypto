@@ -34,7 +34,7 @@ enum class IRProperty : uint64_t {
   TypeChecked,              ///< IR has passed type checking
   NoNestedCalls,            ///< No nested call expressions
   NormalizedStmtStructure,  ///< Statement structure normalized
-  NoRedundantBlocks,        ///< No single-child or nested SeqStmts/OpStmts
+  NoRedundantBlocks,        ///< No single-child or nested SeqStmts
   SplitIncoreOrch,          ///< InCore scopes outlined into separate functions
   HasMemRefs,               ///< MemRef objects initialized on variables
   IncoreTileOps,            ///< InCore functions use tile ops (tile types, load/store)

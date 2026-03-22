@@ -94,7 +94,6 @@ class IRVisitor : public IRFunctor<void> {
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const ScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
-  void VisitStmt_(const OpStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
   void VisitStmt_(const ContinueStmtPtr& op) override;

@@ -223,13 +223,6 @@ void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
   }
 }
 
-void IRVisitor::VisitStmt_(const OpStmtsPtr& op) {
-  for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    INTERNAL_CHECK(op->stmts_[i]) << "OpStmts has null statement at index " << i;
-    VisitStmt(op->stmts_[i]);
-  }
-}
-
 void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK(op->expr_) << "EvalStmt has null expr";
   VisitExpr(op->expr_);

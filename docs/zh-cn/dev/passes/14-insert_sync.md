@@ -41,8 +41,8 @@ program_with_sync = sync_pass(program)
 1. **阶段一 -- 依赖收集**：遍历中间表示 (IR) 树，确定每个操作的流水线分配（使用后端流水线信息），并收集生产者-消费者同步对（包括跨流水线和同流水线）。对于循环，额外展开一次迭代以检测跨迭代依赖。
 2. **阶段二 -- 作用域调整**：调整跨越作用域边界（IfStmt/ForStmt）的同步对：
    - 跨迭代（wait <= set 在同一 for 循环体内，包括同流水线屏障）：将 sync_dst/bar 移至迭代末尾
-   - 当 wait 在比 set 更深的作用域中时：将 sync_dst 移至 set 所在 OpStmts 的末尾
-   - 当 set 在比 wait 更深的作用域中时：将 sync_src 移至 wait 所在 OpStmts 的开头
+   - 当 wait 在比 set 更深的作用域中时：将 `sync_dst` 移到父级 `SeqStmts` 中生产者所在连续同级操作片段的末尾
+   - 当 set 在比 wait 更深的作用域中时：将 `sync_src` 移到父级 `SeqStmts` 中消费者所在连续同级操作片段的开头
 3. **阶段三 -- 事件 ID 分配**：为同步操作分配唯一的事件 ID，尽可能复用 ID
 4. **阶段四 -- AST 构建**：构建包含 sync_src/sync_dst/barrier 插入的最终 IR
 
@@ -50,10 +50,10 @@ program_with_sync = sync_pass(program)
 
 - **生产者-消费者**：sync_src（生产者） -> sync_dst（消费者）
 - **流水线屏障**：bar_v / bar_m
-- **If 分支作用域**：当生产者在 if 分支中而消费者在外部时，sync_src 被移至消费者所在 OpStmts 的开头
-- **For 循环体到父级**：当生产者在 for 循环体中而消费者在外部时，sync_src 被移至消费者所在 OpStmts 的开头
+- **If 分支作用域**：当生产者在 if 分支中而消费者在外部时，`sync_src` 被移至消费者所在同级操作片段的开头
+- **For 循环体到父级**：当生产者在 for 循环体中而消费者在外部时，`sync_src` 被移至消费者所在同级操作片段的开头
 - **跨迭代**：sync_dst/bar 放置在迭代末尾（yield 之前）
-- **OpStmts 合并**：同步操作合并到相邻的 OpStmts 中（不产生独立的同步 OpStmts）
+- **同级片段合并**：同步操作合并到同一个 `SeqStmts` 中的相邻语句附近（不再依赖独立包装节点）
 
 ## 示例
 

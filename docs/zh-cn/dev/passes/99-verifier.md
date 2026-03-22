@@ -66,8 +66,8 @@
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
 | **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |
-| **NormalizedStmtStructure** | NormalizedStmtStructure | 连续赋值包装在 OpStmts 中 |
-| **NoRedundantBlocks** | NoRedundantBlocks | 无单子节点或嵌套的 SeqStmts/OpStmts |
+| **NormalizedStmtStructure** | NormalizedStmtStructure | 展平嵌套 `SeqStmts` 并解包单子节点 `SeqStmts` |
+| **NoRedundantBlocks** | NoRedundantBlocks | 无单子节点或嵌套的 `SeqStmts` |
 | **SplitIncoreOrch** | SplitIncoreOrch | Opaque 函数中不残留 InCore ScopeStmts |
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |

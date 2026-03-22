@@ -550,35 +550,17 @@ StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) 
   return std::make_shared<AssignStmt>(memref, alloc_call, Span::unknown());
 }
 
-// Insert alloc statements at the beginning of the first OpStmts in a SeqStmts body
+// Insert alloc statements at the beginning of a SeqStmts body
 StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
   if (alloc_stmts.empty()) return body;
 
   auto seq = As<SeqStmts>(body);
   if (!seq || seq->stmts_.empty()) return body;
 
+  // Prepend alloc statements directly into the SeqStmts
   std::vector<StmtPtr> new_seq_stmts;
-  bool inserted = false;
-
-  for (const auto& child : seq->stmts_) {
-    if (!inserted) {
-      if (auto op_stmts = As<OpStmts>(child)) {
-        // Prepend alloc statements into the first OpStmts
-        std::vector<StmtPtr> merged = alloc_stmts;
-        merged.insert(merged.end(), op_stmts->stmts_.begin(), op_stmts->stmts_.end());
-        new_seq_stmts.push_back(std::make_shared<OpStmts>(merged, child->span_));
-        inserted = true;
-        continue;
-      }
-    }
-    new_seq_stmts.push_back(child);
-  }
-
-  if (!inserted) {
-    // No OpStmts found — create one at the beginning
-    auto new_op_stmts = std::make_shared<OpStmts>(alloc_stmts, Span::unknown());
-    new_seq_stmts.insert(new_seq_stmts.begin(), new_op_stmts);
-  }
+  new_seq_stmts.insert(new_seq_stmts.end(), alloc_stmts.begin(), alloc_stmts.end());
+  new_seq_stmts.insert(new_seq_stmts.end(), seq->stmts_.begin(), seq->stmts_.end());
 
   return std::make_shared<SeqStmts>(new_seq_stmts, body->span_);
 }
@@ -587,7 +569,7 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * @brief Initialize MemRef for all variables in a function
  *
  * This transformation:
- * 1. Normalizes statement structure (ensures SeqStmts/OpStmts)
+ * 1. Normalizes statement structure (ensures SeqStmts)
  * 2. Initializes the MemRef field for all Var nodes
  * 3. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
  *
@@ -598,7 +580,7 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * - Non-tile variables -> DDR (default)
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
-  // Step 1: Normalize statement structure to ensure SeqStmts/OpStmts
+  // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
   // Step 2: Analyze usage to determine memory space for each variable
@@ -639,7 +621,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
   }
 
-  // Step 5: Insert alloc statements into the first OpStmts
+  // Step 5: Insert alloc statements at the beginning of the function body
   auto final_body = InsertAllocsIntoBody(new_body, alloc_stmts);
 
   return std::make_shared<Function>(result_func->name_, new_params, result_func->param_directions_,

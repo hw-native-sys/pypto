@@ -93,17 +93,12 @@ def test_insert_sync_cross_pipe():
     # Build Before IR
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_c, tile.add(tile_a, tile_b), span),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_c, offsets=[0, 0], output_tensor=output),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_c, tile.add(tile_a, tile_b), span),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_c, offsets=[0, 0], output_tensor=output),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -123,21 +118,16 @@ def test_insert_sync_cross_pipe():
     # Build Expected IR (reuse vars from Before since auto_mapping handles mapping)
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                    ir.AssignStmt(tile_c, tile.add(tile_a, tile_b), span),
-                    make_sync_src(V, MTE3, 0),
-                    make_sync_dst(V, MTE3, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_c, offsets=[0, 0], output_tensor=output),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
+            ir.AssignStmt(tile_c, tile.add(tile_a, tile_b), span),
+            make_sync_src(V, MTE3, 0),
+            make_sync_dst(V, MTE3, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_c, offsets=[0, 0], output_tensor=output),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -193,13 +183,8 @@ def test_insert_sync_intra_pipe():
     # Build Before IR
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(t_c, tile.add(t_a, t_b), span),
-                    ir.AssignStmt(t_d, tile.add(t_c, t_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(t_c, tile.add(t_a, t_b), span),
+            ir.AssignStmt(t_d, tile.add(t_c, t_a), span),
             ir.ReturnStmt([t_d], span),
         ],
         span,
@@ -215,14 +200,9 @@ def test_insert_sync_intra_pipe():
     # Build Expected IR
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(t_c, tile.add(t_a, t_b), span),
-                    make_bar_v(),
-                    ir.AssignStmt(t_d, tile.add(t_c, t_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(t_c, tile.add(t_a, t_b), span),
+            make_bar_v(),
+            ir.AssignStmt(t_d, tile.add(t_c, t_a), span),
             ir.ReturnStmt([t_d], span),
         ],
         span,
@@ -304,17 +284,12 @@ def test_insert_sync_cube_pipe():
     # Build Before IR
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, load_a, span),
-                    ir.AssignStmt(tile_b, load_b, span),
-                    ir.AssignStmt(tile_a_cube, move_a, span),
-                    ir.AssignStmt(tile_b_cube, move_b, span),
-                    ir.AssignStmt(tile_c, matmul_op, span),
-                    ir.AssignStmt(store_result, store_op, span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, load_a, span),
+            ir.AssignStmt(tile_b, load_b, span),
+            ir.AssignStmt(tile_a_cube, move_a, span),
+            ir.AssignStmt(tile_b_cube, move_b, span),
+            ir.AssignStmt(tile_c, matmul_op, span),
+            ir.AssignStmt(store_result, store_op, span),
             ir.ReturnStmt(span),
         ],
         span,
@@ -330,27 +305,22 @@ def test_insert_sync_cube_pipe():
     # Build Expected IR
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, MTE1, 0),
-                    ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, MTE1, 1),
-                    make_sync_dst(MTE2, MTE1, 0),
-                    ir.AssignStmt(tile_a_cube, tile.move(tile_a, target_memory=ir.MemorySpace.Left), span),
-                    make_sync_dst(MTE2, MTE1, 1),
-                    ir.AssignStmt(tile_b_cube, tile.move(tile_b, target_memory=ir.MemorySpace.Right), span),
-                    make_sync_src(MTE1, M, 0),
-                    make_sync_dst(MTE1, M, 0),
-                    ir.AssignStmt(tile_c, tile.matmul(tile_a_cube, tile_b_cube), span),
-                    make_sync_src(M, FIX, 0),
-                    make_sync_dst(M, FIX, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_c, offsets=[0, 0], output_tensor=output),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, MTE1, 0),
+            ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, MTE1, 1),
+            make_sync_dst(MTE2, MTE1, 0),
+            ir.AssignStmt(tile_a_cube, tile.move(tile_a, target_memory=ir.MemorySpace.Left), span),
+            make_sync_dst(MTE2, MTE1, 1),
+            ir.AssignStmt(tile_b_cube, tile.move(tile_b, target_memory=ir.MemorySpace.Right), span),
+            make_sync_src(MTE1, M, 0),
+            make_sync_dst(MTE1, M, 0),
+            ir.AssignStmt(tile_c, tile.matmul(tile_a_cube, tile_b_cube), span),
+            make_sync_src(M, FIX, 0),
+            make_sync_dst(M, FIX, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_c, offsets=[0, 0], output_tensor=output),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -406,24 +376,21 @@ def test_if_both_branches():
     # Build Before IR
     then_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     else_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_c, tile.mul(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_c, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_c], span),
         ],
         span,
     )
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span)],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
             ir.IfStmt(condition, then_body, else_body, [if_return_var], span),
             ir.ReturnStmt(span),
         ],
@@ -437,31 +404,26 @@ def test_if_both_branches():
     backend.set_backend_type(BackendType.Ascend910B_CCE)
     After = passes.insert_sync()(Before)
 
-    # Build Expected IR: sync_dst merged into same OpStmts as load + sync_src
+    # Build Expected IR: sync_dst merged into same SeqStmts as load + sync_src
     expected_then = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     expected_else = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_c, tile.mul(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_c, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_c], span),
         ],
         span,
     )
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.IfStmt(condition, expected_then, expected_else, [if_return_var], span),
             ir.ReturnStmt(span),
         ],
@@ -508,7 +470,7 @@ def test_if_one_branch():
     # Build Before IR
     then_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
@@ -516,10 +478,7 @@ def test_if_one_branch():
     else_body = ir.YieldStmt([tile_a], span)
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span)],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
             ir.IfStmt(condition, then_body, else_body, [], span),
             ir.ReturnStmt(span),
         ],
@@ -536,12 +495,7 @@ def test_if_one_branch():
     # Build Expected IR
     expected_then = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
@@ -549,14 +503,9 @@ def test_if_one_branch():
     expected_else = ir.YieldStmt([tile_a], span)
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.IfStmt(condition, expected_then, expected_else, [], span),
             ir.ReturnStmt(span),
         ],
@@ -609,33 +558,25 @@ def test_branch_merge():
     # Build Before IR (test_branch_merge)
     then_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     else_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span)],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
             ir.IfStmt(condition, then_body, else_body, [], span),
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -655,49 +596,29 @@ def test_branch_merge():
     # Build Expected IR
     expected_then = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     expected_else = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.IfStmt(condition, expected_then, expected_else, [], span),
-            ir.OpStmts(
-                [
-                    make_sync_src(V, MTE3, 0),
-                    make_sync_dst(V, MTE3, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
-                        span,
-                    ),
-                ],
+            make_sync_src(V, MTE3, 0),
+            make_sync_dst(V, MTE3, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -752,26 +673,18 @@ def test_for_loop():
     # Build Before IR
     for_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([], span),
         ],
         span,
     )
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span)],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
             ir.ForStmt(loop_var, start, stop, step, [], for_body, [], span),
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -791,38 +704,23 @@ def test_for_loop():
     # Build Expected IR
     expected_for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                    make_bar_v(),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            make_bar_v(),
             ir.YieldStmt([], span),
         ],
         span,
     )
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.ForStmt(loop_var, start, stop, step, [], expected_for_body, [], span),
-            ir.OpStmts(
-                [
-                    make_sync_src(V, MTE3, 0),
-                    make_sync_dst(V, MTE3, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
-                        span,
-                    ),
-                ],
+            make_sync_src(V, MTE3, 0),
+            make_sync_dst(V, MTE3, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=output_tensor),
                 span,
             ),
             ir.ReturnStmt(span),
@@ -875,14 +773,9 @@ def test_for_cross_iteration():
     # Build Before IR
     for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                    ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
             ir.YieldStmt([], span),
         ],
         span,
@@ -901,19 +794,14 @@ def test_for_cross_iteration():
     # Build Expected IR
     expected_for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                    make_bar_v(),
-                    ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
-                    make_sync_src(V, MTE2, 0),
-                    make_sync_dst(V, MTE2, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            make_bar_v(),
+            ir.AssignStmt(tile_a, tile.mul(tile_b, tile_b), span),
+            make_sync_src(V, MTE2, 0),
+            make_sync_dst(V, MTE2, 0),
             ir.YieldStmt([], span),
         ],
         span,
@@ -974,16 +862,11 @@ def test_for_cross_iteration_mte3_to_mte2():
     # Build Before IR
     for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                 span,
             ),
             ir.YieldStmt([], span),
@@ -1004,24 +887,19 @@ def test_for_cross_iteration_mte3_to_mte2():
     # Build Expected IR
     expected_for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                    make_sync_src(V, MTE3, 0),
-                    make_sync_dst(V, MTE3, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
-                        span,
-                    ),
-                    make_sync_src(MTE3, MTE2, 0),
-                    make_sync_dst(MTE3, MTE2, 0),
-                ],
+            ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
+            make_sync_src(V, MTE3, 0),
+            make_sync_dst(V, MTE3, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                 span,
             ),
+            make_sync_src(MTE3, MTE2, 0),
+            make_sync_dst(MTE3, MTE2, 0),
             ir.YieldStmt([], span),
         ],
         span,
@@ -1089,33 +967,25 @@ def test_for_with_if_branches():
     # Build Before IR
     then_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     else_body = ir.SeqStmts(
         [
-            ir.OpStmts([ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span)], span),
+            ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span)],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
             ir.IfStmt(condition, then_body, else_body, [], span),
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
-                        span,
-                    ),
-                ],
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                 span,
             ),
             ir.YieldStmt([], span),
@@ -1136,53 +1006,33 @@ def test_for_with_if_branches():
     # Build Expected IR
     expected_then = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.add(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     expected_else = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_b, tile.mul(tile_a, tile_a), span),
             ir.YieldStmt([tile_b], span),
         ],
         span,
     )
     expected_for_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(data_tensor, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.IfStmt(condition, expected_then, expected_else, [], span),
-            ir.OpStmts(
-                [
-                    make_sync_src(V, MTE3, 0),
-                    make_sync_dst(V, MTE3, 0),
-                    ir.AssignStmt(
-                        store_result,
-                        tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
-                        span,
-                    ),
-                    make_sync_src(MTE3, MTE2, 0),
-                    make_sync_dst(MTE3, MTE2, 0),
-                ],
+            make_sync_src(V, MTE3, 0),
+            make_sync_dst(V, MTE3, 0),
+            ir.AssignStmt(
+                store_result,
+                tile.store(tile_b, offsets=[0, 0], output_tensor=data_tensor),
                 span,
             ),
+            make_sync_src(MTE3, MTE2, 0),
+            make_sync_dst(MTE3, MTE2, 0),
             ir.YieldStmt([], span),
         ],
         span,
@@ -1250,13 +1100,8 @@ def test_if_scope_crossing_dedup():
     # Build Before IR
     then_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_c, tile.add(tile_a, tile_a), span),
-                    ir.AssignStmt(tile_d, tile.add(tile_b, tile_b), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_c, tile.add(tile_a, tile_a), span),
+            ir.AssignStmt(tile_d, tile.add(tile_b, tile_b), span),
             ir.YieldStmt([], span),
         ],
         span,
@@ -1264,13 +1109,8 @@ def test_if_scope_crossing_dedup():
     else_body = ir.YieldStmt([], span)
     body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
             ir.IfStmt(condition, then_body, else_body, [], span),
             ir.ReturnStmt(span),
         ],
@@ -1289,13 +1129,8 @@ def test_if_scope_crossing_dedup():
     # Build Expected IR: only one MTE2->V sync pair (deduplicated from two)
     expected_then = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_c, tile.add(tile_a, tile_a), span),
-                    ir.AssignStmt(tile_d, tile.add(tile_b, tile_b), span),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_c, tile.add(tile_a, tile_a), span),
+            ir.AssignStmt(tile_d, tile.add(tile_b, tile_b), span),
             ir.YieldStmt([], span),
         ],
         span,
@@ -1303,15 +1138,10 @@ def test_if_scope_crossing_dedup():
     expected_else = ir.YieldStmt([], span)
     expected_body = ir.SeqStmts(
         [
-            ir.OpStmts(
-                [
-                    ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
-                    ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
-                    make_sync_src(MTE2, V, 0),
-                    make_sync_dst(MTE2, V, 0),
-                ],
-                span,
-            ),
+            ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
+            ir.AssignStmt(tile_b, tile.load(input_b, offsets=[0, 0], shapes=[64, 64]), span),
+            make_sync_src(MTE2, V, 0),
+            make_sync_dst(MTE2, V, 0),
             ir.IfStmt(condition, expected_then, expected_else, [], span),
             ir.ReturnStmt(span),
         ],

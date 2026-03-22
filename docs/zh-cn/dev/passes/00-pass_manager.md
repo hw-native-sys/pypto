@@ -32,7 +32,7 @@
 | `TypeChecked` | IR 已通过类型 (Type) 检查 |
 | `NoNestedCalls` | 无嵌套调用表达式 (Expression) |
 | `NormalizedStmtStructure` | 语句 (Statement) 结构已规范化 |
-| `NoRedundantBlocks` | 无单子节点或嵌套的 SeqStmts/OpStmts |
+| `NoRedundantBlocks` | 无单子节点或嵌套的 SeqStmts |
 | `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
 | `ClusterOutlined` | Cluster 作用域已提取为 Group 函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |

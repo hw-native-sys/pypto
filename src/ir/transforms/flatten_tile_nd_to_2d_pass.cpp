@@ -52,9 +52,6 @@ std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     return seq->stmts_;
   }
-  if (auto op_stmts = As<OpStmts>(stmt)) {
-    return op_stmts->stmts_;
-  }
   return {stmt};
 }
 
@@ -324,13 +321,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // SeqStmts: recurse
     if (auto seq = As<SeqStmts>(stmt)) {
       auto inner = TransformBody(seq->stmts_, ctx, op_registry, span);
-      result.insert(result.end(), inner.begin(), inner.end());
-      continue;
-    }
-
-    // OpStmts: recurse
-    if (auto op_stmts = As<OpStmts>(stmt)) {
-      auto inner = TransformBody(op_stmts->stmts_, ctx, op_registry, span);
       result.insert(result.end(), inner.begin(), inner.end());
       continue;
     }

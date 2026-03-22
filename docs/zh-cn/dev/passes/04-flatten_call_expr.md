@@ -42,12 +42,12 @@ program_flat = flatten_pass(program)
 2. **提取到临时变量**：创建临时变量（命名为 `t__tmp_v0`、`t__tmp_v1` 等）
 3. **插入 AssignStmt**：在原始语句 (Statement) 之前添加赋值语句
 4. **替换为变量**：将嵌套调用替换为临时变量引用
-5. **处理控制流**：对于 if/for 语句，插入到最后一个 OpStmts 或创建新的 OpStmts
+5. **处理控制流**：对于 if/for 语句，将提取出的临时语句直接插入到外层 `SeqStmts` 中该控制流语句之前
 
 **提取位置**：
 
 - AssignStmt/EvalStmt 之前：直接插入在前面
-- IfStmt/ForStmt 之前：插入到前面 SeqStmts 中的最后一个 OpStmts，或创建新的 OpStmts
+- 在 IfStmt/ForStmt 之前：作为外层 `SeqStmts` 中的同级语句插入
 
 ## 示例
 

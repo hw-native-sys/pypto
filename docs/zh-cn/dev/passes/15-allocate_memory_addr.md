@@ -57,7 +57,7 @@ program_with_addrs = alloc_pass(program)
 ### 之前（InitMemRef + BasicMemoryReuse 之后）
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)   # addr=-1 (unallocated)
 mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)   # addr=-1 (unallocated)
 tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
@@ -68,7 +68,7 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 ### 之后（地址已分配）
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, 0, 16384, 0)      # addr=0
 mem_vec_1: MemRefType = tile.alloc(Vec, 16384, 16384, 1)   # addr=16384 (aligned)
 tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
@@ -119,5 +119,5 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 32 字节对齐的地址分配
 - 测试多 MemRef 分配
 - 测试空函数（无 Tile）
-- 测试 alloc 语句位于首个 OpStmts 内
+- 测试 alloc 语句被前置到函数体顶层 `SeqStmts`
 - 测试 MemRef 去重的原始指针唯一性

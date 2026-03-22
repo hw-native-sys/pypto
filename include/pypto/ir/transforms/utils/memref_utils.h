@@ -27,17 +27,11 @@
 
 namespace pypto::ir {
 
-/// Find the YieldStmt inside a statement body (searches through SeqStmts/OpStmts).
+/// Find the YieldStmt inside a statement body (searches through SeqStmts).
 inline YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
   if (auto yield = As<YieldStmt>(body)) return yield;
   if (auto seq = As<SeqStmts>(body)) {
     for (const auto& child : seq->stmts_) {
-      auto result = FindYieldStmt(child);
-      if (result) return result;
-    }
-  }
-  if (auto ops = As<OpStmts>(body)) {
-    for (const auto& child : ops->stmts_) {
       auto result = FindYieldStmt(child);
       if (result) return result;
     }

@@ -91,7 +91,6 @@ enum class ObjectKind {
   WhileStmt,
   ScopeStmt,
   SeqStmts,
-  OpStmts,
   EvalStmt,
   BreakStmt,
   ContinueStmt,

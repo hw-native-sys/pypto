@@ -41,8 +41,8 @@ program_with_sync = sync_pass(program)
 1. **Phase 1 — Dependency Collection**: Walk the IR tree, determine pipeline assignment for each operation (using backend pipe info), and collect producer-consumer sync pairs (both cross-pipeline and same-pipeline). For loops, unroll one extra iteration to detect cross-iteration dependencies.
 2. **Phase 2 — Scope Adjustment**: Adjust sync pairs that cross scope boundaries (IfStmt/ForStmt):
    - Cross-iteration (wait ≤ set in same for body, including same-pipe bars): move sync_dst/bar to end of iteration
-   - When wait is in a deeper scope than set: move sync_dst to end of set's OpStmts
-   - When set is in a deeper scope than wait: move sync_src to beginning of wait's OpStmts
+   - When wait is in a deeper scope than set: move `sync_dst` to the end of the producer's contiguous sibling op run in the parent `SeqStmts`
+   - When set is in a deeper scope than wait: move `sync_src` to the beginning of the consumer's contiguous sibling op run in the parent `SeqStmts`
 3. **Phase 3 — Event ID Allocation**: Assign unique event IDs for sync operations, reusing IDs when possible
 4. **Phase 4 — AST Construction**: Build the final IR with sync_src/sync_dst/barrier insertions
 
@@ -50,10 +50,10 @@ program_with_sync = sync_pass(program)
 
 - **Producer-consumer**: sync_src (producer) → sync_dst (consumer)
 - **Pipe barrier**: bar_v / bar_m
-- **If branch scope**: when producer is in if branch and consumer is outside, sync_src is moved to beginning of consumer's OpStmts
-- **For body to parent**: when producer is in for body and consumer is outside, sync_src is moved to beginning of consumer's OpStmts
+- **If branch scope**: when producer is in an if branch and consumer is outside, `sync_src` is moved to the beginning of the consumer's sibling op run
+- **For body to parent**: when producer is in a for body and consumer is outside, `sync_src` is moved to the beginning of the consumer's sibling op run
 - **Cross-iteration**: sync_dst/bar placed at end of iteration (before yield)
-- **OpStmts merging**: sync operations merged into adjacent OpStmts (no standalone sync OpStmts)
+- **Sibling-run merging**: sync operations are merged into adjacent statements in the same `SeqStmts` (no standalone wrapper node)
 
 ## Example
 

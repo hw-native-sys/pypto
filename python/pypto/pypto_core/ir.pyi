@@ -1798,47 +1798,6 @@ class SeqStmts(Stmt):
             IndexError: If index is out of range
         """
 
-class OpStmts(Stmt):
-    """Operation statements: a sequence of assignment and/or evaluation statements."""
-
-    stmts: Final[list[AssignStmt | EvalStmt]]
-    """List of assignment and/or evaluation statements."""
-
-    def __init__(self, stmts: list[AssignStmt | EvalStmt], span: Span) -> None:
-        """Create an operation statements.
-
-        Args:
-            stmts: List of assignment and/or evaluation statements
-            span: Source location
-        """
-
-    def __str__(self) -> str:
-        """String representation of the operation statements.
-
-        Returns:
-            Operation statements as a string
-        """
-
-    def __repr__(self) -> str:
-        """Detailed representation of the operation statements.
-
-        Returns:
-            Operation statements with type information
-        """
-
-    def __getitem__(self, index: int) -> AssignStmt | EvalStmt:
-        """Get statement by index, supports negative indexing.
-
-        Args:
-            index: Statement index (negative indices count from end)
-
-        Returns:
-            Statement at the given index
-
-        Raises:
-            IndexError: If index is out of range
-        """
-
 class EvalStmt(Stmt):
     """Evaluation statement: expr."""
 
@@ -2879,7 +2838,7 @@ class ParentStmtAnalysis:
             func: The function to analyze
 
         Parent relationships established:
-        - For SeqStmts/OpStmts: Each child statement's parent is the SeqStmts/OpStmts
+        - For SeqStmts: Each child statement's parent is the SeqStmts
         - For IfStmt: then_body and else_body (if present) have IfStmt as parent
         - For ForStmt: body has ForStmt as parent
         - Root statement (function.body) has no parent

@@ -131,9 +131,6 @@ def _iter_all_assign_stmts(stmt):
     elif isinstance(stmt, ir.SeqStmts):
         for child in stmt.stmts:
             yield from _iter_all_assign_stmts(child)
-    elif isinstance(stmt, ir.OpStmts):
-        for child in stmt.stmts:
-            yield from _iter_all_assign_stmts(child)
     elif isinstance(stmt, ir.ForStmt):
         yield from _iter_all_assign_stmts(stmt.body)
     elif isinstance(stmt, ir.IfStmt):
@@ -475,7 +472,7 @@ def _build_program_with_allocs(tile_specs, op_specs):
             call = ir.Call(ir.get_op(op_name), args, result_var.type, span)
         stmts.append(ir.AssignStmt(result_var, call, span))
 
-    body = ir.SeqStmts([ir.OpStmts(stmts, span), ir.ReturnStmt([var_map[op_specs[-1][0]]], span)], span)
+    body = ir.SeqStmts([*stmts, ir.ReturnStmt([var_map[op_specs[-1][0]]], span)], span)
     func = ir.Function(
         "main",
         [(param_in, ir.ParamDirection.In), (param_out, ir.ParamDirection.Out)],
@@ -978,7 +975,7 @@ def _find_first_for_stmt(stmt):
     """Return the first ForStmt found in a statement tree."""
     if isinstance(stmt, ir.ForStmt):
         return stmt
-    if isinstance(stmt, (ir.SeqStmts, ir.OpStmts)):
+    if isinstance(stmt, ir.SeqStmts):
         for child in stmt.stmts:
             found = _find_first_for_stmt(child)
             if found is not None:
@@ -1065,7 +1062,7 @@ def _build_for_loop_program(init_mrs, yield_mrs, add_overlap=False, shape=None, 
             body_stmts.append(ir.AssignStmt(next_var, add_call, _SPAN))
         yield_values.append(next_var)
 
-    loop_body = ir.SeqStmts([ir.OpStmts(body_stmts, _SPAN), ir.YieldStmt(yield_values, _SPAN)], _SPAN)
+    loop_body = ir.SeqStmts([*body_stmts, ir.YieldStmt(yield_values, _SPAN)], _SPAN)
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), _SPAN)
     loop_stmt = ir.ForStmt(loop_var, _ci(0), _ci(4), _ci(1), iter_args, loop_body, return_vars, _SPAN)
@@ -1082,15 +1079,7 @@ def _build_for_loop_program(init_mrs, yield_mrs, add_overlap=False, shape=None, 
     result_var = ir.Var("result", _tensor_t(shape, dtype, out_mr), _SPAN)
     store_stmt = ir.AssignStmt(result_var, store_call, _SPAN)
 
-    body = ir.SeqStmts(
-        [
-            ir.OpStmts(init_stmts, _SPAN),
-            loop_stmt,
-            ir.OpStmts([store_stmt], _SPAN),
-            ir.ReturnStmt([result_var], _SPAN),
-        ],
-        _SPAN,
-    )
+    body = ir.SeqStmts([*init_stmts, loop_stmt, store_stmt, ir.ReturnStmt([result_var], _SPAN)], _SPAN)
     func = ir.Function(
         "main",
         [(input_tensor, ir.ParamDirection.In), (out_tensor, ir.ParamDirection.Out)],

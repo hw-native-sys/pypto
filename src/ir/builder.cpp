@@ -323,7 +323,6 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
 }
 
 // ========== Program Building ==========
-
 void IRBuilder::BeginProgram(const std::string& name, const Span& span) {
   if (InProgram()) {
     throw pypto::RuntimeError("Cannot begin program '" + name + "': already inside program '" +

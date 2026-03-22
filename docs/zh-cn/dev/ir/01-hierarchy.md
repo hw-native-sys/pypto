@@ -13,7 +13,7 @@
 <type_list>  ::= <type> { "," <type> }
 
 <stmt>       ::= <assign_stmt> | <if_stmt> | <for_stmt> | <while_stmt> | <yield_stmt>
-               | <eval_stmt> | <seq_stmts> | <op_stmts> | <scope_stmt>
+               | <eval_stmt> | <seq_stmts> | <scope_stmt>
                | <break_stmt> | <continue_stmt>
 
 <assign_stmt> ::= <var> "=" <expr>
@@ -31,7 +31,6 @@
 <yield_stmt> ::= "yield" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<op_stmts>   ::= <assign_stmt> { ";" <assign_stmt> }
 <scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
@@ -154,7 +153,6 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
-| **OpStmts** | `stmts_` | 赋值语句序列 |
 | **BreakStmt** | *(无)* | 退出循环 |
 | **ContinueStmt** | *(无)* | 跳至下一次循环迭代 |
 
@@ -348,7 +346,7 @@ add_func = program.get_function("add")  # Access by name
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |
-| **语句** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, OpStmts, BreakStmt, ContinueStmt |
+| **语句** | 10 | AssignStmt, IfStmt, ForStmt, WhileStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **类型** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **函数** | 2 | Function, Program |
 

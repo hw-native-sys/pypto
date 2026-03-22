@@ -787,7 +787,7 @@ class TestConvertTensorToTileOps:
             ir.ConstInt(1, DataType.INDEX, span),
             ir.ConstInt(1, DataType.INDEX, span),
             [],
-            ir.OpStmts([], span),
+            ir.SeqStmts([], span),
             [],
             span,
             chunk_size=iter_arg,

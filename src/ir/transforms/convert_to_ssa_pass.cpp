@@ -209,9 +209,6 @@ static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
   if (auto op = As<ScopeStmt>(stmt)) {
     return ComputeStmtLiveIn(op->body_);
   }
-  if (auto op = As<OpStmts>(stmt)) {
-    return ComputeSeqLiveIn(op->stmts_);
-  }
   return {};
 }
 
@@ -381,7 +378,6 @@ class SSAConverter {
     if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
     if (kind == ObjectKind::ScopeStmt) return ConvertScope(As<ScopeStmt>(s));
-    if (kind == ObjectKind::OpStmts) return ConvertOps(As<OpStmts>(s));
     return s;
   }
 
@@ -837,17 +833,6 @@ class SSAConverter {
     return body != op->body_
                ? std::make_shared<ScopeStmt>(op->scope_kind_, body, op->span_, op->level_, op->role_)
                : op;
-  }
-
-  StmtPtr ConvertOps(const OpStmtsPtr& op) {
-    std::vector<StmtPtr> out;
-    bool changed = false;
-    for (const auto& s : op->stmts_) {
-      auto ns = ConvertStmt(s);
-      if (ns != s) changed = true;
-      out.push_back(ns);
-    }
-    return changed ? OpStmts::Flatten(std::move(out), op->span_) : op;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

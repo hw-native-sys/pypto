@@ -46,9 +46,9 @@ namespace {
 
 // Path element representing a position in the IR tree
 struct PathElement {
-  enum class Kind { SeqIndex, OpIndex, IfThen, IfElse, ForBody };
+  enum class Kind { SeqIndex, IfThen, IfElse, ForBody };
   Kind kind;
-  int index;  // Index within SeqStmts/OpStmts, or -1 for branch/body markers
+  int index;  // Index within SeqStmts, or -1 for branch/body markers
 
   bool operator==(const PathElement& other) const { return kind == other.kind && index == other.index; }
 
@@ -91,8 +91,7 @@ struct Position {
     size_t min_len = std::min(path.size(), other.path.size());
     for (size_t i = 0; i < min_len; ++i) {
       if (!(path[i] == other.path[i])) {
-        if (path[i].kind == other.path[i].kind &&
-            (path[i].kind == PathElement::Kind::SeqIndex || path[i].kind == PathElement::Kind::OpIndex)) {
+        if (path[i].kind == other.path[i].kind && (path[i].kind == PathElement::Kind::SeqIndex)) {
           return path[i].index < other.path[i].index;
         }
         return false;
@@ -101,6 +100,22 @@ struct Position {
     return false;
   }
 };
+
+[[nodiscard]] bool IsOpLikeStmt(const StmtPtr& stmt) { return IsA<AssignStmt>(stmt) || IsA<EvalStmt>(stmt); }
+
+[[nodiscard]] std::optional<int> GetTrailingSeqIndex(const Position& pos) {
+  if (pos.path.empty() || pos.path.back().kind != PathElement::Kind::SeqIndex) {
+    return std::nullopt;
+  }
+  return pos.path.back().index;
+}
+
+[[nodiscard]] std::vector<PathElement> GetParentPath(const Position& pos) {
+  std::vector<PathElement> parent;
+  if (pos.path.empty()) return parent;
+  parent.assign(pos.path.begin(), pos.path.end() - 1);
+  return parent;
+}
 
 class MemRefCollector : public IRVisitor {
  public:
@@ -242,7 +257,7 @@ struct SyncPair {
 };
 
 struct InsertionPlan {
-  // Key: (seq_index, op_index). op_index = -1 for positions at the SeqStmts child level.
+  // Key: (seq_index, -1). Second element is always -1 (reserved for compatibility).
   using PosKey = std::pair<int, int>;
   std::map<PosKey, std::vector<StmtPtr>> insert_before;
   std::map<PosKey, std::vector<StmtPtr>> insert_after;
@@ -253,7 +268,7 @@ class AnalysisContext {
   std::vector<SyncPair> sync_pairs;
   std::vector<PathElement> current_path;
   std::map<Position, StmtPtr> pos_to_stmt;
-  std::map<std::vector<PathElement>, int> op_counts;
+  std::map<std::vector<PathElement>, std::set<int>> op_indices_by_parent;
 
   [[nodiscard]] Position CurrentPosition() const {
     Position pos;
@@ -262,11 +277,17 @@ class AnalysisContext {
   }
 
   void EnterSeq(int index) { current_path.push_back({PathElement::Kind::SeqIndex, index}); }
-  void EnterOp(int index) { current_path.push_back({PathElement::Kind::OpIndex, index}); }
   void EnterIfThen() { current_path.push_back({PathElement::Kind::IfThen, -1}); }
   void EnterIfElse() { current_path.push_back({PathElement::Kind::IfElse, -1}); }
   void EnterForBody() { current_path.push_back({PathElement::Kind::ForBody, -1}); }
   void Leave() { current_path.pop_back(); }
+
+  void RegisterLeaf(const Position& pos, const StmtPtr& stmt) {
+    pos_to_stmt[pos] = stmt;
+    auto seq_index = GetTrailingSeqIndex(pos);
+    if (!seq_index.has_value() || !IsOpLikeStmt(stmt)) return;
+    op_indices_by_parent[GetParentPath(pos)].insert(*seq_index);
+  }
 };
 
 // --------------------------------------------------------------------------
@@ -327,7 +348,7 @@ class SyncInserter {
     auto [reads, writes] = GetLeafMemRefs(leaf_stmt);
     if (reads.empty() && writes.empty()) return;
 
-    ctx_.pos_to_stmt[current_pos] = leaf_stmt;
+    ctx_.RegisterLeaf(current_pos, leaf_stmt);
 
     // RAW + WAW
     auto sync_against_writers = [&](const std::set<MemRefPtr>& memrefs) {
@@ -365,14 +386,7 @@ class SyncInserter {
       const auto& stmt = seq->stmts_[i];
       ctx_.EnterSeq(i);
 
-      if (auto op_stmts = As<OpStmts>(stmt)) {
-        ctx_.op_counts[ctx_.current_path] = static_cast<int>(op_stmts->stmts_.size());
-        for (int j = 0; j < static_cast<int>(op_stmts->stmts_.size()); ++j) {
-          ctx_.EnterOp(j);
-          ProcessLeafStmt(op_stmts->stmts_[j], state);
-          ctx_.Leave();
-        }
-      } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      if (auto if_stmt = As<IfStmt>(stmt)) {
         CollectFromIfStmt(if_stmt, state);
       } else if (auto for_stmt = As<ForStmt>(stmt)) {
         CollectFromForStmt(for_stmt, state);
@@ -599,28 +613,40 @@ class SyncInserter {
     return -1;
   }
 
-  [[nodiscard]] Position EndOfOpScope(const Position& pos) const {
-    if (pos.path.size() >= 2 && pos.path.back().kind == PathElement::Kind::OpIndex) {
-      std::vector<PathElement> key(pos.path.begin(), pos.path.end() - 1);
-      auto it = ctx_.op_counts.find(key);
-      if (it != ctx_.op_counts.end()) {
-        Position result;
-        result.path = std::move(key);
-        result.path.push_back(PathElement{PathElement::Kind::OpIndex, it->second - 1});
-        return result;
-      }
+  [[nodiscard]] Position EndOfSiblingOpGroup(const Position& pos) const {
+    auto seq_index = GetTrailingSeqIndex(pos);
+    if (!seq_index.has_value()) return pos;
+
+    auto parent = GetParentPath(pos);
+    auto it = ctx_.op_indices_by_parent.find(parent);
+    if (it == ctx_.op_indices_by_parent.end() || !it->second.count(*seq_index)) return pos;
+
+    int last_index = *seq_index;
+    while (it->second.count(last_index + 1)) {
+      ++last_index;
     }
-    return pos;
+
+    Position adjusted = pos;
+    adjusted.path.back().index = last_index;
+    return adjusted;
   }
 
-  [[nodiscard]] static Position BeginOfOpScope(const Position& pos) {
-    if (pos.path.size() >= 2 && pos.path.back().kind == PathElement::Kind::OpIndex) {
-      Position result;
-      result.path.assign(pos.path.begin(), pos.path.end() - 1);
-      result.path.push_back({PathElement::Kind::OpIndex, 0});
-      return result;
+  [[nodiscard]] Position BeginOfSiblingOpGroup(const Position& pos) const {
+    auto seq_index = GetTrailingSeqIndex(pos);
+    if (!seq_index.has_value()) return pos;
+
+    auto parent = GetParentPath(pos);
+    auto it = ctx_.op_indices_by_parent.find(parent);
+    if (it == ctx_.op_indices_by_parent.end() || !it->second.count(*seq_index)) return pos;
+
+    int first_index = *seq_index;
+    while (it->second.count(first_index - 1)) {
+      --first_index;
     }
-    return pos;
+
+    Position adjusted = pos;
+    adjusted.path.back().index = first_index;
+    return adjusted;
   }
 
   void AdjustScopeCrossings() {
@@ -628,7 +654,7 @@ class SyncInserter {
       // Cross-iteration(same scope, wait <= set), Move wait to end of iteration.
       if (pair.set_position.IsInSameScope(pair.wait_position) &&
           (pair.wait_position.IsBefore(pair.set_position) || pair.wait_position == pair.set_position)) {
-        pair.wait_position = EndOfOpScope(pair.set_position);
+        pair.wait_position = pair.set_position;
         pair.wait_after = true;
         continue;
       }
@@ -641,10 +667,10 @@ class SyncInserter {
       int wait_depth = GetScopeDepth(pair.wait_position);
 
       if (wait_depth > set_depth) {
-        pair.wait_position = EndOfOpScope(pair.set_position);
+        pair.wait_position = EndOfSiblingOpGroup(pair.set_position);
         pair.wait_after = true;
       } else {
-        pair.set_position = BeginOfOpScope(pair.wait_position);
+        pair.set_position = BeginOfSiblingOpGroup(pair.wait_position);
         pair.set_before = true;
       }
     }
@@ -681,25 +707,8 @@ class SyncInserter {
   // Phase 4: AST Construction
   // --------------------------------------------------------------------------
 
-  static std::vector<PathElement> GetParentPath(const Position& pos) {
-    std::vector<PathElement> parent;
-    if (pos.path.empty()) return parent;
-    // Strip trailing OpIndex if present, then strip SeqIndex
-    size_t end = pos.path.size();
-    if (pos.path.back().kind == PathElement::Kind::OpIndex && end >= 2) {
-      end -= 2;  // Strip both OpIndex and SeqIndex
-    } else if (end >= 1) {
-      end -= 1;  // Strip just SeqIndex
-    }
-    parent.assign(pos.path.begin(), pos.path.begin() + static_cast<std::ptrdiff_t>(end));
-    return parent;
-  }
-
   static InsertionPlan::PosKey GetPlanIndex(const Position& pos) {
     if (pos.path.empty()) return {-1, -1};
-    if (pos.path.back().kind == PathElement::Kind::OpIndex && pos.path.size() >= 2) {
-      return {pos.path[pos.path.size() - 2].index, pos.path.back().index};
-    }
     if (pos.path.back().kind == PathElement::Kind::SeqIndex) {
       return {pos.path.back().index, -1};
     }
@@ -772,126 +781,42 @@ class SyncInserter {
     auto plan_it = insertion_plans_.find(path);
     bool has_plan = (plan_it != insertion_plans_.end());
     std::vector<StmtPtr> result;
-    // Buffer for pending op-compatible stmts to merge into adjacent OpStmts
-    std::vector<StmtPtr> pending_ops;
-
-    // Flush pending_ops: merge into previous OpStmts if possible, otherwise create new one
-    auto flush_pending = [&]() {
-      if (pending_ops.empty()) return;
-      if (!result.empty()) {
-        if (auto prev_ops = As<OpStmts>(result.back())) {
-          // Merge into previous OpStmts
-          std::vector<StmtPtr> merged(prev_ops->stmts_.begin(), prev_ops->stmts_.end());
-          merged.insert(merged.end(), pending_ops.begin(), pending_ops.end());
-          result.back() = std::make_shared<const OpStmts>(merged, prev_ops->span_);
-          pending_ops.clear();
-          return;
-        }
-      }
-      result.push_back(std::make_shared<const OpStmts>(pending_ops, pending_ops[0]->span_));
-      pending_ops.clear();
-    };
 
     for (int i = 0; i < static_cast<int>(seq->stmts_.size()); ++i) {
-      // Collect insert_before at SeqStmts level into pending_ops
-      if (has_plan) CollectInsertions(plan_it->second.insert_before, {i, -1}, pending_ops, result);
+      // Insert before this position
+      if (has_plan) CollectInsertions(plan_it->second.insert_before, {i, -1}, result);
 
-      if (auto op_stmts = As<OpStmts>(seq->stmts_[i])) {
-        // Merge pending_ops as prefix into this OpStmts
-        BuildOpStmtsWithInsertions(op_stmts, i, has_plan ? &plan_it->second : nullptr, pending_ops, result);
-        // pending_ops is now clear (consumed by BuildOpStmtsWithInsertions)
-      } else if (auto if_stmt = As<IfStmt>(seq->stmts_[i])) {
-        flush_pending();
+      if (auto if_stmt = As<IfStmt>(seq->stmts_[i])) {
         path.push_back({PathElement::Kind::SeqIndex, i});
         result.push_back(ApplyToIfStmt(if_stmt, path));
         path.pop_back();
       } else if (auto for_stmt = As<ForStmt>(seq->stmts_[i])) {
-        flush_pending();
         path.push_back({PathElement::Kind::SeqIndex, i});
         result.push_back(ApplyToForStmt(for_stmt, path));
         path.pop_back();
       } else {
-        flush_pending();
         result.push_back(seq->stmts_[i]);
       }
 
-      // Collect insert_after at SeqStmts level into pending_ops
-      if (has_plan) CollectInsertions(plan_it->second.insert_after, {i, -1}, pending_ops, result);
+      // Insert after this position
+      if (has_plan) CollectInsertions(plan_it->second.insert_after, {i, -1}, result);
     }
 
     // Handle catch-all positions targeting past the last child
     if (has_plan) {
-      CollectInsertions(plan_it->second.insert_before, {static_cast<int>(seq->stmts_.size()), -1},
-                        pending_ops, result);
+      CollectInsertions(plan_it->second.insert_before, {static_cast<int>(seq->stmts_.size()), -1}, result);
     }
-    flush_pending();
 
     return std::make_shared<const SeqStmts>(result, seq->span_);
   }
 
   static void CollectInsertions(const std::map<InsertionPlan::PosKey, std::vector<StmtPtr>>& plan_map,
-                                InsertionPlan::PosKey key, std::vector<StmtPtr>& pending_ops,
-                                std::vector<StmtPtr>& result) {
+                                InsertionPlan::PosKey key, std::vector<StmtPtr>& result) {
     auto it = plan_map.find(key);
     if (it == plan_map.end()) return;
     for (const auto& stmt : it->second) {
-      if (As<AssignStmt>(stmt) || As<EvalStmt>(stmt)) {
-        pending_ops.push_back(stmt);
-      } else {
-        if (!pending_ops.empty()) {
-          result.push_back(std::make_shared<const OpStmts>(pending_ops, pending_ops[0]->span_));
-          pending_ops.clear();
-        }
-        result.push_back(stmt);
-      }
+      result.push_back(stmt);
     }
-  }
-
-  static void BuildOpStmtsWithInsertions(const OpStmtsPtr& op_stmts, int seq_idx, const InsertionPlan* plan,
-                                         std::vector<StmtPtr>& pending_ops, std::vector<StmtPtr>& result) {
-    // Start with pending_ops as prefix
-    std::vector<StmtPtr> current_ops = std::move(pending_ops);
-    pending_ops.clear();
-
-    auto flush_ops = [&]() {
-      if (!current_ops.empty()) {
-        result.push_back(std::make_shared<const OpStmts>(current_ops, current_ops[0]->span_));
-        current_ops.clear();
-      }
-    };
-
-    for (int j = 0; j < static_cast<int>(op_stmts->stmts_.size()); ++j) {
-      if (plan) {
-        auto before_it = plan->insert_before.find({seq_idx, j});
-        if (before_it != plan->insert_before.end()) {
-          for (const auto& stmt : before_it->second) {
-            if (As<AssignStmt>(stmt) || As<EvalStmt>(stmt)) {
-              current_ops.push_back(stmt);
-            } else {
-              flush_ops();
-              result.push_back(stmt);
-            }
-          }
-        }
-      }
-
-      current_ops.push_back(op_stmts->stmts_[j]);
-
-      if (plan) {
-        auto after_it = plan->insert_after.find({seq_idx, j});
-        if (after_it != plan->insert_after.end()) {
-          for (const auto& stmt : after_it->second) {
-            if (As<AssignStmt>(stmt) || As<EvalStmt>(stmt)) {
-              current_ops.push_back(stmt);
-            } else {
-              flush_ops();
-              result.push_back(stmt);
-            }
-          }
-        }
-      }
-    }
-    flush_ops();
   }
 
   StmtPtr ApplyToIfStmt(const IfStmtPtr& if_stmt, std::vector<PathElement>& path) {

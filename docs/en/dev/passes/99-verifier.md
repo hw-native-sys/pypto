@@ -66,8 +66,8 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
-| **NormalizedStmtStructure** | NormalizedStmtStructure | Consecutive assigns wrapped in OpStmts |
-| **NoRedundantBlocks** | NoRedundantBlocks | No single-child or nested SeqStmts/OpStmts |
+| **NormalizedStmtStructure** | NormalizedStmtStructure | Nested `SeqStmts` flattened and single-child `SeqStmts` unwrapped |
+| **NoRedundantBlocks** | NoRedundantBlocks | No single-child or nested `SeqStmts` |
 | **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |

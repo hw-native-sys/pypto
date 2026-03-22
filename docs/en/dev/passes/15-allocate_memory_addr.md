@@ -57,7 +57,7 @@ program_with_addrs = alloc_pass(program)
 ### Before (after InitMemRef + BasicMemoryReuse)
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, -1, 16384, 0)   # addr=-1 (unallocated)
 mem_vec_1: MemRefType = tile.alloc(Vec, -1, 16384, 1)   # addr=-1 (unallocated)
 tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
@@ -68,7 +68,7 @@ tile_b: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.add(tile_a, ...)
 ### After (addresses assigned)
 
 ```python
-# OpStmts [
+# SeqStmts [
 mem_vec_0: MemRefType = tile.alloc(Vec, 0, 16384, 0)      # addr=0
 mem_vec_1: MemRefType = tile.alloc(Vec, 16384, 16384, 1)   # addr=16384 (aligned)
 tile_a: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.load(...)
@@ -119,5 +119,5 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests address allocation with 32-byte alignment
 - Tests multiple MemRef allocations
 - Tests empty function (no tiles)
-- Tests alloc statements are inside first OpStmts
+- Tests alloc statements are prepended to the function body's top-level `SeqStmts`
 - Tests raw pointer uniqueness for MemRef deduplication
