@@ -60,7 +60,7 @@ class TensorSpec:
         Returns:
             Initialised tensor with the requested shape and dtype.
         """
-        import torch  # type: ignore[import]  # noqa: PLC0415
+        import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
 
         if self.init_value is None or self.is_output:
             return torch.zeros(self.shape, dtype=self.dtype)

@@ -41,7 +41,7 @@ class LayerNormProgram:
         )
         mean: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_x, tmp)
         mean_T: pl.Tile[[1, 32], pl.FP32] = pl.reshape(mean, [1, 32])
-        mean_T = pl.mul(mean_T, 0.015625)  # 1.0 / 64  # type: ignore[reportArgumentType]
+        mean_T = pl.mul(mean_T, 0.015625)  # 1.0 / 64
         mean = pl.reshape(mean_T, [32, 1])
 
         # centered = x - mean (broadcast mean across hidden dim)
@@ -54,12 +54,12 @@ class LayerNormProgram:
         )
         var: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(squared, tmp2)
         var_T: pl.Tile[[1, 32], pl.FP32] = pl.reshape(var, [1, 32])
-        var_T = pl.mul(var_T, 0.015625)  # 1.0 / 64  # type: ignore[reportArgumentType]
+        var_T = pl.mul(var_T, 0.015625)  # 1.0 / 64
         var = pl.reshape(var_T, [32, 1])
 
         # std = sqrt(var + eps)
         var_T2: pl.Tile[[1, 32], pl.FP32] = pl.reshape(var, [1, 32])
-        var_eps_T: pl.Tile[[1, 32], pl.FP32] = pl.add(var_T2, 1e-5)  # type: ignore[reportArgumentType]
+        var_eps_T: pl.Tile[[1, 32], pl.FP32] = pl.add(var_T2, 1e-5)
         std_T: pl.Tile[[1, 32], pl.FP32] = pl.sqrt(var_eps_T)
         std: pl.Tile[[32, 1], pl.FP32] = pl.reshape(std_T, [32, 1])
 

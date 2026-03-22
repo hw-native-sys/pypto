@@ -124,7 +124,6 @@ class PagedAttention:
         pl.store(max_tile, [0, 0], mij)
         pl.store(sum_tile, [0, 0], lij)
         pl.store(pij_bf16_tile, [0, 0], pij)
-        return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
     @pl.function(type=pl.FunctionType.InCore)
     def online_update(
@@ -166,7 +165,6 @@ class PagedAttention:
         pl.store(li_new_tile, [0, 0], li)
         pl.store(oi_updated_tile, [0, 0], oi)
         pl.store(dst_tile, [0, 0], dst)
-        return  # noqa: PLR1711 - DSL requires explicit return to build IR return statement
 
 
 def test_tile_ops_codegen():

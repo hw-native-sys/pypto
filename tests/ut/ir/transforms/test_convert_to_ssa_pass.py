@@ -816,7 +816,7 @@ class TestEdgeCases:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                unused: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)  # noqa: F841
+                _unused: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)
                 result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result
 
@@ -824,7 +824,7 @@ class TestEdgeCases:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                unused_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)  # noqa: F841
+                _unused_0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 3.0)
                 result_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return result_0
 

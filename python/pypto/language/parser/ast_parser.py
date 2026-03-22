@@ -890,17 +890,19 @@ class ASTParser:
         if not self._is_cond_call(stmt):
             return None
 
-        call = stmt.value  # type: ignore[union-attr]
+        assert isinstance(stmt, ast.Expr)
+        call = stmt.value
+        assert isinstance(call, ast.Call)
 
         # Parse the condition argument
-        if len(call.args) != 1:  # type: ignore[attr-defined]
+        if len(call.args) != 1:
             raise ParserSyntaxError(
                 "pl.cond() requires exactly 1 argument",
                 span=self.span_tracker.get_span(call),
                 hint="Use: pl.cond(condition)",
             )
 
-        return self.parse_expression(call.args[0])  # type: ignore[attr-defined]
+        return self.parse_expression(call.args[0])
 
     @staticmethod
     def _is_dsl_call(stmt: ast.Expr, func_name: str) -> bool:
@@ -958,10 +960,11 @@ class ASTParser:
 
     def _handle_static_print(self, stmt: ast.Expr) -> None:
         """Handle pl.static_print() — print IR info to stdout at parse time."""
-        call = stmt.value  # type: ignore[union-attr]
+        call = stmt.value
+        assert isinstance(call, ast.Call)
         span = self.span_tracker.get_span(stmt)
 
-        if not call.args:  # type: ignore[union-attr]
+        if not call.args:
             raise ParserSyntaxError(
                 "static_print() requires at least 1 argument",
                 span=span,
@@ -969,7 +972,7 @@ class ASTParser:
             )
 
         parts: list[str] = []
-        for arg in call.args:  # type: ignore[union-attr]
+        for arg in call.args:
             # String literals are printed as-is (labels)
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 parts.append(arg.value)
@@ -984,10 +987,11 @@ class ASTParser:
 
     def _handle_static_assert(self, stmt: ast.Expr) -> None:
         """Handle pl.static_assert() — assert condition at parse time."""
-        call = stmt.value  # type: ignore[union-attr]
+        call = stmt.value
+        assert isinstance(call, ast.Call)
         span = self.span_tracker.get_span(stmt)
 
-        args = call.args  # type: ignore[union-attr]
+        args = call.args
         if len(args) < 1 or len(args) > 2:
             raise ParserSyntaxError(
                 "static_assert() requires 1 or 2 arguments",

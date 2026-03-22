@@ -142,6 +142,61 @@ class Scalar(metaclass=ScalarMeta):
             "Scalar wraps a symbolic IR expression and has no concrete truth value."
         )
 
+    # ------------------------------------------------------------------
+    # Arithmetic operators — enable type-checked DSL expressions like
+    # ``n * 2`` or ``n // 4`` where ``n`` is a Scalar parameter.
+    # ------------------------------------------------------------------
+
+    def __add__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() + (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __radd__(self, other: "int | float") -> "Scalar":
+        return Scalar(expr=other + self.unwrap())
+
+    def __sub__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() - (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __rsub__(self, other: "int | float") -> "Scalar":
+        return Scalar(expr=other - self.unwrap())
+
+    def __mul__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() * (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __rmul__(self, other: "int | float") -> "Scalar":
+        return Scalar(expr=other * self.unwrap())
+
+    def __truediv__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() / (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __floordiv__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() // (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __mod__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() % (other.unwrap() if isinstance(other, Scalar) else other))
+
+    # ------------------------------------------------------------------
+    # Comparison operators — return Scalar wrapping the IR comparison node.
+    # ------------------------------------------------------------------
+
+    def __lt__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() < (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __le__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() <= (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __gt__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() > (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __ge__(self, other: "int | float | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() >= (other.unwrap() if isinstance(other, Scalar) else other))
+
+    # ------------------------------------------------------------------
+    # In-place operators for RangeIterator compatibility.
+    # ------------------------------------------------------------------
+
+    def __iadd__(self, other: "int | float | Scalar") -> "Scalar":
+        return self.__add__(other)
+
     @classmethod
     def __class_getitem__(cls, item: DataType) -> "Scalar":
         """Support static type checkers for Scalar[dtype] syntax."""

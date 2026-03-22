@@ -543,7 +543,7 @@ class TestScalarRangeRoundTrip:
         class Before:
             @pl.function
             def main(self, n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(n * 2):  # type: ignore[operator]
+                for i in pl.range(n * 2):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
                 return y
 

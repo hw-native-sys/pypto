@@ -503,7 +503,7 @@ class TestScalarRange:
 
         @pl.function
         def scalar_expr_stop(n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            for i in pl.range(n * 2):  # type: ignore[operator]
+            for i in pl.range(n * 2):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
@@ -519,7 +519,7 @@ class TestScalarRange:
         def scalar_complex_expr(
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
-            for i in pl.range(n * 2 + 1):  # type: ignore[operator]
+            for i in pl.range(n * 2 + 1):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 
@@ -535,7 +535,7 @@ class TestScalarRange:
         def scalar_floordiv_expr(
             n: pl.Scalar[pl.INT64], x: pl.Tensor[[64], pl.FP32]
         ) -> pl.Tensor[[64], pl.FP32]:
-            for i in pl.range(n // 4):  # type: ignore[operator]
+            for i in pl.range(n // 4):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return y
 

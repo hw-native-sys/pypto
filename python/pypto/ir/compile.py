@@ -19,6 +19,7 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassManager
+from .pto_codegen import PartialCodegenError, generate
 
 
 def _write_files(files: dict[str, str], output_dir: str) -> None:
@@ -113,8 +114,6 @@ def compile(
         transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
     if backend_type in (BackendType.Ascend910B_PTO, BackendType.Ascend950):
-        from .pto_codegen import PartialCodegenError, generate  # noqa: PLC0415
-
         try:
             files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
         except PartialCodegenError as exc:

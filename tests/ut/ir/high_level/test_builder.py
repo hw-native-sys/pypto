@@ -353,9 +353,10 @@ class TestIRBuilderIfStmt:
             if_stmt = func.body
         else:
             # If there are multiple statements, find the if
-            assert isinstance(func.body, ir.SeqStmts)
+            body = func.body
+            assert isinstance(body, ir.SeqStmts)
             if_stmt = None
-            for stmt in func.body.stmts:  # type: ignore[attr-defined]
+            for stmt in body.stmts:
                 if isinstance(stmt, ir.IfStmt):
                     if_stmt = stmt
                     break

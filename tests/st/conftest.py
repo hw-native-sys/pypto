@@ -30,7 +30,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pytest  # noqa: E402
-from harness.core.environment import ensure_simpler_available  # noqa: E402
+from harness.core.environment import (  # noqa: E402
+    ensure_simpler_available,
+    get_simpler_python_path,
+    get_simpler_scripts_path,
+)
 from harness.core.test_runner import TestRunner  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
@@ -48,11 +52,6 @@ def setup_simpler_dependency(request):
     """
     if request.config.getoption("--codegen-only"):
         return  # Code generation only, Simpler not needed
-
-    from harness.core.environment import (  # noqa: PLC0415
-        get_simpler_python_path,
-        get_simpler_scripts_path,
-    )
 
     simpler_root = ensure_simpler_available()
     os.environ["SIMPLER_ROOT"] = str(simpler_root)

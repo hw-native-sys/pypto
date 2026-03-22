@@ -883,7 +883,7 @@ def test_continue_no_iter_args():
             for i in pl.range(0, 10, 1):
                 if i < 5:
                     continue
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)  # noqa: F841
+                _y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)
             return x_0
 
     @pl.program
@@ -911,7 +911,7 @@ def test_break_no_iter_args():
             for i in pl.range(0, 10, 1):
                 if i > 5:
                     break
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)  # noqa: F841
+                _y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)
             return x_0
 
     @pl.program

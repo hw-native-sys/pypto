@@ -315,7 +315,7 @@ class TestFlattenCallInIfCondition:
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # get_block_idx() in if condition
-                if pl.tile.get_block_idx() < 10:  # type: ignore[operator]
+                if pl.tile.get_block_idx() < 10:
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
@@ -327,7 +327,7 @@ class TestFlattenCallInIfCondition:
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t__tmp_v0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()
-                if t__tmp_v0 < 10:  # type: ignore[operator]
+                if t__tmp_v0 < 10:
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output

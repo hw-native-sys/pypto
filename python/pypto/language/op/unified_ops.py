@@ -56,6 +56,7 @@ __all__ = [
 
 from pypto.ir.utils import resolve_cast_mode
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import MemorySpace, PadValue
 
 from ..typing import IntLike, Scalar, Tensor, Tile
@@ -474,8 +475,6 @@ def cast(
     if isinstance(input, Scalar):
         if resolve_cast_mode(mode) != 2:
             raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
-        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
-
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
         return Scalar(expr=_ir_core.cast(input.unwrap(), dtype))
     raise TypeError(f"cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")

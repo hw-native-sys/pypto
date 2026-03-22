@@ -42,12 +42,12 @@ class RMSNormProgram:
         )
         mean_sq: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(squared, tmp)
         mean_sq_T: pl.Tile[[1, 32], pl.FP32] = pl.reshape(mean_sq, [1, 32])
-        mean_sq_T = pl.mul(mean_sq_T, 0.015625)  # 1.0 / 64  # type: ignore[reportArgumentType]
+        mean_sq_T = pl.mul(mean_sq_T, 0.015625)  # 1.0 / 64
         mean_sq = pl.reshape(mean_sq_T, [32, 1])
 
         # rms = sqrt(mean_sq + eps)
         mean_sq_T2: pl.Tile[[1, 32], pl.FP32] = pl.reshape(mean_sq, [1, 32])
-        rms_T: pl.Tile[[1, 32], pl.FP32] = pl.add(mean_sq_T2, 1e-5)  # type: ignore[reportArgumentType]
+        rms_T: pl.Tile[[1, 32], pl.FP32] = pl.add(mean_sq_T2, 1e-5)
         rms_T = pl.sqrt(rms_T)
         rms: pl.Tile[[32, 1], pl.FP32] = pl.reshape(rms_T, [32, 1])
 

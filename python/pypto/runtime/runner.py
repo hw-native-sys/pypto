@@ -35,6 +35,8 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
+import os
+import sys
 import time
 import traceback
 from collections.abc import Callable
@@ -250,9 +252,6 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
         platform: Target execution platform (``"a2a3sim"`` or ``"a2a3"``).
         device_id: Hardware device index.
     """
-    import os  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
     simpler_root = os.environ.get("SIMPLER_ROOT")
     if simpler_root:
         for sub in ("examples/scripts", "python"):
@@ -260,7 +259,7 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-    from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415
+    from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415,I001 — available after sys.path setup
 
     CodeRunner(
         kernels_dir=str(work_dir),

@@ -49,10 +49,10 @@ class FFNGeluProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Vector InCore: apply GELU activation — x * sigmoid(1.702 * x)."""
         tile_x: pl.Tile[[64, 64], pl.FP32] = pl.load(x, [0, 0], [64, 64])
-        x_scaled: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_x, 1.702)  # type: ignore[reportArgumentType]
-        x_neg: pl.Tile[[64, 64], pl.FP32] = pl.mul(x_scaled, -1.0)  # type: ignore[reportArgumentType]
+        x_scaled: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_x, 1.702)
+        x_neg: pl.Tile[[64, 64], pl.FP32] = pl.mul(x_scaled, -1.0)
         exp_neg: pl.Tile[[64, 64], pl.FP32] = pl.exp(x_neg)
-        denom: pl.Tile[[64, 64], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[64, 64], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[64, 64], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_x, sigmoid)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], output)
@@ -105,9 +105,9 @@ class FFNSwigluProgram:
         """Vector InCore: apply SwiGLU activation — gate * sigmoid(gate) * up."""
         tile_gate: pl.Tile[[64, 64], pl.FP32] = pl.load(gate, [0, 0], [64, 64])
         tile_up: pl.Tile[[64, 64], pl.FP32] = pl.load(up, [0, 0], [64, 64])
-        gate_neg: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_gate, -1.0)  # type: ignore[reportArgumentType]
+        gate_neg: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_gate, -1.0)
         exp_neg: pl.Tile[[64, 64], pl.FP32] = pl.exp(gate_neg)
-        denom: pl.Tile[[64, 64], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[64, 64], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[64, 64], pl.FP32] = pl.recip(denom)
         swish: pl.Tile[[64, 64], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[64, 64], pl.FP32] = pl.mul(swish, tile_up)

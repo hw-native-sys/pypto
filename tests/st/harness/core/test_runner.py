@@ -25,6 +25,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from pypto.backend import set_backend_type
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
@@ -262,6 +263,4 @@ class TestSuite:
 
 
 if __name__ == "__main__":
-    import pytest  # noqa: PLC0415
-
     pytest.main([__file__, "-v"])

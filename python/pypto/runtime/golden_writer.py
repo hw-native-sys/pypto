@@ -153,7 +153,7 @@ def generate_golden_source(
 
 def _init_expr(spec: TensorSpec) -> str:
     """Return the Python expression (string) used to initialise this tensor in golden.py."""
-    import torch  # type: ignore[import]  # noqa: PLC0415
+    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
 
     dtype_str = _torch_dtype_str(spec.dtype)
     shape_str = repr(tuple(spec.shape))
@@ -191,7 +191,7 @@ def _init_expr(spec: TensorSpec) -> str:
 
 def _tensor_literal_expr(tensor: "torch.Tensor", shape_str: str, dtype_str: str) -> str:
     """Generate an inline expression for a concrete torch.Tensor init_value."""
-    import torch  # type: ignore[import]  # noqa: PLC0415
+    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
 
     if tensor.numel() == 0:
         return f"torch.zeros({shape_str}, dtype={dtype_str})"
@@ -224,7 +224,7 @@ def _tensor_literal_expr(tensor: "torch.Tensor", shape_str: str, dtype_str: str)
 
 def _torch_dtype_str(dtype: "torch.dtype") -> str:
     """Return the string representation of a torch dtype (e.g. 'torch.float32')."""
-    import torch  # type: ignore[import]  # noqa: PLC0415
+    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
 
     _map: dict[torch.dtype, str] = {
         torch.float32: "torch.float32",

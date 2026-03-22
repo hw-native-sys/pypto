@@ -16,6 +16,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, codegen
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 def assert_code_equal(actual: str, expected: str) -> None:
@@ -1336,8 +1337,6 @@ class TestOrchestration:
                 return output_tensor
 
         # Run the full pass pipeline to produce compound SSA suffixes
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(ChunkedInplaceProgram)
 

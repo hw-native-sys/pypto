@@ -106,11 +106,11 @@ class RangeIterator(Generic[T]):
             If no init_values: just the loop variable (Scalar)
             If init_values provided: Tuple of (loop_var, (iter_arg_values...))
         """
-        if self.current >= self.stop:  # type: ignore[operator]
+        if self.current >= self.stop:
             raise StopIteration
 
         value = self.current
-        self.current += self.step  # type: ignore[operator]
+        self.current += self.step
 
         # Return just the value if no init_values, otherwise return (value, iter_args_tuple)
         if not self.init_values:

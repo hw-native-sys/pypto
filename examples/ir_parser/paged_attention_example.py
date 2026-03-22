@@ -273,11 +273,11 @@ def build_paged_attention_program(
 
                     # Create inplace accumulators for this q_tile group
                     oi: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                        [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                        [q_tile, head_dim_cfg],
                         dtype=pl.FP32,
                     )
-                    li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
-                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                    li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
 
                     # Initialize accumulators via shared module-level InCore kernel
                     oi, li_update, mi_update = kernel_init_inplace(oi, li_update, mi_update)
@@ -286,7 +286,7 @@ def build_paged_attention_program(
                         # Query view: row offset = b_idx * num_heads + q_idx * q_tile
                         qi: pl.Tensor[[q_tile, head_dim_cfg], pl.BF16] = pl.slice(
                             query,
-                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [q_tile, head_dim_cfg],
                             [cur_offset, 0],
                         )
 
@@ -298,17 +298,17 @@ def build_paged_attention_program(
                         kv_block_row = cur_block_idx * block_size_cfg
                         kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
                             key_cache,
-                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [head_dim_cfg, block_size_cfg],
                             [kv_block_row, 0],
                         )
                         vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             value_cache,
-                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [block_size_cfg, head_dim_cfg],
                             [kv_block_row, 0],
                         )
 
                         sij: pl.Tensor[[q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(
-                            [q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [q_tile, block_size_cfg],
                             dtype=pl.FP32,
                         )
 
@@ -316,22 +316,22 @@ def build_paged_attention_program(
                         sij = kernel_qk_matmul(qi, kj, sij)
                         sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.slice(
                             sij,
-                            [q_tile, valid_len],  # type: ignore[reportArgumentType]
+                            [q_tile, valid_len],
                             [0, 0],
                         )
 
                         pij_f16: pl.Tensor[[q_tile, block_size_cfg], pl.BF16] = pl.create_tensor(
-                            [q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [q_tile, block_size_cfg],
                             dtype=pl.BF16,
                         )
-                        mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
-                        li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)  # type: ignore[reportArgumentType]
+                        mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
 
                         # Softmax prepare (VECTOR) via shared module-level InCore kernel
                         pij_f16, mi, li = kernel_softmax_prepare(sij_valid, 1.0, pij_f16, mi, li)  # type: ignore[reportArgumentType]
 
                         oi_tmp: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [q_tile, head_dim_cfg],
                             dtype=pl.FP32,
                         )
                         # PV matmul (CUBE) via shared module-level InCore kernel
@@ -339,18 +339,18 @@ def build_paged_attention_program(
 
                         # Conditional flags
                         if bn == 0:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
                         else:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
                         if bn == bn_this_batch - 1:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
                         else:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
 
                         # Output view: same row offset as query view
                         out_view: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
                             out,
-                            [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                            [q_tile, head_dim_cfg],
                             [cur_offset, 0],
                         )
                         # Online softmax update via shared module-level InCore kernel

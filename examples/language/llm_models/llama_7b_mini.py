@@ -109,11 +109,11 @@ def build_llama_mini_program(
             mean_sq: pl.Tile[[seq_len, 1], pl.FP32] = pl.row_sum(squared, tmp)
             # [S, 1] is ColMajor; reshape to [1, S] for scalar mul, then back
             mean_sq_T: pl.Tile[[1, seq_len], pl.FP32] = pl.reshape(mean_sq, [1, seq_len])
-            mean_sq_T = pl.mul(mean_sq_T, inv_head_dim)  # type: ignore[reportArgumentType]
+            mean_sq_T = pl.mul(mean_sq_T, inv_head_dim)
             mean_sq = pl.reshape(mean_sq_T, [seq_len, 1])
 
             mean_sq_T2: pl.Tile[[1, seq_len], pl.FP32] = pl.reshape(mean_sq, [1, seq_len])
-            rms_T: pl.Tile[[1, seq_len], pl.FP32] = pl.add(mean_sq_T2, 1e-6)  # type: ignore[reportArgumentType]
+            rms_T: pl.Tile[[1, seq_len], pl.FP32] = pl.add(mean_sq_T2, 1e-6)
             rms_T = pl.sqrt(rms_T)
             rms: pl.Tile[[seq_len, 1], pl.FP32] = pl.reshape(rms_T, [seq_len, 1])
 
@@ -283,7 +283,7 @@ def build_llama_mini_program(
         ) -> pl.Tensor[[seq_len, seq_len], pl.FP32]:
             """Scale attention scores by 1/sqrt(head_dim)."""
             tile: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.load(scores, [0, 0], [seq_len, seq_len])
-            scaled: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.mul(tile, attn_scale)  # type: ignore[reportArgumentType]
+            scaled: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.mul(tile, attn_scale)
             out: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.store(scaled, [0, 0], output)
             return out
 
@@ -385,9 +385,9 @@ def build_llama_mini_program(
                 up, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
             )
 
-            gate_neg: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_gate, -1.0)  # type: ignore[reportArgumentType]
+            gate_neg: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_gate, -1.0)
             exp_neg: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.exp(gate_neg)
-            denom: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+            denom: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.add(exp_neg, 1.0)
             sigmoid: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.recip(denom)
             swish: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_gate, sigmoid)
             result: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(swish, tile_up)

@@ -30,9 +30,9 @@ class SiluProgram:
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
         tile_x: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
-        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, -1.0)  # type: ignore[reportArgumentType]
+        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, -1.0)
         exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(x_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
         out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
@@ -58,10 +58,10 @@ class GeluProgram:
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # GELU(x) = x * sigmoid(1.702 * x)  (fast approximation)
         tile_x: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
-        x_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, 1.702)  # type: ignore[reportArgumentType]
-        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(x_scaled, -1.0)  # type: ignore[reportArgumentType]
+        x_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, 1.702)
+        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(x_scaled, -1.0)
         exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(x_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
         out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
@@ -89,9 +89,9 @@ class SwigluProgram:
         # SwiGLU(gate, up) = Swish(gate) * up = gate * sigmoid(gate) * up
         tile_gate: pl.Tile[[32, 128], pl.FP32] = pl.load(gate, [0, 0], [32, 128])
         tile_up: pl.Tile[[32, 128], pl.FP32] = pl.load(up, [0, 0], [32, 128])
-        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, -1.0)  # type: ignore[reportArgumentType]
+        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, -1.0)
         exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(gate_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         swish: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(swish, tile_up)
@@ -122,10 +122,10 @@ class GegluProgram:
         # GELU approximation: gate * sigmoid(1.702 * gate)
         tile_gate: pl.Tile[[32, 128], pl.FP32] = pl.load(gate, [0, 0], [32, 128])
         tile_up: pl.Tile[[32, 128], pl.FP32] = pl.load(up, [0, 0], [32, 128])
-        gate_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, 1.702)  # type: ignore[reportArgumentType]
-        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(gate_scaled, -1.0)  # type: ignore[reportArgumentType]
+        gate_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, 1.702)
+        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(gate_scaled, -1.0)
         exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(gate_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)  # type: ignore[reportArgumentType]
+        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
         sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
         gelu_gate: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
         result: pl.Tile[[32, 128], pl.FP32] = pl.mul(gelu_gate, tile_up)

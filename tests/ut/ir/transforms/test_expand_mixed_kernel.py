@@ -1831,9 +1831,7 @@ class TestDCERegression:
                 w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                 z = pl.matmul(x_left, w_right)
-                z_vec = pl.move(  # noqa: F841
-                    z, target_memory=pl.MemorySpace.Vec
-                )
+                _z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
                 # z_vec is dead — only a separate load+cast+store returns a value
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 x_fp32 = pl.tile.cast(x_tile, target_type=pl.FP32, mode="round")
@@ -1865,7 +1863,7 @@ class TestDCERegression:
                 w: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(  # noqa: F841
+                _z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
                 x_tile = pl.load(x, [0, 0], [16, 128])

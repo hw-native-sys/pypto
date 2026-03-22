@@ -422,7 +422,7 @@ def BuildBatchPagedAttentionProgram(
             q_loop_cfg = (num_heads_cfg + q_tile - 1) // q_tile
 
             # Compute max_bn across all batches (mirrors C++ max_bn loop)
-            max_bn: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+            max_bn: pl.Scalar[pl.INT64] = pl.yield_(0)
             for b in pl.range(batch_cfg):
                 cur_seq_b = pl.tensor.read(context_lens, [b])
                 bn_b = (cur_seq_b + block_size_cfg - 1) // block_size_cfg
@@ -432,16 +432,16 @@ def BuildBatchPagedAttentionProgram(
                 q_offset = q_idx * q_tile
 
                 # Batch-sized accumulators (mirrors C++ oi_batch/li_batch/mi_batch)
-                oi_batch: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                    [batch_cfg * q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                oi_batch: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
+                    [batch_cfg * q_tile, head_dim_cfg],
                     dtype=pl.FP32,
                 )
-                li_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                    [batch_cfg * q_tile, 1],  # type: ignore[reportArgumentType]
+                li_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
+                    [batch_cfg * q_tile, 1],
                     dtype=pl.FP32,
                 )
-                mi_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                    [batch_cfg * q_tile, 1],  # type: ignore[reportArgumentType]
+                mi_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
+                    [batch_cfg * q_tile, 1],
                     dtype=pl.FP32,
                 )
 
@@ -450,24 +450,24 @@ def BuildBatchPagedAttentionProgram(
 
                 for bn in pl.range(max_bn):
                     # Batch-sized intermediate tensors (mirrors C++ sij_b/pij_b/etc.)
-                    sij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                        [batch_cfg * q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                    sij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(
+                        [batch_cfg * q_tile, block_size_cfg],
                         dtype=pl.FP32,
                     )
-                    pij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP16] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                        [batch_cfg * q_tile, block_size_cfg],  # type: ignore[reportArgumentType]
+                    pij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP16] = pl.create_tensor(
+                        [batch_cfg * q_tile, block_size_cfg],
                         dtype=pl.FP16,
                     )
-                    mij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                        [batch_cfg * q_tile, 1],  # type: ignore[reportArgumentType]
+                    mij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
+                        [batch_cfg * q_tile, 1],
                         dtype=pl.FP32,
                     )
-                    lij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                        [batch_cfg * q_tile, 1],  # type: ignore[reportArgumentType]
+                    lij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
+                        [batch_cfg * q_tile, 1],
                         dtype=pl.FP32,
                     )
-                    oi_new_b: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(  # type: ignore[reportArgumentType]
-                        [batch_cfg * q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
+                    oi_new_b: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
+                        [batch_cfg * q_tile, head_dim_cfg],
                         dtype=pl.FP32,
                     )
 
@@ -478,10 +478,10 @@ def BuildBatchPagedAttentionProgram(
                         sij_b,
                         block_table,
                         batch_cfg,
-                        bn,  # type: ignore[reportArgumentType]
-                        q_offset,  # type: ignore[reportArgumentType]
+                        bn,
+                        q_offset,
                         block_num_cfg,
-                        num_heads_cfg,  # type: ignore[reportArgumentType]
+                        num_heads_cfg,
                     )
 
                     # Stage 2: Softmax prepare (FUNC_SOFTMAX_PREPARE, AIV / VECTOR)
@@ -493,7 +493,7 @@ def BuildBatchPagedAttentionProgram(
                         1.0,  # type: ignore[reportArgumentType]
                         context_lens,
                         batch_cfg,
-                        bn,  # type: ignore[reportArgumentType]
+                        bn,
                     )
 
                     # Stage 3: PV matmul (FUNC_PV_MATMUL, AIC / CUBE)
@@ -503,19 +503,19 @@ def BuildBatchPagedAttentionProgram(
                         oi_new_b,
                         block_table,
                         batch_cfg,
-                        bn,  # type: ignore[reportArgumentType]
-                        block_num_cfg,  # type: ignore[reportArgumentType]
+                        bn,
+                        block_num_cfg,
                     )
 
                     # Conditional flags (mirrors C++ is_first/is_last)
                     if bn == 0:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
                     else:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
                     if bn == max_bn - 1:
-                        is_last: pl.Scalar[pl.INT64] = pl.yield_(1)  # type: ignore[reportArgumentType]
+                        is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
                     else:
-                        is_last: pl.Scalar[pl.INT64] = pl.yield_(0)  # type: ignore[reportArgumentType]
+                        is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
 
                     # Stage 4: Online update (FUNC_ONLINE_UPDATE, AIV / VECTOR)
                     mi_batch, li_batch, oi_batch, out = self.KernelOnlineUpdate(
@@ -529,8 +529,8 @@ def BuildBatchPagedAttentionProgram(
                         is_first,
                         is_last,
                         batch_cfg,
-                        q_offset,  # type: ignore[reportArgumentType]
-                        num_heads_cfg,  # type: ignore[reportArgumentType]
+                        q_offset,
+                        num_heads_cfg,
                     )
 
             return out
