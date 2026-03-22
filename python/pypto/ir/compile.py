@@ -13,12 +13,11 @@ import os
 from datetime import datetime
 
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import PartialCodegenError, generate
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
-
-from pypto.backend.pto_backend import PartialCodegenError, generate
 
 from .pass_manager import OptimizationStrategy, PassManager
 
