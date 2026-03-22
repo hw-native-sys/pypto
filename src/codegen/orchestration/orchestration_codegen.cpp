@@ -20,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -540,7 +541,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // 2. Self-assignment after SSA name collapse (e.g., "auto oi = oi;") — C++ UB
       // 3. Variable traces to a param (external tensor) — would shadow ext_ declaration
       bool is_param_derived = ResolveToParam(return_var.get()) != nullptr;
-      if (!declared_vars_.count(resolved_return) && !is_param_derived && resolved_return != init_value) {
+      if (!declared_var_names_.count(resolved_return) && !is_param_derived && resolved_return != init_value) {
         code_ << Indent() << GetCppType(iter_arg->GetType()) << " " << resolved_return << " = " << init_value
               << ";\n";
       }
@@ -652,7 +653,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
               }
             }
           }
-          call_result_vars_.insert(var_name);
+          call_result_var_ptrs_.insert(assign->var_.get());
         } else {
           // For tuple returns: generate aliases for each element
           auto tuple_key_it = call_to_tuple_key_.find(call.get());
@@ -680,7 +681,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                     std::string ext_out = arg_param ? "ext_" + GetParamEmitName(arg_param) : out_arg;
                     code_ << Indent() << "Tensor& " << elem_name << " = " << ext_out << ";\n";
                   }
-                  call_result_vars_.insert(elem_name);
+                  call_result_var_ptrs_.insert(elem.var);
                 }
               }
             }
@@ -713,7 +714,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // Skip yield when:
         // 1. Self-assignment (e.g., "oi = oi;" for inplace tensor iter_args)
         // 2. Value is a task-submission result (no C++ variable exists for it)
-        if (current_return_var_names_[i] != value_expr && !call_result_vars_.count(value_expr)) {
+        auto yield_var = AsVarLike(yield_stmt->value_[i]);
+        bool is_call_result = yield_var && call_result_var_ptrs_.count(yield_var.get());
+        if (current_return_var_names_[i] != value_expr && !is_call_result) {
           code_ << Indent() << current_return_var_names_[i] << " = " << value_expr << ";\n";
         }
       }
@@ -824,8 +827,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return;
     }
 
-    // Dedup: skip if this tensor was already declared (SSA name collapse)
-    if (op_name == "tensor.create" && declared_vars_.count(result_var)) {
+    // VarPtr dedup: skip if this exact variable was already declared
+    if (op_name == "tensor.create" && assign_var && declared_var_ptrs_.count(assign_var)) {
       return;
     }
 
@@ -836,10 +839,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return;
     }
 
-    current_result_var_ = result_var;
-    if (op_name == "tensor.create") {
-      declared_vars_.insert(result_var);
+    std::string emit_var = result_var;
+    if (op_name == "tensor.create" && assign_var) {
+      declared_var_ptrs_.insert(assign_var);
+      // Ensure unique C++ variable name: if the preferred name collides with
+      // a previously emitted declaration, fall back to the raw name_hint_
+      if (declared_var_names_.count(emit_var)) {
+        emit_var = assign_var->name_hint_;
+      }
+      declared_var_names_.insert(emit_var);
     }
+
+    current_result_var_ = emit_var;
 
     std::string gen_code = (*codegen_func)(call, *this);
 
@@ -1018,10 +1029,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int task_counter_ = 0;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;  // Call* → unique key for tuple calls
-  std::set<std::string> declared_vars_;  // Track declared C++ variables for dedup after SSA name collapse
-  // Accumulates across the entire function body (not per-scope). Safe because SSA guarantees unique
-  // names — a task-submission result name from one scope cannot collide with an unrelated yield var.
-  std::set<std::string> call_result_vars_;  // Vars from task submissions (no C++ declaration, skip in yield)
+  // VarPtr-based dedup: prevents skipping tensor.create for distinct vars with same base name
+  std::unordered_set<const Var*> declared_var_ptrs_;
+  // String-based dedup: ensures unique C++ variable names in generated code
+  std::set<std::string> declared_var_names_;
+  // VarPtr-based tracking of task-submission results (no C++ declaration exists, skip in yield)
+  std::unordered_set<const Var*> call_result_var_ptrs_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
