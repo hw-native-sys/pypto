@@ -250,10 +250,12 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   var_to_memref_.clear();
   memref_to_tile_type_.clear();
   emitted_constants_.clear();
+  emitted_i64_constants_.clear();
   emitted_float_constants_.clear();
   float_const_names_.clear();
   extra_alloc_tiles_.clear();
-  extra_tile_buf_types_.clear();
+  ssa_to_tile_buf_type_.clear();
+  tile_var_allocs_.clear();
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -290,12 +292,26 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     collector.VisitStmt(func->body_);
   }
 
-  for (const auto& memref : collector.GetMemRefs()) {
-    auto name_it = memref_to_var_name_.find(memref.get());
-    std::string tile_buf = (name_it != memref_to_var_name_.end()) ? NewNamedTemp(name_it->second) : NewTemp();
-    memref_to_mlir_[memref.get()] = tile_buf;
-  }
+  // Still collect memref_to_tile_type_ for GetTileBufTypeString fallback paths
   memref_to_tile_type_ = collector.GetMemRefTileTypes();
+
+  // Per-var SSA binding: each tile variable gets its own SSA name
+  for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
+    std::string ssa_name = NewNamedTemp(tile_var->name_hint_);
+    BindVarToMlir(tile_var, ssa_name);
+
+    // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
+    // can query it before EmitAllocTiles runs
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+    ssa_to_tile_buf_type_[ssa_name] = type_str;
+
+    auto memref = ir::GetDefinedMemRef(tile_type);
+
+    // Also maintain memref_to_mlir_ for compatibility (first var per MemRef)
+    if (memref_to_mlir_.find(memref.get()) == memref_to_mlir_.end()) {
+      memref_to_mlir_[memref.get()] = ssa_name;
+    }
+  }
 
   // Collect ordered unique dynamic dimension variables from tensor parameter shapes
   std::vector<VarPtr> dyn_vars;
@@ -359,11 +375,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_ << " {\n";
   indent_level_++;
 
-  for (const auto& [var_key, memref_ptr] : var_to_memref_) {
-    if (param_keys.find(var_key) == param_keys.end()) {
-      var_to_mlir_[var_key] = memref_to_mlir_[memref_ptr];
+  // Pre-emit i64 address constants now that indent_level_ is set
+  for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
+    auto memref = ir::GetDefinedMemRef(tile_type);
+    if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
+      GetOrEmitI64Constant(const_addr->value_);
     }
   }
+
+  // Parameters are already bound; non-param tile vars are bound above in per-var SSA binding
 
   for (const auto& var : func->params_) {
     if (auto tensor_type = As<TensorType>(var->GetType())) {
@@ -401,7 +421,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   stream_ << constants_section_.str();
   EmitMakeTensorViews(func);
-  EmitAllocTiles(func, collector.GetMemRefs());
+  EmitAllocTiles(func);
   EmitExtraAllocTiles();
   stream_ << body_content;
   stream_ << GetIndent() << "return\n";
@@ -415,26 +435,28 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
    public:
     std::map<const ir::Var*, const ir::MemRef*>& var_to_memref;
     std::map<const ir::MemRef*, std::string>& memref_to_var_name;
+    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
-                    std::map<const ir::MemRef*, std::string>& reverse_mapping)
-        : var_to_memref(mapping), memref_to_var_name(reverse_mapping) {}
+                    std::map<const ir::MemRef*, std::string>& reverse_mapping,
+                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs)
+        : var_to_memref(mapping), memref_to_var_name(reverse_mapping), tile_var_allocs(allocs) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         const auto memref = ir::GetDefinedMemRef(tile_type);
         const ir::MemRef* ptr = memref.get();
         var_to_memref[op->var_.get()] = ptr;
-        // Record first variable name per MemRef (program order)
         if (memref_to_var_name.find(ptr) == memref_to_var_name.end()) {
           memref_to_var_name[ptr] = op->var_->name_hint_;
         }
+        tile_var_allocs.emplace_back(op->var_, tile_type);
       }
       ir::IRVisitor::VisitStmt_(op);
     }
   };
 
-  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_);
+  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -524,38 +546,50 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs) {
+void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func) {
   (void)func;
-  for (const auto& memref : memrefs) {
-    std::string tile_buf = memref_to_mlir_[memref.get()];
+  for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
+    auto var_key = GetVarKey(tile_var);
+    auto mlir_it = var_to_mlir_.find(var_key);
+    INTERNAL_CHECK(mlir_it != var_to_mlir_.end())
+        << "Tile var " << tile_var->name_hint_ << " not found in var_to_mlir_";
+    std::string tile_buf = mlir_it->second;
 
     // Collect dynamic valid_shape variable names if present
     std::string valid_row_mlir;
     std::string valid_col_mlir;
-    auto tile_it = memref_to_tile_type_.find(memref.get());
-    if (tile_it != memref_to_tile_type_.end()) {
-      const auto& tile_type = tile_it->second;
-      if (tile_type->tile_view_.has_value()) {
-        const auto& tv = tile_type->tile_view_.value();
-        if (tv.valid_shape.size() >= 1) {
-          if (auto var = As<ir::Var>(tv.valid_shape[0])) {
-            valid_row_mlir = GetVarName(var);
-          }
+    if (tile_type->tile_view_.has_value()) {
+      const auto& tv = tile_type->tile_view_.value();
+      if (tv.valid_shape.size() >= 1) {
+        if (auto var = As<ir::Var>(tv.valid_shape[0])) {
+          valid_row_mlir = GetVarName(var);
         }
-        if (tv.valid_shape.size() >= 2) {
-          if (auto var = As<ir::Var>(tv.valid_shape[1])) {
-            valid_col_mlir = GetVarName(var);
-          }
+      }
+      if (tv.valid_shape.size() >= 2) {
+        if (auto var = As<ir::Var>(tv.valid_shape[1])) {
+          valid_col_mlir = GetVarName(var);
         }
       }
     }
 
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+
+    // Get addr from MemRef.addr_
+    auto memref = ir::GetDefinedMemRef(tile_type);
+    std::string addr_ssa;
+    if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
+      addr_ssa = GetOrEmitI64Constant(const_addr->value_);
+    }
+
     std::ostringstream line;
     line << tile_buf << " = pto.alloc_tile";
+    if (!addr_ssa.empty()) line << " addr = " << addr_ssa;
     if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
     if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
-    line << " : " << GetTileBufTypeString(memref.get());
+    line << " : " << type_str;
     stream_ << GetIndent() << line.str() << "\n";
+
+    ssa_to_tile_buf_type_[tile_buf] = type_str;
   }
 }
 
@@ -583,6 +617,29 @@ std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
   return name;
 }
 
+std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
+  auto it = emitted_i64_constants_.find(value);
+  if (it != emitted_i64_constants_.end()) {
+    return it->second;
+  }
+  std::string ssa_id;
+  if (value == 0) {
+    ssa_id = "c0i";
+  } else {
+    ssa_id = "c" + std::to_string(value);
+  }
+  std::string name;
+  if (used_ssa_names_.find(ssa_id) == used_ssa_names_.end()) {
+    used_ssa_names_.insert(ssa_id);
+    name = "%" + ssa_id;
+  } else {
+    name = NewTemp();
+  }
+  constants_section_ << GetIndent() << name << " = arith.constant " << value << " : i64\n";
+  emitted_i64_constants_[value] = name;
+  return name;
+}
+
 std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
   auto it = memref_to_mlir_.find(memref.get());
   INTERNAL_CHECK(it != memref_to_mlir_.end()) << "MemRef not found in mapping";
@@ -593,14 +650,19 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
                                         const std::string& name_hint) {
   std::string name = NewNamedTemp(name_hint);
   extra_alloc_tiles_.emplace_back(name, tile_buf_type_string);
-  extra_tile_buf_types_[name] = tile_buf_type_string;
+  ssa_to_tile_buf_type_[name] = tile_buf_type_string;
   return name;
 }
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { current_result_buf_ = buf; }
 
 void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::string& type_string) {
-  extra_tile_buf_types_[ssa_name] = type_string;
+  ssa_to_tile_buf_type_[ssa_name] = type_string;
+}
+
+std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
+  auto it = ssa_to_tile_buf_type_.find(ssa_name);
+  return it != ssa_to_tile_buf_type_.end() ? it->second : std::string{};
 }
 
 void PTOCodegen::EmitExtraAllocTiles() {
@@ -620,7 +682,13 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
           op->var_->name_hint_;  // Seed for readable MLIR names when no tile buffer exists.
       std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-        result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+        // Prefer per-var SSA name from var_to_mlir_ (set during per-var alloc binding)
+        auto var_it = var_to_mlir_.find(GetVarKey(op->var_));
+        if (var_it != var_to_mlir_.end()) {
+          result_buf = var_it->second;
+        } else {
+          result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+        }
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
         result_tile_type = tile_type;
@@ -638,6 +706,15 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // update variable mapping so subsequent references use the new buffer
       if (!current_result_buf_.empty() && current_result_buf_ != result_buf) {
         BindVarToMlir(op->var_, current_result_buf_);
+      }
+      // Register per-variable tile_buf type from the variable's own TileType.
+      // This ensures that even when multiple variables share a MemRef, each
+      // variable's SSA value carries its correct typed annotation.
+      if (result_tile_type && !current_result_buf_.empty()) {
+        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
+        if (!var_type_str.empty()) {
+          ssa_to_tile_buf_type_[current_result_buf_] = var_type_str;
+        }
       }
       current_result_var_.reset();
       current_result_buf_.clear();
@@ -981,35 +1058,46 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
   if (auto var = As<ir::Var>(expr)) {
     auto key = GetVarKey(var);
-    // Check if variable was remapped to a dynamically-allocated tile buffer (e.g., reshape output)
+    // Primary lookup: SSA name → tile_buf type (covers root allocs AND view results)
     auto mlir_it = var_to_mlir_.find(key);
     if (mlir_it != var_to_mlir_.end()) {
-      auto extra_it = extra_tile_buf_types_.find(mlir_it->second);
-      if (extra_it != extra_tile_buf_types_.end()) {
-        return extra_it->second;
+      auto ssa_it = ssa_to_tile_buf_type_.find(mlir_it->second);
+      if (ssa_it != ssa_to_tile_buf_type_.end()) {
+        return ssa_it->second;
       }
     }
-    // Check if this variable maps to a tile buffer via memref
+    // Per-variable TileType: derives the type from the variable's own
+    // TileType, which is correct for view op results (slice, reshape,
+    // fillpad) whose type differs from the root alloc's type.
+    if (auto tile_type = As<TileType>(var->GetType())) {
+      if (tile_type->memref_.has_value()) {
+        return GetTileBufTypeStringFromTileType(tile_type);
+      }
+    }
+    // Fallback: var → memref → root alloc type
     auto memref_it = var_to_memref_.find(key);
     if (memref_it != var_to_memref_.end()) {
       return GetTileBufTypeString(memref_it->second);
     }
-    // Check if this is a scalar parameter
     if (auto scalar_type = As<ScalarType>(var->GetType())) {
       return GetTypeString(scalar_type->dtype_);
     }
-    // Check if variable has TileType with memref
-    if (auto tile_type = ir::GetTileTypeWithMemRef(var->GetType())) {
-      return GetTileBufTypeString(ir::GetDefinedMemRef(tile_type).get());
-    }
   }
   if (auto iter_arg = As<ir::IterArg>(expr)) {
-    auto memref_it = var_to_memref_.find(GetVarKey(std::dynamic_pointer_cast<const ir::Var>(iter_arg)));
-    if (memref_it != var_to_memref_.end()) {
-      return GetTileBufTypeString(memref_it->second);
+    auto key = GetVarKey(std::dynamic_pointer_cast<const ir::Var>(iter_arg));
+    auto mlir_it = var_to_mlir_.find(key);
+    if (mlir_it != var_to_mlir_.end()) {
+      auto ssa_it = ssa_to_tile_buf_type_.find(mlir_it->second);
+      if (ssa_it != ssa_to_tile_buf_type_.end()) {
+        return ssa_it->second;
+      }
     }
     if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      return GetTileBufTypeString(ir::GetDefinedMemRef(tile_type).get());
+      return GetTileBufTypeStringFromTileType(tile_type);
+    }
+    auto memref_it = var_to_memref_.find(key);
+    if (memref_it != var_to_memref_.end()) {
+      return GetTileBufTypeString(memref_it->second);
     }
     if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
       return GetTypeString(scalar_type->dtype_);

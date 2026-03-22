@@ -188,6 +188,11 @@ void BindPass(nb::module_& m) {
              "(sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.\n"
              "Uses the globally configured backend to obtain pipe information.");
 
+  passes.def("legalize_pto_buffer_reuse", &pass::LegalizePTOBufferReuse,
+             "Create a PTO buffer reuse legalisation pass\n\n"
+             "After generic MemoryReuse, detects illegal cross-type MemRef sharing\n"
+             "that PTO codegen cannot express and splits such MemRefs.");
+
   passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
              "Create an allocate memory address pass\n\n"
              "Allocates real memory addresses for existing alloc operations.\n"

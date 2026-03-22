@@ -135,7 +135,7 @@ def test_add_kernel_valid_shape_pto_codegen():
     # tload is generated for each load
     assert "pto.tload" in mlir_code
     # alloc_tile carries valid_row/valid_col for dynamic valid_shapes
-    assert "pto.alloc_tile valid_row = %arg3 valid_col = %arg4" in mlir_code
+    assert "pto.alloc_tile addr = %c0i valid_row = %arg3 valid_col = %arg4" in mlir_code
     # v_row and v_col are wildcards (?) when valid_shape is dynamic
     assert "v_row=?" in mlir_code
     assert "v_col=?" in mlir_code

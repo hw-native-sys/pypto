@@ -169,19 +169,24 @@ For each `TensorType` parameter, the codegen generates:
 
 ### Allocation Generation
 
-Based on MemRef objects attached to TileType variables. The codegen derives tile dimensions and dtype from the associated TileType:
+Based on TileType variables collected from the function body. Each tile variable gets its own `pto.alloc_tile` instruction with an explicit `addr` attribute derived from the variable's MemRef. Variables sharing the same MemRef share the same address:
 
 ```mlir
-%0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32,
-                       v_row=32, v_col=32, blayout=row_major,
-                       slayout=none_box, fractal=512, pad=0>
+%mi_tile = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
+                      v_row=16, v_col=1, blayout=col_major,
+                      slayout=none_box, fractal=512, pad=0>
+%mi_tile_nd = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
+                      v_row=1, v_col=16, blayout=row_major,
+                      slayout=none_box, fractal=512, pad=0>
 ```
 
-**MemRef → alloc_tile mapping**:
+**Tile variable → alloc_tile mapping**:
 
 - Memory space (`TileType.memory_space_`) → `loc` attribute (using PTO address space names)
-- Tile dtype and dimensions derived from associated TileType metadata
-- One allocation per unique MemRef
+- Tile dtype and dimensions derived from each variable's own TileType metadata
+- One allocation per tile variable (not per unique MemRef)
+- `addr` attribute from `MemRef.addr_`, emitted as `arith.constant ... : i64`
+- Variables sharing the same MemRef produce the same `addr` SSA value
 
 ### Load Operation Transformation
 

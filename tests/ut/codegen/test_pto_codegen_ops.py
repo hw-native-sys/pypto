@@ -712,6 +712,43 @@ class TestTileSliceCodegen:
             f"tile.slice with valid_shape should generate pto.textract, got:\n{mlir}"
         )
 
+    def test_tile_slice_multiple_slices_have_correct_types(self):
+        """Multiple tile.slice from one reshape must produce correct type annotations.
+
+        Reproduces the Qwen3 decode pattern:
+            load [1,512] → reshape [4,128] → slice [4,64]@[0,0] + slice [4,64]@[0,64]
+        Both slices share the same MemRef and PTO buffer (sequential execution),
+        but their ins()/outs() type annotations must reflect the [4,64] slice
+        shape, not the [1,512] root alloc shape.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 512], pl.FP32],
+                dst: pl.Tensor[[4, 128], pl.FP32],
+            ) -> pl.Tensor[[4, 128], pl.FP32]:
+                tile_a: pl.Tile[[1, 512], pl.FP32] = pl.load(src, [0, 0], [1, 512])
+                reshaped: pl.Tile[[4, 128], pl.FP32] = pl.tile.reshape(tile_a, [4, 128])
+                lo: pl.Tile[[4, 64], pl.FP32] = pl.tile.slice(reshaped, [4, 64], [0, 0])
+                hi: pl.Tile[[4, 64], pl.FP32] = pl.tile.slice(reshaped, [4, 64], [0, 64])
+                combined: pl.Tile[[4, 128], pl.FP32] = pl.tile.concat(lo, hi)
+                return pl.store(combined, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+
+        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
+        assert len(textract_lines) == 2, (
+            f"Expected 2 pto.textract (lo+hi slices), got {len(textract_lines)}:\n"
+            + "\n".join(textract_lines)
+        )
+        for line in textract_lines:
+            assert "rows=4" in line and "cols=64" in line, (
+                f"textract outs() type should be rows=4,cols=64 (slice shape), got:\n{line}"
+            )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

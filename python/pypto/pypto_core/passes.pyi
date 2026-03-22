@@ -209,6 +209,9 @@ def memory_reuse() -> Pass:
 def insert_sync() -> Pass:
     """Create an insert sync pass."""
 
+def legalize_pto_buffer_reuse() -> Pass:
+    """Create a PTO buffer reuse legalisation pass."""
+
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
 
@@ -349,6 +352,7 @@ __all__ = [
     "PassPipeline",
     "init_mem_ref",
     "memory_reuse",
+    "legalize_pto_buffer_reuse",
     "insert_sync",
     "allocate_memory_addr",
     "VerificationError",

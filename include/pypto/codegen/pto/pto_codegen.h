@@ -202,6 +202,7 @@ class PTOCodegen : public CodegenBase {
    */
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
+  std::string GetSSATileBufType(const std::string& ssa_name) const;
 
  protected:
   // Override visitor methods for code generation - Statements
@@ -276,9 +277,9 @@ class PTOCodegen : public CodegenBase {
   void EmitMakeTensorViews(const ir::FunctionPtr& func);
 
   /**
-   * @brief Emit alloc_tile for all MemRefs
+   * @brief Emit alloc_tile for all tile variables (per-var with explicit addr)
    */
-  void EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs);
+  void EmitAllocTiles(const ir::FunctionPtr& func);
 
   /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
@@ -296,6 +297,11 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrEmitIndexConstant(int64_t value);
 
   /**
+   * @brief Get or emit i64 constant (for tile buffer addresses)
+   */
+  std::string GetOrEmitI64Constant(int64_t value);
+
+  /**
    * @brief Get tile_buf name for a MemRef
    */
   std::string GetTileBufForMemRef(const ir::MemRefPtr& memref);
@@ -311,21 +317,29 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::Var*, std::string> tensor_to_view_;
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
   std::map<const ir::Var*, const ir::MemRef*> var_to_memref_;
+  /// Root alloc TileType per MemRef (first writer's type, used for pto.alloc_tile)
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
   std::map<int64_t, std::string> emitted_constants_;
+  std::map<int64_t, std::string> emitted_i64_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
 
   /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
   std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
-  /// Maps extra tile buffer SSA names to their type strings (for correct type annotations)
-  std::map<std::string, std::string> extra_tile_buf_types_;
+  /// Unified SSA → tile_buf type mapping.  Every typed tile SSA value
+  /// (root alloc, reshape result, fillpad result, etc.) has an entry here.
+  /// GetExprTypeAnnotation uses this as the primary lookup.
+  std::map<std::string, std::string> ssa_to_tile_buf_type_;
 
   int temp_counter_ = 0;
   std::set<std::string> used_ssa_names_;
 
   /// Maps each unique MemRef to the first IR variable name assigned to it (program order)
   std::map<const ir::MemRef*, std::string> memref_to_var_name_;
+
+  /// Ordered tile variable allocations: (VarPtr, TileType) pairs in program order.
+  /// This is the single source of truth for EmitAllocTiles emission order.
+  std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs_;
 
   // Current function context
   ir::FunctionPtr current_function_;

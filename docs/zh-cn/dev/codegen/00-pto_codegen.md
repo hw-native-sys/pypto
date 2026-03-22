@@ -9,7 +9,7 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 - **自动 MLIR 生成**: 将 PyPTO IR 转换为 PTO-ISA MLIR 方言
 - **结构化代码生成 (CodeGen)**: 按顺序输出常量、张量 (Tensor) 视图和分配
 - **隐式降级**: 从 `tile.load`/`tile.store` 自动生成 `pto.partition_view`
-- **基于内存引用 (MemRef) 的分配**: 将 IR MemRef 对象映射到 `pto.alloc_tile` 操作
+- **基于 Tile 变量的分配**: 为每个 Tile 变量生成带显式 `addr` 的 `pto.alloc_tile` 操作
 - **类型 (Type) 感知转换**: 从 TileType 元数据推导 tile_buf/tensor_view 类型
 - **PTOAS 类型标注**: 为所有操作生成带类型的 `ins`/`outs` 子句
 
@@ -19,7 +19,7 @@ PTO 代码生成 (CodeGen) (`PTOCodegen`) 从 PyPTO 中间表示 (IR) 生成 PTO
 
 1. **常量**: 索引和浮点值的 `arith.constant`
 2. **张量视图**: 所有张量参数的 `pto.make_tensor_view`
-3. **分配**: 所有 Tile 缓冲区的 `pto.alloc_tile` (基于 MemRef)
+3. **分配**: 所有 Tile 变量的 `pto.alloc_tile` (按变量维度, 带 `addr` 属性)
 4. **操作**: 包含加载、计算、存储操作的函数体
 
 ## 架构
@@ -172,16 +172,21 @@ print(pto_code)
 基于附加到 TileType 变量的 MemRef 对象。代码生成器从关联的 TileType 推导 Tile 维度和数据类型:
 
 ```mlir
-%0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32,
-                       v_row=32, v_col=32, blayout=row_major,
+%mi_tile = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
+                       v_row=16, v_col=1, blayout=col_major,
+                       slayout=none_box, fractal=512, pad=0>
+%mi_tile_nd = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
+                       v_row=1, v_col=16, blayout=row_major,
                        slayout=none_box, fractal=512, pad=0>
 ```
 
-**MemRef 到 alloc_tile 的映射**:
+**Tile 变量到 alloc_tile 的映射**:
 
 - 内存空间 (`TileType.memory_space_`) 映射到 `loc` 属性 (使用 PTO 地址空间名)
-- Tile 数据类型和维度从关联的 TileType 元数据推导
-- 每个唯一 MemRef 对应一次分配
+- Tile 数据类型和维度从每个变量自身的 TileType 元数据推导
+- 每个 Tile 变量对应一次分配 (不是每个唯一 MemRef)
+- `addr` 属性来自 `MemRef.addr_`，输出为 `arith.constant ... : i64`
+- 共享同一 MemRef 的变量共享相同的 `addr` SSA 值
 
 ### 加载操作转换
 

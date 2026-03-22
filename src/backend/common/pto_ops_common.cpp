@@ -38,6 +38,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1032,8 +1033,27 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       std::string acc = codegen.GetExprAsCode(op->args_[0]);
       std::string dst = codegen.GetCurrentResultTarget();
 
-      // Copy accumulator to output buffer when they differ
-      if (acc != dst) {
+      // Copy accumulator to output buffer when they differ and occupy
+      // different physical storage.  With per-var alloc, two distinct SSA
+      // names may share the same MemRef (same addr/space), making the
+      // tmov a hardware-level no-op that must be suppressed.
+      bool need_tmov = (acc != dst);
+      if (need_tmov) {
+        auto acc_var = ir::As<ir::Var>(op->args_[0]);
+        auto result_var = codegen.GetCurrentResultVar();
+        if (acc_var && result_var) {
+          auto acc_tt = ir::GetTileTypeWithMemRef(acc_var->GetType());
+          auto dst_tt = ir::GetTileTypeWithMemRef(result_var->GetType());
+          if (acc_tt && dst_tt) {
+            auto acc_mr = ir::GetDefinedMemRef(acc_tt);
+            auto dst_mr = ir::GetDefinedMemRef(dst_tt);
+            if (acc_mr.get() == dst_mr.get()) {
+              need_tmov = false;
+            }
+          }
+        }
+      }
+      if (need_tmov) {
         std::string acc_type = codegen.GetExprTypeAnnotation(op->args_[0]);
         std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
         std::ostringstream mov;
@@ -1166,11 +1186,13 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string result_target = codegen.GetCurrentResultTarget();
     std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
 
-    if (src == result_target && !result_type.empty()) {
-      result_target = codegen.NewTemp();
+    // With per-var alloc model, prefer the pre-declared alloc SSA if its type
+    // matches the slice result type
+    auto existing_type = codegen.GetSSATileBufType(result_target);
+    if (!result_type.empty() && existing_type != result_type) {
+      result_target = codegen.AllocNewTileBuf(result_type, "slice_buf");
       codegen.SetCurrentResultBuf(result_target);
-    }
-    if (!result_type.empty()) {
+    } else if (!result_type.empty()) {
       codegen.RegisterTileBufType(result_target, result_type);
     }
 
@@ -1191,14 +1213,19 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.size() == 2) << "Operation:[tile.reshape] requires 2 arguments (tile, shape), but got "
                                  << op->args_.size();
-    std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string result_target = codegen.GetCurrentResultTarget();
-    // Use the TileType-based method to get the correct reshaped output type,
-    // bypassing the memref lookup which would return the pre-reshape shape.
     std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
-    // Get the correct input type directly from the source variable's TileType,
-    // bypassing the memref_to_tile_type_ lookup which may return the wrong shape
-    // when input and output share the same MemRef.
+
+    // With per-var alloc model, the result variable already has a pre-declared
+    // alloc_tile with the correct reshaped type and shared addr. If the types
+    // match, the reshape is a no-op at the PTO level.
+    auto existing_type = codegen.GetSSATileBufType(result_target);
+    if (!existing_type.empty() && existing_type == result_type) {
+      return std::string("");
+    }
+
+    // Fallback: emit pto.treshape for cases without pre-declared alloc
+    std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type;
     if (auto src_var = AsVarLike(op->args_[0])) {
       if (auto tile_type = ir::As<ir::TileType>(src_var->GetType())) {
@@ -1207,16 +1234,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         }
       }
     }
-    // tile.reshape is a view-like op that produces a new SSA value, not an in-place write.
-    // If the target variable already has a preallocated tile buffer name, emitting
-    // `result_target = pto.treshape ...` would redefine the same SSA value after
-    // the earlier `pto.alloc_tile`. Always materialize reshape results with a fresh
-    // SSA name when codegen assigned a MemRef-backed result target.
+
     if (!result_type.empty()) {
       result_target = codegen.NewNamedTemp("reshape_buf");
       codegen.SetCurrentResultBuf(result_target);
-    }
-    if (!result_type.empty()) {
       codegen.RegisterTileBufType(result_target, result_type);
     }
     std::ostringstream oss;

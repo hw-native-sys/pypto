@@ -41,8 +41,8 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
 
-        assert len(pm.passes) == 18
-        assert len(pm.pass_names) == 18
+        assert len(pm.passes) == 19
+        assert len(pm.pass_names) == 19
         assert pm.pass_names[0] == "UnrollLoops"
         assert pm.pass_names[1] == "CtrlFlowTransform"
         assert pm.pass_names[2] == "ConvertToSSA"
@@ -60,7 +60,8 @@ class TestPassManagerBasics:
         assert pm.pass_names[14] == "ExpandMixedKernel"
         assert pm.pass_names[15] == "InitMemRef"
         assert pm.pass_names[16] == "MemoryReuse"
-        assert pm.pass_names[17] == "AllocateMemoryAddr"
+        assert pm.pass_names[17] == "LegalizePTOBufferReuse"
+        assert pm.pass_names[18] == "AllocateMemoryAddr"
 
 
 class TestPassManagerExecution:

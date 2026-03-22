@@ -26,6 +26,7 @@ import subprocess
 import textwrap
 from collections import OrderedDict
 
+from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 
@@ -383,7 +384,19 @@ def generate(
                     f.write(pto_code)
 
                 cpp_path = os.path.join(ptoas_dir, f"{func.name}.cpp")
-                _run_ptoas(pto_path, cpp_path, ptoas_flags=["--enable-insert-sync"])
+                _run_ptoas(
+                    pto_path,
+                    cpp_path,
+                    ptoas_flags=[
+                        "--enable-insert-sync",
+                        "--pto-level=level3",
+                    ]
+                    + (
+                        ["--pto-arch", "a5"]
+                        if _backend_core.get_backend_type() == _backend_core.BackendType.Ascend950
+                        else []
+                    ),
+                )
 
                 with open(cpp_path) as f:
                     ptoas_cpp = f.read()
