@@ -1416,6 +1416,9 @@ class TestOrchestration:
         # 3 tensor params expected
         assert "expected_arg_count = 3" in code
 
+        # Tuple-return elements must not be collapsed into a single alias
+        assert "Tensor& out =" not in code
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

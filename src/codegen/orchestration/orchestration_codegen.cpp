@@ -141,11 +141,18 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
   return (*func_name_to_id)[func_name];
 }
 
+// Per-call tuple element: stores index, fallback name, and VarPtr for identity resolution
+struct TupleElement {
+  int index;
+  std::string fallback_name;  // GetSSABaseName result — used only if VarPtr resolution unavailable
+  const Var* var;             // VarPtr for identity-based emit name resolution
+};
+
 // Collect metadata from IR (tuple info) for orchestration codegen
 class OrchestrationInfoCollector : public IRVisitor {
  public:
-  // Per-call tuple elements: key = unique call key, value = [(index, element_base_name), ...]
-  std::map<std::string, std::vector<std::pair<int, std::string>>> call_tuple_elements;
+  // Per-call tuple elements: key = unique call key, value = [TupleElement, ...]
+  std::map<std::string, std::vector<TupleElement>> call_tuple_elements;
   // Maps Call* to unique key for cross-phase coordination with StmtCodegen
   std::map<const Call*, std::string> call_to_tuple_key;
 
@@ -173,7 +180,7 @@ class OrchestrationInfoCollector : public IRVisitor {
       // Find the unique key for the most recent tuple call with this var name
       auto it = current_tuple_key_.find(tuple_ref_name);
       if (it != current_tuple_key_.end()) {
-        call_tuple_elements[it->second].emplace_back(tuple_get->index_, var_name);
+        call_tuple_elements[it->second].push_back({tuple_get->index_, var_name, assign->var_.get()});
       }
     }
     IRVisitor::VisitStmt_(assign);
@@ -215,6 +222,20 @@ class VarLineageCollector : public IRVisitor {
       }
     }
     IRVisitor::VisitStmt_(for_stmt);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& while_stmt) override {
+    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+      const auto& iter_arg = while_stmt->iter_args_[i];
+      const Var* param = ResolveExpr(iter_arg->initValue_);
+      if (param) {
+        var_to_param[iter_arg.get()] = param;
+        if (i < while_stmt->return_vars_.size()) {
+          var_to_param[while_stmt->return_vars_[i].get()] = param;
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(while_stmt);
   }
 
   // IfStmt lineage is not tracked: orchestration IfStmt return_vars are rare
@@ -447,10 +468,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         param_name_set_(std::move(param_name_set)) {}
 
   // Set per-call tuple elements using unique keys (avoids cross-call collision)
-  void SetCallTupleElements(const std::map<std::string, std::vector<std::pair<int, std::string>>>& elements) {
+  void SetCallTupleElements(const std::map<std::string, std::vector<TupleElement>>& elements) {
     tuple_var_to_elements_ = elements;
     for (auto& [key, vec] : tuple_var_to_elements_) {
-      std::sort(vec.begin(), vec.end());
+      std::sort(vec.begin(), vec.end(),
+                [](const TupleElement& a, const TupleElement& b) { return a.index < b.index; });
     }
   }
 
@@ -649,7 +671,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
                 }
                 // Map each tuple element to corresponding Out/InOut arg
                 for (size_t ei = 0; ei < elements_it->second.size() && ei < out_indices.size(); ++ei) {
-                  const auto& [_idx, elem_name] = elements_it->second[ei];
+                  const auto& elem = elements_it->second[ei];
+                  // Resolve elem name via VarPtr identity (avoids legacy suffix collisions)
+                  std::string elem_name = ResolveVarEmitName(elem.var);
                   std::string out_arg = TryGetVarName(call->args_[out_indices[ei]]);
                   if (!out_arg.empty() && elem_name != out_arg) {
                     const Var* arg_param = ResolveExprToParam(call->args_[out_indices[ei]]);
@@ -992,7 +1016,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::string current_result_var_;
   std::vector<std::string> current_return_var_names_;
   int task_counter_ = 0;
-  std::map<std::string, std::vector<std::pair<int, std::string>>> tuple_var_to_elements_;
+  std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;  // Call* → unique key for tuple calls
   std::set<std::string> declared_vars_;  // Track declared C++ variables for dedup after SSA name collapse
   // Accumulates across the entire function body (not per-scope). Safe because SSA guarantees unique
