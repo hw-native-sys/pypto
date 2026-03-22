@@ -23,7 +23,8 @@
 | `OrchestrationStmtCodegen` | 语句级 C++ 代码生成器（继承 CodegenBase） | orchestration_codegen.cpp |
 | `OrchestrationOpRegistry` | 张量操作代码生成处理器的单例注册表 | orchestration_op_registry.h |
 | `GenerateOrchestration()` | 主入口函数，组合所有生成阶段 | orchestration_codegen.cpp |
-| `GetSSABaseName()` | 剥离 SSA/流水线后缀，恢复原始变量名 | orchestration_codegen.cpp |
+| `VarLineageCollector` | 通过 VarPtr 身份追踪函数体变量到函数参数的来源 | orchestration_codegen.cpp |
+| `GetSSABaseName()` | 剥离 SSA/流水线后缀用于 C++ 名称生成（非身份判定） | orchestration_codegen.cpp |
 
 ### OrchestrationInfoCollector
 
@@ -298,19 +299,16 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
 
 ## 变量命名
 
-### SSA 名称剥离
+### 基于 VarPtr 的变量身份追踪
 
-`GetSSABaseName()` 迭代剥离流水线后缀以恢复原始变量名：
+变量身份判定（该变量是否为参数？两个变量是否为同一张量？）使用基于
+`VarPtr` 指针的身份识别，而非字符串匹配。`VarLineageCollector` 在代码生成
+前遍历函数体，通过 ForStmt iter_arg/return_var 链和简单的 Var-to-Var 赋值，
+将每个函数体 `Var*` 追踪回其源函数参数 `Var*`。这避免了后缀剥离导致的名称
+冲突问题（例如 `out_0` → `out` 合并了不同变量）。
 
-| 后缀 | 来源 Pass | 示例 |
-| ---- | --------- | ---- |
-| `_N` | SSA 转换 | `mi_4` → `mi` |
-| `_iter_N` | SSA iter_arg | `mi_iter_2` → `mi` |
-| `_rv` | split_chunked_loops | `output_rv` → `output` |
-| `_lN` | interchange_chunk_loops | `output_l0` → `output` |
-| `_outer`/`_inner`/`_rem` | split_chunked_loops | `output_outer` → `output` |
-
-后缀可组合：`output_tensor_iter_1_outer_l0_rv` → `output_tensor`
+`GetSSABaseName()` 仍用于 C++ 代码生成（生成输出中的清晰变量名），
+但不再用于身份判定。
 
 ### 命名约定
 

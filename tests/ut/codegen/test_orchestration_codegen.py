@@ -1358,6 +1358,64 @@ class TestOrchestration:
         assert "ext_output_tensor)" in code
         assert "ext_output_tensor_iter" not in code
 
+    def test_param_with_numeric_suffix(self):
+        """Regression test for issue #573: params with numeric suffixes must not be collapsed.
+
+        When function params have names like `out_0` and `out_1`,
+        GetSSABaseName previously stripped the numeric suffix, collapsing
+        both to `out`. This caused duplicate ARG_PTR defines and merged
+        external tensors. With VarPtr-based identity, each param retains
+        its distinct identity regardless of name patterns.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class NumericSuffixProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                out_0: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                out_1: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                xt: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                r0: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], out_0)
+                r1: pl.Tensor[[16, 16], pl.FP32] = pl.store(xt, [0, 0], out_1)
+                return r0, r1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_numeric(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out_0: pl.Tensor[[16, 16], pl.FP32],
+                out_1: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0, out_1 = self.kernel(x, out_0, out_1)
+                return out_0
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(NumericSuffixProgram)
+        code = files["orchestration/orch_numeric.cpp"]
+
+        # Each param must get a distinct ARG_PTR define
+        assert "#define ARG_PTR_X 0" in code
+        assert "#define ARG_PTR_OUT_0 1" in code
+        assert "#define ARG_PTR_OUT_1 2" in code
+
+        # No collapsed "ARG_PTR_OUT" without suffix
+        assert "#define ARG_PTR_OUT " not in code
+
+        # Each param gets its own make_tensor_external
+        assert "ext_out_0" in code
+        assert "ext_out_1" in code
+
+        # 3 tensor params expected
+        assert "expected_arg_count = 3" in code
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

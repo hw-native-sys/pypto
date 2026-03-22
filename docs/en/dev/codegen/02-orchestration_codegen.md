@@ -23,7 +23,8 @@ The orchestration codegen generates PTO2 runtime C++ code that manages task-grap
 | `OrchestrationStmtCodegen` | Statement-level C++ code generator (extends CodegenBase) | orchestration_codegen.cpp |
 | `OrchestrationOpRegistry` | Singleton registry for tensor operation codegen handlers | orchestration_op_registry.h |
 | `GenerateOrchestration()` | Main entry point combining all generation phases | orchestration_codegen.cpp |
-| `GetSSABaseName()` | Strips SSA/pass-pipeline suffixes from variable names | orchestration_codegen.cpp |
+| `VarLineageCollector` | Traces body variables back to function params via VarPtr identity | orchestration_codegen.cpp |
+| `GetSSABaseName()` | Strips SSA/pass-pipeline suffixes for C++ name emission (not identity) | orchestration_codegen.cpp |
 
 ### OrchestrationInfoCollector
 
@@ -298,19 +299,17 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
 
 ## Variable Naming
 
-### SSA Name Stripping
+### Variable Identity via VarPtr Lineage
 
-`GetSSABaseName()` iteratively strips pass-pipeline suffixes to recover the original variable name:
+Variable identity decisions (is this var a param? are two vars the same tensor?) use
+`VarPtr`-based pointer identity, not string matching. `VarLineageCollector` walks the
+function body before codegen and traces each body `Var*` back to its originating
+function parameter `Var*` through ForStmt iter_arg/return_var chains and simple
+Var-to-Var assignments. This avoids the name-collision bugs where suffix stripping
+(e.g., `out_0` → `out`) would merge distinct variables.
 
-| Suffix | Source Pass | Example |
-| ------ | ----------- | ------- |
-| `_N` | SSA conversion | `mi_4` → `mi` |
-| `_iter_N` | SSA iter_arg | `mi_iter_2` → `mi` |
-| `_rv` | split_chunked_loops | `output_rv` → `output` |
-| `_lN` | interchange_chunk_loops | `output_l0` → `output` |
-| `_outer`/`_inner`/`_rem` | split_chunked_loops | `output_outer` → `output` |
-
-Suffixes compose: `output_tensor_iter_1_outer_l0_rv` → `output_tensor`
+`GetSSABaseName()` is still used for C++ code emission (generating clean variable
+names in the output), but never for identity decisions.
 
 ### Naming Conventions
 
