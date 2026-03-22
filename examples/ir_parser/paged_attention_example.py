@@ -332,11 +332,21 @@ def build_paged_attention_program(
                             [q_tile, block_size_cfg],
                             dtype=pl.BF16,
                         )
-                        mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
-                        li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        mi_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
+                            [q_tile, 1], dtype=pl.FP32
+                        )
+                        li_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
+                            [q_tile, 1], dtype=pl.FP32
+                        )
 
                         # Softmax prepare (VECTOR) via shared module-level InCore kernel
-                        pij_f16, mi, li = kernel_softmax_prepare(sij_valid, 1.0, pij_f16_buf, mi_buf, li_buf)
+                        pij_f16, mi, li = kernel_softmax_prepare(
+                            sij_valid,
+                            1.0,  # type: ignore[reportArgumentType]
+                            pij_f16_buf,
+                            mi_sm_buf,
+                            li_sm_buf,
+                        )
 
                         oi_tmp_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
                             [q_tile, head_dim_cfg],
@@ -356,14 +366,14 @@ def build_paged_attention_program(
                             is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
 
                         # Output view: same row offset as query view
-                        out_view: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
+                        out_view_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
                             out,
                             [q_tile, head_dim_cfg],
                             [cur_offset, 0],
                         )
                         # Online softmax update via shared module-level InCore kernel
                         mi_update, li_update, oi, out_view = kernel_online_update(
-                            mi, li, oi_tmp, mi_update, li_update, oi, out_view, is_first, is_last
+                            mi, li, oi_tmp, mi_update, li_update, oi, out_view_buf, is_first, is_last
                         )
 
             return out
