@@ -161,8 +161,8 @@ class TestTypeMismatchReassignment:
 
         assert func is not None
 
-    def test_reassign_different_rank_raises(self):
-        """Reassigning with a different tensor rank raises ParserTypeError."""
+    def test_reassign_different_shape_raises(self):
+        """Reassigning with a different tensor shape raises ParserTypeError."""
 
         with pytest.raises(ParserTypeError, match="Cannot reassign"):
 
@@ -171,7 +171,7 @@ class TestTypeMismatchReassignment:
                 x: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 t = pl.create_tensor([16, 16], dtype=pl.FP32)  # noqa: F841
-                t = pl.create_tensor([16], dtype=pl.FP32)  # different rank  # noqa: F841
+                t = pl.create_tensor([4, 4], dtype=pl.FP32)  # different shape  # noqa: F841
                 return x
 
 

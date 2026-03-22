@@ -456,10 +456,10 @@ def build_llama_mini_program(
                 [seq_len, head_dim], dtype=pl.FP32
             )
             q_rot = self.kernel_rope(q, cos_emb, sin_emb, q_rot)
-            k_rot: pl.Tensor[[head_dim, seq_len], pl.FP32, pl.DN] = pl.create_tensor(
+            k_rot_buf: pl.Tensor[[head_dim, seq_len], pl.FP32, pl.DN] = pl.create_tensor(
                 [head_dim, seq_len], dtype=pl.FP32, layout=pl.DN
             )
-            k_rot = self.kernel_rope(k, cos_emb, sin_emb, k_rot)
+            k_rot = self.kernel_rope(k, cos_emb, sin_emb, k_rot_buf)
 
             # Scaled causal dot-product attention
             scores: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.create_tensor(
