@@ -1475,48 +1475,46 @@ class TestEscapingVariables:
         assert "k0_iter" not in printed, "k0 should not be promoted to iter_arg"
         assert "chunk_iter" not in printed, "chunk should not be promoted to iter_arg"
 
-    def test_disjoint_scope_same_name_different_shape_not_carried(self):
-        """Same-named var in disjoint scopes with different shapes must not be loop-carried.
+    def test_loop_local_var_not_carried_as_iter_arg(self):
+        """Loop-local variable freshly created each iteration must not be loop-carried.
 
-        Regression test for issue #642: ConvertToSSA incorrectly linked
-        same-named variables across disjoint scopes when they had different
-        shapes, creating spurious loop-carry iter_args.
+        Regression test for issue #642: ConvertToSSA incorrectly promoted
+        a variable created inside a loop body to a loop-carry iter_arg.
         """
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
-                # Scope 1: sq_sum is [16, 1]
-                sq_sum = pl.create_tensor([16, 1], dtype=pl.FP32)
-                sq_sum = pl.mul(sq_sum, 0.0)
+                result = pl.create_tensor([16, 1], dtype=pl.FP32)
+                result = pl.mul(result, 0.0)
                 for b0 in pl.range(0, 16, 4):
-                    sq_sum = pl.mul(sq_sum, 2.0)
-                result1 = pl.mul(sq_sum, 2.0)
+                    result = pl.mul(result, 2.0)
+                out = pl.mul(result, 2.0)
 
-                # Scope 2: sq_sum_local is [4, 1], completely independent
+                # local_var is freshly created each iteration — must NOT
+                # become a loop-carry variable in the outer loop.
                 for b0 in pl.range(0, 16, 4):
-                    sq_sum_local = pl.create_tensor([4, 1], dtype=pl.FP32)
-                    sq_sum_local = pl.mul(sq_sum_local, 0.0)
+                    local_var = pl.create_tensor([4, 1], dtype=pl.FP32)
+                    local_var = pl.mul(local_var, 0.0)
                     for kb in pl.range(0, 40):
-                        sq_sum_local = pl.add(sq_sum_local, 1.0)
-                    _result2 = pl.mul(sq_sum_local, 3.0)
+                        local_var = pl.add(local_var, 1.0)
+                    _tmp = pl.mul(local_var, 3.0)
 
-                return result1
+                return out
 
         After = passes.convert_to_ssa()(Before)
         printed = ir.python_print(After)
 
-        # The second for-b0 loop should NOT carry sq_sum_local as an iter_arg
-        # because it is freshly created each iteration
-        lines = printed.split("\n")
-        for line in lines:
-            if "b0__idx_v0_1" in line or (lines.index(line) > 10 and "for b0" in line):
-                # The second for-loop line should not have sq_sum in init_values
-                assert "sq_sum__" not in line, (
-                    f"sq_sum should not appear as loop-carry in the second loop: {line}"
-                )
-                break
+        # Count ForStmt lines with init_values — only the first two loops
+        # (outer b0 and inner kb) should carry variables; the second b0
+        # loop should have NO init_values (no loop-carry).
+        for_lines = [ln.strip() for ln in printed.split("\n") if "for " in ln and "pl.range" in ln]
+        assert len(for_lines) == 3, f"Expected 3 for-loops, got {len(for_lines)}"
+        # Second for-b0 loop should not have init_values
+        assert "init_values" not in for_lines[1], (
+            f"Second for-loop should not have init_values: {for_lines[1]}"
+        )
 
 
 if __name__ == "__main__":

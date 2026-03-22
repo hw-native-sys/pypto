@@ -548,7 +548,7 @@ class SSAConverter {
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_, ia_to_source);
+    RegisterExistingReturnVars(ias, op->return_vars_, ia_to_source);
 
     // Build return_vars in iter_arg order: existing + carried + escaping
     std::vector<VarPtr> all_rvs;
@@ -676,7 +676,7 @@ class SSAConverter {
     cur_ = before;
     for (size_t i = 0; i < carried.size(); ++i) cur_[carried[i]] = carried_rvs[i];
     for (size_t i = 0; i < escaping.size() && i < esc_rvs.size(); ++i) cur_[escaping[i]] = esc_rvs[i];
-    RegisterExistingReturnVars(op->iter_args_, op->return_vars_, ia_to_source);
+    RegisterExistingReturnVars(ias, op->return_vars_, ia_to_source);
 
     // Build return_vars: existing + carried + escaping
     std::vector<VarPtr> all_rvs;

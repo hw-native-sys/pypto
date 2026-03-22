@@ -411,6 +411,23 @@ class ASTParser:
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
 
+    @staticmethod
+    def _types_compatible(a: ir.Type, b: ir.Type) -> bool:
+        """Check if two types are compatible for variable reassignment.
+
+        For exact matches, returns True immediately.  For shaped types
+        (TensorType, TileType), compares rank and dtype only — shape
+        dimension values and metadata (memref, tile_view, memory_space)
+        may legitimately differ across operations on the same variable.
+        """
+        if a == b:
+            return True
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, ir.ShapedType) and isinstance(b, ir.ShapedType):
+            return len(a.shape) == len(b.shape) and a.dtype == b.dtype
+        return False
+
     def _assign_or_let(
         self,
         var_name: str,
@@ -421,12 +438,14 @@ class ASTParser:
         """Assign to existing Var if possible, otherwise create a new let binding."""
         existing_var = self.scope_manager.lookup_var(var_name)
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
-            # Reject reassignment with a different type (#642).
+            # Reject reassignment with a different base type (#642).
+            # Compare shape and dtype only — metadata (memref, tile_view,
+            # memory_space) may legitimately change across reassignments.
             value_type = override_type or value_expr.type
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
-                and existing_var.type != value_type
+                and not self._types_compatible(existing_var.type, value_type)
             ):
                 raise ParserTypeError(
                     f"Cannot reassign '{var_name}' with a different type: "
