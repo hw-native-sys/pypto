@@ -986,8 +986,8 @@ class TestOrchestration:
                 result: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 d0: pl.Scalar[pl.INT64] = pl.tensor.dim(a, 0)  # noqa: F841
-                result = self.kernel_add(a, b, result)
-                return result
+                result_out = self.kernel_add(a, b, result)
+                return result_out
 
         generator = codegen.CCECodegen()
         files = generator.generate(TensorDimProgram)

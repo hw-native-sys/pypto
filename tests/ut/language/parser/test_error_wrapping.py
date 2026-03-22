@@ -20,6 +20,7 @@ import pytest
 from pypto.language.parser.diagnostics import (
     InvalidOperationError,
     ParserError,
+    ParserTypeError,
 )
 
 
@@ -144,6 +145,34 @@ class TestProgramCatchAll:
                     return result
 
         assert exc_info.value.source_lines is not None
+
+
+class TestTypeMismatchReassignment:
+    """Tests for rejecting reassignment with a different type (#642)."""
+
+    def test_reassign_same_type_succeeds(self):
+        """Reassigning with the same type is allowed."""
+
+        @pl.function
+        def func(x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            t = pl.create_tensor([16, 16], dtype=pl.FP32)
+            t = pl.mul(t, 2.0)  # same type, should succeed
+            return t
+
+        assert func is not None
+
+    def test_reassign_different_shape_raises(self):
+        """Reassigning with a different tensor shape raises ParserTypeError."""
+
+        with pytest.raises(ParserTypeError, match="Cannot reassign"):
+
+            @pl.function
+            def func(  # noqa: F841
+                x: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t = pl.create_tensor([16, 16], dtype=pl.FP32)  # noqa: F841
+                t = pl.create_tensor([4, 4], dtype=pl.FP32)  # different shape  # noqa: F841
+                return x
 
 
 if __name__ == "__main__":

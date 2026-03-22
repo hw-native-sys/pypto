@@ -421,6 +421,20 @@ class ASTParser:
         """Assign to existing Var if possible, otherwise create a new let binding."""
         existing_var = self.scope_manager.lookup_var(var_name)
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
+            # Reject reassignment with a different type (#642).
+            value_type = override_type or value_expr.type
+            if (
+                not isinstance(value_type, ir.UnknownType)
+                and not isinstance(existing_var.type, ir.UnknownType)
+                and existing_var.type != value_type
+            ):
+                raise ParserTypeError(
+                    f"Cannot reassign '{var_name}' with a different type: "
+                    f"was {ir.python_print_type(existing_var.type)}, "
+                    f"got {ir.python_print_type(value_type)}",
+                    span=span,
+                    hint="Use a different variable name for tensors with different shapes or dtypes",
+                )
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
         return self.builder.let(var_name, value_expr, type=override_type, span=span)

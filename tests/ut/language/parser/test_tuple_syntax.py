@@ -78,8 +78,8 @@ class TestTupleSubscriptParsing:
         @pl.function
         def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.FP32]):
             my_tuple = (x, y)
-            _ = my_tuple[0]
-            _ = my_tuple[1]
+            _first = my_tuple[0]
+            _second = my_tuple[1]
 
         assert func is not None
         assert isinstance(func, ir.Function)
@@ -91,8 +91,8 @@ class TestTupleSubscriptParsing:
         def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.FP32]):
             inner = (x, x)
             nested = (inner, y)
-            _ = nested[0]
-            _ = nested[0][1]
+            _first = nested[0]
+            _inner_second = nested[0][1]
 
         assert func is not None
         assert isinstance(func, ir.Function)
@@ -107,8 +107,8 @@ class TestTupleRoundTrip:
         @pl.function
         def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.FP32]):
             my_tuple = (x, y)
-            _ = my_tuple[0]
-            _ = my_tuple[1]
+            _first = my_tuple[0]
+            _second = my_tuple[1]
 
         assert func is not None
         assert isinstance(func, ir.Function)
@@ -123,8 +123,8 @@ class TestTupleRoundTrip:
             first = my_tuple[0]
             second = my_tuple[1]
             # Store them for verification
-            _ = first
-            _ = second
+            _first = first
+            _second = second
 
         assert func is not None
         assert isinstance(func, ir.Function)
