@@ -469,7 +469,7 @@ The wrapper unpacks `int64_t* args` following the same convention as CCECodegen:
 
 ### Implementation
 
-**Module**: `python/pypto/ir/pto_codegen.py`
+**Module**: `python/pypto/backend/pto_backend.py`
 
 Key functions:
 

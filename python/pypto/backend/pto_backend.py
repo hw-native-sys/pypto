@@ -7,12 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""PTO backend code generation (Python side).
+"""PTO backend driver.
 
-Generates all output files for the PTO backend, analogous to C++ CCECodegen:
+Orchestrates the full PTO backend output pipeline:
 
-- **Kernel files**: InCore functions go through PTOCodegen → ptoas → kernel wrapper
-- **Orchestration**: Reuses the shared C++ orchestration codegen (PTO2 runtime API)
+- **Kernel files**: InCore functions go through C++ PTOCodegen (IR → MLIR) → ptoas → kernel wrapper
+- **Orchestration**: Shared C++ orchestration codegen (PTO2 runtime API)
 - **Config**: Generates kernel_config.py with runtime/orchestration/kernel metadata
 
 Entry point: ``generate(program, output_dir) -> dict[str, str]``

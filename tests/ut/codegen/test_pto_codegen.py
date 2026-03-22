@@ -25,16 +25,16 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
-from pypto.ir import OptimizationStrategy, PassManager
-from pypto.ir.builder import IRBuilder
-from pypto.ir.op import tile
-from pypto.ir.pto_codegen import (
+from pypto.backend.pto_backend import (
     _format_error_report,
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
     _preprocess_ptoas_output,
     generate,
 )
+from pypto.ir import OptimizationStrategy, PassManager
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tile
 
 PTOCodegen = codegen.PTOCodegen
 

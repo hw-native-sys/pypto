@@ -18,8 +18,9 @@ from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
+from pypto.backend.pto_backend import PartialCodegenError, generate
+
 from .pass_manager import OptimizationStrategy, PassManager
-from .pto_codegen import PartialCodegenError, generate
 
 
 def _write_files(files: dict[str, str], output_dir: str) -> None:
