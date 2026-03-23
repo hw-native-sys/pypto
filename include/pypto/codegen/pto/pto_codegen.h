@@ -371,6 +371,17 @@ class PTOCodegen : public CodegenBase {
 
   /// Get MLIR type string for a scalar iter_arg/return_var (e.g., "index", "i1", "f32")
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
+  std::vector<bool> GetScalarIterArgMask(const std::vector<ir::IterArgPtr>& iter_args) const;
+  void BindNonScalarIterArgs(const std::vector<ir::IterArgPtr>& iter_args,
+                             const std::vector<ir::VarPtr>& return_vars, const std::vector<bool>& is_scalar);
+  void EmitYieldValues(const std::vector<std::string>& yielded_values,
+                       const std::vector<std::string>& yield_types);
+  void EmitYieldBufferWithTypes(const std::vector<std::string>& yield_types, const std::string& stmt_name);
+  void EmitScalarYieldBufferWithTypes(const std::vector<bool>& is_scalar,
+                                      const std::vector<std::string>& yield_types,
+                                      const std::string& stmt_name);
+  std::string GetVarLikeExprTypeAnnotation(const ir::VarPtr& var) const;
+  std::string GetStructuredControlFlowTypeString(const ir::VarPtr& var) const;
 };
 
 }  // namespace codegen

@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/pto/pto_codegen.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +45,7 @@ namespace codegen {
 
 using ir::As;
 using ir::AssignStmtPtr;
+using ir::AsVarLike;
 using ir::BinaryExprPtr;
 using ir::CallPtr;
 using ir::EvalStmtPtr;
@@ -1010,11 +1012,8 @@ static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& cod
   }
 }
 
-std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
-  auto tile_it = memref_to_tile_type_.find(memref);
-  INTERNAL_CHECK(tile_it != memref_to_tile_type_.end())
-      << "Internal error: missing tile type for MemRef '" << memref->name_hint_ << "'";
-  auto memory_space = tile_it->second->GetMemorySpace();
+static std::string BuildTileBufTypeStringFromTileType(const TileType& tile_type, const PTOCodegen& codegen) {
+  auto memory_space = tile_type.GetMemorySpace();
   INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile type must have memory_space";
 
   std::string loc = MemorySpaceToMLIR(*memory_space);
@@ -1025,91 +1024,68 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
   ir::TileLayout slayout = ir::TileLayout::none_box;
   uint64_t fractal = 512;
   ir::PadValue pad = ir::PadValue::null;
-
-  int64_t v_row = rows;
-  int64_t v_col = cols;
-  bool v_row_dynamic = false;
-  bool v_col_dynamic = false;
-  ExtractTileTypeInfo(*tile_it->second, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row,
-                      v_col, v_row_dynamic, v_col_dynamic);
-
-  return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
-                                 v_row_dynamic, v_col_dynamic);
-}
-
-std::string PTOCodegen::GetTileBufTypeStringFromTileType(
-    const std::shared_ptr<const ir::TileType>& tile_type) const {
-  INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
-  auto memory_space = tile_type->GetMemorySpace();
-  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
-
-  std::string loc = MemorySpaceToMLIR(*memory_space);
-  std::string dtype_str = "f32";
-  int64_t rows = 32;
-  int64_t cols = 32;
-  ir::TileLayout blayout = ir::TileLayout::row_major;
-  ir::TileLayout slayout = ir::TileLayout::none_box;
-  uint64_t fractal = 512;
-  ir::PadValue pad = ir::PadValue::null;
   int64_t v_row = rows;
   int64_t v_col = cols;
   bool v_row_dynamic = false;
   bool v_col_dynamic = false;
 
-  ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
+  ExtractTileTypeInfo(tile_type, codegen, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
                       v_row_dynamic, v_col_dynamic);
 
   return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
                                  v_row_dynamic, v_col_dynamic);
 }
 
-std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
-  if (auto var = As<ir::Var>(expr)) {
-    auto key = GetVarKey(var);
-    // Primary lookup: SSA name → tile_buf type (covers root allocs AND view results)
-    auto mlir_it = var_to_mlir_.find(key);
-    if (mlir_it != var_to_mlir_.end()) {
-      auto ssa_it = ssa_to_tile_buf_type_.find(mlir_it->second);
-      if (ssa_it != ssa_to_tile_buf_type_.end()) {
-        return ssa_it->second;
-      }
-    }
-    // Per-variable TileType: derives the type from the variable's own
-    // TileType, which is correct for view op results (slice, reshape,
-    // fillpad) whose type differs from the root alloc's type.
-    if (auto tile_type = As<TileType>(var->GetType())) {
-      if (tile_type->memref_.has_value()) {
-        return GetTileBufTypeStringFromTileType(tile_type);
-      }
-    }
-    // Fallback: var → memref → root alloc type
-    auto memref_it = var_to_memref_.find(key);
-    if (memref_it != var_to_memref_.end()) {
-      return GetTileBufTypeString(memref_it->second);
-    }
-    if (auto scalar_type = As<ScalarType>(var->GetType())) {
-      return GetTypeString(scalar_type->dtype_);
+std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
+  auto tile_it = memref_to_tile_type_.find(memref);
+  INTERNAL_CHECK(tile_it != memref_to_tile_type_.end())
+      << "Internal error: missing tile type for MemRef '" << memref->name_hint_ << "'";
+  return BuildTileBufTypeStringFromTileType(*tile_it->second, *this);
+}
+
+std::string PTOCodegen::GetTileBufTypeStringFromTileType(
+    const std::shared_ptr<const ir::TileType>& tile_type) const {
+  INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
+  return BuildTileBufTypeStringFromTileType(*tile_type, *this);
+}
+
+std::string PTOCodegen::GetVarLikeExprTypeAnnotation(const ir::VarPtr& var) const {
+  INTERNAL_CHECK(var != nullptr) << "Internal error: variable for type annotation must not be null";
+  auto key = GetVarKey(var);
+  auto mlir_it = var_to_mlir_.find(key);
+  if (mlir_it != var_to_mlir_.end()) {
+    auto ssa_it = ssa_to_tile_buf_type_.find(mlir_it->second);
+    if (ssa_it != ssa_to_tile_buf_type_.end()) {
+      return ssa_it->second;
     }
   }
-  if (auto iter_arg = As<ir::IterArg>(expr)) {
-    auto key = GetVarKey(std::dynamic_pointer_cast<const ir::Var>(iter_arg));
-    auto mlir_it = var_to_mlir_.find(key);
-    if (mlir_it != var_to_mlir_.end()) {
-      auto ssa_it = ssa_to_tile_buf_type_.find(mlir_it->second);
-      if (ssa_it != ssa_to_tile_buf_type_.end()) {
-        return ssa_it->second;
-      }
-    }
-    if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      return GetTileBufTypeStringFromTileType(tile_type);
-    }
-    auto memref_it = var_to_memref_.find(key);
-    if (memref_it != var_to_memref_.end()) {
-      return GetTileBufTypeString(memref_it->second);
-    }
-    if (auto scalar_type = As<ScalarType>(iter_arg->GetType())) {
-      return GetTypeString(scalar_type->dtype_);
-    }
+  if (auto tile_type = ir::GetTileTypeWithMemRef(var->GetType())) {
+    return GetTileBufTypeStringFromTileType(tile_type);
+  }
+  auto memref_it = var_to_memref_.find(key);
+  if (memref_it != var_to_memref_.end()) {
+    return GetTileBufTypeString(memref_it->second);
+  }
+  if (auto scalar_type = As<ScalarType>(var->GetType())) {
+    return GetTypeString(scalar_type->dtype_);
+  }
+  return "";
+}
+
+std::string PTOCodegen::GetStructuredControlFlowTypeString(const ir::VarPtr& var) const {
+  INTERNAL_CHECK(var != nullptr) << "Internal error: control-flow value must not be null";
+  if (auto tensor_type = As<TensorType>(var->GetType())) {
+    return GetTensorViewTypeString(tensor_type.get());
+  }
+  if (auto scalar_type = As<ScalarType>(var->GetType())) {
+    return GetScalarIterArgTypeString(scalar_type);
+  }
+  return GetVarLikeExprTypeAnnotation(var);
+}
+
+std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
+  if (auto var = AsVarLike(expr)) {
+    return GetVarLikeExprTypeAnnotation(var);
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
     return "f32";
@@ -1448,6 +1424,92 @@ std::string PTOCodegen::GetScalarIterArgTypeString(
   return "index";
 }
 
+std::vector<bool> PTOCodegen::GetScalarIterArgMask(const std::vector<ir::IterArgPtr>& iter_args) const {
+  std::vector<bool> is_scalar(iter_args.size(), false);
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    if (As<ScalarType>(iter_args[i]->GetType())) {
+      is_scalar[i] = true;
+    }
+  }
+  return is_scalar;
+}
+
+void PTOCodegen::BindNonScalarIterArgs(const std::vector<ir::IterArgPtr>& iter_args,
+                                       const std::vector<ir::VarPtr>& return_vars,
+                                       const std::vector<bool>& is_scalar) {
+  INTERNAL_CHECK(iter_args.size() == return_vars.size())
+      << "Internal error: iter_args and return_vars must have matching sizes";
+  INTERNAL_CHECK(iter_args.size() == is_scalar.size())
+      << "Internal error: scalar mask must match iter_args size";
+
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    if (is_scalar[i]) continue;
+
+    const auto& iter_arg = iter_args[i];
+    const auto& return_var = return_vars[i];
+
+    std::string init_mlir_name;
+    auto tensor_type = As<TensorType>(iter_arg->GetType());
+    if (tensor_type) {
+      auto init_var = AsVarLike(iter_arg->initValue_);
+      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+      init_mlir_name = GetOrCreateTensorView(init_var);
+    } else {
+      VisitExpr(iter_arg->initValue_);
+      init_mlir_name = current_expr_value_;
+      current_expr_value_.clear();
+    }
+
+    BindVarToMlir(iter_arg, init_mlir_name);
+    BindVarToMlir(return_var, init_mlir_name);
+
+    if (tensor_type) {
+      BindTensorView(iter_arg, init_mlir_name);
+      BindTensorView(return_var, init_mlir_name);
+    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
+      const auto memref = ir::GetDefinedMemRef(tile_type);
+      BindVarToMemRef(iter_arg, memref.get());
+      BindVarToMemRef(return_var, memref.get());
+    }
+  }
+}
+
+void PTOCodegen::EmitYieldValues(const std::vector<std::string>& yielded_values,
+                                 const std::vector<std::string>& yield_types) {
+  if (!yielded_values.empty()) {
+    Emit("scf.yield " + JoinCommaSep(yielded_values) + " : " + JoinCommaSep(yield_types));
+  }
+}
+
+void PTOCodegen::EmitYieldBufferWithTypes(const std::vector<std::string>& yield_types,
+                                          const std::string& stmt_name) {
+  EmitYieldValues(yield_buffer_, yield_types);
+  CHECK(yield_buffer_.size() == yield_types.size())
+      << stmt_name << " yield count (" << yield_buffer_.size() << ") must match expected values ("
+      << yield_types.size() << ")";
+  yield_buffer_.clear();
+}
+
+void PTOCodegen::EmitScalarYieldBufferWithTypes(const std::vector<bool>& is_scalar,
+                                                const std::vector<std::string>& yield_types,
+                                                const std::string& stmt_name) {
+  INTERNAL_CHECK(is_scalar.size() >= yield_buffer_.size())
+      << "Internal error: yield buffer cannot outgrow iter_arg scalar mask";
+
+  std::vector<std::string> scalar_yields;
+  for (size_t i = 0; i < yield_buffer_.size(); ++i) {
+    if (is_scalar[i]) {
+      scalar_yields.push_back(yield_buffer_[i]);
+    }
+  }
+
+  EmitYieldValues(scalar_yields, yield_types);
+  CHECK(scalar_yields.size() == yield_types.size())
+      << stmt_name << " scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
+      << yield_types.size() << ")";
+  yield_buffer_.clear();
+}
+
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
   INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
@@ -1480,16 +1542,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       std::string ret_name = NewNamedTemp(return_var->name_hint_);
       BindVarToMlir(return_var, ret_name);
       return_var_names.push_back(ret_name);
-      if (auto tensor_type = As<TensorType>(return_var->GetType())) {
+      if (As<TensorType>(return_var->GetType())) {
         BindTensorView(return_var, ret_name);
-        return_var_types.push_back(GetTensorViewTypeString(tensor_type.get()));
-      } else if (auto tile_type = As<TileType>(return_var->GetType())) {
-        INTERNAL_CHECK(tile_type->memref_.has_value())
-            << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
-        return_var_types.push_back(GetTileBufTypeString(tile_type->memref_.value().get()));
-      } else {
-        return_var_types.push_back(GetScalarIterArgTypeString(As<ScalarType>(return_var->GetType())));
       }
+      return_var_types.push_back(GetStructuredControlFlowTypeString(return_var));
     }
 
     CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
@@ -1502,13 +1558,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     // Then branch
     yield_buffer_.clear();
     VisitStmt(op->then_body_);
-    if (!yield_buffer_.empty()) {
-      Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(return_var_types));
-    }
-    CHECK(yield_buffer_.size() == return_var_types.size())
-        << "IfStmt then-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
-        << return_var_types.size() << ")";
-    yield_buffer_.clear();
+    EmitYieldBufferWithTypes(return_var_types, "IfStmt then-branch");
     indent_level_--;
 
     // Else branch
@@ -1516,13 +1566,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       Emit("} else {");
       indent_level_++;
       VisitStmt(*op->else_body_);
-      if (!yield_buffer_.empty()) {
-        Emit("scf.yield " + JoinCommaSep(yield_buffer_) + " : " + JoinCommaSep(return_var_types));
-      }
-      CHECK(yield_buffer_.size() == return_var_types.size())
-          << "IfStmt else-branch yield count (" << yield_buffer_.size() << ") must match return_vars ("
-          << return_var_types.size() << ")";
-      yield_buffer_.clear();
+      EmitYieldBufferWithTypes(return_var_types, "IfStmt else-branch");
       indent_level_--;
     }
     Emit("}");
@@ -1564,46 +1608,12 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   // for loop-carried value semantics. Non-scalar types (TileType, TensorType)
   // are mutable references written in-place via outs(), so they are mapped
   // directly to their init values and excluded from iter_args/yield.
-  std::vector<bool> is_scalar(op->iter_args_.size(), false);
-  bool has_scalar_iter_args = false;
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType())) {
-      is_scalar[i] = true;
-      has_scalar_iter_args = true;
-    }
-  }
+  std::vector<bool> is_scalar = GetScalarIterArgMask(op->iter_args_);
+  bool has_scalar_iter_args =
+      std::any_of(is_scalar.begin(), is_scalar.end(), [](bool value) { return value; });
 
-  // Map non-scalar iter_args/return_vars directly to their init values
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (is_scalar[i]) continue;
-
-    const auto& iter_arg = op->iter_args_[i];
-    const auto& return_var = op->return_vars_[i];
-
-    std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
-    if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
-      init_mlir_name = GetOrCreateTensorView(init_var);
-    } else {
-      VisitExpr(iter_arg->initValue_);
-      init_mlir_name = current_expr_value_;
-      current_expr_value_ = "";
-    }
-
-    BindVarToMlir(iter_arg, init_mlir_name);
-    BindVarToMlir(return_var, init_mlir_name);
-
-    if (tensor_type) {
-      BindTensorView(iter_arg, init_mlir_name);
-      BindTensorView(return_var, init_mlir_name);
-    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref.get());
-      BindVarToMemRef(return_var, memref.get());
-    }
-  }
+  // Map non-scalar iter_args/return_vars directly to their init values.
+  BindNonScalarIterArgs(op->iter_args_, op->return_vars_, is_scalar);
 
   if (!has_scalar_iter_args) {
     // Simple scf.for (no iter_args, or all iter_args are non-scalar)
@@ -1656,34 +1666,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 
     yield_buffer_.clear();
     VisitStmt(op->body_);
-
-    // Filter yield_buffer to keep only scalar iter_arg entries
-    std::vector<std::string> scalar_yields;
-    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (is_scalar[i] && i < yield_buffer_.size()) {
-        scalar_yields.push_back(yield_buffer_[i]);
-      }
-    }
-
-    // Emit scf.yield from filtered yield values
-    if (!scalar_yields.empty()) {
-      std::ostringstream yield_oss;
-      yield_oss << "scf.yield ";
-      for (size_t i = 0; i < scalar_yields.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << scalar_yields[i];
-      }
-      yield_oss << " : ";
-      for (size_t i = 0; i < iter_arg_types.size(); ++i) {
-        if (i > 0) yield_oss << ", ";
-        yield_oss << iter_arg_types[i];
-      }
-      Emit(yield_oss.str());
-    }
-    CHECK(scalar_yields.size() == iter_arg_types.size())
-        << "ForStmt scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
-        << iter_arg_types.size() << ")";
-    yield_buffer_.clear();
+    EmitScalarYieldBufferWithTypes(is_scalar, iter_arg_types, "ForStmt");
 
     indent_level_--;
     Emit("}");
@@ -1703,46 +1686,12 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
   // for loop-carried value semantics. Non-scalar types (TileType, TensorType)
   // are mutable references written in-place via outs(), so they are mapped
   // directly to their init values and excluded from iter_args/yield.
-  std::vector<bool> is_scalar(op->iter_args_.size(), false);
-  bool has_scalar_iter_args = false;
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (As<ScalarType>(op->iter_args_[i]->GetType())) {
-      is_scalar[i] = true;
-      has_scalar_iter_args = true;
-    }
-  }
+  std::vector<bool> is_scalar = GetScalarIterArgMask(op->iter_args_);
+  bool has_scalar_iter_args =
+      std::any_of(is_scalar.begin(), is_scalar.end(), [](bool value) { return value; });
 
-  // Map non-scalar iter_args/return_vars directly to their init values
-  for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    if (is_scalar[i]) continue;
-
-    const auto& iter_arg = op->iter_args_[i];
-    const auto& return_var = op->return_vars_[i];
-
-    std::string init_mlir_name;
-    auto tensor_type = As<TensorType>(iter_arg->GetType());
-    if (tensor_type) {
-      auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
-      init_mlir_name = GetOrCreateTensorView(init_var);
-    } else {
-      VisitExpr(iter_arg->initValue_);
-      init_mlir_name = current_expr_value_;
-      current_expr_value_ = "";
-    }
-
-    BindVarToMlir(iter_arg, init_mlir_name);
-    BindVarToMlir(return_var, init_mlir_name);
-
-    if (tensor_type) {
-      BindTensorView(iter_arg, init_mlir_name);
-      BindTensorView(return_var, init_mlir_name);
-    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref.get());
-      BindVarToMemRef(return_var, memref.get());
-    }
-  }
+  // Map non-scalar iter_args/return_vars directly to their init values.
+  BindNonScalarIterArgs(op->iter_args_, op->return_vars_, is_scalar);
 
   if (!has_scalar_iter_args) {
     // Simple scf.while (no iter_args, or all iter_args are non-scalar)
@@ -1839,23 +1788,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     // Visit body
     yield_buffer_.clear();
     VisitStmt(op->body_);
-
-    // Filter yield_buffer to keep only scalar iter_arg entries
-    std::vector<std::string> scalar_yields;
-    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      if (is_scalar[i] && i < yield_buffer_.size()) {
-        scalar_yields.push_back(yield_buffer_[i]);
-      }
-    }
-
-    // Emit scf.yield from filtered yield values
-    if (!scalar_yields.empty()) {
-      Emit("scf.yield " + JoinCommaSep(scalar_yields) + " : " + JoinCommaSep(iter_arg_types));
-    }
-    CHECK(scalar_yields.size() == iter_arg_types.size())
-        << "WhileStmt scalar yield count (" << scalar_yields.size() << ") must match scalar iter_args ("
-        << iter_arg_types.size() << ")";
-    yield_buffer_.clear();
+    EmitScalarYieldBufferWithTypes(is_scalar, iter_arg_types, "WhileStmt");
 
     indent_level_--;
     Emit("}");
