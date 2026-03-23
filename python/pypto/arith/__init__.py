@@ -13,8 +13,20 @@ PyPTO arithmetic simplification module.
 Provides constant folding and (future) expression analysis utilities.
 """
 
-from pypto.pypto_core.arith import fold_const
+from pypto.pypto_core.arith import (
+    extended_euclidean,
+    floordiv,
+    floormod,
+    fold_const,
+    gcd,
+    lcm,
+)
 
 __all__ = [
+    "extended_euclidean",
+    "floordiv",
+    "floormod",
     "fold_const",
+    "gcd",
+    "lcm",
 ]

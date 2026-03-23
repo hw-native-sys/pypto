@@ -25,9 +25,14 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/tuple.h>
+
+#include <cstdint>
+#include <tuple>
 
 #include "../module.h"
 #include "pypto/ir/arith/const_fold.h"
+#include "pypto/ir/arith/int_operator.h"
 
 namespace nb = nanobind;
 
@@ -42,6 +47,20 @@ void BindArith(nb::module_& m) {
       nb::arg("expr"),
       "Try to constant-fold an expression. Accepts any BinaryExpr or UnaryExpr.\n"
       "Returns the folded result, or None if folding is not possible.");
+
+  // Integer operator utilities (exposed for testing)
+  arith.def("floordiv", &ir::arith::floordiv, nb::arg("x"), nb::arg("y"), "Floor division.");
+  arith.def("floormod", &ir::arith::floormod, nb::arg("x"), nb::arg("y"), "Floor modulo.");
+  arith.def("gcd", &ir::arith::ZeroAwareGCD, nb::arg("a"), nb::arg("b"), "GCD (treats 0 as identity).");
+  arith.def("lcm", &ir::arith::LeastCommonMultiple, nb::arg("a"), nb::arg("b"), "Least common multiple.");
+  arith.def(
+      "extended_euclidean",
+      [](int64_t a, int64_t b) -> std::tuple<int64_t, int64_t, int64_t> {
+        int64_t x, y;
+        int64_t g = ir::arith::ExtendedEuclidean(a, b, &x, &y);
+        return {g, x, y};
+      },
+      nb::arg("a"), nb::arg("b"), "Extended Euclidean: returns (gcd, x, y) where a*x + b*y = gcd.");
 }
 
 }  // namespace python

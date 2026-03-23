@@ -121,9 +121,17 @@ class TestFloatDiv:
         assert isinstance(result, ir.ConstFloat)
         assert result.value == pytest.approx(3.5)
 
-    def test_floatdiv_by_zero_raises(self):
-        with pytest.raises(Exception):
-            fold_const(ir.FloatDiv(cf(5.0), cf(0.0), FP, S))
+    def test_floatdiv_by_zero_returns_inf(self):
+        """IEEE 754: float division by zero produces infinity."""
+        result = fold_const(ir.FloatDiv(cf(5.0), cf(0.0), FP, S))
+        assert isinstance(result, ir.ConstFloat)
+        assert result.value == float("inf")
+
+    def test_floatdiv_neg_by_zero_returns_neg_inf(self):
+        """IEEE 754: -5.0 / 0.0 produces -infinity."""
+        result = fold_const(ir.FloatDiv(cf(-5.0), cf(0.0), FP, S))
+        assert isinstance(result, ir.ConstFloat)
+        assert result.value == float("-inf")
 
 
 # ============================================================================
@@ -423,6 +431,68 @@ class TestUnaryFolding:
         x = ir.Var("x", ir.ScalarType(INT), S)
         result = fold_const(ir.Neg(x, INT, S))
         assert result is None
+
+
+# ============================================================================
+# Edge cases: overflow, INT64_MIN, shift bounds
+# ============================================================================
+
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
+
+
+class TestOverflowAndEdgeCases:
+    def test_add_overflow_skips_folding(self):
+        """Integer overflow in add should skip folding (return None)."""
+        result = fold_const(ir.Add(ci(INT64_MAX), ci(1), INT, S))
+        assert result is None
+
+    def test_sub_overflow_skips_folding(self):
+        result = fold_const(ir.Sub(ci(INT64_MIN), ci(1), INT, S))
+        assert result is None
+
+    def test_mul_overflow_skips_folding(self):
+        result = fold_const(ir.Mul(ci(INT64_MAX), ci(2), INT, S))
+        assert result is None
+
+    def test_pow_overflow_skips_folding(self):
+        result = fold_const(ir.Pow(ci(2), ci(63), INT, S))
+        assert result is None  # 2^63 overflows int64_t
+
+    def test_neg_int64_min_skips_folding(self):
+        """Negating INT64_MIN overflows — should skip."""
+        result = fold_const(ir.Neg(ci(INT64_MIN), INT, S))
+        assert result is None
+
+    def test_abs_int64_min_skips_folding(self):
+        """abs(INT64_MIN) overflows — should skip."""
+        result = fold_const(ir.Abs(ci(INT64_MIN), INT, S))
+        assert result is None
+
+    def test_shift_left_negative_count_skips(self):
+        """Negative shift count — skip folding."""
+        result = fold_const(ir.BitShiftLeft(ci(1), ci(-1), INT, S))
+        assert result is None
+
+    def test_shift_left_too_large_skips(self):
+        """Shift count >= 64 — skip folding."""
+        result = fold_const(ir.BitShiftLeft(ci(1), ci(64), INT, S))
+        assert result is None
+
+    def test_shift_right_negative_count_skips(self):
+        result = fold_const(ir.BitShiftRight(ci(16), ci(-1), INT, S))
+        assert result is None
+
+    def test_floordiv_int64_min_neg1_raises(self):
+        """INT64_MIN // -1 overflows — should raise."""
+        with pytest.raises(Exception):
+            fold_const(ir.FloorDiv(ci(INT64_MIN), ci(-1), INT, S))
+
+    def test_pow_exponent_by_squaring(self):
+        """Verify exponentiation by squaring gives correct result."""
+        result = fold_const(ir.Pow(ci(3), ci(20), INT, S))
+        assert isinstance(result, ir.ConstInt)
+        assert result.value == 3**20
 
 
 if __name__ == "__main__":

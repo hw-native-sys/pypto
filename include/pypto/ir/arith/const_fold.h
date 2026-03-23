@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 
 #include "pypto/core/dtype.h"
@@ -52,6 +53,39 @@ inline ExprPtr MakeConstFloat(double value, DataType dtype) {
 inline ExprPtr MakeConstBool(bool value) { return std::make_shared<ConstBool>(value, Span::unknown()); }
 
 // ---------------------------------------------------------------------------
+// Overflow-safe integer arithmetic helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a + b overflows int64_t.
+inline bool AddWouldOverflow(int64_t a, int64_t b) {
+  return (b > 0 && a > std::numeric_limits<int64_t>::max() - b) ||
+         (b < 0 && a < std::numeric_limits<int64_t>::min() - b);
+}
+
+/// Check if a - b overflows int64_t.
+inline bool SubWouldOverflow(int64_t a, int64_t b) {
+  return (b > 0 && a < std::numeric_limits<int64_t>::min() + b) ||
+         (b < 0 && a > std::numeric_limits<int64_t>::max() + b);
+}
+
+/// Check if a * b overflows int64_t.
+inline bool MulWouldOverflow(int64_t a, int64_t b) {
+  if (a == 0 || b == 0) return false;
+  if (b > 0) {
+    if (a < std::numeric_limits<int64_t>::min() / b) return true;
+    if (a > std::numeric_limits<int64_t>::max() / b) return true;
+  } else {
+    if (b == -1 && a == std::numeric_limits<int64_t>::min()) return true;
+    if (a > std::numeric_limits<int64_t>::min() / b) return true;
+    if (a < std::numeric_limits<int64_t>::max() / b) return true;
+  }
+  return false;
+}
+
+/// Check if -a overflows int64_t.
+inline bool NegWouldOverflow(int64_t a) { return a == std::numeric_limits<int64_t>::min(); }
+
+// ---------------------------------------------------------------------------
 // detail — per-op fold helpers
 // ---------------------------------------------------------------------------
 
@@ -65,14 +99,6 @@ struct BinaryConstOperands {
 };
 
 // ---- Generic fold patterns (merge int & float behavior) ------------------
-
-/// Fold a numeric binary op that works on both int and float.
-template <typename Op>
-inline ExprPtr FoldNumeric(const BinaryConstOperands& c, Op op) {
-  if (c.pa && c.pb) return MakeConstInt(op(c.pa->value_, c.pb->value_), c.pa->dtype());
-  if (c.fa && c.fb) return MakeConstFloat(op(c.fa->value_, c.fb->value_), c.fa->dtype());
-  return nullptr;
-}
 
 /// Fold a comparison that works on both int and float, returning ConstBool.
 template <typename Op>
@@ -104,20 +130,38 @@ inline bool RhsIsConst(const BinaryConstOperands& c, int64_t v) {
 // ---- Per-op fold functions -----------------------------------------------
 
 inline ExprPtr FoldAdd(const BinaryConstOperands& c) {
-  if (auto r = FoldNumeric(c, std::plus<>{})) return r;
+  if (c.pa && c.pb) {
+    if (!AddWouldOverflow(c.pa->value_, c.pb->value_)) {
+      return MakeConstInt(c.pa->value_ + c.pb->value_, c.pa->dtype());
+    }
+    return nullptr;  // overflow — skip folding
+  }
+  if (c.fa && c.fb) return MakeConstFloat(c.fa->value_ + c.fb->value_, c.fa->dtype());
   if (LhsIsConst(c, 0)) return c.rhs;  // 0 + x → x
   if (RhsIsConst(c, 0)) return c.lhs;  // x + 0 → x
   return nullptr;
 }
 
 inline ExprPtr FoldSub(const BinaryConstOperands& c) {
-  if (auto r = FoldNumeric(c, std::minus<>{})) return r;
+  if (c.pa && c.pb) {
+    if (!SubWouldOverflow(c.pa->value_, c.pb->value_)) {
+      return MakeConstInt(c.pa->value_ - c.pb->value_, c.pa->dtype());
+    }
+    return nullptr;
+  }
+  if (c.fa && c.fb) return MakeConstFloat(c.fa->value_ - c.fb->value_, c.fa->dtype());
   if (RhsIsConst(c, 0)) return c.lhs;  // x - 0 → x
   return nullptr;
 }
 
 inline ExprPtr FoldMul(const BinaryConstOperands& c) {
-  if (auto r = FoldNumeric(c, std::multiplies<>{})) return r;
+  if (c.pa && c.pb) {
+    if (!MulWouldOverflow(c.pa->value_, c.pb->value_)) {
+      return MakeConstInt(c.pa->value_ * c.pb->value_, c.pa->dtype());
+    }
+    return nullptr;
+  }
+  if (c.fa && c.fb) return MakeConstFloat(c.fa->value_ * c.fb->value_, c.fa->dtype());
   if (LhsIsConst(c, 1)) return c.rhs;  // 1 * x → x
   if (RhsIsConst(c, 1)) return c.lhs;  // x * 1 → x
   if (LhsIsConst(c, 0)) return c.lhs;  // 0 * x → 0
@@ -128,43 +172,65 @@ inline ExprPtr FoldMul(const BinaryConstOperands& c) {
 inline ExprPtr FoldFloorDiv(const BinaryConstOperands& c) {
   if (c.pa && c.pb) {
     CHECK(c.pb->value_ != 0) << "Floor division by zero";
+    CHECK(!(c.pa->value_ == std::numeric_limits<int64_t>::min() && c.pb->value_ == -1))
+        << "Floor division overflow: INT64_MIN // -1";
     return MakeConstInt(floordiv(c.pa->value_, c.pb->value_), c.pa->dtype());
   }
   if (c.pa && c.pa->value_ == 0) return c.lhs;  // 0 // x → 0
   if (c.pb && c.pb->value_ == 1) return c.lhs;  // x // 1 → x
-  if (c.pb) CHECK(c.pb->value_ != 0) << "Floor division by zero";
+  if (c.pb) {
+    CHECK(c.pb->value_ != 0) << "Floor division by zero";
+  }
   return nullptr;
 }
 
 inline ExprPtr FoldFloorMod(const BinaryConstOperands& c) {
   if (c.pa && c.pb) {
     CHECK(c.pb->value_ != 0) << "Floor modulo by zero";
+    CHECK(!(c.pa->value_ == std::numeric_limits<int64_t>::min() && c.pb->value_ == -1))
+        << "Floor modulo overflow: INT64_MIN % -1";
     return MakeConstInt(floormod(c.pa->value_, c.pb->value_), c.pa->dtype());
   }
   if (c.pa && c.pa->value_ == 0) return c.lhs;                           // 0 % x → 0
   if (c.pb && c.pb->value_ == 1) return MakeConstInt(0, c.pb->dtype());  // x % 1 → 0
-  if (c.pb) CHECK(c.pb->value_ != 0) << "Floor modulo by zero";
+  if (c.pb) {
+    CHECK(c.pb->value_ != 0) << "Floor modulo by zero";
+  }
   return nullptr;
 }
 
 inline ExprPtr FoldFloatDiv(const BinaryConstOperands& c) {
   if (c.fa && c.fb) {
-    CHECK(c.fb->value_ != 0) << "Float division by zero";
+    // IEEE 754: division by zero produces +/-inf, not an error.
     return MakeConstFloat(c.fa->value_ / c.fb->value_, c.fa->dtype());
   }
   if (c.fa && c.fa->value_ == 0) return c.lhs;  // 0.0 / x → 0.0
   if (c.fb && c.fb->value_ == 1) return c.lhs;  // x / 1.0 → x
-  if (c.fb) CHECK(c.fb->value_ != 0) << "Float division by zero";
   return nullptr;
 }
 
-inline ExprPtr FoldPow(const BinaryConstOperands& c) {
-  if (c.pa && c.pb) {
-    CHECK(c.pb->value_ >= 0) << "Integer power requires non-negative exponent, got " << c.pb->value_;
-    int64_t result = 1;
-    for (int64_t i = 0; i < c.pb->value_; ++i) result *= c.pa->value_;
-    return MakeConstInt(result, c.pa->dtype());
+/// Integer power via exponentiation by squaring, with overflow checking.
+/// Returns nullptr if overflow occurs.
+inline ExprPtr SafeIntPow(int64_t base, int64_t exp, DataType dtype) {
+  CHECK(exp >= 0) << "Integer power requires non-negative exponent, got " << exp;
+  int64_t result = 1;
+  int64_t cur = base;
+  while (exp > 0) {
+    if (exp & 1) {
+      if (MulWouldOverflow(result, cur)) return nullptr;
+      result *= cur;
+    }
+    exp >>= 1;
+    if (exp > 0) {
+      if (MulWouldOverflow(cur, cur)) return nullptr;
+      cur *= cur;
+    }
   }
+  return MakeConstInt(result, dtype);
+}
+
+inline ExprPtr FoldPow(const BinaryConstOperands& c) {
+  if (c.pa && c.pb) return SafeIntPow(c.pa->value_, c.pb->value_, c.pa->dtype());
   if (c.fa && c.fb) return MakeConstFloat(std::pow(c.fa->value_, c.fb->value_), c.fa->dtype());
   if (LhsIsConst(c, 1)) return c.lhs;  // 1^x → 1
   if (c.pb && c.pb->value_ == 0) {     // x^0 → 1
@@ -177,15 +243,15 @@ inline ExprPtr FoldPow(const BinaryConstOperands& c) {
 }
 
 inline ExprPtr FoldMin(const BinaryConstOperands& c) {
-  auto r = FoldNumeric(c, [](auto a, auto b) { return std::min(a, b); });
-  if (r) return r;
+  if (c.pa && c.pb) return MakeConstInt(std::min(c.pa->value_, c.pb->value_), c.pa->dtype());
+  if (c.fa && c.fb) return MakeConstFloat(std::min(c.fa->value_, c.fb->value_), c.fa->dtype());
   if (c.lhs.get() == c.rhs.get()) return c.lhs;  // min(x, x) → x
   return nullptr;
 }
 
 inline ExprPtr FoldMax(const BinaryConstOperands& c) {
-  auto r = FoldNumeric(c, [](auto a, auto b) { return std::max(a, b); });
-  if (r) return r;
+  if (c.pa && c.pb) return MakeConstInt(std::max(c.pa->value_, c.pb->value_), c.pa->dtype());
+  if (c.fa && c.fb) return MakeConstFloat(std::max(c.fa->value_, c.fb->value_), c.fa->dtype());
   if (c.lhs.get() == c.rhs.get()) return c.lhs;  // max(x, x) → x
   return nullptr;
 }
@@ -216,6 +282,27 @@ inline ExprPtr FoldXor(const ExprPtr& lhs, const ExprPtr& rhs) {
   auto ba = As<ConstBool>(lhs);
   auto bb = As<ConstBool>(rhs);
   if (ba && bb) return MakeConstBool(ba->value_ != bb->value_);
+  return nullptr;
+}
+
+/// Safe shift: skip folding for negative or out-of-range shift counts.
+inline ExprPtr FoldShiftLeft(const BinaryConstOperands& c) {
+  if (c.pa && c.pb) {
+    constexpr int64_t kBitWidth = static_cast<int64_t>(sizeof(int64_t) * 8);
+    if (c.pb->value_ < 0 || c.pb->value_ >= kBitWidth) return nullptr;
+    // Use unsigned to avoid UB on left-shift of negative values.
+    auto result = static_cast<int64_t>(static_cast<uint64_t>(c.pa->value_) << c.pb->value_);
+    return MakeConstInt(result, c.pa->dtype());
+  }
+  return nullptr;
+}
+
+inline ExprPtr FoldShiftRight(const BinaryConstOperands& c) {
+  if (c.pa && c.pb) {
+    constexpr int64_t kBitWidth = static_cast<int64_t>(sizeof(int64_t) * 8);
+    if (c.pb->value_ < 0 || c.pb->value_ >= kBitWidth) return nullptr;
+    return MakeConstInt(c.pa->value_ >> c.pb->value_, c.pa->dtype());
+  }
   return nullptr;
 }
 
@@ -284,9 +371,9 @@ inline ExprPtr TryConstFoldBinary(ObjectKind kind, const ExprPtr& lhs, const Exp
     case ObjectKind::BitXor:
       return detail::FoldIntOnly(c, std::bit_xor<int64_t>{});
     case ObjectKind::BitShiftLeft:
-      return detail::FoldIntOnly(c, [](int64_t a, int64_t b) { return a << b; });
+      return detail::FoldShiftLeft(c);
     case ObjectKind::BitShiftRight:
-      return detail::FoldIntOnly(c, [](int64_t a, int64_t b) { return a >> b; });
+      return detail::FoldShiftRight(c);
     default:
       return nullptr;
   }
@@ -305,11 +392,17 @@ inline ExprPtr TryConstFoldUnary(ObjectKind kind, const ExprPtr& operand) {
 
   switch (kind) {
     case ObjectKind::Neg:
-      if (pi) return MakeConstInt(-pi->value_, pi->dtype());
+      if (pi) {
+        if (NegWouldOverflow(pi->value_)) return nullptr;
+        return MakeConstInt(-pi->value_, pi->dtype());
+      }
       if (pf) return MakeConstFloat(-pf->value_, pf->dtype());
       return nullptr;
     case ObjectKind::Abs:
-      if (pi) return MakeConstInt(pi->value_ >= 0 ? pi->value_ : -pi->value_, pi->dtype());
+      if (pi) {
+        if (NegWouldOverflow(pi->value_)) return nullptr;  // abs(INT64_MIN) overflows
+        return MakeConstInt(pi->value_ >= 0 ? pi->value_ : -pi->value_, pi->dtype());
+      }
       if (pf) return MakeConstFloat(std::fabs(pf->value_), pf->dtype());
       return nullptr;
     case ObjectKind::Not:

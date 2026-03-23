@@ -548,7 +548,9 @@ class PMatchesOneOf {
            MatchImpl(value, cond, std::index_sequence<Rest...>());
   }
 
-  std::tuple<const TPattern&...> patterns_;
+  // Store by value to avoid dangling references when patterns are temporaries.
+  // PVar members inside the patterns are mutable, so Match() works on const copies.
+  std::tuple<TPattern...> patterns_;
 };
 
 template <typename... TPattern>

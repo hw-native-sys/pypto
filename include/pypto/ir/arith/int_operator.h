@@ -18,17 +18,31 @@
 #ifndef PYPTO_IR_ARITH_INT_OPERATOR_H_
 #define PYPTO_IR_ARITH_INT_OPERATOR_H_
 
-#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <utility>
+
+#include "pypto/core/logging.h"
 
 namespace pypto {
 namespace ir {
 namespace arith {
 
+/// Safe absolute value for int64_t. Returns uint64_t to avoid
+/// overflow when the input is INT64_MIN.
+inline uint64_t SafeAbs(int64_t x) {
+  if (x >= 0) return static_cast<uint64_t>(x);
+  // -(INT64_MIN) overflows int64_t, but converting to unsigned first is safe.
+  return static_cast<uint64_t>(-(x + 1)) + 1U;
+}
+
 /// Floor division: rounds toward negative infinity.
 /// Corrects C++'s truncation-toward-zero behavior for negative quotients.
+/// Precondition: y != 0 and not (x == INT64_MIN && y == -1).
 inline int64_t floordiv(int64_t x, int64_t y) {
+  INTERNAL_CHECK(y != 0) << "floordiv: division by zero";
+  INTERNAL_CHECK(!(x == std::numeric_limits<int64_t>::min() && y == -1))
+      << "floordiv: INT64_MIN / -1 overflows int64_t";
   int64_t rdiv = x / y;
   int64_t rmod = x % y;
   bool is_floor = (y >= 0 && rmod >= 0) || (y < 0 && rmod <= 0);
@@ -36,53 +50,64 @@ inline int64_t floordiv(int64_t x, int64_t y) {
 }
 
 /// Floor modulo: result has the same sign as the divisor.
+/// Precondition: y != 0 and not (x == INT64_MIN && y == -1).
 inline int64_t floormod(int64_t x, int64_t y) {
+  INTERNAL_CHECK(y != 0) << "floormod: division by zero";
+  INTERNAL_CHECK(!(x == std::numeric_limits<int64_t>::min() && y == -1))
+      << "floormod: INT64_MIN % -1 overflows int64_t";
   int64_t rmod = x % y;
   bool is_floor = (y >= 0 && rmod >= 0) || (y < 0 && rmod <= 0);
   return is_floor ? rmod : rmod + y;
 }
 
 /// Extended Euclidean algorithm: solve a*x + b*y = gcd(a, b).
-/// Returns gcd, sets *px and *py.
+/// Returns gcd (always non-negative), sets *px and *py.
 inline int64_t ExtendedEuclidean(int64_t a, int64_t b, int64_t* px, int64_t* py) {
   int64_t s = 0, old_s = 1;
-  int64_t r = b, old_r = a >= 0 ? a : -a;
+  // Work on non-negative magnitudes. SafeAbs handles INT64_MIN.
+  uint64_t r = SafeAbs(b);
+  uint64_t old_r = SafeAbs(a);
   while (r != 0) {
-    int64_t q = old_r / r;
-    int64_t tmp = old_r;
+    uint64_t q = old_r / r;
+    uint64_t tmp_r = old_r - q * r;
+    int64_t tmp_s = old_s - static_cast<int64_t>(q) * s;
     old_r = r;
-    r = tmp - q * r;
-    tmp = old_s;
+    r = tmp_r;
     old_s = s;
-    s = tmp - q * s;
+    s = tmp_s;
   }
   *px = a >= 0 ? old_s : -old_s;
+  int64_t gcd = static_cast<int64_t>(old_r);
   if (b != 0) {
-    *py = (old_r - (*px) * a) / b;
+    *py = (gcd - (*px) * a) / b;
   } else {
     *py = 1;
   }
-  return old_r;
+  return gcd;
 }
 
 /// GCD that treats 0 as +infinity (identity element for GCD).
+/// Always returns a non-negative value. Safe for INT64_MIN inputs.
 inline int64_t ZeroAwareGCD(int64_t a, int64_t b) {
-  if (a < 0) a = -a;
-  if (b < 0) b = -b;
-  if (a < b) std::swap(a, b);
-  if (b == 0) return a;
-  while (a % b != 0) {
-    a = a % b;
-    std::swap(a, b);
+  uint64_t ua = SafeAbs(a);
+  uint64_t ub = SafeAbs(b);
+  if (ua < ub) std::swap(ua, ub);
+  if (ub == 0) return static_cast<int64_t>(ua);
+  while (ua % ub != 0) {
+    ua = ua % ub;
+    std::swap(ua, ub);
   }
-  return b;
+  return static_cast<int64_t>(ub);
 }
 
-/// Least common multiple via Extended Euclidean GCD.
-/// Precondition: at least one of a, b must be non-zero.
+/// Least common multiple. Always returns a non-negative value.
+/// Returns 0 if either input is 0.
 inline int64_t LeastCommonMultiple(int64_t a, int64_t b) {
+  if (a == 0 || b == 0) return 0;
   int64_t x, y;
-  return (a / ExtendedEuclidean(a, b, &x, &y)) * b;
+  int64_t g = ExtendedEuclidean(a, b, &x, &y);
+  int64_t lcm = (a / g) * b;
+  return lcm < 0 ? -lcm : lcm;
 }
 
 }  // namespace arith

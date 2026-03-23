@@ -12,15 +12,25 @@
 from pypto.pypto_core.ir import Expr
 
 def fold_const(expr: Expr) -> Expr | None:
-    """Try to constant-fold an expression.
+    """Try to constant-fold an expression."""
+    ...
 
-    Accepts any BinaryExpr (Add, Sub, ...) or UnaryExpr (Neg, Abs, ...).
-    Returns the folded constant result, or None if folding is not possible.
+def floordiv(x: int, y: int) -> int:
+    """Floor division."""
+    ...
 
-    Args:
-        expr: A binary or unary expression node to fold.
+def floormod(x: int, y: int) -> int:
+    """Floor modulo."""
+    ...
 
-    Returns:
-        Folded constant expression, or None if not foldable.
-    """
+def gcd(a: int, b: int) -> int:
+    """GCD (treats 0 as identity)."""
+    ...
+
+def lcm(a: int, b: int) -> int:
+    """Least common multiple."""
+    ...
+
+def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
+    """Extended Euclidean: returns (gcd, x, y) where a*x + b*y = gcd."""
     ...
