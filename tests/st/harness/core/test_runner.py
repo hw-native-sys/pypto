@@ -18,10 +18,14 @@ Orchestrates the full test execution pipeline:
 5. Validate results
 """
 
+import json
+import os
+import re
 import shutil
 import tempfile
 import time
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +62,118 @@ def _resolve_platform(config_platform: str, backend_type: BackendType) -> str:
     is_sim = config_platform.endswith("sim")
     arch = _BACKEND_TO_ARCH.get(backend_type, config_platform.rstrip("sim").rstrip("_"))
     return f"{arch}sim" if is_sim else arch
+
+# Environment variable names shared with conftest.py
+_FAILURE_RECORDS_ENV = "PYPTO_FAILURE_RECORDS_DIR"
+_CURRENT_TEST_ENV = "PYPTO_CURRENT_TEST_NODEID"
+
+
+def _parse_partial_codegen_table(exc_str: str) -> list[dict]:
+    """Extract per-function errors from PartialCodegenError formatted table.
+
+    Parses multi-line table rows of the form:
+      func_name   | first line of error
+                  | continuation line
+
+    Continuation lines (empty function column) are joined with a space to
+    form a single summary string per function.
+    Skips the "Function" header row and separator lines.
+    """
+    results = []
+    current_func: str | None = None
+    current_parts: list[str] = []
+
+    for line in exc_str.split("\n"):
+        # Primary row: "  funcname   | error text"
+        m = re.match(r"^\s{2}(\w+)\s+\|\s*(.*)$", line)
+        if m:
+            func_name = m.group(1)
+            if func_name == "Function" or not func_name.strip("-"):
+                if current_func:
+                    results.append({"function": current_func, "summary": " ".join(current_parts)})
+                    current_func = None
+                    current_parts = []
+                continue
+            if current_func:
+                results.append({"function": current_func, "summary": " ".join(current_parts)})
+            current_func = func_name
+            first = m.group(2).strip()
+            current_parts = [first] if first else []
+        elif current_func:
+            # Continuation row: "            | more error text"
+            cont = re.match(r"^\s+\|\s*(.*)$", line)
+            if cont:
+                part = cont.group(1).strip()
+                if part:
+                    current_parts.append(part)
+            elif re.match(r"^\s*[-=]+\+", line):
+                results.append({"function": current_func, "summary": " ".join(current_parts)})
+                current_func = None
+                current_parts = []
+
+    if current_func:
+        results.append({"function": current_func, "summary": " ".join(current_parts)})
+
+    return results
+
+
+def _classify_error(exc: Exception) -> tuple[str, list[dict]]:
+    """Classify an exception into (error_type, func_errors).
+
+    Returns:
+        A tuple of:
+        - error_type: human-readable category string
+        - func_errors: list of {"function": str, "summary": str} dicts,
+          one per failed function (or one entry with function="-" for non-compilation errors)
+    """
+    try:
+        from pypto.backend.pto_backend import PartialCodegenError  # noqa: PLC0415
+
+        if isinstance(exc, PartialCodegenError):
+            func_errors = _parse_partial_codegen_table(str(exc))
+            if not func_errors:
+                # Fallback: use function names from exc.files without per-function summary
+                func_errors = [{"function": k, "summary": "compile failed"} for k in exc.files]
+            return "Compilation Error", func_errors
+    except ImportError:
+        pass
+
+    msg = str(exc)
+    m = re.search(r"Mismatched elements: (\d+/\d+)", msg)
+    if m or "does not match golden" in msg:
+        summary = f"Mismatched elements: {m.group(1)}" if m else "Output mismatch"
+        return "Precision Error", [{"function": "-", "summary": summary}]
+
+    m = re.search(r"launch_runtime failed: (\w+)", msg)
+    if m:
+        return "Runtime Error", [{"function": "-", "summary": f"launch_runtime failed: {m.group(1)}"}]
+
+    exc_only = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    first_line = exc_only.split("\n")[0].strip()[:80]
+    return "Error", [{"function": "-", "summary": first_line or type(exc).__name__}]
+
+
+def _write_failure_record(case_name: str, nodeid: str, error_type: str, func_errors: list[dict]) -> None:
+    """Write a JSON failure record to PYPTO_FAILURE_RECORDS_DIR.
+
+    Silently skips if the env var is not set or writing fails.
+    """
+    records_dir = os.environ.get(_FAILURE_RECORDS_ENV)
+    if not records_dir:
+        return
+    record = {
+        "nodeid": nodeid,
+        "case_name": case_name,
+        "error_type": error_type,
+        "func_errors": func_errors,
+    }
+    try:
+        os.makedirs(records_dir, exist_ok=True)
+        path = os.path.join(records_dir, f"failure_{uuid.uuid4().hex}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def _default_work_dir(test_name: str) -> Path:
@@ -216,6 +332,9 @@ class TestRunner:
             )
 
         except Exception as e:
+            error_type, func_errors = _classify_error(e)
+            nodeid = os.environ.get(_CURRENT_TEST_ENV, "")
+            _write_failure_record(test_name, nodeid, error_type, func_errors)
             return RunResult(
                 passed=False,
                 test_name=test_name,

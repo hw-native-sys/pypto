@@ -14,9 +14,13 @@ This configuration sets up the testing environment using the internal
 harness package (migrated from pto-testing-framework).
 """
 
+import json
 import os
 import random
+import shutil
 import sys
+import tempfile
+import textwrap
 from pathlib import Path
 
 # Add harness to path (internal package in tests/st/)
@@ -37,6 +41,17 @@ from harness.core.environment import (  # noqa: E402
 )
 from harness.core.test_runner import TestRunner  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
+
+# Environment variable names shared with test_runner.py
+_FAILURE_RECORDS_ENV = "PYPTO_FAILURE_RECORDS_DIR"
+_CURRENT_TEST_ENV = "PYPTO_CURRENT_TEST_NODEID"
+
+# Module-level storage so pytest_terminal_summary can find the records dir
+# even after the session fixture has torn down.
+_failure_records_dir: str | None = None
+# True only in the process that created the temp dir. Under --forked, each
+# child subprocess sees _failure_records_dir set but is NOT the owner.
+_is_failure_records_owner: bool = False
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -60,6 +75,39 @@ def setup_simpler_dependency(request):
     for path in [get_simpler_python_path(), get_simpler_scripts_path()]:
         if path is not None and path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
+
+
+def pytest_sessionstart(session):
+    """Create the shared failure records directory at session start.
+
+    This hook runs at the beginning of each pytest session. In the parent
+    process it creates the temp dir and owns it. Under --forked, each child
+    subprocess inherits PYPTO_FAILURE_RECORDS_DIR and reuses the same
+    directory without taking ownership. Only the owner renders the summary
+    and cleans up; child sessions skip both steps.
+    """
+    global _failure_records_dir, _is_failure_records_owner  # noqa: PLW0603
+    existing = os.environ.get(_FAILURE_RECORDS_ENV)
+    if existing:
+        _failure_records_dir = existing
+        return
+    records_dir = tempfile.mkdtemp(prefix="pypto_st_failures_")
+    _failure_records_dir = records_dir
+    _is_failure_records_owner = True
+    os.environ[_FAILURE_RECORDS_ENV] = records_dir
+
+
+@pytest.fixture(autouse=True)
+def _set_current_test_nodeid(request):
+    """Expose the current pytest node ID to TestRunner via env var.
+
+    TestRunner.run() reads PYPTO_CURRENT_TEST_NODEID to tag failure records
+    with the full pytest test path. Under --forked, this fixture runs in the
+    forked child process, which is where TestRunner also runs — correct.
+    """
+    os.environ[_CURRENT_TEST_ENV] = request.node.nodeid
+    yield
+    os.environ.pop(_CURRENT_TEST_ENV, None)
 
 
 def pytest_addoption(parser):
@@ -217,3 +265,102 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_hardware)
         if "a5" in item.keywords and not platform.startswith("a5"):
             item.add_marker(skip_a5)
+
+
+# ---------------------------------------------------------------------------
+# Harness failure report
+# ---------------------------------------------------------------------------
+
+
+def _load_failure_records(records_dir: Path) -> list[dict]:
+    """Read all JSON failure records from *records_dir*."""
+    records = []
+    for path in sorted(records_dir.glob("failure_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                records.append(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return records
+
+
+def _render_failure_table(terminalreporter, records: list[dict]) -> None:
+    """Render the harness failure summary table to the terminal.
+
+    Produces one row per (test case, function) pair. Compilation errors expand
+    into one row per failed kernel function; all other errors produce a single
+    row with function="-".
+    """
+    max_error_width = 60
+
+    # Flatten records into rows: (case_name, file_path, error_type, function, summary)
+    rows: list[tuple[str, str, str, str, str]] = []
+    for rec in records:
+        nodeid = rec.get("nodeid", "")
+        file_path = nodeid.split("::")[0] if "::" in nodeid else nodeid
+        case_name = rec.get("case_name", "?")
+        error_type = rec.get("error_type", "Error")
+        for fe in rec.get("func_errors", [{"function": "-", "summary": ""}]):
+            rows.append((case_name, file_path, error_type, fe.get("function", "-"), fe.get("summary", "")))
+
+    headers = ("Case Name", "File", "Error Type", "Function", "Error")
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+    col_widths[-1] = min(col_widths[-1], max_error_width)
+    col_widths = [w + 2 for w in col_widths]
+
+    sep = "-+-".join("-" * w for w in col_widths)
+    header_line = " | ".join(f"{h:<{col_widths[i]}}" for i, h in enumerate(headers))
+
+    tw = terminalreporter
+    tw.write_sep("=", "ST Failure Summary", red=True, bold=True)
+    tw.write_line("")
+    tw.write_line("  " + header_line)
+    tw.write_line("  " + sep)
+
+    for case_name, file_path, error_type, function, summary in rows:
+        # Wrap long error summaries
+        wrapped = textwrap.wrap(summary, width=max_error_width) or [summary]
+        cells = [
+            f"{case_name:<{col_widths[0]}}",
+            f"{file_path:<{col_widths[1]}}",
+            f"{error_type:<{col_widths[2]}}",
+            f"{function:<{col_widths[3]}}",
+            f"{wrapped[0]:<{col_widths[4]}}",
+        ]
+        tw.write_line("  " + " | ".join(cells), red=True)
+        for continuation in wrapped[1:]:
+            blank_cells = [" " * col_widths[i] for i in range(4)]
+            tw.write_line("  " + " | ".join(blank_cells) + " | " + continuation, red=True)
+
+    tw.write_line("  " + sep)
+    tw.write_line("")
+    unique_cases = len({r.get("case_name") for r in records})
+    tw.write_line(f"  {unique_cases} test case(s) failed ({len(rows)} failure(s) total)", red=True)
+    tw.write_sep("=", "", red=True)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Render the harness failure summary after all tests complete.
+
+    Only the owner process (the one that created the temp dir) renders the
+    table and cleans up. Under --forked, child subprocesses are not owners
+    and skip this step entirely to avoid deleting the shared directory before
+    the parent has had a chance to read it.
+    """
+    if not _is_failure_records_owner:
+        return
+    records_dir_str = _failure_records_dir or os.environ.get(_FAILURE_RECORDS_ENV)
+    if not records_dir_str:
+        return
+    records_dir = Path(records_dir_str)
+    if not records_dir.is_dir():
+        return
+    try:
+        records = _load_failure_records(records_dir)
+        if records:
+            _render_failure_table(terminalreporter, records)
+    finally:
+        shutil.rmtree(records_dir, ignore_errors=True)
