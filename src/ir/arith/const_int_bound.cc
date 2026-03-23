@@ -181,8 +181,16 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   Bound VisitExpr_(const ConstIntPtr& op) override { return {op->value_, op->value_}; }
 
   Bound VisitExpr_(const ConstFloatPtr& op) override {
-    if (std::isnan(op->value_) || std::isinf(op->value_)) return Everything();
-    return {static_cast<int64_t>(std::floor(op->value_)), static_cast<int64_t>(std::ceil(op->value_))};
+    double v = op->value_;
+    if (std::isnan(v) || std::isinf(v)) return Everything();
+    // Guard against finite values outside int64_t range (cast would be UB)
+    constexpr auto kMax = static_cast<double>(Bound::kPosInf);
+    constexpr auto kMin = static_cast<double>(Bound::kNegInf);
+    double lo = std::floor(v);
+    double hi = std::ceil(v);
+    int64_t lo_i = (lo < kMin) ? Bound::kNegInf : static_cast<int64_t>(lo);
+    int64_t hi_i = (hi > kMax) ? Bound::kPosInf : static_cast<int64_t>(hi);
+    return {lo_i, hi_i};
   }
 
   Bound VisitExpr_(const ConstBoolPtr& op) override {
@@ -452,9 +460,12 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
 
   TryParseConstraint(constraint);
 
-  // Return recovery function
+  // Return recovery function — iterate in reverse so that when the same variable
+  // was tightened multiple times (e.g., And(x >= 0, x < 8)), we restore the
+  // original pre-scope bound, not the intermediate one.
   return [this, recovery = std::move(recovery)]() {
-    for (const auto& [ptr, bound] : recovery) {
+    for (auto it = recovery.rbegin(); it != recovery.rend(); ++it) {
+      const auto& [ptr, bound] = *it;
       if (bound.is_everything()) {
         var_map_.erase(ptr);
       } else {

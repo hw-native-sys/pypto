@@ -40,6 +40,10 @@ def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
 class ConstIntBound:
     """Inclusive integer bounds [min_value, max_value] for an expression."""
 
+    def __init__(self, min_value: int, max_value: int) -> None:
+        """Create inclusive integer bounds [min_value, max_value]."""
+        ...
+
     min_value: int
     max_value: int
     kPosInf: ClassVar[int]

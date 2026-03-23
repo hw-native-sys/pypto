@@ -69,6 +69,8 @@ void BindArith(nb::module_& m) {
   // ConstIntBound
   nb::class_<ir::arith::ConstIntBound>(arith, "ConstIntBound",
                                        "Inclusive integer bounds [min_value, max_value] for an expression.")
+      .def(nb::init<int64_t, int64_t>(), nb::arg("min_value"), nb::arg("max_value"),
+           "Create inclusive integer bounds [min_value, max_value].")
       .def_ro("min_value", &ir::arith::ConstIntBound::min_value, "Inclusive lower bound.")
       .def_ro("max_value", &ir::arith::ConstIntBound::max_value, "Inclusive upper bound.")
       .def_ro_static("kPosInf", &ir::arith::ConstIntBound::kPosInf, "Sentinel for positive infinity.")
