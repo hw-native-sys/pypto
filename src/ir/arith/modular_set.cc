@@ -23,6 +23,7 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
+#include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/arith/int_operator.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -79,7 +80,9 @@ static Entry Union(const Entry& a, const Entry& b) {
   if (base0 == base1) {
     return {coeff, base0};
   }
-  return {ZeroAwareGCD(ZeroAwareGCD(base0, base1), coeff), base0};
+  // Fallback: use gcd(coeff, |base0 - base1|) to capture patterns like
+  // {4k+1} ∪ {4k+3} = {2k+1} (odd numbers).
+  return {ZeroAwareGCD(coeff, std::abs(base0 - base1)), base0};
 }
 
 /// Intersection of two modular sets using the Chinese Remainder Theorem.
@@ -141,12 +144,14 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   Entry VisitExpr_(const AddPtr& op) override {
     auto a = VisitExpr(op->left_);
     auto b = VisitExpr(op->right_);
+    if (AddWouldOverflow(a.base, b.base)) return Everything();
     return {ZeroAwareGCD(a.coeff, b.coeff), a.base + b.base};
   }
 
   Entry VisitExpr_(const SubPtr& op) override {
     auto a = VisitExpr(op->left_);
     auto b = VisitExpr(op->right_);
+    if (SubWouldOverflow(a.base, b.base)) return Everything();
     return {ZeroAwareGCD(a.coeff, b.coeff), a.base - b.base};
   }
 
@@ -155,7 +160,11 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
     auto b = VisitExpr(op->right_);
     // (p*x + n) * (q*y + m) = pq*xy + pm*x + qn*y + nm
     // coeff = gcd(pq, pm, qn), base = nm
-    // Note: overflow is possible but benign — GCD of overflowed values is conservative.
+    if (MulWouldOverflow(a.base, b.base)) return Everything();
+    if (MulWouldOverflow(a.coeff, b.coeff) || MulWouldOverflow(a.coeff, b.base) ||
+        MulWouldOverflow(a.base, b.coeff)) {
+      return Everything();
+    }
     int64_t pq = a.coeff * b.coeff;
     int64_t pm = a.coeff * b.base;
     int64_t qn = a.base * b.coeff;
@@ -225,8 +234,9 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
     if (b.is_const() && b.base >= 0 && b.base < 63) {
       auto a = VisitExpr(op->left_);
       int64_t multiplier = static_cast<int64_t>(1) << b.base;
-      // a * 2^k: coeff = gcd(0, a.coeff * 2^k) = a.coeff * 2^k (when a.coeff > 0)
-      //          base = a.base * 2^k
+      if (MulWouldOverflow(a.coeff, multiplier) || MulWouldOverflow(a.base, multiplier)) {
+        return Everything();
+      }
       return {ZeroAwareGCD(0, a.coeff * multiplier), a.base * multiplier};
     }
     return Everything();
