@@ -502,5 +502,60 @@ class TestVarIdentity:
         assert by.is_everything()
 
 
+# ============================================================================
+# Edge cases: overflow, INT64 boundaries, unsigned cast
+# ============================================================================
+
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
+
+
+class TestEdgeCases:
+    def test_neg_int64_min(self):
+        """Negating INT64_MIN should not cause UB — saturate to kPosInf."""
+        analyzer = ConstIntBoundAnalyzer()
+        b = analyzer(ir.Neg(ci(INT64_MIN), INT, S))
+        # -INT64_MIN overflows int64, so bound saturates
+        assert b.min_value == ConstIntBound.kPosInf
+        assert b.max_value == ConstIntBound.kPosInf
+
+    def test_abs_int64_min(self):
+        """Abs of INT64_MIN should saturate rather than UB."""
+        analyzer = ConstIntBoundAnalyzer()
+        b = analyzer(ir.Abs(ci(INT64_MIN), INT, S))
+        assert b.min_value == ConstIntBound.kPosInf
+        assert b.max_value == ConstIntBound.kPosInf
+
+    def test_large_pow_exponent(self):
+        """Large exponent should not cause O(e) slowdown — O(log e) expected."""
+        analyzer = ConstIntBoundAnalyzer()
+        x = make_var("x")
+        analyzer.bind(x, 2, 4)  # [2, 3]
+        b = analyzer(ir.Pow(x, ci(1000000), INT, S))
+        # Result overflows to inf but should compute fast
+        assert b.min_value == ConstIntBound.kPosInf or b.min_value > 0
+        assert b.max_value == ConstIntBound.kPosInf
+
+    def test_cast_to_unsigned(self):
+        """Cast to unsigned type should use [0, 2^bits-1] range."""
+        analyzer = ConstIntBoundAnalyzer()
+        x = make_var("x")
+        analyzer.bind(x, -10, 300)  # [-10, 299]
+        b = analyzer(ir.Cast(x, DataType.UINT8, S))
+        # UINT8 range is [0, 255], intersected with [-10, 299]
+        assert b.min_value == 0
+        assert b.max_value == 255
+
+    def test_cast_to_signed(self):
+        """Cast to signed type should use [-2^(bits-1), 2^(bits-1)-1] range."""
+        analyzer = ConstIntBoundAnalyzer()
+        x = make_var("x")
+        analyzer.bind(x, -200, 200)  # [-200, 199]
+        b = analyzer(ir.Cast(x, DataType.INT8, S))
+        # INT8 range is [-128, 127]
+        assert b.min_value == -128
+        assert b.max_value == 127
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

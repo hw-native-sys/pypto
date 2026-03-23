@@ -73,7 +73,33 @@ static int64_t InfAwareMul(int64_t a, int64_t b) {
 static int64_t InfAwareNeg(int64_t a) {
   if (a == Bound::kPosInf) return Bound::kNegInf;
   if (a == Bound::kNegInf) return Bound::kPosInf;
+  if (NegWouldOverflow(a)) return Bound::kPosInf;  // -INT64_MIN overflows
   return -a;
+}
+
+/// Overflow-safe exponentiation by squaring — O(log e).
+static int64_t InfAwarePow(int64_t base, int64_t exp) {
+  if (exp == 0) return 1;
+  if (base == 0) return 0;
+  if (base == 1) return 1;
+  int64_t result = 1;
+  int64_t b = base;
+  int64_t e = exp;
+  while (e > 0) {
+    if (e & 1) {
+      result = InfAwareMul(result, b);
+      if (result == Bound::kPosInf || result == Bound::kNegInf) return result;
+    }
+    e >>= 1;
+    if (e > 0) {
+      b = InfAwareMul(b, b);
+      if (b == Bound::kPosInf || b == Bound::kNegInf) {
+        // Base overflowed; remaining result depends on remaining exponent parity
+        return (result > 0) == (base > 0 || (exp & 1) == 0) ? Bound::kPosInf : Bound::kNegInf;
+      }
+    }
+  }
+  return result;
 }
 
 // ============================================================================
@@ -238,13 +264,8 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
     if (e == 0) return {1, 1};
     if (e == 1) return base;
     if (base.is_non_negative()) {
-      // Monotonically increasing for non-negative base
-      int64_t lo = 1, hi = 1;
-      for (int64_t i = 0; i < e; ++i) {
-        lo = InfAwareMul(lo, base.min_value);
-        hi = InfAwareMul(hi, base.max_value);
-      }
-      return {lo, hi};
+      // O(log e) exponentiation by squaring for bound propagation
+      return {InfAwarePow(base.min_value, e), InfAwarePow(base.max_value, e)};
     }
     return Everything();
   }
@@ -331,9 +352,15 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
     if (!scalar_type || !scalar_type->dtype_.IsInt()) return Everything();
     size_t bits = scalar_type->dtype_.GetBit();
-    if (bits == 0 || bits > 63) return a;  // Unknown or >= 64 bits: pass through
-    int64_t type_min = -(static_cast<int64_t>(1) << (bits - 1));
-    int64_t type_max = (static_cast<int64_t>(1) << (bits - 1)) - 1;
+    if (bits == 0 || bits >= 64) return a;  // Unknown or >= 64 bits: pass through
+    int64_t type_min, type_max;
+    if (scalar_type->dtype_.IsUnsignedInt()) {
+      type_min = 0;
+      type_max = (static_cast<int64_t>(1) << bits) - 1;
+    } else {
+      type_min = -(static_cast<int64_t>(1) << (bits - 1));
+      type_max = (static_cast<int64_t>(1) << (bits - 1)) - 1;
+    }
     return {std::max(a.min_value, type_min), std::min(a.max_value, type_max)};
   }
 
@@ -376,10 +403,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto gt = As<Gt>(expr)) {
       if (auto var = As<Var>(gt->left_)) {
         auto rb = VisitExpr(gt->right_);
-        if (rb.is_const()) TryTighten(var.get(), {rb.min_value + 1, Bound::kPosInf});
+        if (rb.is_const()) TryTighten(var.get(), {InfAwareAdd(rb.min_value, 1), Bound::kPosInf});
       } else if (auto var = As<Var>(gt->right_)) {
         auto lb = VisitExpr(gt->left_);
-        if (lb.is_const()) TryTighten(var.get(), {Bound::kNegInf, lb.max_value - 1});
+        if (lb.is_const()) TryTighten(var.get(), {Bound::kNegInf, InfAwareAdd(lb.max_value, -1)});
       }
       return;
     }
@@ -398,10 +425,10 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
     if (auto lt = As<Lt>(expr)) {
       if (auto var = As<Var>(lt->left_)) {
         auto rb = VisitExpr(lt->right_);
-        if (rb.is_const()) TryTighten(var.get(), {Bound::kNegInf, rb.max_value - 1});
+        if (rb.is_const()) TryTighten(var.get(), {Bound::kNegInf, InfAwareAdd(rb.max_value, -1)});
       } else if (auto var = As<Var>(lt->right_)) {
         auto lb = VisitExpr(lt->left_);
-        if (lb.is_const()) TryTighten(var.get(), {lb.min_value + 1, Bound::kPosInf});
+        if (lb.is_const()) TryTighten(var.get(), {InfAwareAdd(lb.min_value, 1), Bound::kPosInf});
       }
       return;
     }
