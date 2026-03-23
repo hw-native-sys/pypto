@@ -88,7 +88,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
 }
 
 // 阶段 5：入口函数签名
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 ```
 
@@ -101,7 +101,7 @@ void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
 void* arg_output_ptr = reinterpret_cast<void*>(args[ARG_PTR_OUTPUT]);
 
 // 阶段 7：外部张量（来自函数参数）
-uint64_t a_shapes[2] = {16, 16};
+uint32_t a_shapes[2] = {16, 16};
 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
 
 // 阶段 8：内部张量（来自 pl.create_tensor — 仅中间变量）
@@ -113,12 +113,11 @@ Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 
 ```cpp
 // 阶段 9：任务提交
-PTOParam params_t0[] = {
-    make_input_param(ext_a),
-    make_input_param(ext_b),
-    make_output_param(ext_output),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+PTOParam params_t0;
+params_t0.add_input(ext_a);
+params_t0.add_input(ext_b);
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(0, params_t0);
 
 // 阶段 10：控制流（ForStmt 示例）
 PTO2_SCOPE {
@@ -145,10 +144,10 @@ PTO2_SCOPE {
 
 | 方向 | Python 注解 | C++ 任务参数 | 语义 |
 | ---- | ----------- | ------------ | ---- |
-| `In` | `pl.Tensor[...]`（默认） | `make_input_param(ext_x)` | 只读 |
-| `Out` | `pl.Out[pl.Tensor[...]]` | `make_output_param(ext_x)` | 只写 |
-| `InOut` | `pl.InOut[pl.Tensor[...]]` | `make_inout_param(ext_x)` | 读写 |
-| Scalar | `pl.Scalar[...]` | `make_scalar_param(value)` | 标量常量 |
+| `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读 |
+| `Out` | `pl.Out[pl.Tensor[...]]` | `params.add_output(ext_x)` | 只写 |
+| `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
+| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量 |
 
 ### 别名生成
 
@@ -161,8 +160,11 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 
 ```cpp
 // 生成的 C++
-PTOParam params_t0[] = { ... make_output_param(ext_output) ... };
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+PTOParam params_t0;
+params_t0.add_input(ext_a);
+params_t0.add_input(ext_b);
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
 
@@ -188,14 +190,13 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 
 ```cpp
 // 生成的 C++ — 每个元素映射到其 Out/InOut 参数
-PTOParam params_t0[] = {
-    make_input_param(ext_sij),
-    make_scalar_param(float_to_u64(scale)),
-    make_output_param(ext_pij),
-    make_output_param(ext_mij),
-    make_output_param(ext_lij),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 5);
+PTOParam params_t0;
+params_t0.add_input(ext_sij);
+params_t0.add_scalar(float_to_u64(scale));
+params_t0.add_output(ext_pij);
+params_t0.add_output(ext_mij);
+params_t0.add_output(ext_lij);
+pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group 函数（混合核）
@@ -204,9 +205,10 @@ pto2_rt_submit_aiv_task(rt, 0, params_t0, 5);
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-PTOParam params_t0[] = { ... };
+PTOParam params_t0;
+// ... add_input / add_output calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(rt, mixed_0, params_t0, param_count);
+pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
 ## 操作映射
@@ -257,7 +259,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 
     // 提取设备指针
@@ -266,11 +268,11 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
     // 外部张量（来自参数）
-    uint64_t a_shapes[2] = {16, 16};
+    uint32_t a_shapes[2] = {16, 16};
     Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-    uint64_t b_shapes[2] = {16, 16};
+    uint32_t b_shapes[2] = {16, 16};
     Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-    uint64_t d_shapes[2] = {16, 16};
+    uint32_t d_shapes[2] = {16, 16};
     Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
     // 内部张量（中间变量）
@@ -278,20 +280,18 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
     // 任务 0: kernel_add (a + b → c)
-    PTOParam params_t0[] = {
-        make_input_param(ext_a),
-        make_input_param(ext_b),
-        make_output_param(c),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    params_t0.add_input(ext_a);
+    params_t0.add_input(ext_b);
+    params_t0.add_output(c);
+    pto2_rt_submit_aiv_task(0, params_t0);
 
     // 任务 1: kernel_add (c + b → d)
-    PTOParam params_t1[] = {
-        make_input_param(c),
-        make_input_param(ext_b),
-        make_output_param(ext_d),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t1, 3);
+    PTOParam params_t1;
+    params_t1.add_input(c);
+    params_t1.add_input(ext_b);
+    params_t1.add_output(ext_d);
+    pto2_rt_submit_aiv_task(0, params_t1);
 }
 
 }  // extern "C"
@@ -335,8 +335,9 @@ for i in pl.range(0, 4):
 Tensor acc = ext_acc;  // 迭代参数初始化
 PTO2_SCOPE {
     for (int64_t i = 0; i < 4; i += 1) {
-        PTOParam params_t0[] = { ... };
-        pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+        PTOParam params_t0;
+        // ... add_input / add_output calls ...
+        pto2_rt_submit_aiv_task(0, params_t0);
     }
 }
 ```
@@ -356,11 +357,13 @@ else:
 ```cpp
 // 生成的 C++
 if (condition) {
-    PTOParam params_t0[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(0, params_t0);
 } else {
-    PTOParam params_t1[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
+    PTOParam params_t1;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(1, params_t1);
 }
 ```
 

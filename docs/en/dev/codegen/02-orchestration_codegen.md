@@ -88,7 +88,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
 }
 
 // Phase 5: Entry function signature
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 ```
 
@@ -101,7 +101,7 @@ void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
 void* arg_output_ptr = reinterpret_cast<void*>(args[ARG_PTR_OUTPUT]);
 
 // Phase 7: External tensors (from function parameters)
-uint64_t a_shapes[2] = {16, 16};
+uint32_t a_shapes[2] = {16, 16};
 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
 
 // Phase 8: Internal tensors (from pl.create_tensor — intermediates only)
@@ -113,12 +113,11 @@ Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 
 ```cpp
 // Phase 9: Task submission
-PTOParam params_t0[] = {
-    make_input_param(ext_a),
-    make_input_param(ext_b),
-    make_output_param(ext_output),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+PTOParam params_t0;
+params_t0.add_input(ext_a);
+params_t0.add_input(ext_b);
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(0, params_t0);
 
 // Phase 10: Control flow (ForStmt example)
 PTO2_SCOPE {
@@ -143,12 +142,12 @@ External tensors wrap device memory pointers passed from the host. Internal tens
 
 The `ParamDirection` of each function parameter determines how it appears in task submission:
 
-| Direction | Python Annotation | C++ Task Param | Semantics |
-| --------- | ----------------- | -------------- | --------- |
-| `In` | `pl.Tensor[...]` (default) | `make_input_param(ext_x)` | Read-only |
-| `Out` | `pl.Out[pl.Tensor[...]]` | `make_output_param(ext_x)` | Write-only |
-| `InOut` | `pl.InOut[pl.Tensor[...]]` | `make_inout_param(ext_x)` | Read-write |
-| Scalar | `pl.Scalar[...]` | `make_scalar_param(value)` | Scalar constant |
+| Direction | Python Annotation | C++ Method | Semantics |
+| --------- | ----------------- | ---------- | --------- |
+| `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only |
+| `Out` | `pl.Out[pl.Tensor[...]]` | `params.add_output(ext_x)` | Write-only |
+| `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
+| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant |
 
 ### Alias Generation
 
@@ -161,8 +160,11 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 
 ```cpp
 // Generated C++
-PTOParam params_t0[] = { ... make_output_param(ext_output) ... };
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+PTOParam params_t0;
+params_t0.add_input(ext_a);
+params_t0.add_input(ext_b);
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
@@ -188,14 +190,13 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 
 ```cpp
 // Generated C++ — each element maps to its Out/InOut arg
-PTOParam params_t0[] = {
-    make_input_param(ext_sij),
-    make_scalar_param(float_to_u64(scale)),
-    make_output_param(ext_pij),
-    make_output_param(ext_mij),
-    make_output_param(ext_lij),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 5);
+PTOParam params_t0;
+params_t0.add_input(ext_sij);
+params_t0.add_scalar(float_to_u64(scale));
+params_t0.add_output(ext_pij);
+params_t0.add_output(ext_mij);
+params_t0.add_output(ext_lij);
+pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group Functions (Mixed Kernels)
@@ -204,9 +205,10 @@ When a kernel uses both AIC and AIV cores (mixed kernel), the codegen generates 
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-PTOParam params_t0[] = { ... };
+PTOParam params_t0;
+// ... add_input / add_output calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(rt, mixed_0, params_t0, param_count);
+pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
 ## Operation Mappings
@@ -257,7 +259,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 
     // Extract device pointers
@@ -266,11 +268,11 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
     // External tensors (from params)
-    uint64_t a_shapes[2] = {16, 16};
+    uint32_t a_shapes[2] = {16, 16};
     Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-    uint64_t b_shapes[2] = {16, 16};
+    uint32_t b_shapes[2] = {16, 16};
     Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-    uint64_t d_shapes[2] = {16, 16};
+    uint32_t d_shapes[2] = {16, 16};
     Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
     // Internal tensor (intermediate)
@@ -278,20 +280,18 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
     // Task 0: kernel_add (a + b → c)
-    PTOParam params_t0[] = {
-        make_input_param(ext_a),
-        make_input_param(ext_b),
-        make_output_param(c),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    params_t0.add_input(ext_a);
+    params_t0.add_input(ext_b);
+    params_t0.add_output(c);
+    pto2_rt_submit_aiv_task(0, params_t0);
 
     // Task 1: kernel_add (c + b → d)
-    PTOParam params_t1[] = {
-        make_input_param(c),
-        make_input_param(ext_b),
-        make_output_param(ext_d),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t1, 3);
+    PTOParam params_t1;
+    params_t1.add_input(c);
+    params_t1.add_input(ext_b);
+    params_t1.add_output(ext_d);
+    pto2_rt_submit_aiv_task(0, params_t1);
 }
 
 }  // extern "C"
@@ -336,8 +336,9 @@ for i in pl.range(0, 4):
 Tensor acc = ext_acc;  // iter_arg initialization
 PTO2_SCOPE {
     for (int64_t i = 0; i < 4; i += 1) {
-        PTOParam params_t0[] = { ... };
-        pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+        PTOParam params_t0;
+        // ... add_input / add_output calls ...
+        pto2_rt_submit_aiv_task(0, params_t0);
     }
 }
 ```
@@ -357,11 +358,13 @@ else:
 ```cpp
 // Generated C++
 if (condition) {
-    PTOParam params_t0[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(0, params_t0);
 } else {
-    PTOParam params_t1[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
+    PTOParam params_t1;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(1, params_t1);
 }
 ```
 

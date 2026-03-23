@@ -113,39 +113,39 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+            void aicpu_orchestration_entry(uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
                 (void)arg_count;
                 (void)orch_thread_num;
                 (void)orch_thread_index;
@@ -156,31 +156,29 @@ class TestOrchestration:
                 void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
                 // External tensors
-                uint64_t a_shapes[2] = {16, 16};
+                uint32_t a_shapes[2] = {16, 16};
                 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-                uint64_t b_shapes[2] = {16, 16};
+                uint32_t b_shapes[2] = {16, 16};
                 Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-                uint64_t d_shapes[2] = {16, 16};
+                uint32_t d_shapes[2] = {16, 16};
                 Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
                 uint64_t c_shapes[2] = {16, 16};
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
-                PTOParam params_t0[] = {
-                    make_input_param(ext_a),
-                    make_input_param(ext_b),
-                    make_output_param(c),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+                PTOParam params_t0;
+                params_t0.add_input(ext_a);
+                params_t0.add_input(ext_b);
+                params_t0.add_output(c);
+                pto2_rt_submit_aiv_task(0, params_t0);
 
                 // Task 1: kernel_add
-                PTOParam params_t1[] = {
-                    make_input_param(c),
-                    make_input_param(ext_b),
-                    make_output_param(ext_d),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t1, 3);
+                PTOParam params_t1;
+                params_t1.add_input(c);
+                params_t1.add_input(ext_b);
+                params_t1.add_output(ext_d);
+                pto2_rt_submit_aiv_task(0, params_t1);
             }
 
             }  // extern "C"
@@ -427,39 +425,39 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+            void aicpu_orchestration_entry(uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
                 (void)arg_count;
                 (void)orch_thread_num;
                 (void)orch_thread_index;
@@ -470,61 +468,56 @@ class TestOrchestration:
                 void* arg_f_ptr = reinterpret_cast<void*>(args[ARG_PTR_F]);
 
                 // External tensors
-                uint64_t a_shapes[2] = {16, 16};
+                uint32_t a_shapes[2] = {16, 16};
                 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-                uint64_t b_shapes[2] = {16, 16};
+                uint32_t b_shapes[2] = {16, 16};
                 Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-                uint64_t f_shapes[2] = {16, 16};
+                uint32_t f_shapes[2] = {16, 16};
                 Tensor ext_f = make_tensor_external(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
 
                 uint64_t c_shapes[2] = {16, 16};
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
-                PTOParam params_t0[] = {
-                    make_input_param(ext_a),
-                    make_input_param(ext_b),
-                    make_output_param(c),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+                PTOParam params_t0;
+                params_t0.add_input(ext_a);
+                params_t0.add_input(ext_b);
+                params_t0.add_output(c);
+                pto2_rt_submit_aiv_task(0, params_t0);
                 uint64_t d_shapes[2] = {16, 16};
                 Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
                 // Task 1: kernel_add_scalar
-                PTOParam params_t1[] = {
-                    make_input_param(c),
-                    make_scalar_param(float_to_u64(1.000000f)),
-                    make_output_param(d),
-                };
-                pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
+                PTOParam params_t1;
+                params_t1.add_input(c);
+                params_t1.add_scalar(float_to_u64(1.000000f));
+                params_t1.add_output(d);
+                pto2_rt_submit_aiv_task(1, params_t1);
                 uint64_t e_shapes[2] = {16, 16};
                 Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
                 // Task 2: kernel_add_scalar
-                PTOParam params_t2[] = {
-                    make_input_param(c),
-                    make_scalar_param(float_to_u64(2.000000f)),
-                    make_output_param(e),
-                };
-                pto2_rt_submit_aiv_task(rt, 1, params_t2, 3);
+                PTOParam params_t2;
+                params_t2.add_input(c);
+                params_t2.add_scalar(float_to_u64(2.000000f));
+                params_t2.add_output(e);
+                pto2_rt_submit_aiv_task(1, params_t2);
                 uint64_t g_shapes[2] = {16, 16};
                 Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
                 // Task 3: kernel_mul
-                PTOParam params_t3[] = {
-                    make_input_param(d),
-                    make_input_param(e),
-                    make_output_param(g),
-                };
-                pto2_rt_submit_aiv_task(rt, 2, params_t3, 3);
+                PTOParam params_t3;
+                params_t3.add_input(d);
+                params_t3.add_input(e);
+                params_t3.add_output(g);
+                pto2_rt_submit_aiv_task(2, params_t3);
 
                 // Task 4: kernel_add
-                PTOParam params_t4[] = {
-                    make_input_param(g),
-                    make_input_param(c),
-                    make_output_param(ext_f),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t4, 3);
+                PTOParam params_t4;
+                params_t4.add_input(g);
+                params_t4.add_input(c);
+                params_t4.add_output(ext_f);
+                pto2_rt_submit_aiv_task(0, params_t4);
             }
 
             }  // extern "C"
@@ -728,13 +721,13 @@ class TestOrchestration:
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
         # online_update: 3 In + 3 InOut + 1 Out = 7 params
-        assert "make_input_param(ext_mij)" in code
-        assert "make_inout_param(ext_mi_in)" in code
-        assert "make_output_param(ext_dst_in)" in code
+        assert "add_input(ext_mij)" in code
+        assert "add_inout(ext_mi_in)" in code
+        assert "add_output(ext_dst_in)" in code
 
         # kernel_add: 2 In + 1 Out = 3 params
-        assert "make_input_param(ext_oi_in)" in code
-        assert "make_output_param(ext_final)" in code
+        assert "add_input(ext_oi_in)" in code
+        assert "add_output(ext_final)" in code
 
         # No PTO2_SCOPE: no control flow
         assert "PTO2_SCOPE" not in code
@@ -878,39 +871,39 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
+            void aicpu_orchestration_entry(uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
                 (void)arg_count;
                 (void)orch_thread_num;
                 (void)orch_thread_index;
@@ -925,33 +918,32 @@ class TestOrchestration:
                 void* arg_dst_ptr = reinterpret_cast<void*>(args[ARG_PTR_DST]);
 
                 // External tensors
-                uint64_t mij_shapes[2] = {16, 1};
+                uint32_t mij_shapes[2] = {16, 1};
                 Tensor ext_mij = make_tensor_external(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
-                uint64_t lij_shapes[2] = {16, 1};
+                uint32_t lij_shapes[2] = {16, 1};
                 Tensor ext_lij = make_tensor_external(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
-                uint64_t oi_new_shapes[2] = {16, 16};
+                uint32_t oi_new_shapes[2] = {16, 16};
                 Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
-                uint64_t mi_shapes[2] = {16, 1};
+                uint32_t mi_shapes[2] = {16, 1};
                 Tensor ext_mi = make_tensor_external(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
-                uint64_t li_shapes[2] = {16, 1};
+                uint32_t li_shapes[2] = {16, 1};
                 Tensor ext_li = make_tensor_external(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
-                uint64_t oi_shapes[2] = {16, 16};
+                uint32_t oi_shapes[2] = {16, 16};
                 Tensor ext_oi = make_tensor_external(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
-                uint64_t dst_shapes[2] = {16, 16};
+                uint32_t dst_shapes[2] = {16, 16};
                 Tensor ext_dst = make_tensor_external(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
 
 
                 // Task 0: online_update
-                PTOParam params_t0[] = {
-                    make_input_param(ext_mij),
-                    make_input_param(ext_lij),
-                    make_input_param(ext_oi_new),
-                    make_inout_param(ext_mi),
-                    make_inout_param(ext_li),
-                    make_inout_param(ext_oi),
-                    make_output_param(ext_dst),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 7);
+                PTOParam params_t0;
+                params_t0.add_input(ext_mij);
+                params_t0.add_input(ext_lij);
+                params_t0.add_input(ext_oi_new);
+                params_t0.add_inout(ext_mi);
+                params_t0.add_inout(ext_li);
+                params_t0.add_inout(ext_oi);
+                params_t0.add_output(ext_dst);
+                pto2_rt_submit_aiv_task(0, params_t0);
             }
 
             }  // extern "C"
@@ -1194,24 +1186,23 @@ class TestOrchestration:
         # kernel_b should only have a and b params (2 inout), not x or y
         assert code.count("params_t1") >= 2
 
-        # Count make_inout_param per task block: each should have exactly 2
+        # Count add_* calls per task block
         lines = code.split("\n")
         task0_params = []
         task1_params = []
-        in_task0 = False
-        in_task1 = False
+        current_task = None
         for line in lines:
-            if "params_t0[]" in line:
-                in_task0 = True
-            elif "params_t1[]" in line:
-                in_task1 = True
-            elif "};" in line:
-                in_task0 = False
-                in_task1 = False
-            if in_task0 and ("make_" in line):
-                task0_params.append(line.strip())
-            if in_task1 and ("make_" in line):
-                task1_params.append(line.strip())
+            stripped = line.strip()
+            if stripped.startswith("PTOParam params_t0"):
+                current_task = 0
+            elif stripped.startswith("PTOParam params_t1"):
+                current_task = 1
+            elif stripped.startswith("pto2_rt_submit"):
+                current_task = None
+            if current_task == 0 and stripped.startswith("params_t0.add_"):
+                task0_params.append(stripped)
+            if current_task == 1 and stripped.startswith("params_t1.add_"):
+                task1_params.append(stripped)
 
         # kernel_a: x, y as inout → 2 params
         assert len(task0_params) == 2, (
