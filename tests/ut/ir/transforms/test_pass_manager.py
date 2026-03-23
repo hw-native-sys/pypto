@@ -11,8 +11,84 @@
 
 import os
 
+import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, backend, ir, passes
+from pypto.backend import BackendType
+
+TENSOR_ONLY_PASSES = [
+    "SplitChunkedLoops",
+    "InterchangeChunkLoops",
+    "OutlineHierarchyScopes",
+    "OutlineIncoreScopes",
+    "OutlineClusterScopes",
+    "ConvertTensorToTileOps",
+]
+
+TENSOR_OPTIMIZATION_PASSES = [
+    "UnrollLoops",
+    "CtrlFlowTransform",
+    "ConvertToSSA",
+    "FlattenCallExpr",
+    *TENSOR_ONLY_PASSES,
+    "FlattenTileNdTo2D",
+    "InferTileMemorySpace",
+    "ResolveTransposeLayout",
+    "ResolveBackendOpLayouts",
+    "ExpandMixedKernel",
+    "InitMemRef",
+    "MemoryReuse",
+    "LegalizePTOBufferReuse",
+    "AllocateMemoryAddr",
+]
+
+DEBUG_TILE_OPTIMIZATION_PASSES = [
+    "UnrollLoops",
+    "CtrlFlowTransform",
+    "ConvertToSSA",
+    "FlattenCallExpr",
+    "FlattenTileNdTo2D",
+    "InferTileMemorySpace",
+    "ResolveTransposeLayout",
+    "ResolveBackendOpLayouts",
+    "ExpandMixedKernel",
+    "InitMemRef",
+    "MemoryReuse",
+    "LegalizePTOBufferReuse",
+    "AllocateMemoryAddr",
+]
+
+TILE_CCE_OPTIMIZATION_PASSES = [
+    "UnrollLoops",
+    "ConvertToSSA",
+    "FlattenCallExpr",
+    "FlattenTileNdTo2D",
+    "InferTileMemorySpace",
+    "ResolveTransposeLayout",
+    "InitMemRef",
+    "MemoryReuse",
+    "InsertSync",
+    "AllocateMemoryAddr",
+]
+
+
+def _build_tile_only_program():
+    @pl.program
+    class TileOnlyProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            tile_a = pl.load(a, [0, 0], [16, 16])
+            tile_b = pl.load(b, [0, 0], [16, 16])
+            result = pl.add(tile_a, tile_b)
+            out = pl.store(result, [0, 0], out)
+            return out
+
+    return TileOnlyProgram
 
 
 class TestOptimizationStrategy:
@@ -21,13 +97,15 @@ class TestOptimizationStrategy:
     def test_optimization_strategy_values(self):
         """Test that all optimization strategies exist."""
         assert ir.OptimizationStrategy.Default is not None
-        assert ir.OptimizationStrategy.CCE is not None
+        assert ir.OptimizationStrategy.DebugTileOptimization is not None
+        assert ir.OptimizationStrategy.TileCCEOptimization is not None
 
     def test_optimization_strategy_values_are_different(self):
         """Test that optimization strategies have different values."""
         strategies = [
             ir.OptimizationStrategy.Default,
-            ir.OptimizationStrategy.CCE,
+            ir.OptimizationStrategy.DebugTileOptimization,
+            ir.OptimizationStrategy.TileCCEOptimization,
         ]
         assert len(strategies) == len(set(strategies))
 
@@ -40,35 +118,30 @@ class TestPassManagerBasics:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
+        assert pm.pass_names == TENSOR_OPTIMIZATION_PASSES
 
-        assert len(pm.passes) == 19
-        assert len(pm.pass_names) == 19
-        assert pm.pass_names[0] == "UnrollLoops"
-        assert pm.pass_names[1] == "CtrlFlowTransform"
-        assert pm.pass_names[2] == "ConvertToSSA"
-        assert pm.pass_names[3] == "FlattenCallExpr"
-        assert pm.pass_names[4] == "SplitChunkedLoops"
-        assert pm.pass_names[5] == "InterchangeChunkLoops"
-        assert pm.pass_names[6] == "OutlineHierarchyScopes"
-        assert pm.pass_names[7] == "OutlineIncoreScopes"
-        assert pm.pass_names[8] == "OutlineClusterScopes"
-        assert pm.pass_names[9] == "ConvertTensorToTileOps"
-        assert pm.pass_names[10] == "FlattenTileNdTo2D"
-        assert pm.pass_names[11] == "InferTileMemorySpace"
-        assert pm.pass_names[12] == "ResolveTransposeLayout"
-        assert pm.pass_names[13] == "ResolveBackendOpLayouts"
-        assert pm.pass_names[14] == "ExpandMixedKernel"
-        assert pm.pass_names[15] == "InitMemRef"
-        assert pm.pass_names[16] == "MemoryReuse"
-        assert pm.pass_names[17] == "LegalizePTOBufferReuse"
-        assert pm.pass_names[18] == "AllocateMemoryAddr"
+    def test_pass_manager_get_strategy_debug_tile_optimization(self):
+        """Test getting DebugTileOptimization strategy PassManager."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.DebugTileOptimization)
+        assert pm is not None
+        assert pm.strategy == ir.OptimizationStrategy.DebugTileOptimization
+        assert pm.pass_names == DEBUG_TILE_OPTIMIZATION_PASSES
+        assert not set(TENSOR_ONLY_PASSES).intersection(pm.pass_names)
+
+    def test_pass_manager_get_strategy_tile_cce_optimization(self):
+        """Test getting TileCCEOptimization strategy PassManager."""
+        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.TileCCEOptimization)
+        assert pm is not None
+        assert pm.strategy == ir.OptimizationStrategy.TileCCEOptimization
+        assert pm.pass_names == TILE_CCE_OPTIMIZATION_PASSES
+        assert not set(TENSOR_ONLY_PASSES).intersection(pm.pass_names)
 
 
 class TestPassManagerExecution:
     """Test PassManager execution functionality."""
 
     def test_run_with_implicit_default_strategy(self):
-        """Test running PassManager with implicit default strategy."""
+        """Test running PassManager with implicit Default strategy."""
         span = ir.Span.unknown()
         dtype = DataType.INT64
         x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -82,6 +155,27 @@ class TestPassManagerExecution:
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert result is not program
         assert func.name == "test_func"
+
+    def test_tile_strategies_run_on_tile_only_program(self):
+        """Test tile-only strategies on an already-tiled program."""
+        program = _build_tile_only_program()
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        tile_result = ir.PassManager.get_strategy(ir.OptimizationStrategy.DebugTileOptimization).run_passes(
+            program
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+        tile_cce_result = ir.PassManager.get_strategy(ir.OptimizationStrategy.TileCCEOptimization).run_passes(
+            program
+        )
+
+        assert isinstance(tile_result, ir.Program)
+        assert isinstance(tile_cce_result, ir.Program)
+        assert tile_result.name == program.name
+        assert tile_cce_result.name == program.name
 
 
 class TestPassManagerMultipleInstances:

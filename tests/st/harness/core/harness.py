@@ -157,13 +157,13 @@ class PTOTestCase(ABC):
     def get_strategy(self) -> OptimizationStrategy:
         """Return the optimization strategy for the pass pipeline.
 
-        Override to use a different strategy (e.g., CCE).
-        Default is OptimizationStrategy.CCE.
+        Override to use a different strategy (e.g., Default).
+        Default is OptimizationStrategy.TileCCEOptimization.
 
         Returns:
             OptimizationStrategy enum value.
         """
-        return OptimizationStrategy.CCE
+        return OptimizationStrategy.TileCCEOptimization
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.

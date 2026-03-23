@@ -189,10 +189,14 @@ print(f"Generated code in: {output_dir}")
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `program` | (required) | The `ir.Program` to compile |
-| `strategy` | `Default` | Optimization strategy (`Default` or `PTOAS`) |
+| `strategy` | `Default` | Optimization strategy (`Default`, `DebugTileOptimization`, or `TileCCEOptimization`) |
 | `dump_passes` | `True` | Print IR after each optimization pass |
 | `backend_type` | `PTO` | Code generator (`PTO` or `CCE`) |
 | `output_dir` | auto-generated | Where to write output files |
+
+`DebugTileOptimization` is a debug-only shortcut for inspecting the PTO tile
+pipeline. Prefer `Default` unless you are explicitly debugging strategy
+selection or pass ordering.
 
 **Inspect IR without compiling:**
 

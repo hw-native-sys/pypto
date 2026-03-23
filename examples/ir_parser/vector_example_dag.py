@@ -129,7 +129,7 @@ def main():
         config=RunConfig(
             platform="a2a3",
             device_id=10,
-            strategy=OptimizationStrategy.CCE,
+            strategy=OptimizationStrategy.TileCCEOptimization,
             backend_type=BackendType.Ascend910B_CCE,
             rtol=1e-5,
             atol=1e-5,

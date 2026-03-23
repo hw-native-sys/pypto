@@ -74,7 +74,7 @@ class After:
 
 ## Pipeline Position
 
-UnrollLoops runs **once** in both Default and PTOAS strategies, before control flow structuring:
+UnrollLoops runs **once** in `Default`, `DebugTileOptimization`, and `TileCCEOptimization`, before control flow structuring:
 
 ```text
 UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...

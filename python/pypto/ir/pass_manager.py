@@ -18,12 +18,15 @@ from pypto.pypto_core import passes
 
 from .printer import python_print
 
+PassSpec = tuple[str, Callable[[], passes.Pass]]
+
 
 class OptimizationStrategy(Enum):
     """Enumeration of optimization strategies."""
 
-    Default = "Default"  # PTO optimization without scheduling and sync
-    CCE = "CCE"  # CCE optimization with scheduling and sync
+    Default = "Default"  # Full tensor-oriented PTO pipeline
+    DebugTileOptimization = "DebugTileOptimization"  # Debug-only PTO tile pipeline
+    TileCCEOptimization = "TileCCEOptimization"  # CCE-oriented tile pipeline with sync
 
 
 class PassManager:
@@ -45,54 +48,57 @@ class PassManager:
     """
 
     # Static storage: strategy -> List of (pass_name, pass_factory) tuples
-    _strategy_passes: dict[OptimizationStrategy, list[tuple[str, Callable[[], passes.Pass]]]] = {}
+    _strategy_passes: dict[OptimizationStrategy, list[PassSpec]] = {}
 
     @classmethod
     def _register_passes(cls):
         """Register all strategy Pass configurations."""
+        tensor_prefix_passes: list[PassSpec] = [
+            ("UnrollLoops", lambda: passes.unroll_loops()),
+            ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
+            ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
+        ]
+        cce_prefix_passes: list[PassSpec] = [
+            ("UnrollLoops", lambda: passes.unroll_loops()),
+            ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
+        ]
+        tensor_only_passes: list[PassSpec] = [
+            ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
+            ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
+            ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
+            ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
+            ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
+            ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
+        ]
+        tile_pto_passes: list[PassSpec] = [
+            ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+            ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
+            ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
+            ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
+            ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
+            ("InitMemRef", lambda: passes.init_mem_ref()),
+            ("MemoryReuse", lambda: passes.memory_reuse()),
+            ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
+            ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
+        ]
+        tile_cce_passes: list[PassSpec] = [
+            ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+            ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
+            ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
+            # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
+            # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
+            # Codegen already supports AIC/AIV/Group function types.
+            ("InitMemRef", lambda: passes.init_mem_ref()),
+            ("MemoryReuse", lambda: passes.memory_reuse()),
+            ("InsertSync", lambda: passes.insert_sync()),
+            ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
+        ]
         cls._strategy_passes = {
-            OptimizationStrategy.Default: [
-                ("UnrollLoops", lambda: passes.unroll_loops()),
-                ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
-                ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-                ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
-                ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
-                ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
-                ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
-                ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
-                ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
-                ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
-                ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
-                ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-                ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
-                ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
-                ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.memory_reuse()),
-                ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
-                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
-            ],
-            OptimizationStrategy.CCE: [
-                ("UnrollLoops", lambda: passes.unroll_loops()),
-                ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-                ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-                ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
-                ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
-                ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
-                ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
-                ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
-                ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
-                ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
-                ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
-                ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-                # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
-                # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
-                # Codegen already supports AIC/AIV/Group function types.
-                ("InitMemRef", lambda: passes.init_mem_ref()),
-                ("MemoryReuse", lambda: passes.memory_reuse()),
-                ("InsertSync", lambda: passes.insert_sync()),
-                ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
-            ],
+            OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,
+            OptimizationStrategy.DebugTileOptimization: tensor_prefix_passes + tile_pto_passes,
+            OptimizationStrategy.TileCCEOptimization: cce_prefix_passes + tile_cce_passes,
         }
 
     @classmethod

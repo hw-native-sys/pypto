@@ -88,11 +88,16 @@ class MyKernel:
         tile_c = pl.add(tile_a, tile_b)
         pl.store(tile_c, [0, 0], a)
 
-# Compile with PTO backend and PTOAS optimization
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.Ascend910B_PTO)
+# Compile with PTO backend and DebugTileOptimization (debug only)
+output_dir = compile(
+    MyKernel,
+    strategy=OptimizationStrategy.DebugTileOptimization,
+    backend_type=BackendType.Ascend910B_PTO,
+)
 ```
 
 `compile()` 函数会自动应用选定的优化策略, 并根据 `backend_type` 调用相应的代码生成器。
+正常的 PTO 编译应使用 `Default`；`DebugTileOptimization` 只用于调试 pass 流水线。
 
 ### 直接访问代码生成器
 

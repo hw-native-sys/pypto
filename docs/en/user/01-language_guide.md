@@ -476,7 +476,7 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # auto-generated if None
-    strategy=ir.OptimizationStrategy.Default,  # Default or PTOAS
+    strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization / TileCCEOptimization
     dump_passes=True,                          # print IR after each pass
     backend_type=BackendType.Ascend910B_PTO,              # PTO or CCE
 )
@@ -484,7 +484,7 @@ output_dir = ir.compile(
 
 | Parameter | Options | Description |
 | --------- | ------- | ----------- |
-| `strategy` | `Default`, `PTOAS` | `Default` = full pipeline with sync insertion. `PTOAS` = PTO assembly (no scheduling) |
+| `strategy` | `Default`, `DebugTileOptimization`, `TileCCEOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes. `TileCCEOptimization` = CCE-oriented tile-only pipeline with sync insertion |
 | `backend_type` | `PTO`, `CCE` | Code generator backend |
 | `dump_passes` | `True`/`False` | Print IR before/after each optimization pass |
 | `skip_ptoas` | `True`/`False` | Skip PTOAS step, emit raw MLIR files (default `False`) |
@@ -496,16 +496,24 @@ output_dir = ir.compile(
 The `Default` strategy runs these passes in order:
 
 1. **UnrollLoops** — unroll loop iterations
-2. **ConvertToSSA** — convert to static single assignment form
-3. **FlattenCallExpr** — flatten nested function calls
-4. **SplitChunkedLoops** — split chunked loops into separate loops
-5. **InterchangeChunkLoops** — interchange chunk loop ordering
-6. **OutlineIncoreScopes** — outline incore scopes into separate functions
-7. **ConvertTensorToTileOps** — convert tensor operations to tile operations
-8. **InitMemRef** — assign memory spaces, insert buffer allocations
-9. **MemoryReuse** — share buffers with non-overlapping lifetimes
-10. **InsertSync** — insert synchronization barriers between pipeline stages
-11. **AllocateMemoryAddr** — assign concrete memory addresses
+2. **CtrlFlowTransform** — rewrite control flow to structured IR
+3. **ConvertToSSA** — convert to static single assignment form
+4. **FlattenCallExpr** — flatten nested function calls
+5. **SplitChunkedLoops** — split chunked loops into separate loops
+6. **InterchangeChunkLoops** — interchange chunk loop ordering
+7. **OutlineHierarchyScopes** — outline hierarchy scopes
+8. **OutlineIncoreScopes** — outline InCore scopes into separate functions
+9. **OutlineClusterScopes** — outline cluster scopes
+10. **ConvertTensorToTileOps** — convert tensor operations to tile operations
+11. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
+12. **InferTileMemorySpace** — infer tile memory spaces
+13. **ResolveTransposeLayout** — repair transpose layout handling
+14. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
+15. **ExpandMixedKernel** — split mixed kernels when needed
+16. **InitMemRef** — assign memory spaces and insert buffer allocations
+17. **MemoryReuse** — share buffers with non-overlapping lifetimes
+18. **LegalizePTOBufferReuse** — legalize PTO buffer reuse patterns
+19. **AllocateMemoryAddr** — assign concrete memory addresses
 
 ### Debugging
 

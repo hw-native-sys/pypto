@@ -189,10 +189,13 @@ print(f"Generated code in: {output_dir}")
 | 参数 | 默认值 | 说明 |
 | ---- | ------ | ---- |
 | `program` | （必需） | 要编译的 `ir.Program` |
-| `strategy` | `Default` | 优化策略（`Default` 或 `PTOAS`） |
+| `strategy` | `Default` | 优化策略（`Default`、`DebugTileOptimization` 或 `TileCCEOptimization`） |
 | `dump_passes` | `True` | 每个优化 pass 后打印 IR |
 | `backend_type` | `PTO` | 代码生成后端（`PTO` 或 `CCE`） |
 | `output_dir` | 自动生成 | 输出文件目录 |
+
+`DebugTileOptimization` 只是用于观察 PTO tile 流水线的调试捷径。除非你正在
+专门排查策略选择或 pass 顺序，否则应优先使用 `Default`。
 
 **不编译直接查看 IR：**
 

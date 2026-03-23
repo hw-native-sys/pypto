@@ -133,7 +133,7 @@ The test framework provides extensive configuration through pytest command-line 
 | ------ | ------- | ----------- |
 | `--platform` | `a2a3sim` | Target platform: `a2a3sim` (simulator) or `a2a3` (hardware) |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
-| `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `CCE` |
+| `--strategy` | `Default` | PyPTO optimization strategy: `Default`, `DebugTileOptimization`, or `TileCCEOptimization` |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
 | `--kernels-dir` | `build_output/{testName}_{timestamp}/` | Custom output directory for saved kernels |
 | `--dump-passes` | `False` | Dump intermediate IR after each compiler pass |
@@ -261,7 +261,7 @@ from pypto.ir.pass_manager import OptimizationStrategy
 
 class MyTest(PTOTestCase):
     def get_strategy(self):
-        return OptimizationStrategy.CCE
+        return OptimizationStrategy.TileCCEOptimization
 ```
 
 ### Parameterized Testing

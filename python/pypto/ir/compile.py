@@ -70,7 +70,7 @@ def compile(
         >>> program = build_my_program()
         >>> output_dir = ir.compile(
         ...     program,
-        ...     strategy=ir.OptimizationStrategy.PTOAS,
+        ...     strategy=ir.OptimizationStrategy.Default,
         ...     dump_passes=True,
         ...     backend_type=BackendType.Ascend910B_PTO
         ... )

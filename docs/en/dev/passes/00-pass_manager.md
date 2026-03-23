@@ -17,7 +17,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 - **Property Tracking**: Passes declare required, produced, and invalidated properties
 - **Instrumentation**: PassContext holds PassInstruments that run before/after each pass
 - **Runtime Verification**: VerificationInstrument checks properties against actual IR
-- **Strategy-based Pipelines**: Pre-configured optimization levels (Default/PTOAS)
+- **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`, `DebugTileOptimization`, `TileCCEOptimization`)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
 
 ## IRProperty System
@@ -254,7 +254,7 @@ When `VerificationLevel` is `Basic` (the default), the pipeline automatically ve
 3. Throw `VerificationError` on errors
 4. Track verified properties to avoid re-checking
 
-**With the default strategy**:
+**With the `Default` strategy**:
 
 | After Pass | Properties Verified | Cumulative |
 | ---------- | ------------------- | ---------- |
@@ -312,9 +312,9 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
     result = pm.run_passes(program)
 ```
 
-### Default Strategy Notes
+### Strategy Notes
 
-The late InCore part of the default PTO-oriented pipeline is:
+The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 
 1. `FlattenTileNdTo2D`
 2. `InferTileMemorySpace`
@@ -323,7 +323,12 @@ The late InCore part of the default PTO-oriented pipeline is:
 5. `ExpandMixedKernel`
 6. `InitMemRef`
 7. `MemoryReuse`
-8. `AllocateMemoryAddr`
+8. `LegalizePTOBufferReuse`
+9. `AllocateMemoryAddr`
+
+`DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
+without the tensor-only prefix passes. Use `Default` for normal compilation and
+for non-strategy-specific tests so the maintained pipeline stays covered.
 
 `ResolveBackendOpLayouts` repairs backend-constrained elementwise tile ops using
 registered layout metadata. For the current PTO row-major elementwise ops, it

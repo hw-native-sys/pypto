@@ -88,11 +88,16 @@ class MyKernel:
         tile_c = pl.add(tile_a, tile_b)
         pl.store(tile_c, [0, 0], a)
 
-# Compile with PTO backend and PTOAS optimization
-output_dir = compile(MyKernel, strategy=OptimizationStrategy.PTOAS, backend_type=BackendType.Ascend910B_PTO)
+# Compile with PTO backend and DebugTileOptimization (debug only)
+output_dir = compile(
+    MyKernel,
+    strategy=OptimizationStrategy.DebugTileOptimization,
+    backend_type=BackendType.Ascend910B_PTO,
+)
 ```
 
 The `compile()` function automatically applies the selected optimization strategy and invokes the appropriate codegen based on `backend_type`.
+Use `Default` for normal PTO compilation; `DebugTileOptimization` is intended only for pass-pipeline debugging.
 
 ### Direct Codegen Access
 

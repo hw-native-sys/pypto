@@ -14,7 +14,7 @@ import pytest
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.op import tile
-from pypto.ir.pass_manager import PassManager
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 class TestTileElementwiseOps:
@@ -408,7 +408,7 @@ class TestTileReductionOps:
         program = RowMaxKernel
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B_CCE)
-        pm = PassManager.get_strategy()
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized_program = pm.run_passes(program)
 
         assert optimized_program is not None
@@ -434,7 +434,7 @@ class TestTileReductionOps:
         program = RowSumKernel
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B_CCE)
-        pm = PassManager.get_strategy()
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized_program = pm.run_passes(program)
 
         assert optimized_program is not None

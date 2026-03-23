@@ -74,7 +74,7 @@ class After:
 
 ## 流水线位置
 
-UnrollLoops 在 Default 和 PTOAS 策略中**运行一次**，位于控制流结构化之前：
+UnrollLoops 在 `Default`、`DebugTileOptimization` 和 `TileCCEOptimization` 中都只**运行一次**，位于控制流结构化之前：
 
 ```text
 UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...

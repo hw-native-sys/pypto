@@ -476,7 +476,7 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # 为 None 时自动生成
-    strategy=ir.OptimizationStrategy.Default,  # Default 或 PTOAS
+    strategy=ir.OptimizationStrategy.Default,  # 或 DebugTileOptimization / TileCCEOptimization
     dump_passes=True,                          # 每个 pass 后打印 IR
     backend_type=BackendType.Ascend910B_PTO,              # PTO 或 CCE
 )
@@ -484,7 +484,7 @@ output_dir = ir.compile(
 
 | 参数 | 选项 | 说明 |
 | ---- | ---- | ---- |
-| `strategy` | `Default`、`PTOAS` | `Default` = 完整流水线含同步插入。`PTOAS` = PTO 汇编（无调度） |
+| `strategy` | `Default`、`DebugTileOptimization`、`TileCCEOptimization` | `Default` = 完整的 tensor 导向流水线。`DebugTileOptimization` = 仅用于调试的 PTO tile 流水线，不包含 tensor-only pass。`TileCCEOptimization` = 面向 CCE 且带同步插入的 tile-only 流水线 |
 | `backend_type` | `PTO`、`CCE` | 代码生成后端 |
 | `dump_passes` | `True`/`False` | 每个优化 pass 前后打印 IR |
 | `skip_ptoas` | `True`/`False` | 跳过 PTOAS 步骤，输出原始 MLIR 文件（默认 `False`） |
@@ -496,16 +496,24 @@ output_dir = ir.compile(
 `Default` 策略按顺序运行以下 pass：
 
 1. **UnrollLoops** —— 展开循环迭代
-2. **ConvertToSSA** —— 转换为静态单赋值形式
-3. **FlattenCallExpr** —— 展平嵌套函数调用
-4. **SplitChunkedLoops** —— 将分块循环拆分为独立循环
-5. **InterchangeChunkLoops** —— 交换分块循环顺序
-6. **OutlineIncoreScopes** —— 将 incore 作用域提取为独立函数
-7. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
-8. **InitMemRef** —— 分配内存空间，插入缓冲区分配
-9. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
-10. **InsertSync** —— 在流水线阶段之间插入同步屏障
-11. **AllocateMemoryAddr** —— 分配具体内存地址
+2. **CtrlFlowTransform** —— 将控制流改写为结构化 IR
+3. **ConvertToSSA** —— 转换为静态单赋值形式
+4. **FlattenCallExpr** —— 展平嵌套函数调用
+5. **SplitChunkedLoops** —— 将分块循环拆分为独立循环
+6. **InterchangeChunkLoops** —— 交换分块循环顺序
+7. **OutlineHierarchyScopes** —— 提取 hierarchy 作用域
+8. **OutlineIncoreScopes** —— 将 InCore 作用域提取为独立函数
+9. **OutlineClusterScopes** —— 提取 cluster 作用域
+10. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
+11. **FlattenTileNdTo2D** —— 将 ND tile 操作规范化为 2D
+12. **InferTileMemorySpace** —— 推断 tile 内存空间
+13. **ResolveTransposeLayout** —— 修复转置布局处理
+14. **ResolveBackendOpLayouts** —— 修复 backend 受限的 tile 布局
+15. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
+16. **InitMemRef** —— 分配内存空间并插入缓冲区分配
+17. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
+18. **LegalizePTOBufferReuse** —— 规范化 PTO 缓冲区复用模式
+19. **AllocateMemoryAddr** —— 分配具体内存地址
 
 ### 调试
 
