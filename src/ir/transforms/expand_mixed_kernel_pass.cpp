@@ -288,9 +288,10 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // ============================================================================
 
 std::vector<std::pair<std::string, std::any>> MakeAivIdxKwargs() { return {{"aiv_idx", std::any(0)}}; }
+std::vector<std::pair<std::string, std::any>> MakeSplitKwargs() { return {{"split", std::any(0)}}; }
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span) {
-  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeAivIdxKwargs(), span);
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(), span);
 }
 
 /// Build a clean TileType with only shape, dtype, and memory_space (no TileView/memref).

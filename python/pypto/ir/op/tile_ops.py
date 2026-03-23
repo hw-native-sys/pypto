@@ -1725,28 +1725,28 @@ def _resolve_tpop_type(
     return None
 
 
-def tpush_to_aiv(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+def tpush_to_aiv(tile: Expr, *, split: int, span: Span | None = None) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
     Args:
         tile: Tile data to push
-        aiv_idx: Target AIV core index
+        split: Split mode (0=none, 1=up-down, 2=left-right)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], {"split": split}, actual_span)
 
 
-def tpush_to_aic(tile: Expr, *, aiv_idx: int, span: Span | None = None) -> Call:
+def tpush_to_aic(tile: Expr, *, split: int, span: Span | None = None) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     Args:
         tile: Tile data to push
-        aiv_idx: Source AIV core index
+        split: Split mode (0=none, 1=up-down, 2=left-right)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], {"split": split}, actual_span)
 
 
 def tpop_from_aic(

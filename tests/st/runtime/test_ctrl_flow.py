@@ -706,21 +706,18 @@ class TestCtrlFlowOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="InsertSync BUG")
     def test_for_loop_yield_tile_accum(self, test_runner):
         """Test for loop with yield carrying tile accumulator across iterations."""
         test_case = TestForLoopYieldTileAccum()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="InsertSync BUG")
     def test_if_yield_tensor(self, test_runner):
         """Test if-else with yield carrying tensors."""
         test_case = TestIfYieldTensor()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.xfail(reason="MemRef and InsertSync BUG")
     def test_for_if_else_nested(self, test_runner):
         """Test if-else nested inside a for loop."""
         test_case = TestForIfElseNested()

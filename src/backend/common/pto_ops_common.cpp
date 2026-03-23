@@ -649,9 +649,9 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK(tile) << "tpush_to_aiv first argument must be a Var or IterArg";
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tpush_to_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  const int split = op->GetKwarg<int>("split", -1);
+  CHECK(split >= 0 && split <= 2)
+      << "tpush_to_aiv requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string tile_buf = codegen.GetVarName(tile);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -661,7 +661,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
-  oss << ") {aiv_idx = " << aiv_idx << "}";
+  oss << ") {split = " << split << "}";
   codegen.Emit(oss.str());
 
   return "";
@@ -675,9 +675,9 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK(tile) << "tpush_to_aic first argument must be a Var or IterArg";
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tpush_to_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  const int split = op->GetKwarg<int>("split", -1);
+  CHECK(split >= 0 && split <= 2)
+      << "tpush_to_aic requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string tile_buf = codegen.GetVarName(tile);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -687,7 +687,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
-  oss << ") {aiv_idx = " << aiv_idx << "}";
+  oss << ") {split = " << split << "}";
   codegen.Emit(oss.str());
 
   return "";

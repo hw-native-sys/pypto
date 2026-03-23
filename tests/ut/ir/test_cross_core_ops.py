@@ -20,7 +20,7 @@ def test_tpush_ops_return_unknown_type():
     tile_var = ir.Var("t", tile_type, span)
 
     for op_name in ["tile.tpush_to_aiv", "tile.tpush_to_aic"]:
-        call = ir.create_op_call(op_name, [tile_var], {"aiv_idx": 0}, span)
+        call = ir.create_op_call(op_name, [tile_var], {"split": 0}, span)
         assert isinstance(call.type, ir.UnknownType)
 
 

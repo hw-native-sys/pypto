@@ -39,7 +39,7 @@ REGISTER_OP("tile.tpush_to_aiv")
     .set_description("Push tile data from AIC to AIV via cross-core pipe")
     .set_op_category("CrossCoreOp")
     .add_argument("tile", "Tile data to transfer")
-    .set_attr<int>("aiv_idx")
+    .set_attr<int>("split")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -48,7 +48,7 @@ REGISTER_OP("tile.tpush_to_aic")
     .set_description("Push tile data from AIV to AIC via cross-core pipe")
     .set_op_category("CrossCoreOp")
     .add_argument("tile", "Tile data to transfer")
-    .set_attr<int>("aiv_idx")
+    .set_attr<int>("split")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 

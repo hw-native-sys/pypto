@@ -223,7 +223,7 @@ class TestSplitStructure:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -306,7 +306,7 @@ class TestCrossCoreBoundaries:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -376,7 +376,7 @@ class TestCrossCoreBoundaries:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_sum_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -387,7 +387,7 @@ class TestCrossCoreBoundaries:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 x_sum = pl.add(x_tile, x_tile)
-                pl.tpush_to_aic(x_sum, aiv_idx=0)
+                pl.tpush_to_aic(x_sum, split=0)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
@@ -455,7 +455,7 @@ class TestCubeOpVariants:
                 b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile = pl.matmul(a_left, b_right)
                 d_tile = pl.matmul_acc(c_tile, a_left, b_right)
-                pl.tpush_to_aiv(d_tile, aiv_idx=0)
+                pl.tpush_to_aiv(d_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -521,7 +521,7 @@ class TestCubeOpVariants:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 bias_tile = pl.load(bias, [0, 0], [1, 128])
-                pl.tpush_to_aic(bias_tile, aiv_idx=0)
+                pl.tpush_to_aic(bias_tile, split=0)
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
@@ -585,7 +585,7 @@ class TestCubeOpVariants:
                 b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile = pl.gemv(a_left, b_right)
-                pl.tpush_to_aiv(c_tile, aiv_idx=0)
+                pl.tpush_to_aiv(c_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -656,7 +656,7 @@ class TestCubeOpVariants:
                 a_left2 = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
                 b_right2 = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 d_tile = pl.gemv_acc(c_tile, a_left2, b_right2)
-                pl.tpush_to_aiv(d_tile, aiv_idx=0)
+                pl.tpush_to_aiv(d_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -722,7 +722,7 @@ class TestCubeOpVariants:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 bias_tile = pl.load(bias, [0, 0], [1, 128])
-                pl.tpush_to_aic(bias_tile, aiv_idx=0)
+                pl.tpush_to_aic(bias_tile, split=0)
                 c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
@@ -799,7 +799,7 @@ class TestVectorOpClassification:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_sub_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -810,7 +810,7 @@ class TestVectorOpClassification:
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 x_sub = pl.sub(x_tile, x_tile)
-                pl.tpush_to_aic(x_sub, aiv_idx=0)
+                pl.tpush_to_aic(x_sub, split=0)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                 )
@@ -874,7 +874,7 @@ class TestVectorOpClassification:
                 y_l1 = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
                 y_right = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -951,7 +951,7 @@ class TestRealisticPatterns:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -1020,7 +1020,7 @@ class TestRealisticPatterns:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -1112,7 +1112,7 @@ class TestMultipleInCore:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def compute_a_incore_0_aiv(
@@ -1150,7 +1150,7 @@ class TestMultipleInCore:
                 b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
                 c_tile = pl.gemv(a_left, b_right)
-                pl.tpush_to_aiv(c_tile, aiv_idx=0)
+                pl.tpush_to_aiv(c_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def compute_b_incore_0_aiv(
@@ -1237,7 +1237,7 @@ class TestMultipleInCore:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def mixed_incore_0_aiv(
@@ -1341,7 +1341,7 @@ class TestNestedStructures:
                     y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile = pl.matmul(x_left, y_right)
-                    pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                    pl.tpush_to_aiv(z_tile, split=0)
 
         @pl.program
         class ExpAIV:
@@ -1416,7 +1416,7 @@ class TestNestedStructures:
                     y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile = pl.matmul(x_sum_left, y_right)
-                    pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                    pl.tpush_to_aiv(z_tile, split=0)
 
         @pl.program
         class ExpAIV:
@@ -1430,7 +1430,7 @@ class TestNestedStructures:
                 for i in pl.range(4):
                     x_tile = pl.load(x, [0, 0], [16, 128])
                     x_sum = pl.add(x_tile, x_tile)
-                    pl.tpush_to_aic(x_sum, aiv_idx=0)
+                    pl.tpush_to_aic(x_sum, split=0)
                     z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                         shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                     )
@@ -1485,7 +1485,7 @@ class TestNestedStructures:
                     y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile = pl.matmul(x_left, y_right)
-                    pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                    pl.tpush_to_aiv(z_tile, split=0)
 
         @pl.program
         class ExpAIV:
@@ -1566,7 +1566,7 @@ class TestEdgeCases:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, aiv_idx=0)
+                pl.tpush_to_aiv(z_tile, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def compute_incore_0_aiv(
@@ -1690,7 +1690,7 @@ class TestDCERegression:
                     w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                     z = pl.matmul(x_left, w_right)
-                    pl.tpush_to_aiv(z, aiv_idx=0)
+                    pl.tpush_to_aiv(z, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -1773,7 +1773,7 @@ class TestDCERegression:
                     w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                     z = pl.matmul(x_left, w_right)
-                    pl.tpush_to_aiv(z, aiv_idx=0)
+                    pl.tpush_to_aiv(z, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -1787,7 +1787,7 @@ class TestDCERegression:
                 for i, (acc_iter,) in pl.range(4, init_values=(acc_1,)):
                     x_tile = pl.load(x, [0, 0], [16, 128])
                     x_sum = pl.add(x_tile, x_tile)
-                    pl.tpush_to_aic(x_sum, aiv_idx=0)
+                    pl.tpush_to_aic(x_sum, split=0)
                     z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
                         shape=[16, 128], dtype=pl.FP32, aiv_idx=0
                     )
@@ -1854,7 +1854,7 @@ class TestDCERegression:
                 w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                 z = pl.matmul(x_left, w_right)
-                pl.tpush_to_aiv(z, aiv_idx=0)
+                pl.tpush_to_aiv(z, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -2085,7 +2085,7 @@ class TestDCERegression:
                         w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                         w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                         z = pl.matmul(x_left, w_right)
-                        pl.tpush_to_aiv(z, aiv_idx=0)
+                        pl.tpush_to_aiv(z, split=0)
                         branch_out = pl.yield_(acc_iter)
                     else:
                         branch_out = pl.yield_(acc_iter)
@@ -2181,7 +2181,7 @@ class TestDCERegression:
                     w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                     z = pl.matmul(x_left, w_right)
-                    pl.tpush_to_aiv(z, aiv_idx=0)
+                    pl.tpush_to_aiv(z, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(
@@ -2270,8 +2270,8 @@ class TestDCERegression:
                     w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                     z = pl.matmul(x_left, w_right)
-                    pl.tpush_to_aiv(z, aiv_idx=0)
-                    pl.tpush_to_aiv(z, aiv_idx=0)
+                    pl.tpush_to_aiv(z, split=0)
+                    pl.tpush_to_aiv(z, split=0)
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_incore_0_aiv(

@@ -218,12 +218,12 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.tile.tpush_to_aiv(t, aiv_idx=0)
+                pl.tile.tpush_to_aiv(t, split=0)
                 return t
 
         printed = Before.as_python()
         assert "pl.tile.tpush_to_aiv(" in printed
-        assert "aiv_idx=0" in printed
+        assert "split=0" in printed
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(Before, reparsed)
 
@@ -234,7 +234,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.tile.tpush_to_aic(t, aiv_idx=0)
+                pl.tile.tpush_to_aic(t, split=0)
                 return t
 
         printed = Before.as_python()
@@ -279,7 +279,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.tpush_to_aic(t, aiv_idx=0)
+                pl.tpush_to_aic(t, split=0)
                 return t
 
         printed = Before.as_python()
@@ -325,7 +325,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self, t: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
-                pl.tpush_to_aiv(t, aiv_idx=0)
+                pl.tpush_to_aiv(t, split=0)
                 return t
 
         printed = Before.as_python()

@@ -87,14 +87,14 @@ __all__ = [
 ]
 
 
-def tpush_to_aiv(tile: Tile, *, aiv_idx: int, span: Span | None = None) -> Call:
+def tpush_to_aiv(tile: Tile, *, split: int, span: Span | None = None) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe."""
-    return _ir_ops.tpush_to_aiv(tile.unwrap(), aiv_idx=aiv_idx, span=span)
+    return _ir_ops.tpush_to_aiv(tile.unwrap(), split=split, span=span)
 
 
-def tpush_to_aic(tile: Tile, *, aiv_idx: int, span: Span | None = None) -> Call:
+def tpush_to_aic(tile: Tile, *, split: int, span: Span | None = None) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe."""
-    return _ir_ops.tpush_to_aic(tile.unwrap(), aiv_idx=aiv_idx, span=span)
+    return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, span=span)
 
 
 def tpop_from_aic(
