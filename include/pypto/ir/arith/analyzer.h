@@ -132,6 +132,41 @@ class ModularSetAnalyzer {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Pattern-matching rewrite engine for algebraic simplification of expressions.
+///
+/// Applies algebraic identities (e.g., x + 0 -> x, x - x -> 0) using
+/// pattern matching. Supports variable substitution and constraint scoping.
+class RewriteSimplifier {
+ public:
+  /// Construct a standalone simplifier (no parent Analyzer).
+  RewriteSimplifier();
+
+  ~RewriteSimplifier();
+
+  RewriteSimplifier(const RewriteSimplifier&) = delete;
+  RewriteSimplifier& operator=(const RewriteSimplifier&) = delete;
+  RewriteSimplifier(RewriteSimplifier&&) noexcept;
+  RewriteSimplifier& operator=(RewriteSimplifier&&) noexcept;
+
+  /// Simplify an expression by applying rewrite rules.
+  ExprPtr operator()(const ExprPtr& expr) const;
+
+  /// Register a variable substitution: replace var with new_expr during simplification.
+  /// Pass nullptr to remove a previous substitution.
+  void Update(const VarPtr& var, const ExprPtr& new_expr);
+
+  /// Enter a constraint scope (e.g., inside an if-branch where constraint is known true).
+  /// Returns a recovery function that restores original state.
+  std::function<void()> EnterConstraint(const ExprPtr& constraint);
+
+ private:
+  friend class Analyzer;
+  explicit RewriteSimplifier(Analyzer* parent);
+
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace arith
 }  // namespace ir
 }  // namespace pypto

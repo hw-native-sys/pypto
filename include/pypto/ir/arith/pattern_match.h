@@ -43,6 +43,7 @@
 #ifndef PYPTO_IR_ARITH_PATTERN_MATCH_H_
 #define PYPTO_IR_ARITH_PATTERN_MATCH_H_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -63,6 +64,10 @@ namespace pypto {
 namespace ir {
 namespace arith {
 
+// Forward declarations for hidden friends in Pattern.
+template <typename OpType, typename TA, typename TB>
+class PBinaryExpr;
+
 // ============================================================================
 // Pattern base (CRTP)
 // ============================================================================
@@ -77,6 +82,18 @@ class Pattern {
  public:
   /// Nested storage type: value for intermediates, const& for PVars.
   using Nested = Derived;
+
+  /// Hidden friends for min/max: non-template functions that beat
+  /// std::min/std::max (found via ADL through shared_ptr in ExprPtr)
+  /// in overload resolution. They handle same-type arguments only;
+  /// different-type arguments use the template overloads which don't
+  /// conflict with std::min (std::min requires both args same type).
+  friend auto min(const Derived& a, const Derived& b) -> PBinaryExpr<Min, Derived, Derived> {
+    return PBinaryExpr<Min, Derived, Derived>(a, b);
+  }
+  friend auto max(const Derived& a, const Derived& b) -> PBinaryExpr<Max, Derived, Derived> {
+    return PBinaryExpr<Max, Derived, Derived>(a, b);
+  }
 
   /// Match value against the pattern, populating any PVars.
   template <typename NodeType>
@@ -233,6 +250,26 @@ class PConst : public Pattern<PConst<T>> {
  private:
   const T value_;
 };
+
+// ============================================================================
+// PExprLiteral — wraps a pre-built ExprPtr so it can appear in pattern
+// result expressions. Match is identity; Eval returns the stored value.
+// ============================================================================
+
+class PExprLiteral : public Pattern<PExprLiteral> {
+ public:
+  explicit PExprLiteral(ExprPtr value) : value_(std::move(value)) {}
+
+  void InitMatch_() const {}
+  [[nodiscard]] bool Match_(const ExprPtr& value) const { return value_.get() == value.get(); }
+  [[nodiscard]] ExprPtr Eval() const { return value_; }
+
+ private:
+  ExprPtr value_;
+};
+
+/// Convenience: wrap an ExprPtr as a pattern literal.
+inline PExprLiteral pexpr(ExprPtr value) { return PExprLiteral(std::move(value)); }
 
 // ============================================================================
 // PConstWithTypeLike — matches ConstInt with a specific int64_t value,
@@ -460,6 +497,16 @@ inline PCastExpr<DType, TA> cast(const Pattern<DType>& dtype, const Pattern<TA>&
   inline PBinaryExpr<NodeName, PConstWithTypeLike<TA>, TA> FuncName(int64_t b, const Pattern<TA>& a) { \
     CheckStep;                                                                                         \
     return FuncName(PConstWithTypeLike<TA>(a.derived(), b), a);                                        \
+  }                                                                                                    \
+  template <typename TA>                                                                               \
+  inline PBinaryExpr<NodeName, TA, PExprLiteral> FuncName(const Pattern<TA>& a, ExprPtr b) {           \
+    CheckStep;                                                                                         \
+    return FuncName(a, PExprLiteral(std::move(b)));                                                    \
+  }                                                                                                    \
+  template <typename TA>                                                                               \
+  inline PBinaryExpr<NodeName, PExprLiteral, TA> FuncName(ExprPtr a, const Pattern<TA>& b) {           \
+    CheckStep;                                                                                         \
+    return FuncName(PExprLiteral(std::move(a)), b);                                                    \
   }
 
 #define PYPTO_PATTERN_BINARY_OP(FuncName, NodeName) PYPTO_PATTERN_BINARY_OP_EX(FuncName, NodeName, )
@@ -564,6 +611,15 @@ matches_one_of(const TPattern&... patterns) {
 // Rewrite macros — used by RewriteSimplifier (PR 3)
 // ============================================================================
 
+/// Evaluate a rewrite result: calls `.Eval()` on pattern expressions,
+/// returns `ExprPtr` values directly.
+template <typename T>
+inline auto PatternEval(T&& val) -> decltype(val.Eval()) {
+  return val.Eval();
+}
+
+inline ExprPtr PatternEval(const ExprPtr& val) { return val; }
+
 // NOLINTBEGIN(cppcoreguidelines-macro-usage, readability/nolint)
 
 /// Try to match SrcExpr against `ret`. On success, evaluate ResExpr and
@@ -571,7 +627,7 @@ matches_one_of(const TPattern&... patterns) {
 #define PYPTO_TRY_REWRITE(SrcExpr, ResExpr) \
   if ((SrcExpr).Match(ret)) {               \
     RecordAttemptedRewrite();               \
-    auto r = (ResExpr).Eval();              \
+    auto r = PatternEval(ResExpr);          \
     RecordRewrite();                        \
     return RecursiveRewrite(r);             \
   }
@@ -581,7 +637,7 @@ matches_one_of(const TPattern&... patterns) {
   if ((SrcExpr).Match(ret)) {                        \
     RecordAttemptedRewrite();                        \
     if (Cond) {                                      \
-      auto r = (ResExpr).Eval();                     \
+      auto r = PatternEval(ResExpr);                 \
       RecordRewrite();                               \
       return RecursiveRewrite(r);                    \
     }                                                \

@@ -38,6 +38,25 @@ def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
     """Extended Euclidean: returns (gcd, x, y) where a*x + b*y = gcd."""
     ...
 
+class RewriteSimplifier:
+    """Simplifies expressions by applying algebraic rewrite rules."""
+
+    def __init__(self) -> None:
+        """Create a standalone RewriteSimplifier."""
+        ...
+
+    def __call__(self, expr: Expr) -> Expr:
+        """Simplify an expression by applying rewrite rules."""
+        ...
+
+    def update(self, var: Var, new_expr: Expr) -> None:
+        """Register a variable substitution: replace var with new_expr during simplification."""
+        ...
+
+    def enter_constraint(self, constraint: Expr) -> Callable[[], None]:
+        """Enter a constraint scope. Returns a recovery function that restores original state."""
+        ...
+
 class ConstIntBound:
     """Inclusive integer bounds [min_value, max_value] for an expression."""
 

@@ -90,6 +90,17 @@ void BindArith(nb::module_& m) {
         return "ConstIntBound[" + fmt(b.min_value) + ", " + fmt(b.max_value) + "]";
       });
 
+  // RewriteSimplifier
+  nb::class_<ir::arith::RewriteSimplifier>(arith, "RewriteSimplifier",
+                                           "Simplifies expressions by applying algebraic rewrite rules.")
+      .def(nb::init<>(), "Create a standalone RewriteSimplifier.")
+      .def("__call__", &ir::arith::RewriteSimplifier::operator(), nb::arg("expr"),
+           "Simplify an expression by applying rewrite rules.")
+      .def("update", &ir::arith::RewriteSimplifier::Update, nb::arg("var"), nb::arg("new_expr"),
+           "Register a variable substitution: replace var with new_expr during simplification.")
+      .def("enter_constraint", &ir::arith::RewriteSimplifier::EnterConstraint, nb::arg("constraint"),
+           "Enter a constraint scope. Returns a recovery function that restores original state.");
+
   // ConstIntBoundAnalyzer
   nb::class_<ir::arith::ConstIntBoundAnalyzer>(arith, "ConstIntBoundAnalyzer",
                                                "Propagates constant integer bounds through expression trees.")

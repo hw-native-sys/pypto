@@ -118,6 +118,7 @@ set(PYPTO_SOURCES
     # IR - Arith
     src/ir/arith/const_int_bound.cc
     src/ir/arith/modular_set.cc
+    src/ir/arith/rewrite_simplify.cpp
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
