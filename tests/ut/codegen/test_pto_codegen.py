@@ -42,6 +42,15 @@ _TH = pl.dynamic("TH")
 _TW = pl.dynamic("TW")
 
 
+@pytest.fixture(autouse=True)
+def _setup_backend():
+    """Configure PTO backend before each test."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    yield
+    backend.reset_for_testing()
+
+
 @pl.program
 class _DynKernel:
     """Dynamic shape kernel used in wrapper dispatch tests."""
@@ -61,10 +70,7 @@ class _DynKernel:
 
 def _get_dyn_incore_func():
     """Return the transformed InCore function from _DynKernel."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed = pm.run_passes(_DynKernel)
+    transformed = _run_default_passes(_DynKernel)
     for func in transformed.functions.values():
         if ir.is_incore_type(func.func_type):
             return func
@@ -74,6 +80,46 @@ def _get_dyn_incore_func():
 def _get_mlir_code(result):
     """Normalize generate() result to MLIR string (support both str and dict)."""
     return result if isinstance(result, str) else "".join(result.values())
+
+
+def _run_default_passes(program_cls):
+    """Run the default pass pipeline for a program class."""
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    return pm.run_passes(program_cls)
+
+
+def _generate_mlir(program: ir.Program) -> str:
+    """Generate MLIR for an already-built program."""
+    return _get_mlir_code(PTOCodegen().generate(program))
+
+
+def _generate_default_mlir(program_cls) -> str:
+    """Run default passes then generate MLIR for a program class."""
+    return _generate_mlir(_run_default_passes(program_cls))
+
+
+def _get_mlir_lines(mlir_code: str) -> list[str]:
+    """Return stripped MLIR lines for line-oriented assertions."""
+    return [line.strip() for line in mlir_code.splitlines()]
+
+
+def _get_alloc_tile_lines(mlir_code: str) -> list[str]:
+    """Return normalized alloc_tile lines from generated MLIR."""
+    return [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+
+
+def _find_lines(lines: list[str], token: str, *, startswith: bool = False) -> list[str]:
+    """Return MLIR lines matching a token."""
+    if startswith:
+        return [line for line in lines if line.startswith(token)]
+    return [line for line in lines if token in line]
+
+
+def _single_line(lines: list[str], token: str, *, startswith: bool = False) -> str:
+    """Return the single MLIR line matching a token."""
+    matched = _find_lines(lines, token, startswith=startswith)
+    assert len(matched) == 1, f"Expected one line containing {token!r}, got: {matched}"
+    return matched[0]
 
 
 SAMPLE_PTOAS_OUTPUT = """\
@@ -137,8 +183,6 @@ def _make_func(name, params_spec):
 
 def test_pto_codegen_basic_mlir_structure():
     """Test that PTOCodegen generates valid MLIR module structure."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class BasicProgram:
@@ -148,13 +192,7 @@ def test_pto_codegen_basic_mlir_structure():
             tile_b = pl.add(tile_a, 1.0)
             pl.store(tile_b, offsets=[0, 0], output_tensor=b)
 
-    # Compile with Default strategy (applies necessary passes + codegen)
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(BasicProgram)
-
-    # Generate MLIR
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(BasicProgram)
 
     # Verify MLIR module structure
     assert "module attributes {pto.target_arch =" in mlir_code
@@ -165,8 +203,6 @@ def test_pto_codegen_basic_mlir_structure():
 
 def test_pto_codegen_tensor_parameters():
     """Test that tensor parameters generate correct make_tensor_view."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class TensorParamProgram:
@@ -182,11 +218,7 @@ def test_pto_codegen_tensor_parameters():
             tile_c = pl.mul(tile_a, tile_b)
             pl.store(tile_c, offsets=[0, 0], output_tensor=output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(TensorParamProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(TensorParamProgram)
 
     # Verify function signature with pointer types
     assert "%arg0: !pto.ptr<f32>" in mlir_code
@@ -202,8 +234,6 @@ def test_pto_codegen_tensor_parameters():
 
 def test_pto_codegen_alloc_tile():
     """Test that tile buffers generate alloc_tile operations."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class AllocTileProgram:
@@ -214,23 +244,16 @@ def test_pto_codegen_alloc_tile():
             tile_c = pl.mul(tile_a, tile_b)
             pl.store(tile_c, offsets=[0, 0], output_tensor=b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(AllocTileProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
-
-    # Verify alloc_tile operations
-    assert "pto.alloc_tile" in mlir_code
-    assert "loc=vec" in mlir_code  # Vector buffer (PTO address space)
-    assert "dtype=f32" in mlir_code
-    assert "rows=32, cols=32" in mlir_code
+    alloc_lines = _get_alloc_tile_lines(_generate_default_mlir(AllocTileProgram))
+    assert len(alloc_lines) > 0, "Expected at least one alloc_tile"
+    for alloc_line in alloc_lines:
+        assert "loc=vec" in alloc_line, f"Expected vector alloc_tile, got: {alloc_line}"
+        assert "dtype=f32" in alloc_line, f"Expected f32 alloc_tile, got: {alloc_line}"
+        assert "rows=32, cols=32" in alloc_line, f"Expected 32x32 alloc_tile, got: {alloc_line}"
 
 
 def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     """Test that shared MemRef tiles emit one alloc_tile and preserve merged TileView info."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, DataType.INDEX, span)
     size = ir.ConstInt(128, DataType.INDEX, span)
@@ -296,9 +319,8 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     )
     program = ir.Program([func], "fillpad_test_program", span)
 
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(program))
-    alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+    mlir_code = _generate_mlir(program)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
     # Both share the same addr (same MemRef)
@@ -315,9 +337,6 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
 
 def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
     """Dynamic valid_shape scalars defined in-body should still reach alloc_tile."""
-
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class DynamicValidShapeScalarProgram:
@@ -340,27 +359,65 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
             result: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(tile, [0, 0], output)
             return result
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(DynamicValidShapeScalarProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+    mlir_code = _generate_default_mlir(DynamicValidShapeScalarProgram)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
-    assert "valid_col = %" in alloc_lines[0], (
-        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_lines[0]}"
+    alloc_line = alloc_lines[0]
+    assert "valid_col = %" in alloc_line, (
+        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_line}"
     )
-    assert "valid_col = %arg" not in alloc_lines[0], (
-        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_lines[0]}"
+    assert "valid_row = %" not in alloc_line, f"Did not expect dynamic valid_row in alloc_tile: {alloc_line}"
+    assert "v_row=1" in alloc_line, f"Expected static v_row=1 in tile_buf type, got: {alloc_line}"
+    assert "v_col=?" in alloc_line, f"Expected dynamic v_col in tile_buf type, got: {alloc_line}"
+    assert "valid_col = %arg" not in alloc_line, (
+        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_line}"
     )
     assert "%c-1" not in mlir_code
 
 
+def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
+    """Dynamic valid_shape rows defined in-body should still reach alloc_tile."""
+
+    @pl.program
+    class DynamicValidShapeRowProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def body_valid_row(
+            self,
+            input: pl.Tensor[[120, 16], pl.FP32],
+            ctx_rows: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[120, 16], pl.FP32],
+        ) -> pl.Tensor[[120, 16], pl.FP32]:
+            valid_rows: pl.Scalar[pl.INDEX] = ctx_rows + 0
+            tile: pl.Tile[[120, 16], pl.FP32] = pl.tile.load(
+                input,
+                [0, 0],
+                [120, 16],
+                [valid_rows, 16],
+                target_memory=pl.MemorySpace.Vec,
+                transpose=False,
+            )
+            result: pl.Tensor[[120, 16], pl.FP32] = pl.tile.store(tile, [0, 0], output)
+            return result
+
+    mlir_code = _generate_default_mlir(DynamicValidShapeRowProgram)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+
+    assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
+    alloc_line = alloc_lines[0]
+    assert "valid_row = %" in alloc_line, (
+        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_line}"
+    )
+    assert "valid_col = %" not in alloc_line, f"Did not expect dynamic valid_col in alloc_tile: {alloc_line}"
+    assert "v_row=?" in alloc_line, f"Expected dynamic v_row in tile_buf type, got: {alloc_line}"
+    assert "v_col=16" in alloc_line, f"Expected static v_col=16 in tile_buf type, got: {alloc_line}"
+    assert "valid_row = %arg" not in alloc_line, (
+        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_line}"
+    )
+
+
 def test_pto_codegen_tile_load_lowering():
     """Test that tile.load generates partition_view + tload."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class LoadProgram:
@@ -369,11 +426,7 @@ def test_pto_codegen_tile_load_lowering():
             tile = pl.load(input, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile, offsets=[0, 0], output_tensor=output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(LoadProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(LoadProgram)
 
     # Verify partition_view generation
     assert "pto.partition_view" in mlir_code
@@ -390,8 +443,6 @@ def test_pto_codegen_tile_load_lowering():
 
 def test_pto_codegen_tile_store_lowering():
     """Test that tile.store generates partition_view + tstore."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class StoreProgram:
@@ -400,11 +451,7 @@ def test_pto_codegen_tile_store_lowering():
             tile = pl.load(input, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile, offsets=[0, 0], output_tensor=output)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(StoreProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(StoreProgram)
 
     # Verify tstore generation
     assert "pto.tstore" in mlir_code
@@ -414,8 +461,6 @@ def test_pto_codegen_tile_store_lowering():
 
 def test_pto_codegen_tile_mul():
     """Test that tile.mul generates pto.tmul."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class MulProgram:
@@ -431,11 +476,7 @@ def test_pto_codegen_tile_mul():
             tile_c = pl.mul(tile_a, tile_b)
             pl.store(tile_c, offsets=[0, 0], output_tensor=c)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(MulProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(MulProgram)
 
     # Verify tmul generation
     assert "pto.tmul" in mlir_code
@@ -445,8 +486,6 @@ def test_pto_codegen_tile_mul():
 
 def test_pto_codegen_tile_adds():
     """Test that tile.adds generates pto.tadds with scalar constant."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class AddsProgram:
@@ -456,11 +495,7 @@ def test_pto_codegen_tile_adds():
             tile_b = pl.add(tile_a, 3.14)
             pl.store(tile_b, offsets=[0, 0], output_tensor=b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(AddsProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(AddsProgram)
 
     # Verify tadds generation
     assert "pto.tadds" in mlir_code
@@ -472,8 +507,6 @@ def test_pto_codegen_tile_adds():
 
 def test_pto_codegen_constants():
     """Test that constants are generated correctly."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ConstantProgram:
@@ -482,11 +515,7 @@ def test_pto_codegen_constants():
             tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile_a, offsets=[0, 0], output_tensor=b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(ConstantProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(ConstantProgram)
 
     # Verify index constants
     assert "arith.constant" in mlir_code
@@ -496,8 +525,6 @@ def test_pto_codegen_constants():
 
 def test_pto_codegen_ssa_naming():
     """Test that SSA value names are correct."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class SSAProgram:
@@ -513,11 +540,7 @@ def test_pto_codegen_ssa_naming():
             tile_c = pl.mul(tile_a, tile_b)
             pl.store(tile_c, offsets=[0, 0], output_tensor=c)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(SSAProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(SSAProgram)
 
     # Verify SSA value naming pattern
     assert "%arg0" in mlir_code  # Function parameters
@@ -528,8 +551,6 @@ def test_pto_codegen_ssa_naming():
 
 def test_pto_codegen_code_generation_order():
     """Test that code is generated in correct order: constants, views, allocs, body."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class OrderProgram:
@@ -538,13 +559,7 @@ def test_pto_codegen_code_generation_order():
             tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile, offsets=[0, 0], output_tensor=b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(OrderProgram)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
-
-    lines = mlir_code.split("\n")
+    lines = _get_mlir_lines(_generate_default_mlir(OrderProgram))
 
     # Find indices of key operations
     const_idx = next((i for i, line in enumerate(lines) if "arith.constant" in line), -1)
@@ -560,8 +575,6 @@ def test_pto_codegen_code_generation_order():
 
 def test_pto_codegen_multiple_functions():
     """Test PTOCodegen with multiple functions."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class MultiFunc:
@@ -575,11 +588,7 @@ def test_pto_codegen_multiple_functions():
             tile = pl.load(x, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile, offsets=[0, 0], output_tensor=y)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(MultiFunc)
-
-    codegen = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+    mlir_code = _generate_default_mlir(MultiFunc)
 
     # Verify both functions are present
     assert "func.func @func1" in mlir_code
@@ -588,8 +597,6 @@ def test_pto_codegen_multiple_functions():
 
 def test_pto_codegen_reusability():
     """Test that the same PTOCodegen instance can be used multiple times."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ReusableProgram:
@@ -598,8 +605,7 @@ def test_pto_codegen_reusability():
             tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
             pl.store(tile, offsets=[0, 0], output_tensor=b)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(ReusableProgram)
+    transformed_program = _run_default_passes(ReusableProgram)
 
     # Use the same codegen instance multiple times
     codegen = PTOCodegen()
@@ -742,8 +748,6 @@ class TestGenerateSkipPtoas:
 
     def test_returns_pto_files(self, tmp_path):
         """When skip_ptoas=True, result keys for InCore functions end with .pto, not .cpp."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
 
         @pl.program
         class SkipPtoasProgram:
@@ -755,8 +759,7 @@ class TestGenerateSkipPtoas:
                 out = pl.store(tile, offsets=[0, 0], output_tensor=b)
                 return out
 
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed_program = pm.run_passes(SkipPtoasProgram)
+        transformed_program = _run_default_passes(SkipPtoasProgram)
 
         result = generate(transformed_program, str(tmp_path), skip_ptoas=True)
 
@@ -769,8 +772,6 @@ class TestGenerateSkipPtoas:
 
 def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
     """compile() should preserve generated files when some InCore functions fail."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class PartialFailureProgram:
@@ -861,8 +862,6 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     init values (the output tensor view), and the generated scf.for should not contain
     iter_args or scf.yield for tensor types.
     """
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class ForTensorIterArgProgram:
@@ -879,31 +878,22 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
                 result = pl.yield_(updated)
             return result
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(ForTensorIterArgProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    lines = [line.strip() for line in mlir_code.split("\n")]
+    lines = _get_mlir_lines(_generate_default_mlir(ForTensorIterArgProgram))
 
     # The output tensor parameter (%arg1) must have a make_tensor_view
-    view_lines = [line for line in lines if "pto.make_tensor_view %arg1" in line]
-    assert len(view_lines) == 1, "Expected one make_tensor_view for output tensor (%arg1)"
-    output_view_name = view_lines[0].split("=")[0].strip()
+    output_view_line = _single_line(lines, "pto.make_tensor_view %arg1")
+    output_view_name = output_view_line.split("=")[0].strip()
 
     # scf.for should NOT have iter_args (tensor is non-scalar, excluded)
-    for_lines = [line for line in lines if "scf.for" in line]
-    assert len(for_lines) == 1, f"Expected exactly one scf.for, got: {for_lines}"
-    assert "iter_args(" not in for_lines[0], (
-        f"scf.for should not have iter_args for tensor types: {for_lines[0]}"
-    )
+    for_line = _single_line(lines, "scf.for")
+    assert "iter_args(" not in for_line, f"scf.for should not have iter_args for tensor types: {for_line}"
 
     # No scf.yield should be present (tensor yields are excluded)
-    yield_lines = [line for line in lines if "scf.yield" in line]
+    yield_lines = _find_lines(lines, "scf.yield")
     assert len(yield_lines) == 0, f"No scf.yield expected for tensor-only iter_args: {yield_lines}"
 
     # pto.partition_view must use the output tensor view directly (mapped from iter_arg)
-    partition_lines = [line for line in lines if "pto.partition_view" in line]
+    partition_lines = _find_lines(lines, "pto.partition_view")
     assert len(partition_lines) >= 2, "Expected at least 2 partition_view ops (load + store)"
     store_partitions = [line for line in partition_lines if f"pto.partition_view {output_view_name}," in line]
     assert len(store_partitions) >= 1, (
@@ -911,8 +901,7 @@ def test_pto_codegen_for_loop_tensor_iter_arg():
     )
 
     # pto.tstore must still be present
-    tstore_lines = [line for line in lines if line.startswith("pto.tstore")]
-    assert len(tstore_lines) == 1, "Expected exactly one pto.tstore"
+    _single_line(lines, "pto.tstore", startswith=True)
 
 
 def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
@@ -923,8 +912,6 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
     Tile-typed iter_args should be mapped directly to their init values, and
     the generated scf.for should not contain iter_args or scf.yield for tiles.
     """
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class TileIterArgProgram:
@@ -950,45 +937,34 @@ def test_pto_codegen_for_loop_tile_iter_arg_no_ddr_alloc():
             final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
             return final
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(TileIterArgProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    lines = [line.strip() for line in mlir_code.split("\n")]
+    mlir_code = _generate_default_mlir(TileIterArgProgram)
+    lines = _get_mlir_lines(mlir_code)
 
     # All alloc_tile must be loc=vec (no spurious loc=gm allocation)
-    alloc_lines = [line for line in lines if "pto.alloc_tile" in line]
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
     assert len(alloc_lines) > 0, "Expected at least one pto.alloc_tile"
     for alloc_line in alloc_lines:
         assert "loc=vec" in alloc_line, f"Expected loc=vec in alloc_tile, got: {alloc_line}"
         assert "loc=gm" not in alloc_line, f"Unexpected loc=gm in alloc_tile: {alloc_line}"
 
     # scf.for should NOT have iter_args (all iter_args are tile type)
-    for_lines = [line for line in lines if "scf.for" in line]
-    assert len(for_lines) == 1, f"Expected exactly one scf.for, got: {for_lines}"
-    assert "iter_args(" not in for_lines[0], (
-        f"scf.for should not have iter_args for tile types: {for_lines[0]}"
-    )
+    for_line = _single_line(lines, "scf.for")
+    assert "iter_args(" not in for_line, f"scf.for should not have iter_args for tile types: {for_line}"
 
     # No scf.yield should be present (tile yields are excluded)
-    yield_lines = [line for line in lines if "scf.yield" in line]
+    yield_lines = _find_lines(lines, "scf.yield")
     assert len(yield_lines) == 0, f"No scf.yield expected for tile-only iter_args: {yield_lines}"
 
     # pto.tadd (the accumulation op) must have loc=vec for all tile_buf operands
-    tadd_lines = [line for line in lines if "pto.tadd" in line]
-    assert len(tadd_lines) == 1, "Expected exactly one pto.tadd"
-    assert "loc=gm" not in tadd_lines[0], f"pto.tadd should not have loc=gm operands: {tadd_lines[0]}"
-    assert tadd_lines[0].count("loc=vec") >= 2, (
-        f"pto.tadd should have at least 2 loc=vec annotations: {tadd_lines[0]}"
+    tadd_line = _single_line(lines, "pto.tadd")
+    assert "loc=gm" not in tadd_line, f"pto.tadd should not have loc=gm operands: {tadd_line}"
+    assert tadd_line.count("loc=vec") >= 2, (
+        f"pto.tadd should have at least 2 loc=vec annotations: {tadd_line}"
     )
 
 
 def test_pto_codegen_repairs_row_sum_add_layout_mismatch():
     """`row_sum -> add` should lower through row-major reshape repair."""
-
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class LayoutRepairProgram:
@@ -1011,18 +987,14 @@ def test_pto_codegen_repairs_row_sum_add_layout_mismatch():
             final: pl.Tensor[[16, 1], pl.FP32] = pl.store(updated, [0, 0], out)
             return final
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(LayoutRepairProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    lines = [line.strip() for line in mlir_code.split("\n")]
+    mlir_code = _generate_default_mlir(LayoutRepairProgram)
+    lines = _get_mlir_lines(mlir_code)
 
     # With per-var alloc model, tile.reshape becomes a no-op: each variable
     # gets its own alloc_tile with the correct shape/layout and shared addr.
     # The reshape operations are expressed at the declaration level, not as
     # runtime pto.treshape instructions.
-    alloc_lines = [line for line in lines if "pto.alloc_tile" in line]
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
     row_vec_allocs = [line for line in alloc_lines if "rows=1, cols=16" in line]
     col_vec_allocs = [line for line in alloc_lines if "rows=16, cols=1" in line]
     assert len(row_vec_allocs) >= 1, (
@@ -1032,19 +1004,15 @@ def test_pto_codegen_repairs_row_sum_add_layout_mismatch():
         f"Expected at least one col-vector alloc_tile (rows=16, cols=1), got: {alloc_lines}"
     )
 
-    tadd_lines = [line for line in lines if "pto.tadd" in line]
-    assert len(tadd_lines) == 1, f"Expected exactly one pto.tadd, got: {tadd_lines}"
-    assert tadd_lines[0].count("blayout=row_major") >= 3, (
-        f"Expected row-major operands/results after repair, got: {tadd_lines[0]}"
+    tadd_line = _single_line(lines, "pto.tadd")
+    assert tadd_line.count("blayout=row_major") >= 3, (
+        f"Expected row-major operands/results after repair, got: {tadd_line}"
     )
-    assert "rows=1, cols=16" in tadd_lines[0], f"Expected repaired row-vector add, got: {tadd_lines[0]}"
+    assert "rows=1, cols=16" in tadd_line, f"Expected repaired row-vector add, got: {tadd_line}"
 
 
 def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
     """Loop-carried tile and reshape result must not collapse to one SSA mapping."""
-
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class LoopReshapeRepairProgram:
@@ -1075,17 +1043,13 @@ def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
             final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
             return final
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(LoopReshapeRepairProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    lines = [line.strip() for line in mlir_code.split("\n")]
+    mlir_code = _generate_default_mlir(LoopReshapeRepairProgram)
+    lines = _get_mlir_lines(mlir_code)
 
     # With per-var alloc model, tile.reshape becomes a no-op: each variable
     # (including reshape results) gets its own alloc_tile at the shared addr.
     # Verify the structural properties instead of pto.treshape presence.
-    alloc_lines = [line for line in lines if "pto.alloc_tile" in line]
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     # Both row-vector (1x16) and col-vector (16x1) allocs should exist
     row_vec_allocs = [line for line in alloc_lines if "rows=1, cols=16" in line]
@@ -1097,10 +1061,7 @@ def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
         f"Expected at least one col-vector alloc (rows=16, cols=1), got: {alloc_lines}"
     )
 
-    tadd_lines = [line for line in lines if line.startswith("pto.tadd ")]
-    assert len(tadd_lines) == 1, f"Expected exactly one pto.tadd, got: {tadd_lines}"
-
-    tadd_line = tadd_lines[0]
+    tadd_line = _single_line(lines, "pto.tadd ", startswith=True)
 
     # The tadd should operate on row-major operands (from per-var alloc declarations)
     assert "blayout=row_major" in tadd_line, (
@@ -1117,8 +1078,6 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
     scf.for should contain iter_args/yield only for the scalar entries, while
     tile iter_args are mapped directly to their init values.
     """
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
 
     @pl.program
     class MixedIterArgProgram:
@@ -1145,27 +1104,20 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
             final: pl.Tensor[[16, 1], pl.FP32] = pl.store(result_tile, [0, 0], out)
             return final
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    transformed_program = pm.run_passes(MixedIterArgProgram)
-
-    codegen_inst = PTOCodegen()
-    mlir_code = _get_mlir_code(codegen_inst.generate(transformed_program))
-    lines = [line.strip() for line in mlir_code.split("\n")]
+    lines = _get_mlir_lines(_generate_default_mlir(MixedIterArgProgram))
 
     # scf.for should have iter_args for the scalar type only
-    for_lines = [line for line in lines if "scf.for" in line]
-    assert len(for_lines) == 1, f"Expected one scf.for, got: {for_lines}"
-    assert "iter_args(" in for_lines[0], f"Expected scalar iter_args: {for_lines[0]}"
+    for_line = _single_line(lines, "scf.for")
+    assert "iter_args(" in for_line, f"Expected scalar iter_args: {for_line}"
 
     # iter_args type should be index (scalar), not tile_buf
-    assert "tile_buf" not in for_lines[0], f"tile_buf should not appear in iter_args: {for_lines[0]}"
-    assert "index" in for_lines[0], f"Expected index type in iter_args: {for_lines[0]}"
+    assert "tile_buf" not in for_line, f"tile_buf should not appear in iter_args: {for_line}"
+    assert "index" in for_line, f"Expected index type in iter_args: {for_line}"
 
     # scf.yield should have index type only, not tile_buf
-    yield_lines = [line for line in lines if "scf.yield" in line]
-    assert len(yield_lines) == 1, f"Expected one scf.yield, got: {yield_lines}"
-    assert "tile_buf" not in yield_lines[0], f"tile_buf should not appear in scf.yield: {yield_lines[0]}"
-    assert "index" in yield_lines[0], f"Expected index type in scf.yield: {yield_lines[0]}"
+    yield_line = _single_line(lines, "scf.yield")
+    assert "tile_buf" not in yield_line, f"tile_buf should not appear in scf.yield: {yield_line}"
+    assert "index" in yield_line, f"Expected index type in scf.yield: {yield_line}"
 
 
 if __name__ == "__main__":

@@ -96,6 +96,29 @@ def _run_legalize(program: ir.Program) -> ir.Function:
     return next(iter(after.functions.values()))
 
 
+def _get_mlir_code(result: str | dict[str, str]) -> str:
+    """Normalize generate() output to a single MLIR string."""
+    return result if isinstance(result, str) else "".join(result.values())
+
+
+def _get_alloc_tile_lines(mlir_code: str) -> list[str]:
+    """Return normalized alloc_tile lines from generated MLIR."""
+    return [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+
+
+def _generate_legalized_mlir(program: ir.Program) -> str:
+    """Run legalization then generate MLIR."""
+    legalized = passes.legalize_pto_buffer_reuse()(program)
+    return _get_mlir_code(codegen.PTOCodegen().generate(legalized))
+
+
+def _get_alloc_addrs(alloc_lines: list[str]) -> list[str]:
+    """Extract alloc_tile addr values after asserting that each line carries one."""
+    for line in alloc_lines:
+        assert "addr =" in line, f"Expected addr attribute in alloc_tile: {line}"
+    return [line.split("addr = ")[1].split()[0] for line in alloc_lines]
+
+
 def _iter_all_assign_stmts(stmt):
     if isinstance(stmt, ir.AssignStmt):
         yield stmt
@@ -432,25 +455,98 @@ class TestLegalizeWithCodegen:
         )
         program = ir.Program([func], "Test", _SPAN)
 
-        # Run legalization first
-        legalized = passes.legalize_pto_buffer_reuse()(program)
-
-        # Then codegen
-        cg = codegen.PTOCodegen()
-        mlir_code = cg.generate(legalized)
-        if isinstance(mlir_code, dict):
-            mlir_code = "".join(mlir_code.values())
-
-        alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+        mlir_code = _generate_legalized_mlir(program)
+        alloc_lines = _get_alloc_tile_lines(mlir_code)
         assert len(alloc_lines) == 2, (
             f"Expected two alloc_tiles for per-var alloc (same MemRef, same addr), got: {alloc_lines}"
         )
         assert "%c-1" not in mlir_code
-        # Both allocs should share the same addr
-        for line in alloc_lines:
-            assert "addr =" in line, f"Expected addr attribute in alloc_tile: {line}"
-        addr_values = [line.split("addr = ")[1].split()[0] for line in alloc_lines]
+        addr_values = _get_alloc_addrs(alloc_lines)
         assert addr_values[0] == addr_values[1], f"Expected same addr for shared MemRef, got: {addr_values}"
+
+    def test_fillpad_dynamic_valid_row_keeps_shared_addr(self):
+        """Dynamic valid_row and fillpad should keep one shared address after legalization."""
+        shared = _MemRefAlloc().vec([128, 128], _FP32)
+
+        input_t = _tensor_t([128, 128], _FP32)
+        output_t = _tensor_t([128, 128], _FP32)
+        valid_rows = ir.Var("m", ir.ScalarType(_IDX), _SPAN)
+
+        load_view = ir.TileView()
+        load_view.valid_shape = [valid_rows, _ci(128)]
+        load_type = _tile_t_with_view([128, 128], _FP32, shared, load_view)
+
+        padded_view = ir.TileView()
+        padded_view.valid_shape = [_ci(128), _ci(128)]
+        padded_view.pad = ir.PadValue.max
+        padded_type = _tile_t_with_view([128, 128], _FP32, shared, padded_view)
+
+        a_var = ir.Var("a", input_t, _SPAN)
+        b_var = ir.Var("b", output_t, _SPAN)
+        t1 = ir.Var("t1", load_type, _SPAN)
+        t2 = ir.Var("t2", padded_type, _SPAN)
+        result_var = ir.Var("result", output_t, _SPAN)
+
+        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
+        shapes = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
+
+        load_call = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes], {}, load_type, _SPAN)
+        fillpad_call = ir.Call(
+            ir.Op("tile.fillpad"),
+            [t1],
+            {"pad_value": ir.PadValue.max},
+            padded_type,
+            _SPAN,
+        )
+        store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(t1, load_call, _SPAN),
+                ir.AssignStmt(t2, fillpad_call, _SPAN),
+                ir.AssignStmt(result_var, store_call, _SPAN),
+                ir.ReturnStmt([result_var], _SPAN),
+            ],
+            _SPAN,
+        )
+
+        func = ir.Function(
+            "main",
+            [
+                (a_var, ir.ParamDirection.In),
+                (b_var, ir.ParamDirection.Out),
+                (valid_rows, ir.ParamDirection.In),
+            ],
+            [output_t],
+            body,
+            _SPAN,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "Test", _SPAN)
+
+        mlir_code = _generate_legalized_mlir(program)
+        alloc_lines = _get_alloc_tile_lines(mlir_code)
+
+        assert len(alloc_lines) == 2, (
+            f"Expected two alloc_tiles for per-var alloc (same MemRef, same addr), got: {alloc_lines}"
+        )
+        addr_values = _get_alloc_addrs(alloc_lines)
+        assert addr_values[0] == addr_values[1], f"Expected same addr for shared MemRef, got: {addr_values}"
+
+        dynamic_allocs = [line for line in alloc_lines if "valid_row = %" in line]
+        assert len(dynamic_allocs) == 1, f"Expected one alloc_tile with dynamic valid_row, got: {alloc_lines}"
+        assert "valid_col = %" not in dynamic_allocs[0], (
+            f"Did not expect dynamic valid_col in alloc_tile: {dynamic_allocs[0]}"
+        )
+        assert "v_row=?" in dynamic_allocs[0], (
+            f"Expected dynamic v_row in tile_buf type, got: {dynamic_allocs[0]}"
+        )
+        assert "v_col=128" in dynamic_allocs[0], (
+            f"Expected static v_col=128 in tile_buf type, got: {dynamic_allocs[0]}"
+        )
+
+        padded_allocs = [line for line in alloc_lines if "pad=2>" in line]
+        assert len(padded_allocs) == 1, f"Expected one padded alloc_tile after fillpad, got: {alloc_lines}"
 
     def test_incompatible_shape_split_produces_two_allocs(self):
         """After legalization, split MemRefs produce separate alloc_tiles."""
@@ -502,19 +598,11 @@ class TestLegalizeWithCodegen:
         )
         program = ir.Program([func], "Test", _SPAN)
 
-        legalized = passes.legalize_pto_buffer_reuse()(program)
-
-        cg = codegen.PTOCodegen()
-        mlir_code = cg.generate(legalized)
-        if isinstance(mlir_code, dict):
-            mlir_code = "".join(mlir_code.values())
-
-        alloc_lines = [line.strip() for line in mlir_code.splitlines() if "pto.alloc_tile" in line]
+        mlir_code = _generate_legalized_mlir(program)
+        alloc_lines = _get_alloc_tile_lines(mlir_code)
         assert len(alloc_lines) == 2, f"Expected two alloc_tiles after split, got: {alloc_lines}"
 
-        # All allocs should have addr attribute
-        for line in alloc_lines:
-            assert "addr =" in line, f"Expected addr attribute in alloc_tile: {line}"
+        _get_alloc_addrs(alloc_lines)
 
         sizes_128 = [line for line in alloc_lines if "rows=128" in line and "cols=128" in line]
         sizes_64 = [line for line in alloc_lines if "rows=64" in line and "cols=64" in line]
