@@ -121,22 +121,24 @@ print(pto_code)
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |
 | ---------- | -------------- | ---- |
-| `tile.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector 推送 |
-| `tile.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube 推送 |
-| `tile.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | 从 Cube 管道弹出 |
-| `tile.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | 从 Vector 管道弹出 |
+| `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector 推送 |
+| `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube 推送 |
+| `tile.tpop_from_aic(split=N)` | `pto.tpop_from_aic outs(%buf : type) {split = N}` | 从 Cube 管道弹出 |
+| `tile.tpop_from_aiv(split=N)` | `pto.tpop_from_aiv outs(%buf : type) {split = N}` | 从 Vector 管道弹出 |
 | `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | 释放槽位给 Cube |
 | `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | 释放槽位给 Vector |
-| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Cube 管道初始化 |
-| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Vector 管道初始化 |
-| `system.reserve_buffer(...)` | `pto.reserve_buffer {name = "N", size = S, base = B}` | 预留缓冲区 |
-| `system.import_peer_buffer(...)` | `pto.import_peer_buffer {name = "N", peer_func = "F"}` | 导入对等缓冲区 |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube 管道初始化 |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector 管道初始化 |
+| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = A} -> i32` | 预留缓冲区 |
+| `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | 导入对等缓冲区 |
 
 **说明：**
 
 - Push 操作使用带类型的 `ins()` 子句；Pop 操作使用 `outs()` 子句
-- `initialize_pipe` 仅在值 ≥ 0（即非 AUTO）时输出 `c2v_consumer_buf`/`v2c_consumer_buf`
-- `reserve_buffer` 在 base 为 AUTO (-1) 时输出 `base = auto`，显式地址时输出 `base = <value>`
+- `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值
+- `reserve_buffer` 在 base 为 AUTO 时输出 `auto = true`，显式地址时输出 `auto = false, base = <value>`
+- `reserve_buffer` location 对于 AIC 函数为 `mat`，对于 AIV/InCore 函数为 `vec`
+- `import_reserved_buffer` 使用 MLIR 符号语法（`@func_name`）表示 `peer_func`
 - 缓冲区名称和 peer_func 字符串由 `CheckSafeIdentifier` 验证（仅允许字母数字和下划线）
 
 ### 参数类型处理

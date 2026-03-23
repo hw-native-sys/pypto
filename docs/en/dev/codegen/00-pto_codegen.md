@@ -121,22 +121,24 @@ print(pto_code)
 
 | PyPTO Operation | Generated PTO-ISA | Description |
 | --------------- | ----------------- | ----------- |
-| `tile.tpush_to_aiv(tile, aiv_idx=N)` | `pto.tpush_to_aiv ins(%tile : type) {aiv_idx = N}` | Cube → Vector push |
-| `tile.tpush_to_aic(tile, aiv_idx=N)` | `pto.tpush_to_aic ins(%tile : type) {aiv_idx = N}` | Vector → Cube push |
-| `tile.tpop_from_aic(aiv_idx=N)` | `pto.tpop_from_aic outs(%buf : type) {aiv_idx = N}` | Pop from Cube pipe |
-| `tile.tpop_from_aiv(aiv_idx=N)` | `pto.tpop_from_aiv outs(%buf : type) {aiv_idx = N}` | Pop from Vector pipe |
+| `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector push |
+| `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube push |
+| `tile.tpop_from_aic(split=N)` | `pto.tpop_from_aic outs(%buf : type) {split = N}` | Pop from Cube pipe |
+| `tile.tpop_from_aiv(split=N)` | `pto.tpop_from_aiv outs(%buf : type) {split = N}` | Pop from Vector pipe |
 | `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | Release slot to Cube |
 | `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | Release slot to Vector |
-| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Cube pipe init |
-| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S, ...}` | Vector pipe init |
-| `system.reserve_buffer(...)` | `pto.reserve_buffer {name = "N", size = S, base = B}` | Reserve buffer |
-| `system.import_peer_buffer(...)` | `pto.import_peer_buffer {name = "N", peer_func = "F"}` | Import peer buffer |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init |
+| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = A} -> i32` | Reserve buffer |
+| `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 
 **Notes:**
 
 - Push ops use `ins()` clause with typed tile buffer; pop ops use `outs()` clause
-- `initialize_pipe` only emits `c2v_consumer_buf`/`v2c_consumer_buf` when the value is ≥ 0 (i.e., not AUTO)
-- `reserve_buffer` emits `base = auto` when base is AUTO (-1), or `base = <value>` for explicit addresses
+- `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands
+- `reserve_buffer` emits `auto = true` when base is AUTO, or `auto = false, base = <value>` for explicit addresses
+- `reserve_buffer` location is `mat` for AIC functions, `vec` for AIV/InCore functions
+- `import_reserved_buffer` uses MLIR symbol syntax (`@func_name`) for `peer_func`
 - Buffer name and peer_func strings are validated by `CheckSafeIdentifier` (alphanumeric + underscore only)
 
 ### Parameter Type Handling

@@ -31,7 +31,7 @@ def test_tpop_ops_return_tile_type():
 
     for op_name in ["tile.tpop_from_aic", "tile.tpop_from_aiv"]:
         op = ir.get_op(op_name)
-        call = ir.Call(op, [], {"aiv_idx": 0}, tile_type, span)
+        call = ir.Call(op, [], {"split": 0}, tile_type, span)
         assert isinstance(call.type, ir.TileType)
         assert call.type.shape == [64]
         assert call.type.dtype == DataType.FP32

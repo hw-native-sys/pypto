@@ -251,12 +251,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   memref_to_tile_type_.clear();
   emitted_constants_.clear();
   emitted_i64_constants_.clear();
+  emitted_i32_constants_.clear();
   emitted_float_constants_.clear();
   float_const_names_.clear();
   extra_alloc_tiles_.clear();
   ssa_to_tile_buf_type_.clear();
   tile_var_allocs_.clear();
   emitted_tile_alloc_vars_.clear();
+  reserve_buf_ssa_.clear();
+  import_buf_ssa_.clear();
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -644,6 +647,32 @@ std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
   return name;
 }
 
+std::string PTOCodegen::GetOrEmitI32Constant(int32_t value) {
+  auto it = emitted_i32_constants_.find(value);
+  if (it != emitted_i32_constants_.end()) {
+    return it->second;
+  }
+  std::string ssa_id;
+  if (value == 0) {
+    ssa_id = "c0_i32";
+  } else if (value < 0) {
+    uint32_t magnitude = static_cast<uint32_t>(-(value + 1)) + 1;
+    ssa_id = "cn" + std::to_string(magnitude) + "_i32";
+  } else {
+    ssa_id = "c" + std::to_string(value) + "_i32";
+  }
+  std::string name;
+  if (used_ssa_names_.find(ssa_id) == used_ssa_names_.end()) {
+    used_ssa_names_.insert(ssa_id);
+    name = "%" + ssa_id;
+  } else {
+    name = NewTemp();
+  }
+  constants_section_ << GetIndent() << name << " = arith.constant " << value << " : i32\n";
+  emitted_i32_constants_[value] = name;
+  return name;
+}
+
 std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
   auto it = memref_to_mlir_.find(memref.get());
   INTERNAL_CHECK(it != memref_to_mlir_.end()) << "MemRef not found in mapping";
@@ -667,6 +696,22 @@ void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::str
 std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   auto it = ssa_to_tile_buf_type_.find(ssa_name);
   return it != ssa_to_tile_buf_type_.end() ? it->second : std::string{};
+}
+
+void PTOCodegen::RecordReserveBufferSSA(const std::string& ssa) { reserve_buf_ssa_ = ssa; }
+
+std::string PTOCodegen::GetReserveBufferSSA() const { return reserve_buf_ssa_; }
+
+void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) { import_buf_ssa_ = ssa; }
+
+std::string PTOCodegen::GetImportBufferSSA() const { return import_buf_ssa_; }
+
+bool PTOCodegen::IsAICFunction() const {
+  return current_function_ && current_function_->func_type_ == ir::FunctionType::AIC;
+}
+
+bool PTOCodegen::IsAIVFunction() const {
+  return current_function_ && current_function_->func_type_ == ir::FunctionType::AIV;
 }
 
 void PTOCodegen::EmitExtraAllocTiles() {
@@ -700,8 +745,9 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
         result_tile_type = tile_type;
-      } else if (As<ScalarType>(op->var_->GetType())) {
-        // Pre-allocate an SSA name for scalar-result backend ops (e.g., tile.getval).
+      } else {
+        // Pre-allocate a %-prefixed SSA name for non-tile backend ops (e.g., scalar
+        // results like tile.getval, or i32 results like reserve_buffer / import_peer_buffer).
         // Register it in var_to_mlir_ so subsequent expressions can resolve the variable.
         result_buf = NewNamedTemp(op->var_->name_hint_);
         BindVarToMlir(op->var_, result_buf);

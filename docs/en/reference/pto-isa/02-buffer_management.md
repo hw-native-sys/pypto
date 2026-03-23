@@ -135,7 +135,7 @@ def my_vector_kernel(self, ...):
     )
 
     for ...:
-        tile = pl.tpop_from_aic(aiv_idx=0)    # zero-copy from pipe_buf on A5
+        tile = pl.tpop_from_aic()              # zero-copy from pipe_buf on A5
         # ... compute on tile ...
         pl.tfree_to_aic(aiv_idx=0)             # release slot
 ```
@@ -158,7 +158,7 @@ def my_cube_kernel(self, ...):
     )
 
     for ...:
-        pl.tpush_to_aiv(tile, aiv_idx=0)    # DMA to peer_buf.base on A5
+        pl.tpush_to_aiv(tile, split=0)       # DMA to peer_buf.base on A5
 ```
 
 ### DSL Summary
@@ -171,30 +171,43 @@ def my_cube_kernel(self, ...):
 
 ## IR Representation
 
-`pl.reserve_buffer` lowers to a `ReserveBuffer` node:
+`pl.reserve_buffer` lowers to a `pto.reserve_buffer` op that returns an `i32` SSA value:
 
-```text
+```mlir
 func @my_vector_kernel(...) {
-    %pipe_buf = reserve_buffer {
+    %c2v_slot_buffer = pto.reserve_buffer {
         name = "c2v_slot_buffer",
-        size = 4096,              // SLOT_NUM * SLOT_SIZE
-        base = auto,              // or literal 0x1000
-        memory_space = "UB"       // inferred from core type
-    }
+        size = 4096,
+        location = #pto.address_space<vec>,
+        auto = true
+    } -> i32
     ...
 }
 ```
 
-`pl.import_peer_buffer` lowers to an `ImportPeerBuffer` node:
+`pl.import_peer_buffer` lowers to a `pto.import_reserved_buffer` op that returns an `i32` SSA value, using MLIR symbol syntax for `peer_func`:
 
-```text
+```mlir
 func @my_cube_kernel(...) {
-    %peer_buf = import_peer_buffer {
+    %c2v_slot_buffer_import = pto.import_reserved_buffer {
         name = "c2v_slot_buffer",
         peer_func = @my_vector_kernel
-    }
+    } -> i32
     ...
 }
+```
+
+The `initialize_pipe` ops reference these SSA values as operands instead of integer attributes:
+
+```mlir
+// Cube side (AIC): consumer for V2C (reserve_buffer), producer for C2V (import)
+%c0_i32 = arith.constant 0 : i32
+%v2c_buf = pto.reserve_buffer {name = "v2c_slot_buffer", size = 4096,
+    location = #pto.address_space<mat>, auto = false, base = 4096} -> i32
+%c2v_import = pto.import_reserved_buffer {name = "c2v_slot_buffer",
+    peer_func = @my_vector_kernel} -> i32
+pto.aic_initialize_pipe {dir_mask = 3, slot_size = 512}
+    (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %v2c_buf : i32)
 ```
 
 ## Allocator Handling

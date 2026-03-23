@@ -249,7 +249,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aic(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aic()
                 return received
 
         printed = Before.as_python()
@@ -264,7 +264,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aiv(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tile.tpop_from_aiv()
                 return received
 
         printed = Before.as_python()
@@ -294,7 +294,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIV)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aic(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aic()
                 return received
 
         printed = Before.as_python()
@@ -340,7 +340,7 @@ class test_program:
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def kernel(self) -> pl.Tile[[64], pl.FP32]:
-                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aiv(aiv_idx=0)
+                received: pl.Tile[[64], pl.FP32] = pl.tpop_from_aiv()
                 return received
 
         printed = Before.as_python()

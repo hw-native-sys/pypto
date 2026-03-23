@@ -57,7 +57,7 @@ REGISTER_OP("tile.tpop_from_aic")
     .set_description("Pop tile data from AIC cross-core pipe into AIV")
     .set_op_category("CrossCoreOp")
     .no_argument()
-    .set_attr<int>("aiv_idx")
+    .set_attr<int>("split")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -66,7 +66,7 @@ REGISTER_OP("tile.tpop_from_aiv")
     .set_description("Pop tile data from AIV cross-core pipe into AIC")
     .set_op_category("CrossCoreOp")
     .no_argument()
-    .set_attr<int>("aiv_idx")
+    .set_attr<int>("split")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 

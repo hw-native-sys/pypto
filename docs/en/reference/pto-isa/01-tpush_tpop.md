@@ -135,36 +135,38 @@ Four direction-specific instructions — direction is encoded in the opcode, no 
 
 | Instruction | Core | Role | Direction |
 | ----------- | ---- | ---- | --------- |
-| `tpush_to_aiv(TILE, AIV_IDX)` | Cube | Producer | C2V |
-| `tpush_to_aic(TILE, AIV_IDX)` | Vector | Producer | V2C |
-| `tpop_from_aic(TILE, AIV_IDX)` | Vector | Consumer | C2V |
-| `tpop_from_aiv(TILE, AIV_IDX)` | Cube | Consumer | V2C |
+| `tpush_to_aiv(TILE, SPLIT)` | Cube | Producer | C2V |
+| `tpush_to_aic(TILE, SPLIT)` | Vector | Producer | V2C |
+| `tpop_from_aic(TILE, SPLIT)` | Vector | Consumer | C2V |
+| `tpop_from_aiv(TILE, SPLIT)` | Cube | Consumer | V2C |
 
-**Parameters:**
+**Parameters (tpush):**
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `TILE` | `Tile&` | Source (push) or destination (pop) tile |
-| `AIV_IDX` | `uint8_t` | Buddy Vector core index (0 or 1) — see note below |
+| `TILE` | `Tile&` | Source tile to push |
+| `SPLIT` | `int` | Split mode (0=none, 1=up-down, 2=left-right) |
 
-> **`AIV_IDX` semantics vary by core type:**
->
-> - On **Cube-executed** instructions (`tpush_to_aiv`, `tpop_from_aiv`): `AIV_IDX` is the **target/source buddy Vector core index**.
-> - On **Vector-executed** instructions (`tpush_to_aic`, `tpop_from_aic`): `AIV_IDX` is **this Vector core's own index**, identifying which hardware flag pair to use.
+**Parameters (tpop):**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `TILE` | `Tile&` | Destination tile to receive into |
+| `SPLIT` | `int` | Split mode (0=none, 1=up-down, 2=left-right) |
 
 ### Push Protocol (`tpush_to_aiv` / `tpush_to_aic`)
 
 ```text
-function tpush_*(TILE, AIV_IDX):
+function tpush_*(TILE, SPLIT):
     // 1. Wait for slot to be free (consumer has released it)
-    WAIT flag_free[dir, AIV_IDX]: target_tag
+    WAIT flag_free[dir]: target_tag
 
     // 2. DMA tile data into ring buffer slot
     MTE_copy(src=TILE.data, dst=ring_buf + target_tag * SLOT_SIZE, size=SLOT_SIZE)
     SET mte_flag; WAIT mte_flag           // ensure DMA complete
 
     // 3. Signal consumer: data in slot is ready
-    SET flag_ready[dir, AIV_IDX]: target_tag
+    SET flag_ready[dir]: target_tag
 
     // 4. Advance to next slot
     target_tag = (target_tag + 1) % SLOT_NUM
@@ -173,9 +175,9 @@ function tpush_*(TILE, AIV_IDX):
 ### Pop Protocol (`tpop_from_aic` / `tpop_from_aiv`)
 
 ```text
-function tpop_*(TILE, AIV_IDX):
+function tpop_*(TILE, SPLIT):
     // 1. Wait for data to be ready (producer has filled the slot)
-    WAIT flag_ready[dir, AIV_IDX]: target_tag
+    WAIT flag_ready[dir]: target_tag
 
     // 2. Load tile data from ring buffer slot
     if PLATFORM_A2A3:
@@ -185,7 +187,7 @@ function tpop_*(TILE, AIV_IDX):
         TILE.data = ring_buf + target_tag * SLOT_SIZE   // zero-copy
 
     // 3. Signal producer: slot is free for reuse
-    SET flag_free[dir, AIV_IDX]: target_tag
+    SET flag_free[dir]: target_tag
 
     // 4. Advance to next slot
     target_tag = (target_tag + 1) % SLOT_NUM
@@ -254,7 +256,7 @@ Flag usage (per AIV peer):
 2. **Backpressure** — producer blocks when all slots full; consumer blocks when empty
 3. **FIFO order** — strict round-robin `(tag + 1) % SLOT_NUM`
 4. **Decoupled DMA** — async MTE transfer with explicit flag wait
-5. **Buddy core selection** — `AIV_IDX` selects which Vector core (0 or 1)
+5. **Buddy core selection** — handled by initialization, not per-instruction
 6. **Static direction** — direction encoded in opcode, verified at compile time
 
 ## API Summary
@@ -263,7 +265,7 @@ Flag usage (per AIV peer):
 | --- | ---- | ---- | ----------- |
 | `aic_initialize_pipe(...)` | Cube | Setup | Bind ring buffer, init tags, pre-signal free slots for V2C |
 | `aiv_initialize_pipe(...)` | Vector | Setup | Bind ring buffer, init tags, pre-signal free slots for C2V |
-| `tpush_to_aiv(TILE, AIV_IDX)` | Cube | Producer | Wait free → DMA tile → signal ready |
-| `tpush_to_aic(TILE, AIV_IDX)` | Vector | Producer | Wait free → DMA tile → signal ready |
-| `tpop_from_aic(TILE, AIV_IDX)` | Vector | Consumer | Wait ready → load tile → signal free |
-| `tpop_from_aiv(TILE, AIV_IDX)` | Cube | Consumer | Wait ready → load tile → signal free |
+| `tpush_to_aiv(TILE, SPLIT)` | Cube | Producer | Wait free → DMA tile → signal ready |
+| `tpush_to_aic(TILE, SPLIT)` | Vector | Producer | Wait free → DMA tile → signal ready |
+| `tpop_from_aic(TILE, SPLIT)` | Vector | Consumer | Wait ready → load tile → signal free |
+| `tpop_from_aiv(TILE, SPLIT)` | Cube | Consumer | Wait ready → load tile → signal free |

@@ -287,7 +287,6 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 // TPUSH / TPOP creation helpers
 // ============================================================================
 
-std::vector<std::pair<std::string, std::any>> MakeAivIdxKwargs() { return {{"aiv_idx", std::any(0)}}; }
 std::vector<std::pair<std::string, std::any>> MakeSplitKwargs() { return {{"split", std::any(0)}}; }
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span) {
@@ -304,7 +303,7 @@ TypePtr CleanTileType(const TypePtr& tile_type) {
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
   auto op = OpRegistry::GetInstance().GetOp(op_name);
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, MakeAivIdxKwargs(), CleanTileType(tile_type),
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, MakeSplitKwargs(), CleanTileType(tile_type),
                                 span);
 }
 

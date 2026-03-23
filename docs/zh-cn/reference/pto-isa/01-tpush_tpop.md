@@ -135,36 +135,38 @@ function aic_initialize_pipe(DIR_MASK, SLOT_SIZE, GM_SLOT_BUFFER,
 
 | 指令 | 核心 | 角色 | 方向 |
 | ---- | ---- | ---- | ---- |
-| `tpush_to_aiv(TILE, AIV_IDX)` | Cube | 生产者 | C2V |
-| `tpush_to_aic(TILE, AIV_IDX)` | Vector | 生产者 | V2C |
-| `tpop_from_aic(TILE, AIV_IDX)` | Vector | 消费者 | C2V |
-| `tpop_from_aiv(TILE, AIV_IDX)` | Cube | 消费者 | V2C |
+| `tpush_to_aiv(TILE, SPLIT)` | Cube | 生产者 | C2V |
+| `tpush_to_aic(TILE, SPLIT)` | Vector | 生产者 | V2C |
+| `tpop_from_aic(TILE, SPLIT)` | Vector | 消费者 | C2V |
+| `tpop_from_aiv(TILE, SPLIT)` | Cube | 消费者 | V2C |
 
-**参数：**
+**参数（tpush）：**
 
 | 参数 | 类型 | 说明 |
 | ---- | ---- | ---- |
-| `TILE` | `Tile&` | 源（push）或目标（pop）tile |
-| `AIV_IDX` | `uint8_t` | 伙伴 Vector 核心索引（0 或 1）— 见下方说明 |
+| `TILE` | `Tile&` | 要推送的源 tile |
+| `SPLIT` | `int` | 分割模式（0=无，1=上下，2=左右） |
 
-> **`AIV_IDX` 语义因核心类型而异：**
->
-> - **Cube 执行**的指令（`tpush_to_aiv`、`tpop_from_aiv`）：`AIV_IDX` 是**目标/源伙伴 Vector 核心索引**。
-> - **Vector 执行**的指令（`tpush_to_aic`、`tpop_from_aic`）：`AIV_IDX` 是**本 Vector 核心自身的索引**，标识使用哪组硬件标志位。
+**参数（tpop）：**
+
+| 参数 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `TILE` | `Tile&` | 接收数据的目标 tile |
+| `SPLIT` | `int` | 分割模式（0=无，1=上下，2=左右） |
 
 ### Push 协议（`tpush_to_aiv` / `tpush_to_aic`）
 
 ```text
-function tpush_*(TILE, AIV_IDX):
+function tpush_*(TILE, SPLIT):
     // 1. Wait for slot to be free (consumer has released it)
-    WAIT flag_free[dir, AIV_IDX]: target_tag
+    WAIT flag_free[dir]: target_tag
 
     // 2. DMA tile data into ring buffer slot
     MTE_copy(src=TILE.data, dst=ring_buf + target_tag * SLOT_SIZE, size=SLOT_SIZE)
     SET mte_flag; WAIT mte_flag           // ensure DMA complete
 
     // 3. Signal consumer: data in slot is ready
-    SET flag_ready[dir, AIV_IDX]: target_tag
+    SET flag_ready[dir]: target_tag
 
     // 4. Advance to next slot
     target_tag = (target_tag + 1) % SLOT_NUM
@@ -173,9 +175,9 @@ function tpush_*(TILE, AIV_IDX):
 ### Pop 协议（`tpop_from_aic` / `tpop_from_aiv`）
 
 ```text
-function tpop_*(TILE, AIV_IDX):
+function tpop_*(TILE, SPLIT):
     // 1. Wait for data to be ready (producer has filled the slot)
-    WAIT flag_ready[dir, AIV_IDX]: target_tag
+    WAIT flag_ready[dir]: target_tag
 
     // 2. Load tile data from ring buffer slot
     if PLATFORM_A2A3:
@@ -185,7 +187,7 @@ function tpop_*(TILE, AIV_IDX):
         TILE.data = ring_buf + target_tag * SLOT_SIZE   // zero-copy
 
     // 3. Signal producer: slot is free for reuse
-    SET flag_free[dir, AIV_IDX]: target_tag
+    SET flag_free[dir]: target_tag
 
     // 4. Advance to next slot
     target_tag = (target_tag + 1) % SLOT_NUM
@@ -254,7 +256,7 @@ Flag usage (per AIV peer):
 2. **背压（Backpressure）** — 生产者在所有槽满时阻塞；消费者在无数据时阻塞
 3. **FIFO 顺序** — 严格的轮询 `(tag + 1) % SLOT_NUM`
 4. **解耦 DMA** — 异步 MTE 传输，显式标志位等待
-5. **伙伴核心选择** — `AIV_IDX` 选择 Vector 核心（0 或 1）
+5. **伙伴核心选择** — 由初始化处理，非逐指令指定
 6. **静态方向** — 方向编码在操作码中，编译时验证
 
 ## API 总结
@@ -263,7 +265,7 @@ Flag usage (per AIV peer):
 | --- | ---- | ---- | ---- |
 | `aic_initialize_pipe(...)` | Cube | 初始化 | 绑定环形缓冲区，初始化标签，预信号 V2C 空闲槽 |
 | `aiv_initialize_pipe(...)` | Vector | 初始化 | 绑定环形缓冲区，初始化标签，预信号 C2V 空闲槽 |
-| `tpush_to_aiv(TILE, AIV_IDX)` | Cube | 生产者 | 等待空闲 → DMA tile → 信号就绪 |
-| `tpush_to_aic(TILE, AIV_IDX)` | Vector | 生产者 | 等待空闲 → DMA tile → 信号就绪 |
-| `tpop_from_aic(TILE, AIV_IDX)` | Vector | 消费者 | 等待就绪 → 加载 tile → 信号空闲 |
-| `tpop_from_aiv(TILE, AIV_IDX)` | Cube | 消费者 | 等待就绪 → 加载 tile → 信号空闲 |
+| `tpush_to_aiv(TILE, SPLIT)` | Cube | 生产者 | 等待空闲 → DMA tile → 信号就绪 |
+| `tpush_to_aic(TILE, SPLIT)` | Vector | 生产者 | 等待空闲 → DMA tile → 信号就绪 |
+| `tpop_from_aic(TILE, SPLIT)` | Vector | 消费者 | 等待就绪 → 加载 tile → 信号空闲 |
+| `tpop_from_aiv(TILE, SPLIT)` | Cube | 消费者 | 等待就绪 → 加载 tile → 信号空闲 |

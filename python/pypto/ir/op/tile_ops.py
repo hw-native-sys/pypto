@@ -1754,7 +1754,7 @@ def tpop_from_aic(
     result_type: _ir_core.Type | None = None,
     shape: list[int] | None = None,
     dtype: DataType | None = None,
-    aiv_idx: int,
+    split: int = 0,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -1763,15 +1763,15 @@ def tpop_from_aic(
         result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
         shape: Shape of the tile to receive (alternative to result_type).
         dtype: Data type of the tile to receive (alternative to result_type).
-        aiv_idx: Target AIV core index
+        split: Split mode (0=none, 1=up-down, 2=left-right)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Vec)
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aic")
-        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
-    return _ir_core.create_op_call("tile.tpop_from_aic", [], {"aiv_idx": aiv_idx}, actual_span)
+        return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aic", [], {"split": split}, actual_span)
 
 
 def tpop_from_aiv(
@@ -1779,7 +1779,7 @@ def tpop_from_aiv(
     result_type: _ir_core.Type | None = None,
     shape: list[int] | None = None,
     dtype: DataType | None = None,
-    aiv_idx: int,
+    split: int = 0,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIV cross-core pipe into AIC.
@@ -1788,12 +1788,12 @@ def tpop_from_aiv(
         result_type: Explicit result type (e.g. TileType). Mutually exclusive with shape/dtype.
         shape: Shape of the tile to receive (alternative to result_type).
         dtype: Data type of the tile to receive (alternative to result_type).
-        aiv_idx: Source AIV core index
+        split: Split mode (0=none, 1=up-down, 2=left-right)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Mat)
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aiv")
-        return _ir_core.Call(op, [], {"aiv_idx": aiv_idx}, resolved_type, actual_span)
-    return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"aiv_idx": aiv_idx}, actual_span)
+        return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"split": split}, actual_span)

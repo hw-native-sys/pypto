@@ -135,7 +135,7 @@ def my_vector_kernel(self, ...):
     )
 
     for ...:
-        tile = pl.tpop_from_aic(aiv_idx=0)    # zero-copy from pipe_buf on A5
+        tile = pl.tpop_from_aic()              # 从 pipe_buf 零拷贝读取（A5 平台）
         # ... compute on tile ...
         pl.tfree_to_aic(aiv_idx=0)             # release slot
 ```
@@ -158,7 +158,7 @@ def my_cube_kernel(self, ...):
     )
 
     for ...:
-        pl.tpush_to_aiv(tile, aiv_idx=0)    # DMA to peer_buf.base on A5
+        pl.tpush_to_aiv(tile, split=0)       # DMA 到 peer_buf.base（A5 平台）
 ```
 
 ### DSL 总结
@@ -171,30 +171,43 @@ def my_cube_kernel(self, ...):
 
 ## IR 表示
 
-`pl.reserve_buffer` 降级为 `ReserveBuffer` 节点：
+`pl.reserve_buffer` 降级为 `pto.reserve_buffer` 操作，返回 `i32` SSA 值：
 
-```text
+```mlir
 func @my_vector_kernel(...) {
-    %pipe_buf = reserve_buffer {
+    %c2v_slot_buffer = pto.reserve_buffer {
         name = "c2v_slot_buffer",
-        size = 4096,              // SLOT_NUM * SLOT_SIZE
-        base = auto,              // or literal 0x1000
-        memory_space = "UB"       // inferred from core type
-    }
+        size = 4096,
+        location = #pto.address_space<vec>,
+        auto = true
+    } -> i32
     ...
 }
 ```
 
-`pl.import_peer_buffer` 降级为 `ImportPeerBuffer` 节点：
+`pl.import_peer_buffer` 降级为 `pto.import_reserved_buffer` 操作，返回 `i32` SSA 值，`peer_func` 使用 MLIR 符号语法：
 
-```text
+```mlir
 func @my_cube_kernel(...) {
-    %peer_buf = import_peer_buffer {
+    %c2v_slot_buffer_import = pto.import_reserved_buffer {
         name = "c2v_slot_buffer",
         peer_func = @my_vector_kernel
-    }
+    } -> i32
     ...
 }
+```
+
+`initialize_pipe` 操作以 SSA 操作数引用这些值，而非整数属性：
+
+```mlir
+// Cube 侧（AIC）：V2C 方向为消费者（reserve_buffer），C2V 方向为生产者（import）
+%c0_i32 = arith.constant 0 : i32
+%v2c_buf = pto.reserve_buffer {name = "v2c_slot_buffer", size = 4096,
+    location = #pto.address_space<mat>, auto = false, base = 4096} -> i32
+%c2v_import = pto.import_reserved_buffer {name = "c2v_slot_buffer",
+    peer_func = @my_vector_kernel} -> i32
+pto.aic_initialize_pipe {dir_mask = 3, slot_size = 512}
+    (c2v_consumer_buf = %c2v_import : i32, v2c_consumer_buf = %v2c_buf : i32)
 ```
 
 ## 分配器处理

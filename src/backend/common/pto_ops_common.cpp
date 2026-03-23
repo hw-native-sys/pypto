@@ -658,7 +658,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
   std::ostringstream oss;
-  oss << "pto.tpush_to_aiv ins(" << tile_buf;
+  oss << "pto.tpush_to_aiv(" << tile_buf;
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
@@ -684,7 +684,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
   std::ostringstream oss;
-  oss << "pto.tpush_to_aic ins(" << tile_buf;
+  oss << "pto.tpush_to_aic(" << tile_buf;
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
@@ -700,20 +700,20 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
 
   CHECK(op->args_.size() == 0) << "tpop_from_aic takes no arguments, got " << op->args_.size();
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tpop_from_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  const int split = op->GetKwarg<int>("split", 0);
+  CHECK(split >= 0 && split <= 2)
+      << "tpop_from_aic requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string result_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK(!result_buf.empty()) << "tpop_from_aic requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tpop_from_aic outs(" << result_buf;
+  oss << "pto.tpop_from_aic {split = " << split << "} (" << result_buf;
   if (!result_type.empty()) {
     oss << " : " << result_type;
   }
-  oss << ") {aiv_idx = " << aiv_idx << "}";
+  oss << ")";
   codegen.Emit(oss.str());
 
   return "";
@@ -725,20 +725,20 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
 
   CHECK(op->args_.size() == 0) << "tpop_from_aiv takes no arguments, got " << op->args_.size();
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tpop_from_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  const int split = op->GetKwarg<int>("split", 0);
+  CHECK(split >= 0 && split <= 2)
+      << "tpop_from_aiv requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string result_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK(!result_buf.empty()) << "tpop_from_aiv requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tpop_from_aiv outs(" << result_buf;
+  oss << "pto.tpop_from_aiv {split = " << split << "} (" << result_buf;
   if (!result_type.empty()) {
     oss << " : " << result_type;
   }
-  oss << ") {aiv_idx = " << aiv_idx << "}";
+  oss << ")";
   codegen.Emit(oss.str());
 
   return "";
@@ -784,20 +784,19 @@ static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::C
 
   const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
   const int slot_size = op->GetKwarg<int>("slot_size", -1);
-  const int c2v_consumer_buf = op->GetKwarg<int>("c2v_consumer_buf", -1);
-  const int v2c_consumer_buf = op->GetKwarg<int>("v2c_consumer_buf", -1);
   CHECK(dir_mask >= 0) << "aic_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aic_initialize_pipe requires 'slot_size' attribute";
 
+  // AIC (Cube): consumer for V2C (reserve), producer for C2V (import)
+  std::string v2c_ssa = codegen.GetReserveBufferSSA();
+  std::string c2v_ssa = codegen.GetImportBufferSSA();
+  if (v2c_ssa.empty()) v2c_ssa = codegen.GetOrEmitI32Constant(0);
+  if (c2v_ssa.empty()) c2v_ssa = codegen.GetOrEmitI32Constant(0);
+
   std::ostringstream oss;
-  oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size;
-  if (c2v_consumer_buf >= 0) {
-    oss << ", c2v_consumer_buf = " << c2v_consumer_buf;
-  }
-  if (v2c_consumer_buf >= 0) {
-    oss << ", v2c_consumer_buf = " << v2c_consumer_buf;
-  }
-  oss << "}";
+  oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}"
+      << " (c2v_consumer_buf = " << c2v_ssa << " : i32"
+      << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
   codegen.Emit(oss.str());
 
   return "";
@@ -809,20 +808,19 @@ static std::string MakeAivInitializePipeCodegenPTO(const CallPtr& op, codegen::C
 
   const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
   const int slot_size = op->GetKwarg<int>("slot_size", -1);
-  const int c2v_consumer_buf = op->GetKwarg<int>("c2v_consumer_buf", -1);
-  const int v2c_consumer_buf = op->GetKwarg<int>("v2c_consumer_buf", -1);
   CHECK(dir_mask >= 0) << "aiv_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aiv_initialize_pipe requires 'slot_size' attribute";
 
+  // AIV (Vector): consumer for C2V (reserve), producer for V2C (import)
+  std::string c2v_ssa = codegen.GetReserveBufferSSA();
+  std::string v2c_ssa = codegen.GetImportBufferSSA();
+  if (c2v_ssa.empty()) c2v_ssa = codegen.GetOrEmitI32Constant(0);
+  if (v2c_ssa.empty()) v2c_ssa = codegen.GetOrEmitI32Constant(0);
+
   std::ostringstream oss;
-  oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size;
-  if (c2v_consumer_buf >= 0) {
-    oss << ", c2v_consumer_buf = " << c2v_consumer_buf;
-  }
-  if (v2c_consumer_buf >= 0) {
-    oss << ", v2c_consumer_buf = " << v2c_consumer_buf;
-  }
-  oss << "}";
+  oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}"
+      << " (c2v_consumer_buf = " << c2v_ssa << " : i32"
+      << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
   codegen.Emit(oss.str());
 
   return "";
@@ -1137,15 +1135,32 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     CHECK(size > 0) << "reserve_buffer requires positive 'size' attribute, got " << size;
     CheckSafeIdentifier(name, "reserve_buffer 'name'");
 
-    std::ostringstream oss;
-    oss << "pto.reserve_buffer {name = \"" << name << "\", size = " << size;
-    if (base >= 0) {
-      oss << ", base = " << base;
-    } else {
-      oss << ", base = auto";
+    std::string ssa_name = codegen.GetCurrentResultTarget();
+    if (ssa_name.empty()) {
+      // EvalStmt context — derive SSA name from buffer name hint
+      ssa_name = codegen.NewNamedTemp(name);
     }
-    oss << "}";
+
+    std::string location;
+    if (codegen.IsAICFunction()) {
+      location = "mat";
+    } else if (codegen.IsAIVFunction()) {
+      location = "vec";
+    } else {
+      location = "undefined";
+    }
+
+    std::ostringstream oss;
+    oss << ssa_name << " = pto.reserve_buffer {name = \"" << name << "\", size = " << size
+        << ", location = #pto.address_space<" << location << ">";
+    if (base >= 0) {
+      oss << ", auto = false, base = " << base;
+    } else {
+      oss << ", auto = true";
+    }
+    oss << "} -> i32";
     codegen.Emit(oss.str());
+    codegen.RecordReserveBufferSSA(ssa_name);
 
     return std::string("");
   });
@@ -1160,9 +1175,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     CheckSafeIdentifier(name, "import_peer_buffer 'name'");
     CheckSafeIdentifier(peer_func, "import_peer_buffer 'peer_func'");
 
+    std::string ssa_name = codegen.GetCurrentResultTarget();
+    if (ssa_name.empty()) {
+      ssa_name = codegen.NewNamedTemp(name + "_import");
+    }
+
     std::ostringstream oss;
-    oss << "pto.import_peer_buffer {name = \"" << name << "\", peer_func = \"" << peer_func << "\"}";
+    oss << ssa_name << " = pto.import_reserved_buffer {name = \"" << name << "\", peer_func = @" << peer_func
+        << "} -> i32";
     codegen.Emit(oss.str());
+    codegen.RecordImportBufferSSA(ssa_name);
 
     return std::string("");
   });

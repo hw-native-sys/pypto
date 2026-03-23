@@ -108,6 +108,14 @@ class PTOCodegen : public CodegenBase {
   std::string GetIndexConstant(int64_t val);
 
   /**
+   * @brief Get or emit i32 constant (for cross-core consumer buffer addresses)
+   *
+   * @param value Constant value
+   * @return SSA variable name for the constant (e.g., "%c0_i32")
+   */
+  std::string GetOrEmitI32Constant(int32_t value);
+
+  /**
    * @brief Register a variable to an MLIR SSA name
    *
    * @param var IR variable
@@ -203,6 +211,36 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+
+  /**
+   * @brief Record the SSA name produced by reserve_buffer for cross-core pipe setup
+   */
+  void RecordReserveBufferSSA(const std::string& ssa);
+
+  /**
+   * @brief Get the recorded reserve_buffer SSA name (empty if none)
+   */
+  [[nodiscard]] std::string GetReserveBufferSSA() const;
+
+  /**
+   * @brief Record the SSA name produced by import_reserved_buffer for cross-core pipe setup
+   */
+  void RecordImportBufferSSA(const std::string& ssa);
+
+  /**
+   * @brief Get the recorded import_reserved_buffer SSA name (empty if none)
+   */
+  [[nodiscard]] std::string GetImportBufferSSA() const;
+
+  /**
+   * @brief Check if the current function is an AIC (Cube) function
+   */
+  [[nodiscard]] bool IsAICFunction() const;
+
+  /**
+   * @brief Check if the current function is an AIV (Vector) function
+   */
+  [[nodiscard]] bool IsAIVFunction() const;
 
  protected:
   // Override visitor methods for code generation - Statements
@@ -321,6 +359,7 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
   std::map<int64_t, std::string> emitted_constants_;
   std::map<int64_t, std::string> emitted_i64_constants_;
+  std::map<int32_t, std::string> emitted_i32_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
 
@@ -349,6 +388,14 @@ class PTOCodegen : public CodegenBase {
   std::shared_ptr<const ir::TileType> current_result_tile_type_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
+
+  // Cross-core buffer SSA tracking (per function)
+  // NOTE: These are singletons because the cross-core protocol guarantees at most
+  // one reserve_buffer and one import_peer_buffer per function.  If the protocol
+  // evolves to support multiple buffers per direction, these should be replaced
+  // with a map keyed by buffer name or direction.
+  std::string reserve_buf_ssa_;  ///< SSA name from reserve_buffer
+  std::string import_buf_ssa_;   ///< SSA name from import_reserved_buffer
 
   // Control flow expression result communication
   std::string current_expr_value_;         ///< SSA name from expression visitors

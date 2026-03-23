@@ -59,10 +59,12 @@ class CrossCoreTpushTpopProgram:
         pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
         pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
 
-        received_add: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
-        received_sub: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
+        received_add: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=1)
+        received_sub: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=1)
+        received_add_left = pl.move(received_add, target_memory=pl.Mem.Left)
+        received_sub_right = pl.move(received_sub, target_memory=pl.Mem.Right)
 
-        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received_add, received_sub)
+        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received_add_left, received_sub_right)
 
         pl.tfree_to_aiv(aiv_idx=0)
         pl.tfree_to_aiv(aiv_idx=0)
@@ -109,7 +111,7 @@ class BidirectionalCrossCorProgram:
         pl.tpush_to_aic(sum_tile, split=0)
 
         # Receive matmul result back from Cube (C2V direction)
-        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.tpop_from_aic(aiv_idx=0)
+        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.tpop_from_aic(split=0)
 
         # Post-process: apply exp (Vector op)
         processed: pl.Tile[[16, 16], pl.FP32] = pl.exp(mm_result)
@@ -136,7 +138,7 @@ class BidirectionalCrossCorProgram:
         )
 
         # Receive preprocessed tile from Vector (V2C direction)
-        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
+        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=0)
 
         # Matmul (Cube op)
         w_tile: pl.Tile[[16, 16], pl.FP16] = pl.load(weight, [0, 0], [16, 16])
@@ -167,6 +169,7 @@ class TestCrossCoreTpushTpopCodegen:
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B_PTO)
+        # backend.set_backend_type(BackendType.Ascend950)
 
         pipeline = passes.PassPipeline()
         for factory in [
@@ -203,11 +206,15 @@ class TestCrossCoreTpushTpopCodegen:
         vector_code = codes["vector_producer"]
 
         assert vector_code, "Vector producer MLIR should not be empty"
-        assert "pto.import_peer_buffer" in vector_code, "Should contain pto.import_peer_buffer"
-        assert 'peer_func = "cube_consumer"' in vector_code, "Should reference cube_consumer"
+        assert "pto.import_reserved_buffer" in vector_code, "Should contain pto.import_reserved_buffer"
+        assert "peer_func = @cube_consumer" in vector_code, (
+            "Should reference cube_consumer with MLIR symbol syntax"
+        )
+        assert "-> i32" in vector_code, "import_reserved_buffer should return i32"
         assert "pto.aiv_initialize_pipe" in vector_code, "Should contain pto.aiv_initialize_pipe"
         assert "dir_mask = 2" in vector_code, "Should have dir_mask = 2 (V2C)"
-        assert "v2c_consumer_buf = 4096" in vector_code, "Should have v2c_consumer_buf = 4096 (0x1000)"
+        assert "v2c_consumer_buf = " in vector_code, "Should have v2c_consumer_buf as SSA reference"
+        assert "c2v_consumer_buf = " in vector_code, "Should have c2v_consumer_buf as SSA reference"
         assert "pto.tpush_to_aic" in vector_code, "Should contain pto.tpush_to_aic"
         assert "pto.tadd" in vector_code, "Should contain elementwise add (Vector op)"
 
@@ -219,10 +226,15 @@ class TestCrossCoreTpushTpopCodegen:
         assert cube_code, "Cube consumer MLIR should not be empty"
         assert "pto.reserve_buffer" in cube_code, "Should contain pto.reserve_buffer"
         assert 'name = "v2c_slot_buffer"' in cube_code, "Should reference v2c_slot_buffer"
+        assert "auto = false" in cube_code, "Should have auto = false for explicit base address"
         assert "base = 4096" in cube_code, "Should have explicit base address (0x1000 = 4096)"
+        assert "location = #pto.address_space<" in cube_code, "Should have location attribute"
+        assert "-> i32" in cube_code, "reserve_buffer should return i32"
         assert "pto.aic_initialize_pipe" in cube_code, "Should contain pto.aic_initialize_pipe"
         assert "dir_mask = 2" in cube_code, "Should have dir_mask = 2 (V2C)"
-        assert "v2c_consumer_buf = 4096" in cube_code, "Should have v2c_consumer_buf = 4096 (0x1000)"
+        assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
+        assert "c2v_consumer_buf = " in cube_code, "Should have c2v_consumer_buf as SSA reference"
+        assert "arith.constant 0 : i32" in cube_code, "Should emit i32 constant for default consumer buf"
         assert "pto.tpop_from_aiv" in cube_code, "Should contain pto.tpop_from_aiv"
         assert "pto.tfree_to_aiv" in cube_code, "Should contain pto.tfree_to_aiv"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
@@ -237,14 +249,16 @@ class TestCrossCoreTpushTpopCodegen:
         # Buffer setup: C2V consumer reserves buffer, V2C producer imports peer buffer
         assert "pto.reserve_buffer" in vector_code, "Should reserve buffer for C2V"
         assert 'name = "c2v_slot_buffer"' in vector_code, "Should reference c2v_slot_buffer"
+        assert "auto = false" in vector_code, "Should have auto = false for explicit base"
         assert "base = 8192" in vector_code, "Should have explicit base address (0x2000 = 8192)"
-        assert "pto.import_peer_buffer" in vector_code, "Should import peer buffer for V2C"
-        assert 'peer_func = "cube_bidir"' in vector_code, "Should reference cube_bidir"
+        assert "-> i32" in vector_code, "Buffer ops should return i32"
+        assert "pto.import_reserved_buffer" in vector_code, "Should import peer buffer for V2C"
+        assert "peer_func = @cube_bidir" in vector_code, "Should reference cube_bidir"
         # Bidirectional init
         assert "pto.aiv_initialize_pipe" in vector_code, "Should contain aiv_initialize_pipe"
         assert "dir_mask = 3" in vector_code, "Should have dir_mask = 3 (bidirectional)"
-        assert "c2v_consumer_buf = 8192" in vector_code, "Should have c2v_consumer_buf = 8192 (0x2000)"
-        assert "v2c_consumer_buf = 4096" in vector_code, "Should have v2c_consumer_buf = 4096 (0x1000)"
+        assert "c2v_consumer_buf = " in vector_code, "Should have c2v_consumer_buf as SSA reference"
+        assert "v2c_consumer_buf = " in vector_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C producer side: preprocess + push
         assert "pto.tadd" in vector_code, "Should do elementwise add (Vector op)"
         assert "pto.tpush_to_aic" in vector_code, "Should push to AIC"
@@ -263,14 +277,16 @@ class TestCrossCoreTpushTpopCodegen:
         # Buffer setup: V2C consumer reserves buffer with explicit base, C2V producer imports peer buffer
         assert "pto.reserve_buffer" in cube_code, "Should reserve buffer for V2C"
         assert 'name = "v2c_slot_buffer"' in cube_code, "Should reference v2c_slot_buffer"
+        assert "auto = false" in cube_code, "Should have auto = false for explicit base"
         assert "base = 4096" in cube_code, "Should have explicit base address (0x1000 = 4096)"
-        assert "pto.import_peer_buffer" in cube_code, "Should import peer buffer for C2V"
-        assert 'peer_func = "vector_bidir"' in cube_code, "Should reference vector_bidir"
-        # Bidirectional init with explicit consumer buffer addresses
+        assert "-> i32" in cube_code, "Buffer ops should return i32"
+        assert "pto.import_reserved_buffer" in cube_code, "Should import peer buffer for C2V"
+        assert "peer_func = @vector_bidir" in cube_code, "Should reference vector_bidir"
+        # Bidirectional init with SSA consumer buffer references
         assert "pto.aic_initialize_pipe" in cube_code, "Should contain aic_initialize_pipe"
         assert "dir_mask = 3" in cube_code, "Should have dir_mask = 3 (bidirectional)"
-        assert "c2v_consumer_buf = 8192" in cube_code, "Should have c2v_consumer_buf = 8192 (0x2000)"
-        assert "v2c_consumer_buf = 4096" in cube_code, "Should have v2c_consumer_buf = 4096 (0x1000)"
+        assert "c2v_consumer_buf = " in cube_code, "Should have c2v_consumer_buf as SSA reference"
+        assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C consumer side: receive preprocessed data
         assert "pto.tpop_from_aiv" in cube_code, "Should pop from AIV"
         assert "pto.tfree_to_aiv" in cube_code, "Should free V2C slot"
@@ -295,7 +311,7 @@ class TestCrossCoreTpushTpopCodegen:
             "pto.aic_initialize_pipe",
             "pto.aiv_initialize_pipe",
             "pto.reserve_buffer",
-            "pto.import_peer_buffer",
+            "pto.import_reserved_buffer",
         ]
         for op in expected_ops:
             assert op in all_code, f"Expected PTO op '{op}' not found in generated MLIR"
