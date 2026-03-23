@@ -13,7 +13,7 @@ PyPTO - Python Tensor Operations Library
 This package provides Python bindings for the PyPTO C++ library.
 """
 
-from . import codegen, ir, passes, testing
+from . import arith, codegen, ir, passes, testing
 from .logging import (
     InternalError,
     LogLevel,
@@ -136,6 +136,8 @@ class DataType:
         """String representation for printing"""
 
 __all__ = [
+    # Arithmetic simplification
+    "arith",
     # Core IR types
     "ir",
     # Pass transformations

@@ -115,10 +115,14 @@ void BindCodegen(nanobind::module_& m);
  */
 void BindBackend(nanobind::module_& m);
 
-// Future binding declarations can be added here:
-// void BindTensors(nanobind::module_& m);
-// void BindOps(nanobind::module_& m);
-// void BindDevices(nanobind::module_& m);
+/**
+ * @brief Register arithmetic simplification utilities
+ *
+ * Registers constant folding and (future) analyzer classes as the arith submodule.
+ *
+ * @param m The parent nanobind module object
+ */
+void BindArith(nanobind::module_& m);
 
 }  // namespace python
 }  // namespace pypto

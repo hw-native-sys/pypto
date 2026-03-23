@@ -63,6 +63,9 @@ NB_MODULE(pypto_core, m) {
   // Register backend bindings
   pypto::python::BindBackend(m);
 
+  // Register arithmetic simplification utilities
+  pypto::python::BindArith(m);
+
   // Validate that all tile.* ops have memory specs — fails at import time if any are missing
   pypto::ir::OpRegistry::GetInstance().ValidateTileOps();
 }
