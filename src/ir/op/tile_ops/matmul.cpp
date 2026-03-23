@@ -173,6 +173,10 @@ TypePtr DeduceTileMatMulAccType(const std::vector<ExprPtr>& args,
   auto result_dtype =
       (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
+  CHECK(acc_type->dtype_ == result_dtype)
+      << "The operator " << op_name << " requires accumulator dtype " << result_dtype.ToString()
+      << ", but got " << acc_type->dtype_.ToString();
+
   // Output shape is [M, N] (same as accumulator)
   std::vector<ExprPtr> output_shape = {m_dim_acc, n_dim_acc};
 

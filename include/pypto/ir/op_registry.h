@@ -369,7 +369,8 @@ class OpRegistryEntry {
   /// Used for accumulate ops where the output writes into the input buffer.
   inline OpRegistryEntry& set_output_reuses_input(size_t arg_index) {
     EnsureMemorySpec();
-    memory_spec_->output_reuses_input_arg = arg_index;
+    auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    spec.output_reuses_input_arg = arg_index;
     return *this;
   }
 
