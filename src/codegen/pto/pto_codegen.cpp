@@ -698,11 +698,21 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != ssa_to_tile_buf_type_.end() ? it->second : std::string{};
 }
 
-void PTOCodegen::RecordReserveBufferSSA(const std::string& ssa) { reserve_buf_ssa_ = ssa; }
+void PTOCodegen::RecordReserveBufferSSA(const std::string& ssa) {
+  INTERNAL_CHECK(reserve_buf_ssa_.empty())
+      << "Internal error: multiple reserve_buffer ops in the same function not supported, "
+      << "existing: " << reserve_buf_ssa_ << ", new: " << ssa;
+  reserve_buf_ssa_ = ssa;
+}
 
 std::string PTOCodegen::GetReserveBufferSSA() const { return reserve_buf_ssa_; }
 
-void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) { import_buf_ssa_ = ssa; }
+void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) {
+  INTERNAL_CHECK(import_buf_ssa_.empty())
+      << "Internal error: multiple import_peer_buffer ops in the same function not supported, "
+      << "existing: " << import_buf_ssa_ << ", new: " << ssa;
+  import_buf_ssa_ = ssa;
+}
 
 std::string PTOCodegen::GetImportBufferSSA() const { return import_buf_ssa_; }
 
