@@ -86,6 +86,52 @@ class ConstIntBoundAnalyzer {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Modular arithmetic properties: value = coeff * k + base for some integer k.
+///
+/// When coeff == 0, the value is exactly `base` (known constant).
+/// When coeff == 1 && base == 0, no useful modular information is known.
+struct ModularSet {
+  int64_t coeff;  ///< Always >= 0. 0 means exact value known.
+  int64_t base;   ///< Normalized: 0 <= base < coeff (when coeff > 0).
+
+  [[nodiscard]] bool is_exact() const { return coeff == 0; }
+  [[nodiscard]] bool is_everything() const { return coeff == 1 && base == 0; }
+};
+
+/// Tracks modular arithmetic properties through expression trees.
+///
+/// Given an expression, computes {coeff, base} such that the expression
+/// is always of the form coeff * k + base. Enables simplifications like
+/// (2*x) % 2 → 0.
+class ModularSetAnalyzer {
+ public:
+  /// Construct a standalone analyzer (no parent Analyzer).
+  ModularSetAnalyzer();
+
+  ~ModularSetAnalyzer();
+
+  ModularSetAnalyzer(const ModularSetAnalyzer&) = delete;
+  ModularSetAnalyzer& operator=(const ModularSetAnalyzer&) = delete;
+  ModularSetAnalyzer(ModularSetAnalyzer&&) noexcept;
+  ModularSetAnalyzer& operator=(ModularSetAnalyzer&&) noexcept;
+
+  /// Compute modular set for an expression.
+  ModularSet operator()(const ExprPtr& expr) const;
+
+  /// Update a variable's modular set information.
+  void Update(const VarPtr& var, const ModularSet& info);
+
+  /// Enter a constraint scope. Returns a recovery function.
+  std::function<void()> EnterConstraint(const ExprPtr& constraint);
+
+ private:
+  friend class Analyzer;
+  explicit ModularSetAnalyzer(Analyzer* parent);
+
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace arith
 }  // namespace ir
 }  // namespace pypto

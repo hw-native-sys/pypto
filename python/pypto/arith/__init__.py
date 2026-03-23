@@ -16,6 +16,8 @@ Provides constant folding and (future) expression analysis utilities.
 from pypto.pypto_core.arith import (
     ConstIntBound,
     ConstIntBoundAnalyzer,
+    ModularSet,
+    ModularSetAnalyzer,
     extended_euclidean,
     floordiv,
     floormod,
@@ -27,6 +29,8 @@ from pypto.pypto_core.arith import (
 __all__ = [
     "ConstIntBound",
     "ConstIntBoundAnalyzer",
+    "ModularSet",
+    "ModularSetAnalyzer",
     "extended_euclidean",
     "floordiv",
     "floormod",

@@ -101,6 +101,31 @@ void BindArith(nb::module_& m) {
            "Bind a variable to the half-open range [min_val, max_val_exclusive).")
       .def("update", &ir::arith::ConstIntBoundAnalyzer::Update, nb::arg("var"), nb::arg("bound"),
            "Update a variable's bound (inclusive on both ends).");
+
+  // ModularSet
+  nb::class_<ir::arith::ModularSet>(arith, "ModularSet",
+                                    "Modular arithmetic properties: value = coeff * k + base.")
+      .def(nb::init<int64_t, int64_t>(), nb::arg("coeff"), nb::arg("base"),
+           "Create a modular set with given coeff and base.")
+      .def_ro("coeff", &ir::arith::ModularSet::coeff, "Coefficient (>= 0). 0 means exact value known.")
+      .def_ro("base", &ir::arith::ModularSet::base, "Base value. Normalized to [0, coeff) when coeff > 0.")
+      .def("is_exact", &ir::arith::ModularSet::is_exact, "Check if exact value is known (coeff == 0).")
+      .def("is_everything", &ir::arith::ModularSet::is_everything,
+           "Check if no useful modular info (coeff == 1, base == 0).")
+      .def("__repr__", [](const ir::arith::ModularSet& s) {
+        return "ModularSet(coeff=" + std::to_string(s.coeff) + ", base=" + std::to_string(s.base) + ")";
+      });
+
+  // ModularSetAnalyzer
+  nb::class_<ir::arith::ModularSetAnalyzer>(arith, "ModularSetAnalyzer",
+                                            "Tracks modular arithmetic properties through expression trees.")
+      .def(nb::init<>(), "Create a standalone ModularSetAnalyzer.")
+      .def("__call__", &ir::arith::ModularSetAnalyzer::operator(), nb::arg("expr"),
+           "Compute modular set for an expression.")
+      .def("update", &ir::arith::ModularSetAnalyzer::Update, nb::arg("var"), nb::arg("info"),
+           "Update a variable's modular set information.")
+      .def("enter_constraint", &ir::arith::ModularSetAnalyzer::EnterConstraint, nb::arg("constraint"),
+           "Enter a constraint scope. Returns a recovery function, or None if constraint is not useful.");
 }
 
 }  // namespace python

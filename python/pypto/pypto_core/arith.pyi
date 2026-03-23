@@ -9,6 +9,7 @@
 
 """Type stubs for the arith submodule (arithmetic simplification utilities)."""
 
+from collections.abc import Callable
 from typing import ClassVar
 
 from pypto.pypto_core.ir import Expr, Var
@@ -82,4 +83,41 @@ class ConstIntBoundAnalyzer:
 
     def update(self, var: Var, bound: ConstIntBound) -> None:
         """Update a variable's bound (inclusive on both ends)."""
+        ...
+
+class ModularSet:
+    """Modular arithmetic properties: value = coeff * k + base."""
+
+    def __init__(self, coeff: int, base: int) -> None:
+        """Create a modular set with given coeff and base."""
+        ...
+
+    coeff: int
+    base: int
+
+    def is_exact(self) -> bool:
+        """Check if exact value is known (coeff == 0)."""
+        ...
+
+    def is_everything(self) -> bool:
+        """Check if no useful modular info (coeff == 1, base == 0)."""
+        ...
+
+class ModularSetAnalyzer:
+    """Tracks modular arithmetic properties through expression trees."""
+
+    def __init__(self) -> None:
+        """Create a standalone ModularSetAnalyzer."""
+        ...
+
+    def __call__(self, expr: Expr) -> ModularSet:
+        """Compute modular set for an expression."""
+        ...
+
+    def update(self, var: Var, info: ModularSet) -> None:
+        """Update a variable's modular set information."""
+        ...
+
+    def enter_constraint(self, constraint: Expr) -> Callable[[], None] | None:
+        """Enter a constraint scope. Returns a recovery function, or None."""
         ...
