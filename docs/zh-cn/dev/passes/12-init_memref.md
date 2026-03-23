@@ -45,6 +45,9 @@ program_with_memrefs = init_pass(program)
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
 2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+   - **tile.store**：结果与输出 tensor 参数共享 MemRef
+   - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
+   - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
 3. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 4. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
 5. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
@@ -115,6 +118,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
+  - 处理 `tile.store`、view 操作以及 ForStmt/IfStmt yield 值的 MemRef 共享
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
 - `CreateAllocStatement` / `InsertAllocsIntoBody` 创建并插入 alloc 操作
 

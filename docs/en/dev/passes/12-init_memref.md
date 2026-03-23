@@ -45,6 +45,9 @@ program_with_memrefs = init_pass(program)
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
 2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+   - **tile.store**: result shares MemRef with the output tensor argument
+   - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
+   - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
 3. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 4. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
 5. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
@@ -115,6 +118,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
+  - Handles MemRef sharing for `tile.store`, view ops, and ForStmt/IfStmt yield values
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
 - `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 

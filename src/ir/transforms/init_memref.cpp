@@ -114,7 +114,7 @@ class InitMemRefMutator : public IRMutator {
     }
 
     INTERNAL_CHECK(memory_space.has_value())
-        << "Internal error: ResolveTileMemorySpace must return a value when default_to_ddr is enabled";
+        << "Internal error: memory_space must be resolved before CreateMemRef";
 
     auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
     uint64_t id = next_id_++;
