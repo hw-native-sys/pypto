@@ -72,6 +72,7 @@ struct MemRefUsageInfo {
   const MemRef* ptr = nullptr;
   std::vector<std::pair<const Var*, TileBufSignature>> writers;
   std::vector<std::pair<const Var*, TileBufSignature>> view_users;
+  std::vector<std::pair<const Var*, const Var*>> view_edges;
 };
 
 class MemRefUsageCollector : public IRVisitor {
@@ -86,8 +87,10 @@ class MemRefUsageCollector : public IRVisitor {
     const MemRef* memref_ptr = GetDefinedMemRef(tile_type).get();
     auto sig = TileBufSignature::FromTileType(*tile_type);
 
+    CallPtr call;
     bool is_view = false;
-    if (auto call = As<Call>(op->value_)) {
+    if (auto maybe_call = As<Call>(op->value_)) {
+      call = maybe_call;
       if (IsLegalViewOp(call->op_->name_)) {
         is_view = true;
       }
@@ -96,6 +99,16 @@ class MemRefUsageCollector : public IRVisitor {
     auto& info = GetOrCreate(memref_ptr);
     if (is_view) {
       info.view_users.emplace_back(op->var_.get(), sig);
+      for (const auto& arg : call->args_) {
+        if (auto source_var = As<Var>(arg)) {
+          if (auto source_tile_type = GetTileTypeWithMemRef(source_var->GetType())) {
+            if (GetDefinedMemRef(source_tile_type).get() == memref_ptr) {
+              info.view_edges.emplace_back(source_var.get(), op->var_.get());
+              break;
+            }
+          }
+        }
+      }
     } else {
       info.writers.emplace_back(op->var_.get(), sig);
     }
@@ -128,6 +141,27 @@ class MemRefUsageCollector : public IRVisitor {
 ///
 /// Strategy: the first writer keeps the original MemRef.  Every subsequent
 /// writer whose root signature differs gets a new MemRef.
+void PropagateSplitToViewUsers(const MemRefUsageInfo& info, const std::vector<const Var*>& split_roots,
+                               const MemRefPtr& new_memref, std::map<const Var*, MemRefPtr>& splits) {
+  std::vector<const Var*> worklist = split_roots;
+  std::map<const Var*, bool> visited;
+  for (const Var* root : split_roots) {
+    visited[root] = true;
+  }
+
+  for (size_t i = 0; i < worklist.size(); ++i) {
+    const Var* source = worklist[i];
+    for (const auto& [view_source, view_user] : info.view_edges) {
+      if (view_source != source || visited[view_user]) {
+        continue;
+      }
+      visited[view_user] = true;
+      splits[view_user] = new_memref;
+      worklist.push_back(view_user);
+    }
+  }
+}
+
 std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const MemRef*, MemRefUsageInfo>& usages,
                                                  uint64_t& next_id) {
   std::map<const Var*, MemRefPtr> splits;
@@ -172,10 +206,13 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const MemRef*, M
       auto memory_space = info.writers[indices[0]].second.memory_space;
       auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
       auto new_memref = std::make_shared<MemRef>(memory_space, addr, memref_ptr->size_, next_id++);
+      std::vector<const Var*> split_roots;
 
       for (size_t idx : indices) {
         splits[info.writers[idx].first] = new_memref;
+        split_roots.push_back(info.writers[idx].first);
       }
+      PropagateSplitToViewUsers(info, split_roots, new_memref, splits);
     }
   }
   return splits;

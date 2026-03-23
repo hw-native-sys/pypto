@@ -303,6 +303,74 @@ class TestIllegalSharingSplit:
         result_func = _run_legalize(program)
         _assert_different_memref(result_func, "t1", "t2")
 
+    def test_split_propagates_through_view_chain(self):
+        """A split writer's legal views should follow the new MemRef."""
+        alloc = _MemRefAlloc()
+        shared = alloc.vec([128, 128], _FP32)
+
+        input_t = _tensor_t([128, 128], _FP32)
+        output_t = _tensor_t([64, 64], _FP32)
+
+        view_128 = ir.TileView()
+        view_128.valid_shape = [_ci(128), _ci(128)]
+        view_64 = ir.TileView()
+        view_64.valid_shape = [_ci(64), _ci(64)]
+        padded_view = ir.TileView()
+        padded_view.valid_shape = [_ci(64), _ci(64)]
+        padded_view.pad = ir.PadValue.max
+
+        tile1_type = _tile_t_with_view([128, 128], _FP32, shared, view_128)
+        tile2_type = _tile_t_with_view([64, 64], _FP32, shared, view_64)
+        tile3_type = _tile_t_with_view([64, 64], _FP32, shared, padded_view)
+
+        a_var = ir.Var("a", input_t, _SPAN)
+        b_var = ir.Var("b", output_t, _SPAN)
+        t1 = ir.Var("t1", tile1_type, _SPAN)
+        t2 = ir.Var("t2", tile2_type, _SPAN)
+        t3 = ir.Var("t3", tile3_type, _SPAN)
+
+        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
+        shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
+        shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
+
+        load1 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_128], {}, tile1_type, _SPAN)
+        load2 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_64], {}, tile2_type, _SPAN)
+        fillpad = ir.Call(
+            ir.Op("tile.fillpad"),
+            [t2],
+            {"pad_value": ir.PadValue.max},
+            tile3_type,
+            _SPAN,
+        )
+        result_var = ir.Var("result", output_t, _SPAN)
+        store_call = ir.Call(ir.Op("tile.store"), [t3, offsets, b_var], result_var.type, _SPAN)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(t1, load1, _SPAN),
+                ir.AssignStmt(t2, load2, _SPAN),
+                ir.AssignStmt(t3, fillpad, _SPAN),
+                ir.AssignStmt(result_var, store_call, _SPAN),
+                ir.ReturnStmt([result_var], _SPAN),
+            ],
+            _SPAN,
+        )
+
+        func = ir.Function(
+            "main",
+            [(a_var, ir.ParamDirection.In), (b_var, ir.ParamDirection.Out)],
+            [output_t],
+            body,
+            _SPAN,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([func], "Test", _SPAN)
+
+        result_func = _run_legalize(program)
+        _assert_different_memref(result_func, "t1", "t2")
+        _assert_shares_memref(result_func, "t2", "t3")
+        _assert_different_memref(result_func, "t1", "t3")
+
 
 # ---------------------------------------------------------------------------
 # Integration test: legalize + codegen
@@ -377,6 +445,7 @@ class TestLegalizeWithCodegen:
         assert len(alloc_lines) == 2, (
             f"Expected two alloc_tiles for per-var alloc (same MemRef, same addr), got: {alloc_lines}"
         )
+        assert "%c-1" not in mlir_code
         # Both allocs should share the same addr
         for line in alloc_lines:
             assert "addr =" in line, f"Expected addr attribute in alloc_tile: {line}"

@@ -354,6 +354,7 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
     assert "valid_col = %arg" not in alloc_lines[0], (
         f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_lines[0]}"
     )
+    assert "%c-1" not in mlir_code
 
 
 def test_pto_codegen_tile_load_lowering():

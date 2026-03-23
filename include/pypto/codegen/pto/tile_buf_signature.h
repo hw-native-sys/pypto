@@ -150,7 +150,12 @@ struct TileBufSignature {
     if (RootSignature() == other.RootSignature()) return true;
 
     // Different physical shape but same memory_space + dtype → reshape
-    if (blayout == other.blayout && slayout == other.slayout && fractal == other.fractal) return true;
+    // Element count must match to ensure the physical buffer capacity is compatible
+    if (blayout == other.blayout && slayout == other.slayout && fractal == other.fractal) {
+      const __int128 lhs_elems = static_cast<__int128>(rows) * static_cast<__int128>(cols);
+      const __int128 rhs_elems = static_cast<__int128>(other.rows) * static_cast<__int128>(other.cols);
+      return lhs_elems == rhs_elems;
+    }
 
     return false;
   }

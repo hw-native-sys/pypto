@@ -277,9 +277,9 @@ class PTOCodegen : public CodegenBase {
   void EmitMakeTensorViews(const ir::FunctionPtr& func);
 
   /**
-   * @brief Emit alloc_tile for all tile variables (per-var with explicit addr)
+   * @brief Emit alloc_tile for a tile variable before its first use
    */
-  void EmitAllocTiles(const ir::FunctionPtr& func);
+  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
@@ -338,8 +338,9 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::MemRef*, std::string> memref_to_var_name_;
 
   /// Ordered tile variable allocations: (VarPtr, TileType) pairs in program order.
-  /// This is the single source of truth for EmitAllocTiles emission order.
+  /// This is the single source of truth for per-variable alloc_tile emission.
   std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs_;
+  std::set<const ir::Var*> emitted_tile_alloc_vars_;
 
   // Current function context
   ir::FunctionPtr current_function_;

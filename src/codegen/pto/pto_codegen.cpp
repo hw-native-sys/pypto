@@ -256,6 +256,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   extra_alloc_tiles_.clear();
   ssa_to_tile_buf_type_.clear();
   tile_var_allocs_.clear();
+  emitted_tile_alloc_vars_.clear();
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -301,7 +302,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(tile_var, ssa_name);
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
-    // can query it before EmitAllocTiles runs
+    // can query it before per-variable alloc_tile emission runs.
     std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
     ssa_to_tile_buf_type_[ssa_name] = type_str;
 
@@ -378,8 +379,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Pre-emit i64 address constants now that indent_level_ is set
   for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
     auto memref = ir::GetDefinedMemRef(tile_type);
-    if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
-      GetOrEmitI64Constant(const_addr->value_);
+    if (memref && As<ir::ConstInt>(memref->addr_)) {
+      GetOrEmitI64Constant(As<ir::ConstInt>(memref->addr_)->value_);
     }
   }
 
@@ -421,7 +422,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   stream_ << constants_section_.str();
   EmitMakeTensorViews(func);
-  EmitAllocTiles(func);
   EmitExtraAllocTiles();
   stream_ << body_content;
   stream_ << GetIndent() << "return\n";
@@ -546,51 +546,52 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func) {
-  (void)func;
-  for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
-    auto var_key = GetVarKey(tile_var);
-    auto mlir_it = var_to_mlir_.find(var_key);
-    INTERNAL_CHECK(mlir_it != var_to_mlir_.end())
-        << "Tile var " << tile_var->name_hint_ << " not found in var_to_mlir_";
-    std::string tile_buf = mlir_it->second;
+void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
+                                     const std::shared_ptr<const ir::TileType>& tile_type) {
+  auto var_key = GetVarKey(tile_var);
+  if (!emitted_tile_alloc_vars_.insert(var_key).second) {
+    return;
+  }
 
-    // Collect dynamic valid_shape variable names if present
-    std::string valid_row_mlir;
-    std::string valid_col_mlir;
-    if (tile_type->tile_view_.has_value()) {
-      const auto& tv = tile_type->tile_view_.value();
-      if (tv.valid_shape.size() >= 1) {
-        if (auto var = As<ir::Var>(tv.valid_shape[0])) {
-          valid_row_mlir = GetVarName(var);
-        }
-      }
-      if (tv.valid_shape.size() >= 2) {
-        if (auto var = As<ir::Var>(tv.valid_shape[1])) {
-          valid_col_mlir = GetVarName(var);
-        }
+  auto mlir_it = var_to_mlir_.find(var_key);
+  INTERNAL_CHECK(mlir_it != var_to_mlir_.end())
+      << "Tile var " << tile_var->name_hint_ << " not found in var_to_mlir_";
+  std::string tile_buf = mlir_it->second;
+
+  std::string valid_row_mlir;
+  std::string valid_col_mlir;
+  if (tile_type->tile_view_.has_value()) {
+    const auto& tv = tile_type->tile_view_.value();
+    if (tv.valid_shape.size() >= 1) {
+      if (auto var = As<ir::Var>(tv.valid_shape[0])) {
+        valid_row_mlir = GetVarName(var);
       }
     }
+    if (tv.valid_shape.size() >= 2) {
+      if (auto var = As<ir::Var>(tv.valid_shape[1])) {
+        valid_col_mlir = GetVarName(var);
+      }
+    }
+  }
 
-    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
-
-    // Get addr from MemRef.addr_
-    auto memref = ir::GetDefinedMemRef(tile_type);
-    std::string addr_ssa;
+  std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+  auto memref = ir::GetDefinedMemRef(tile_type);
+  std::string addr_ssa;
+  if (memref) {
     if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
       addr_ssa = GetOrEmitI64Constant(const_addr->value_);
     }
-
-    std::ostringstream line;
-    line << tile_buf << " = pto.alloc_tile";
-    if (!addr_ssa.empty()) line << " addr = " << addr_ssa;
-    if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
-    if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
-    line << " : " << type_str;
-    stream_ << GetIndent() << line.str() << "\n";
-
-    ssa_to_tile_buf_type_[tile_buf] = type_str;
   }
+
+  std::ostringstream line;
+  line << tile_buf << " = pto.alloc_tile";
+  if (!addr_ssa.empty()) line << " addr = " << addr_ssa;
+  if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
+  if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
+  line << " : " << type_str;
+  Emit(line.str());
+
+  ssa_to_tile_buf_type_[tile_buf] = type_str;
 }
 
 // ========================================================================
@@ -625,6 +626,9 @@ std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
   std::string ssa_id;
   if (value == 0) {
     ssa_id = "c0i";
+  } else if (value < 0) {
+    uint64_t magnitude = static_cast<uint64_t>(-(value + 1)) + 1;
+    ssa_id = "cn" + std::to_string(magnitude);
   } else {
     ssa_id = "c" + std::to_string(value);
   }
@@ -676,6 +680,10 @@ void PTOCodegen::EmitExtraAllocTiles() {
 // ========================================================================
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
+  if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
+    EmitAllocTileForVar(op->var_, tile_type);
+  }
+
   if (auto call = As<ir::Call>(op->value_)) {
     if (backend_ != nullptr && backend_->GetOpInfo(call->op_->name_) != nullptr) {
       std::string result_buf =
