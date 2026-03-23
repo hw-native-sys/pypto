@@ -77,6 +77,8 @@ inline int64_t ExtendedEuclidean(int64_t a, int64_t b, int64_t* px, int64_t* py)
     s = tmp_s;
   }
   *px = a >= 0 ? old_s : -old_s;
+  INTERNAL_CHECK(old_r <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      << "ExtendedEuclidean: GCD exceeds INT64_MAX";
   int64_t gcd = static_cast<int64_t>(old_r);
   if (b != 0) {
     *py = (gcd - (*px) * a) / b;
@@ -87,12 +89,19 @@ inline int64_t ExtendedEuclidean(int64_t a, int64_t b, int64_t* px, int64_t* py)
 }
 
 /// GCD that treats 0 as +infinity (identity element for GCD).
-/// Always returns a non-negative value. Safe for INT64_MIN inputs.
+/// Always returns a non-negative value. Safe for INT64_MIN inputs
+/// (the result is always <= max(|a|, |b|); the only case where it
+/// exceeds INT64_MAX is gcd(INT64_MIN, 0) = 2^63, which cannot be
+/// represented as int64_t and triggers INTERNAL_CHECK).
 inline int64_t ZeroAwareGCD(int64_t a, int64_t b) {
   uint64_t ua = SafeAbs(a);
   uint64_t ub = SafeAbs(b);
   if (ua < ub) std::swap(ua, ub);
-  if (ub == 0) return static_cast<int64_t>(ua);
+  if (ub == 0) {
+    INTERNAL_CHECK(ua <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        << "GCD result exceeds INT64_MAX";
+    return static_cast<int64_t>(ua);
+  }
   while (ua % ub != 0) {
     ua = ua % ub;
     std::swap(ua, ub);

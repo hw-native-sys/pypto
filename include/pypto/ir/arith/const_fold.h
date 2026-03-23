@@ -164,8 +164,10 @@ inline ExprPtr FoldMul(const BinaryConstOperands& c) {
   if (c.fa && c.fb) return MakeConstFloat(c.fa->value_ * c.fb->value_, c.fa->dtype());
   if (LhsIsConst(c, 1)) return c.rhs;  // 1 * x → x
   if (RhsIsConst(c, 1)) return c.lhs;  // x * 1 → x
-  if (LhsIsConst(c, 0)) return c.lhs;  // 0 * x → 0
-  if (RhsIsConst(c, 0)) return c.rhs;  // x * 0 → 0
+  // Integer 0 * x → 0, x * 0 → 0 (well-defined for integers).
+  // Float 0.0 * x is NOT folded because NaN * 0 = NaN, inf * 0 = NaN per IEEE 754.
+  if (c.pa && c.pa->value_ == 0) return c.lhs;
+  if (c.pb && c.pb->value_ == 0) return c.rhs;
   return nullptr;
 }
 
@@ -176,7 +178,7 @@ inline ExprPtr FoldFloorDiv(const BinaryConstOperands& c) {
         << "Floor division overflow: INT64_MIN // -1";
     return MakeConstInt(floordiv(c.pa->value_, c.pb->value_), c.pa->dtype());
   }
-  if (c.pa && c.pa->value_ == 0) return c.lhs;  // 0 // x → 0
+  // NOT folding 0 // x → 0: x could be 0 at runtime, must preserve the division.
   if (c.pb && c.pb->value_ == 1) return c.lhs;  // x // 1 → x
   if (c.pb) {
     CHECK(c.pb->value_ != 0) << "Floor division by zero";
@@ -191,7 +193,7 @@ inline ExprPtr FoldFloorMod(const BinaryConstOperands& c) {
         << "Floor modulo overflow: INT64_MIN % -1";
     return MakeConstInt(floormod(c.pa->value_, c.pb->value_), c.pa->dtype());
   }
-  if (c.pa && c.pa->value_ == 0) return c.lhs;                           // 0 % x → 0
+  // NOT folding 0 % x → 0: x could be 0 at runtime, must preserve the modulo.
   if (c.pb && c.pb->value_ == 1) return MakeConstInt(0, c.pb->dtype());  // x % 1 → 0
   if (c.pb) {
     CHECK(c.pb->value_ != 0) << "Floor modulo by zero";
@@ -204,7 +206,7 @@ inline ExprPtr FoldFloatDiv(const BinaryConstOperands& c) {
     // IEEE 754: division by zero produces +/-inf, not an error.
     return MakeConstFloat(c.fa->value_ / c.fb->value_, c.fa->dtype());
   }
-  if (c.fa && c.fa->value_ == 0) return c.lhs;  // 0.0 / x → 0.0
+  // NOT folding 0.0 / x → 0.0: if x is 0.0 or NaN, result should be NaN per IEEE 754.
   if (c.fb && c.fb->value_ == 1) return c.lhs;  // x / 1.0 → x
   return nullptr;
 }
