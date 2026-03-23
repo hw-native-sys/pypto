@@ -57,6 +57,14 @@ bool IsViewOperation(const std::string& op_name) {
   return !spec_opt->deduce_output_memory({}).has_value();
 }
 
+// Check if an operation's output should reuse the MemRef of a specific input argument.
+// Returns the input arg index whose MemRef to share, or nullopt.
+std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op_name)) return std::nullopt;
+  return registry.GetEntry(op_name).GetOutputReusesInputArg();
+}
+
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
@@ -228,6 +236,27 @@ class InitMemRefMutator : public IRMutator {
             return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
           } else {
             LOG_DEBUG << "Input tile has no MemRef yet";
+          }
+        }
+      }
+
+      // Handle accumulate operations: output shares MemRef with a specific input arg
+      auto reuse_arg_idx = GetOutputReusesInputArg(call->op_->name_);
+      if (reuse_arg_idx.has_value()) {
+        auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
+        if (new_call && *reuse_arg_idx < new_call->args_.size()) {
+          auto input_arg = new_call->args_[*reuse_arg_idx];
+          auto shared_memref = GetTypeMemRef(input_arg->GetType());
+          if (shared_memref.has_value()) {
+            LOG_DEBUG << "Reusing MemRef from input arg " << *reuse_arg_idx << " for "
+                      << op->var_->name_hint_;
+            auto source_memory_space = ExtractMemorySpaceFromType(input_arg->GetType());
+            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+                source_memory_space);
+            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
+            var_map_[op->var_] = new_var;
+            return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
           }
         }
       }

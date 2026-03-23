@@ -268,6 +268,49 @@ class TestMemRefSharing:
         allocs = _get_alloc_stmts(func)
         assert len(allocs) == 1
 
+    def test_matmul_acc_shares_memref_with_accumulator(self):
+        """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP16],
+                input_b: pl.Tensor[[32, 32], pl.FP16],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a_ub: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [32, 32])
+                tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
+                )
+                tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Left] = pl.move(
+                    tile_a_ub, target_memory=pl.MemorySpace.Left
+                )
+                tile_b_l0b: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Right] = pl.move(
+                    tile_b_l1, target_memory=pl.MemorySpace.Right
+                )
+                acc: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(tile_a_l0a, tile_b_l0b)
+                acc_next: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul_acc(
+                    acc, tile_a_l0a, tile_b_l0b
+                )
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(acc_next, [0, 0], output)
+                return result
+
+        After = passes.init_mem_ref()(Before)
+        func = _first_function(After)
+
+        tile_types = _get_tile_types(func)
+        assert "acc" in tile_types
+        assert "acc_next" in tile_types
+
+        # matmul_acc output shares MemRef with its accumulator input
+        assert tile_types["acc"].shares_memref_with(tile_types["acc_next"])
+
+        # Only 1 Acc alloc needed (not 2)
+        acc_allocs = [a for a in _get_alloc_stmts(func) if a.value.args[0].value == MemorySpace.Acc.value]
+        assert len(acc_allocs) == 1
+
 
 class TestYieldMemRef:
     """MemRef propagation through yield in ForStmt and IfStmt."""

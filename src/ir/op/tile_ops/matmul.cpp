@@ -280,6 +280,7 @@ REGISTER_OP("tile.matmul_acc")
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.matmul_acc");
@@ -323,6 +324,7 @@ REGISTER_OP("tile.gemv_acc")
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::Right)
     .set_output_memory(MemorySpace::Acc)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileMatMulAccType(args, kwargs, "tile.gemv_acc");

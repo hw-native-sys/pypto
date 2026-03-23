@@ -59,6 +59,10 @@ struct OpMemorySpaceSpec {
   using OutputResolver =
       std::function<std::optional<MemorySpace>(const std::vector<std::pair<std::string, std::any>>& kwargs)>;
   OutputResolver deduce_output_memory;
+
+  /// When set, the output reuses the MemRef of the input argument at this index.
+  /// Used by accumulate ops (matmul_acc, gemv_acc) where the output IS the input buffer.
+  std::optional<size_t> output_reuses_input_arg;
 };
 
 /**
@@ -360,6 +364,20 @@ class OpRegistryEntry {
 
   /// Get memory spec (nullopt if not annotated)
   [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
+
+  /// Declare that this op's output reuses the MemRef of the input at arg_index.
+  /// Used for accumulate ops where the output writes into the input buffer.
+  inline OpRegistryEntry& set_output_reuses_input(size_t arg_index) {
+    EnsureMemorySpec();
+    memory_spec_->output_reuses_input_arg = arg_index;
+    return *this;
+  }
+
+  /// Returns the input arg index whose MemRef the output should reuse, or nullopt.
+  [[nodiscard]] std::optional<size_t> GetOutputReusesInputArg() const {
+    if (!memory_spec_.has_value()) return std::nullopt;
+    return memory_spec_->output_reuses_input_arg;
+  }
 
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
   /// MemoryReuse will skip producer-consumer reuse for such operations.
