@@ -816,6 +816,59 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
     assert (output_dir / "kernels" / "aiv" / "good_kernel.pto").exists()
 
 
+def test_pto_codegen_tensor_write_preserves_tensor_view_annotation():
+    """tensor.write should keep tensor_view type annotations for tensor operands."""
+
+    @pl.program
+    class TensorWriteProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def write_scalar(
+            self,
+            value: pl.Scalar[pl.INT32],
+            output: pl.Tensor[[4], pl.INT32],
+        ) -> pl.Tensor[[4], pl.INT32]:
+            pl.tensor.write(output, [0], value)
+            return output
+
+    lines = _get_mlir_lines(_generate_default_mlir(TensorWriteProgram))
+    store_line = _single_line(lines, "pto.store_scalar")
+
+    assert "!pto.tensor_view<?xi32>" in store_line, (
+        f"Expected tensor.write to use tensor_view annotation, got: {store_line}"
+    )
+    assert "!pto.ptr<i32>" not in store_line, (
+        f"Did not expect tensor.write to fall back to ptr annotation: {store_line}"
+    )
+
+
+def test_pto_codegen_if_stmt_preserves_scalar_result_dtype():
+    """scf.if result types should keep the original scalar dtype."""
+
+    span = ir.Span.unknown()
+    cond = ir.ConstBool(True, span)
+    result_var = ir.Var("result", ir.ScalarType(DataType.INT32), span)
+    then_value = ir.Cast(ir.ConstInt(1, DataType.INDEX, span), DataType.INT32, span)
+    else_value = ir.Cast(ir.ConstInt(2, DataType.INDEX, span), DataType.INT32, span)
+
+    then_body = ir.SeqStmts([ir.YieldStmt([then_value], span)], span)
+    else_body = ir.SeqStmts([ir.YieldStmt([else_value], span)], span)
+    body = ir.SeqStmts(
+        [
+            ir.IfStmt(cond, then_body, else_body, [result_var], span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    func = ir.Function("if_i32_result", [], [], body, span, ir.FunctionType.InCore)
+    program = ir.Program([func], "if_i32_result_program", span)
+
+    lines = _get_mlir_lines(_generate_mlir(program))
+    if_line = _single_line(lines, " = scf.if ")
+
+    assert "-> (i32)" in if_line, f"Expected scf.if to keep i32 result type, got: {if_line}"
+    assert "-> (index)" not in if_line, f"Did not expect scf.if to degrade i32 to index: {if_line}"
+
+
 class TestFormatErrorReport:
     """Tests for codegen error summary formatting."""
 

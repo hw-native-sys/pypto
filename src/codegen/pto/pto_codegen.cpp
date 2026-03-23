@@ -1059,6 +1059,9 @@ std::string PTOCodegen::GetVarLikeExprTypeAnnotation(const ir::VarPtr& var) cons
       return ssa_it->second;
     }
   }
+  if (auto tensor_type = As<TensorType>(var->GetType())) {
+    return GetTensorViewTypeString(tensor_type.get());
+  }
   if (auto tile_type = ir::GetTileTypeWithMemRef(var->GetType())) {
     return GetTileBufTypeStringFromTileType(tile_type);
   }
@@ -1076,9 +1079,6 @@ std::string PTOCodegen::GetStructuredControlFlowTypeString(const ir::VarPtr& var
   INTERNAL_CHECK(var != nullptr) << "Internal error: control-flow value must not be null";
   if (auto tensor_type = As<TensorType>(var->GetType())) {
     return GetTensorViewTypeString(tensor_type.get());
-  }
-  if (auto scalar_type = As<ScalarType>(var->GetType())) {
-    return GetScalarIterArgTypeString(scalar_type);
   }
   return GetVarLikeExprTypeAnnotation(var);
 }
