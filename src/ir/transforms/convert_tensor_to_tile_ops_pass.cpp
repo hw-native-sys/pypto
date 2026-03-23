@@ -22,7 +22,6 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -36,32 +35,17 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
 
+using transform_utils::FlattenToStmts;
+using transform_utils::SubstituteExpr;
+
 namespace {
-
-/**
- * @brief Unwrap a single StmtPtr into a flat vector of statements.
- *
- * If the statement is a SeqStmts, returns its children; otherwise returns a single-element vector.
- */
-std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
-  if (auto seq = As<SeqStmts>(stmt)) {
-    return seq->stmts_;
-  }
-  return {stmt};
-}
-
-/**
- * @brief Wrap a vector of statements into a single SeqStmts node.
- */
-StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
-  return std::make_shared<SeqStmts>(stmts, span);
-}
 
 std::string MakeTileValueName(const std::string& source_name) {
   return auto_name::BuildName(auto_name::GetBaseName(source_name), "", "tile");
@@ -160,143 +144,6 @@ ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
  */
 ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
   return std::make_shared<MakeTuple>(shape, span);
-}
-
-/**
- * @brief Reconstruct a BinaryExpr with new operands, dispatching on ObjectKind.
- */
-ExprPtr ReconstructBinaryExpr(ObjectKind kind, const ExprPtr& left, const ExprPtr& right, DataType dtype,
-                              const Span& span) {
-  // clang-format off
-  switch (kind) {
-    case ObjectKind::Add:           return std::make_shared<Add>(left, right, dtype, span);
-    case ObjectKind::Sub:           return std::make_shared<Sub>(left, right, dtype, span);
-    case ObjectKind::Mul:           return std::make_shared<Mul>(left, right, dtype, span);
-    case ObjectKind::FloorDiv:      return std::make_shared<FloorDiv>(left, right, dtype, span);
-    case ObjectKind::FloorMod:      return std::make_shared<FloorMod>(left, right, dtype, span);
-    case ObjectKind::FloatDiv:      return std::make_shared<FloatDiv>(left, right, dtype, span);
-    case ObjectKind::Min:           return std::make_shared<Min>(left, right, dtype, span);
-    case ObjectKind::Max:           return std::make_shared<Max>(left, right, dtype, span);
-    case ObjectKind::Pow:           return std::make_shared<Pow>(left, right, dtype, span);
-    case ObjectKind::Eq:            return std::make_shared<Eq>(left, right, dtype, span);
-    case ObjectKind::Ne:            return std::make_shared<Ne>(left, right, dtype, span);
-    case ObjectKind::Lt:            return std::make_shared<Lt>(left, right, dtype, span);
-    case ObjectKind::Le:            return std::make_shared<Le>(left, right, dtype, span);
-    case ObjectKind::Gt:            return std::make_shared<Gt>(left, right, dtype, span);
-    case ObjectKind::Ge:            return std::make_shared<Ge>(left, right, dtype, span);
-    case ObjectKind::And:           return std::make_shared<And>(left, right, dtype, span);
-    case ObjectKind::Or:            return std::make_shared<Or>(left, right, dtype, span);
-    case ObjectKind::Xor:           return std::make_shared<Xor>(left, right, dtype, span);
-    case ObjectKind::BitAnd:        return std::make_shared<BitAnd>(left, right, dtype, span);
-    case ObjectKind::BitOr:         return std::make_shared<BitOr>(left, right, dtype, span);
-    case ObjectKind::BitXor:        return std::make_shared<BitXor>(left, right, dtype, span);
-    case ObjectKind::BitShiftLeft:  return std::make_shared<BitShiftLeft>(left, right, dtype, span);
-    case ObjectKind::BitShiftRight: return std::make_shared<BitShiftRight>(left, right, dtype, span);
-    default:
-      throw pypto::InternalError("ReconstructBinaryExpr: unsupported ObjectKind");
-  }
-  // clang-format on
-}
-
-/**
- * @brief Reconstruct a UnaryExpr with a new operand, dispatching on ObjectKind.
- */
-ExprPtr ReconstructUnaryExpr(ObjectKind kind, const ExprPtr& operand, DataType dtype, const Span& span) {
-  switch (kind) {
-    case ObjectKind::Abs:
-      return std::make_shared<Abs>(operand, dtype, span);
-    case ObjectKind::Neg:
-      return std::make_shared<Neg>(operand, dtype, span);
-    case ObjectKind::Not:
-      return std::make_shared<Not>(operand, dtype, span);
-    case ObjectKind::BitNot:
-      return std::make_shared<BitNot>(operand, dtype, span);
-    case ObjectKind::Cast:
-      return std::make_shared<Cast>(operand, dtype, span);
-    default:
-      throw pypto::InternalError("ReconstructUnaryExpr: unsupported ObjectKind");
-  }
-}
-
-/**
- * @brief Substitute variables in an expression using a pointer-identity map.
- *
- * Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
- * TupleGetItemExpr to replace Var references.
- */
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
-  if (auto iter_arg = As<IterArg>(expr)) {
-    auto it = var_map.find(iter_arg.get());
-    if (it != var_map.end()) {
-      return it->second;
-    }
-    return expr;
-  }
-  if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var.get());
-    if (it != var_map.end()) {
-      return it->second;
-    }
-    return expr;
-  }
-  if (auto call = As<Call>(expr)) {
-    std::vector<ExprPtr> new_args;
-    new_args.reserve(call->args_.size());
-    bool changed = false;
-    for (const auto& arg : call->args_) {
-      auto new_arg = SubstituteExpr(arg, var_map);
-      new_args.push_back(new_arg);
-      if (new_arg != arg) {
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return expr;
-    }
-    return std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-  }
-  if (auto make_tuple = As<MakeTuple>(expr)) {
-    std::vector<ExprPtr> new_elements;
-    new_elements.reserve(make_tuple->elements_.size());
-    bool changed = false;
-    for (const auto& elem : make_tuple->elements_) {
-      auto new_elem = SubstituteExpr(elem, var_map);
-      new_elements.push_back(new_elem);
-      if (new_elem != elem) {
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return expr;
-    }
-    return std::make_shared<MakeTuple>(new_elements, make_tuple->span_);
-  }
-  if (auto tgi = As<TupleGetItemExpr>(expr)) {
-    auto new_tuple = SubstituteExpr(tgi->tuple_, var_map);
-    if (new_tuple == tgi->tuple_) {
-      return expr;
-    }
-    return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
-  }
-  if (auto bin = As<BinaryExpr>(expr)) {
-    auto new_left = SubstituteExpr(bin->left_, var_map);
-    auto new_right = SubstituteExpr(bin->right_, var_map);
-    if (new_left == bin->left_ && new_right == bin->right_) {
-      return expr;
-    }
-    auto dtype = GetScalarDtype(expr);
-    return ReconstructBinaryExpr(bin->GetKind(), new_left, new_right, dtype, bin->span_);
-  }
-  if (auto un = As<UnaryExpr>(expr)) {
-    auto new_operand = SubstituteExpr(un->operand_, var_map);
-    if (new_operand == un->operand_) {
-      return expr;
-    }
-    auto dtype = GetScalarDtype(expr);
-    return ReconstructUnaryExpr(un->GetKind(), new_operand, dtype, un->span_);
-  }
-  // For leaf expression types (ConstInt, ConstFloat, etc.), return as-is
-  return expr;
 }
 
 /**
@@ -441,8 +288,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
-      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
-                                                   WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(
+          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -454,7 +301,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       auto then_map = tensor_to_tile;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = TransformIncoreBody(then_stmts, then_map, conv_registry, op_registry, span);
-      auto new_then_body = WrapInSeqStmts(new_then_stmts, if_stmt->then_body_->span_);
+      auto new_then_body = std::make_shared<SeqStmts>(new_then_stmts, if_stmt->then_body_->span_);
 
       // Recurse into else branch with a copy of the map
       std::optional<StmtPtr> new_else_body;
@@ -462,7 +309,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto else_map = tensor_to_tile;
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else_stmts = TransformIncoreBody(else_stmts, else_map, conv_registry, op_registry, span);
-        new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
+        new_else_body = std::make_shared<SeqStmts>(new_else_stmts, (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
@@ -515,7 +362,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       // Recurse into body
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
-      auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
       std::vector<VarPtr> new_return_vars;
@@ -564,7 +411,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       // Recurse into body
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
-      auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
       std::vector<VarPtr> new_return_vars;
@@ -963,11 +810,12 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
 
     auto new_return_var = std::make_shared<Var>(for_stmt->return_vars_[0]->name_hint_, out_tensor_type,
                                                 for_stmt->return_vars_[0]->span_);
-    auto new_for_stmt = std::make_shared<ForStmt>(
-        for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-        std::vector<IterArgPtr>{new_iter_arg}, WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_),
-        std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-        for_stmt->chunk_policy_, for_stmt->loop_origin_);
+    auto new_for_stmt =
+        std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+                                  std::vector<IterArgPtr>{new_iter_arg},
+                                  std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_),
+                                  std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_,
+                                  for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_);
 
     std::optional<size_t> dead_init_stmt_index;
     if (auto init_var = As<Var>(old_iter_arg->initValue_)) {
@@ -1207,8 +1055,8 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
-      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
-                                                   WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(
+          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -1220,7 +1068,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = UpdateCallSitesBody(then_stmts, then_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_then_body = WrapInSeqStmts(new_then_stmts, if_stmt->then_body_->span_);
+      auto new_then_body = std::make_shared<SeqStmts>(new_then_stmts, if_stmt->then_body_->span_);
 
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
@@ -1228,7 +1076,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else_stmts = UpdateCallSitesBody(else_stmts, else_map, incore_added_outputs,
                                                   transformed_incore_funcs, op_registry, span, changed);
-        new_else_body = WrapInSeqStmts(new_else_stmts, (*if_stmt->else_body_)->span_);
+        new_else_body = std::make_shared<SeqStmts>(new_else_stmts, (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
@@ -1280,7 +1128,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
 
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(for_stmt->return_vars_.size());
@@ -1326,7 +1174,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
 
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(while_stmt->return_vars_.size());

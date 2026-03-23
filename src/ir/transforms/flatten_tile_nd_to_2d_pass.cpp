@@ -33,34 +33,21 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
 
+using transform_utils::FlattenToStmts;
+using transform_utils::SubstituteExpr;
+
 namespace {
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/**
- * @brief Unwrap a StmtPtr into a flat vector of statements.
- */
-std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
-  if (auto seq = As<SeqStmts>(stmt)) {
-    return seq->stmts_;
-  }
-  return {stmt};
-}
-
-/**
- * @brief Wrap a vector of statements into a single SeqStmts node.
- */
-StmtPtr WrapInSeqStmts(const std::vector<StmtPtr>& stmts, const Span& span) {
-  return std::make_shared<SeqStmts>(stmts, span);
-}
 
 /**
  * @brief Check if a TileType has >2 dimensions.
@@ -118,52 +105,6 @@ ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& spa
 std::vector<ExprPtr> Make2DShapeExprs(int64_t merged, int64_t last, const Span& span) {
   return {std::make_shared<ConstInt>(merged, DataType::INDEX, span),
           std::make_shared<ConstInt>(last, DataType::INDEX, span)};
-}
-
-/**
- * @brief Substitute variables in an expression using a pointer-identity map.
- */
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
-  // IterArg must be checked before Var: As<Var>() uses exact ObjectKind matching
-  // and won't match IterArg (which has ObjectKind::IterArg, not ObjectKind::Var).
-  if (auto iter_arg = As<IterArg>(expr)) {
-    auto it = var_map.find(iter_arg.get());
-    return (it != var_map.end()) ? it->second : expr;
-  }
-  if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var.get());
-    return (it != var_map.end()) ? it->second : expr;
-  }
-  if (auto call = As<Call>(expr)) {
-    std::vector<ExprPtr> new_args;
-    new_args.reserve(call->args_.size());
-    bool changed = false;
-    for (const auto& arg : call->args_) {
-      auto new_arg = SubstituteExpr(arg, var_map);
-      new_args.push_back(new_arg);
-      if (new_arg != arg) changed = true;
-    }
-    if (!changed) return expr;
-    return std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-  }
-  if (auto mt = As<MakeTuple>(expr)) {
-    std::vector<ExprPtr> new_elems;
-    new_elems.reserve(mt->elements_.size());
-    bool changed = false;
-    for (const auto& e : mt->elements_) {
-      auto ne = SubstituteExpr(e, var_map);
-      new_elems.push_back(ne);
-      if (ne != e) changed = true;
-    }
-    if (!changed) return expr;
-    return std::make_shared<MakeTuple>(new_elems, mt->span_);
-  }
-  if (auto tgi = As<TupleGetItemExpr>(expr)) {
-    auto new_tuple = SubstituteExpr(tgi->tuple_, var_map);
-    if (new_tuple == tgi->tuple_) return expr;
-    return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
-  }
-  return expr;
 }
 
 // ============================================================================
@@ -329,8 +270,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformBody(body_stmts, ctx, op_registry, span);
-      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
-                                                   WrapInSeqStmts(inner, scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(
+          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -341,14 +282,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto then_ctx = ctx;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then = TransformBody(then_stmts, then_ctx, op_registry, span);
-      auto new_then_body = WrapInSeqStmts(new_then, if_stmt->then_body_->span_);
+      auto new_then_body = std::make_shared<SeqStmts>(new_then, if_stmt->then_body_->span_);
 
       FlattenContext else_ctx = ctx;
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else = TransformBody(else_stmts, else_ctx, op_registry, span);
-        new_else_body = WrapInSeqStmts(new_else, (*if_stmt->else_body_)->span_);
+        new_else_body = std::make_shared<SeqStmts>(new_else, (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (positional matching)
@@ -397,7 +338,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
-      auto new_body = WrapInSeqStmts(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;
@@ -440,7 +381,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_cond = SubstituteExpr(while_stmt->condition_, body_ctx.var_map);
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
-      auto new_body = WrapInSeqStmts(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;

@@ -34,11 +34,14 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
+
+using transform_utils::GetLastYieldStmt;
 
 namespace {
 
@@ -53,14 +56,6 @@ const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::stri
   const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
   if (!spec_opt.has_value()) return nullptr;
   return &spec_opt->input_constraints;
-}
-
-YieldStmtPtr FindLoopExitYield(const StmtPtr& body) {
-  if (auto seq = As<SeqStmts>(body)) {
-    if (seq->stmts_.empty()) return nullptr;
-    return FindLoopExitYield(seq->stmts_.back());
-  }
-  return As<YieldStmt>(body);
 }
 
 // ============================================================================
@@ -102,7 +97,7 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     if (op->return_vars_.empty()) return;
 
-    auto yield_stmt = FindLoopExitYield(op->body_);
+    auto yield_stmt = GetLastYieldStmt(op->body_);
     if (!yield_stmt) return;
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {

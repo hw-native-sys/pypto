@@ -20,24 +20,14 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
 
-/// Find the YieldStmt inside a statement body (searches through SeqStmts).
-inline YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
-  if (auto yield = As<YieldStmt>(body)) return yield;
-  if (auto seq = As<SeqStmts>(body)) {
-    for (const auto& child : seq->stmts_) {
-      auto result = FindYieldStmt(child);
-      if (result) return result;
-    }
-  }
-  return nullptr;
-}
+// Re-export FindYieldStmt from transform_utils so existing consumers compile unchanged.
+using transform_utils::FindYieldStmt;
 
 inline std::optional<MemRefPtr> GetTypeMemRef(const TypePtr& type) {
   if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(type)) {

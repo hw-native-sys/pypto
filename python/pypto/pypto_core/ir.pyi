@@ -2874,6 +2874,27 @@ class ParentStmtAnalysis:
         the same ParentStmtAnalysis instance with different functions.
         """
 
+def flatten_to_stmts(stmt: Stmt) -> list[Stmt]:
+    """Unwrap a statement into a flat list.
+
+    Returns children of SeqStmts, or a single-element list.
+    """
+
+def collect_def_vars(stmt: Stmt) -> list[Var]:
+    """Collect all AssignStmt LHS variables (definition sites) from a statement tree."""
+
+def find_yield_stmt(body: Stmt) -> YieldStmt | None:
+    """Find the first YieldStmt inside a statement body (searches through SeqStmts)."""
+
+def get_last_yield_stmt(body: Stmt) -> YieldStmt | None:
+    """Find the trailing YieldStmt in a statement body (checks only the last element)."""
+
+def substitute_expr(expr: Expr, var_map: list[tuple[Var, Var]]) -> Expr:
+    """Substitute variables in an expression using a list of (original_var, replacement_var) pairs."""
+
+def substitute_stmt(body: Stmt, var_map: list[tuple[Var, Var]]) -> Stmt:
+    """Substitute variable references in a statement subtree using (original_var, replacement_var) pairs."""
+
 def deep_clone(body: Stmt) -> tuple[Stmt, list[tuple[Var, Var]]]:
     """Deep-clone a statement subtree, creating fresh Var objects at definition sites.
 

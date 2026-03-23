@@ -32,11 +32,13 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/substitute_vars.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+using transform_utils::SubstituteStmt;
 namespace outline_utils {
 
 // ============================================================================
@@ -545,7 +547,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Convert EvalStmt/AssignStmt(tile.store) to assign _store_ret vars BEFORE
-    // SubstituteVars, since store_body_ptrs uses the original body Var pointers.
+    // SubstituteStmt, since store_body_ptrs uses the original body Var pointers.
     auto pre_sub_body = recursed_body;
     if (!store_output_set.empty()) {
       std::unordered_map<const Var*, VarPtr> store_target_vars;
@@ -560,7 +562,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Apply pointer-based substitution after store results are materialized.
-    auto transformed_body = SubstituteVars(pre_sub_body, var_substitution_map);
+    auto transformed_body = SubstituteStmt(pre_sub_body, var_substitution_map);
 
     // Build outlined function body (transformed body + return statement)
     StmtPtr outlined_body;

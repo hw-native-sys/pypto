@@ -32,10 +32,13 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+using transform_utils::CollectDefVars;
 
 namespace {
 
@@ -63,55 +66,6 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
  */
 static ExprPtr MakeConstIndex(int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, DataType::INDEX, span);
-}
-
-/**
- * @brief Collect all AssignStmt var_ (DEF sites) from a statement tree.
- *
- * When the body is visited multiple times (inner + remainder), the same
- * VarPtr would appear as a DEF in both, violating SSA. This function
- * collects all such DEF vars so we can create fresh copies before the
- * second visit.
- */
-static void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
-  if (!stmt) return;
-
-  auto kind = stmt->GetKind();
-  switch (kind) {
-    case ObjectKind::AssignStmt: {
-      auto assign = std::static_pointer_cast<const AssignStmt>(stmt);
-      result.push_back(assign->var_);
-      break;
-    }
-    case ObjectKind::SeqStmts: {
-      auto seq = std::static_pointer_cast<const SeqStmts>(stmt);
-      for (const auto& s : seq->stmts_) {
-        CollectDefVars(s, result);
-      }
-      break;
-    }
-    case ObjectKind::ForStmt: {
-      auto for_stmt = std::static_pointer_cast<const ForStmt>(stmt);
-      CollectDefVars(for_stmt->body_, result);
-      break;
-    }
-    case ObjectKind::IfStmt: {
-      auto if_stmt = std::static_pointer_cast<const IfStmt>(stmt);
-      CollectDefVars(if_stmt->then_body_, result);
-      if (if_stmt->else_body_.has_value()) {
-        CollectDefVars(*if_stmt->else_body_, result);
-      }
-      break;
-    }
-    case ObjectKind::ScopeStmt: {
-      auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
-      CollectDefVars(scope->body_, result);
-      break;
-    }
-    default:
-      // YieldStmt, ReturnStmt, EvalStmt, BreakStmt, ContinueStmt — no DEFs
-      break;
-  }
 }
 
 static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::string>& result) {

@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -46,6 +47,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace nb = nanobind;
@@ -1124,6 +1126,62 @@ void BindIR(nb::module_& m) {
       "has_op_conversion",
       [](const std::string& op_name) { return OpConversionRegistry::GetInstance().HasConversion(op_name); },
       nb::arg("op_name"), "Check if a conversion rule exists for an operator.");
+
+  // ---------------------------------------------------------------------------
+  // transform_utils bindings
+  // ---------------------------------------------------------------------------
+
+  ir.def(
+      "flatten_to_stmts", [](const StmtPtr& stmt) { return transform_utils::FlattenToStmts(stmt); },
+      nb::arg("stmt"),
+      "Unwrap a statement into a flat list. Returns children of SeqStmts, or a single-element list.");
+
+  ir.def(
+      "collect_def_vars", [](const StmtPtr& stmt) { return transform_utils::CollectDefVars(stmt); },
+      nb::arg("stmt"), "Collect all AssignStmt LHS variables (definition sites) from a statement tree.");
+
+  ir.def(
+      "find_yield_stmt",
+      [](const StmtPtr& body) -> nb::object {
+        auto result = transform_utils::FindYieldStmt(body);
+        if (!result) return nb::none();
+        return nb::cast(result);
+      },
+      nb::arg("body"), "Find the first YieldStmt inside a statement body (searches through SeqStmts).");
+
+  ir.def(
+      "get_last_yield_stmt",
+      [](const StmtPtr& body) -> nb::object {
+        auto result = transform_utils::GetLastYieldStmt(body);
+        if (!result) return nb::none();
+        return nb::cast(result);
+      },
+      nb::arg("body"), "Find the trailing YieldStmt in a statement body (checks only the last element).");
+
+  ir.def(
+      "substitute_expr",
+      [](const ExprPtr& expr, const std::vector<std::pair<VarPtr, VarPtr>>& var_map_pairs) {
+        std::unordered_map<const Var*, VarPtr> var_map;
+        for (const auto& [orig, replacement] : var_map_pairs) {
+          var_map[orig.get()] = replacement;
+        }
+        return transform_utils::SubstituteExpr(expr, var_map);
+      },
+      nb::arg("expr"), nb::arg("var_map"),
+      "Substitute variables in an expression using a list of (original_var, replacement_var) pairs.");
+
+  ir.def(
+      "substitute_stmt",
+      [](const StmtPtr& body, const std::vector<std::pair<VarPtr, VarPtr>>& var_map_pairs) {
+        std::unordered_map<const Var*, VarPtr> var_map;
+        for (const auto& [orig, replacement] : var_map_pairs) {
+          var_map[orig.get()] = replacement;
+        }
+        return transform_utils::SubstituteStmt(body, var_map);
+      },
+      nb::arg("body"), nb::arg("var_map"),
+      "Substitute variable references in a statement subtree using a list of (original_var, replacement_var) "
+      "pairs.");
 
   ir.def(
       "deep_clone",
