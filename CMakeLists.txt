@@ -115,6 +115,9 @@ set(PYPTO_SOURCES
     src/ir/op/testing.cpp
     src/ir/op/type_inference.cpp
 
+    # IR - Arith
+    src/ir/arith/const_int_bound.cc
+
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp

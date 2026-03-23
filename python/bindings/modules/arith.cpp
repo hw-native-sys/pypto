@@ -19,18 +19,22 @@
  * @file arith.cpp
  * @brief Python bindings for arithmetic simplification utilities.
  *
- * Exposes constant folding for testing.
+ * Exposes constant folding and ConstIntBoundAnalyzer.
  * The full Analyzer API will be added in a later PR.
  */
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/function.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 
 #include <cstdint>
+#include <string>
 #include <tuple>
 
 #include "../module.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/arith/int_operator.h"
 
@@ -61,6 +65,40 @@ void BindArith(nb::module_& m) {
         return {g, x, y};
       },
       nb::arg("a"), nb::arg("b"), "Extended Euclidean: returns (gcd, x, y) where a*x + b*y = gcd.");
+
+  // ConstIntBound
+  nb::class_<ir::arith::ConstIntBound>(arith, "ConstIntBound",
+                                       "Inclusive integer bounds [min_value, max_value] for an expression.")
+      .def_ro("min_value", &ir::arith::ConstIntBound::min_value, "Inclusive lower bound.")
+      .def_ro("max_value", &ir::arith::ConstIntBound::max_value, "Inclusive upper bound.")
+      .def_ro_static("kPosInf", &ir::arith::ConstIntBound::kPosInf, "Sentinel for positive infinity.")
+      .def_ro_static("kNegInf", &ir::arith::ConstIntBound::kNegInf, "Sentinel for negative infinity.")
+      .def("is_const", nb::overload_cast<>(&ir::arith::ConstIntBound::is_const, nb::const_),
+           "Check if min == max (constant).")
+      .def("is_non_negative", &ir::arith::ConstIntBound::is_non_negative, "Check if min >= 0.")
+      .def("is_positive", &ir::arith::ConstIntBound::is_positive, "Check if min > 0.")
+      .def("is_everything", &ir::arith::ConstIntBound::is_everything,
+           "Check if bounds are [-inf, +inf] (no information).")
+      .def("__repr__", [](const ir::arith::ConstIntBound& b) {
+        auto fmt = [](int64_t v) -> std::string {
+          if (v == ir::arith::ConstIntBound::kPosInf) return "+inf";
+          if (v == ir::arith::ConstIntBound::kNegInf) return "-inf";
+          return std::to_string(v);
+        };
+        return "ConstIntBound[" + fmt(b.min_value) + ", " + fmt(b.max_value) + "]";
+      });
+
+  // ConstIntBoundAnalyzer
+  nb::class_<ir::arith::ConstIntBoundAnalyzer>(arith, "ConstIntBoundAnalyzer",
+                                               "Propagates constant integer bounds through expression trees.")
+      .def(nb::init<>(), "Create a standalone ConstIntBoundAnalyzer.")
+      .def("__call__", &ir::arith::ConstIntBoundAnalyzer::operator(), nb::arg("expr"),
+           "Compute bounds for an expression.")
+      .def("bind", &ir::arith::ConstIntBoundAnalyzer::Bind, nb::arg("var"), nb::arg("min_val"),
+           nb::arg("max_val_exclusive"),
+           "Bind a variable to the half-open range [min_val, max_val_exclusive).")
+      .def("update", &ir::arith::ConstIntBoundAnalyzer::Update, nb::arg("var"), nb::arg("bound"),
+           "Update a variable's bound (inclusive on both ends).");
 }
 
 }  // namespace python
