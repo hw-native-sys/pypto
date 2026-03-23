@@ -7,17 +7,12 @@ Initializes MemRef for all variables and creates alloc operations with unallocat
 This pass performs three tasks:
 
 1. **Normalizes statement structure** (calls NormalizeStmtStructure internally)
-2. **Initializes MemRef** for TileType and TensorType variables with appropriate memory spaces
+2. **Initializes MemRef** for TileType and TensorType variables
 3. **Creates `tile.alloc` operations** for each non-DDR MemRef with `addr=-1` (unallocated)
 
-Memory space assignment rules:
+Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
-- **Function parameters** → DDR
-- **tile.store return values** → DDR (special-cased, returns TensorType)
-- **Other tile ops** → Resolved via OpRegistry memory specs (see `OpMemorySpaceSpec`)
-- **Non-tile variables** → DDR (default)
-
-**Requires**: TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps.
+**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred.
 
 **Produces**: HasMemRefs, NormalizedStmtStructure.
 
@@ -49,11 +44,10 @@ program_with_memrefs = init_pass(program)
 ## Algorithm
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
-2. **Analyze usage**: Traverse function body to determine memory space for each variable
-3. **Initialize MemRef**: Create MemRef objects (addr=-1) and attach to variable types
-4. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
-5. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
-6. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
+2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
+3. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
+4. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
+5. **Prepend allocs**: Insert alloc statements at the beginning of the function body's top-level `SeqStmts`
 
 ## Example
 
@@ -120,8 +114,7 @@ Pass InitMemRef();
 **Implementation**: `src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
-- `MemRefUsageVisitor` analyzes memory space for each variable
-- `InitMemRefMutator` creates MemRef objects and attaches to types
+- `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
 - `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 

@@ -7,17 +7,12 @@
 此 Pass 执行三项任务：
 
 1. **规范化语句 (Statement) 结构**（内部调用 NormalizeStmtStructure）
-2. **为 TileType 和 TensorType 变量初始化 MemRef**，分配适当的内存空间
+2. **为 TileType 和 TensorType 变量初始化 MemRef**
 3. **为每个非 DDR 的 MemRef 创建 `tile.alloc` 操作**，地址为 `addr=-1`（未分配）
 
-内存空间分配规则：
+内存空间从 `TileType::memory_space_` 读取（由 InferTileMemorySpace 设置）。无 `memory_space` 的变量默认为 DDR。
 
-- **函数参数** → DDR
-- **tile.store 返回值** → DDR（特殊处理，返回 TensorType）
-- **其他 tile 操作** → 通过 OpRegistry 内存规格解析（参见 `OpMemorySpaceSpec`）
-- **非 tile 变量** → DDR（默认）
-
-**需要**：TypeChecked、SSAForm、SplitIncoreOrch、IncoreTileOps。
+**需要**：SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred。
 
 **产生**：HasMemRefs、NormalizedStmtStructure。
 
@@ -49,11 +44,10 @@ program_with_memrefs = init_pass(program)
 ## 算法
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
-2. **分析用法**：遍历函数体，确定每个变量的内存空间
-3. **初始化 MemRef**：创建 MemRef 对象（addr=-1）并附加到变量类型
-4. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
-5. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
-6. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
+2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
+3. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
+4. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
+5. **前置 alloc**：将 alloc 语句插入到函数体顶层 `SeqStmts` 的开头
 
 ## 示例
 
@@ -120,8 +114,7 @@ Pass InitMemRef();
 **实现文件**：`src/ir/transforms/init_memref.cpp`
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
-- `MemRefUsageVisitor` 分析每个变量的内存空间
-- `InitMemRefMutator` 创建 MemRef 对象并附加到类型
+- `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
 - `CreateAllocStatement` / `InsertAllocsIntoBody` 创建并插入 alloc 操作
 

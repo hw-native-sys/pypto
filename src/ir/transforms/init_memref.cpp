@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -44,30 +45,6 @@ namespace ir {
 
 namespace {
 
-// Resolve memory space for tile op output using registry metadata.
-// tile.store is special-cased since it returns TensorType (DDR), not TileType.
-MemorySpace ResolveMemorySpace(const std::string& op_name, const CallPtr& call) {
-  if (op_name == "tile.store") return MemorySpace::DDR;
-
-  auto& registry = OpRegistry::GetInstance();
-  if (!registry.IsRegistered(op_name)) return MemorySpace::Vec;
-
-  const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
-  if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
-    // No deduction logic — check if the Call's return type already carries a memory_space
-    // (e.g., tpop ops whose return TileType has memory_space set by ExpandMixedKernel).
-    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(call->GetType())) {
-      if (tile_type->memory_space_.has_value()) {
-        return tile_type->memory_space_.value();
-      }
-    }
-    return MemorySpace::Vec;
-  }
-
-  auto result = spec_opt->deduce_output_memory(call->kwargs_);
-  return result.value_or(MemorySpace::Vec);
-}
-
 // Check if operation is a view operation (zero-copy metadata transform)
 // using the registry: deduce_output_memory returning nullopt = view op.
 bool IsViewOperation(const std::string& op_name) {
@@ -80,112 +57,15 @@ bool IsViewOperation(const std::string& op_name) {
   return !spec_opt->deduce_output_memory({}).has_value();
 }
 
-// Visitor to identify memory space for each variable
-class MemRefUsageVisitor : public IRVisitor {
- public:
-  // Initialize visitor with function parameters (all params should be in DDR)
-  explicit MemRefUsageVisitor(const std::vector<VarPtr>& params,
-                              const std::vector<ParamDirection>& /*param_directions*/) {
-    for (const auto& var : params) {
-      var_memory_spaces_[var] = MemorySpace::DDR;
-    }
-  }
-
-  [[nodiscard]] const std::map<VarPtr, MemorySpace>& GetVarMemorySpaces() const { return var_memory_spaces_; }
-
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto call = std::dynamic_pointer_cast<const Call>(op->value_)) {
-      // Check if this is a tile operation (op name starts with "tile.")
-      const std::string& op_name = call->op_->name_;
-      if (op_name.rfind("tile.", 0) == 0) {
-        var_memory_spaces_[op->var_] = ResolveMemorySpace(op_name, call);
-      }
-    }
-    // Continue with default traversal
-    if (op->var_) {
-      VisitExpr(op->var_);
-    }
-    if (op->value_) {
-      VisitExpr(op->value_);
-    }
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    // Visit bodies first to populate yield values' memory spaces
-    IRVisitor::VisitStmt_(op);
-
-    // Propagate memory spaces from yield values to return_vars
-    if (op->return_vars_.empty()) return;
-
-    // Collect memory spaces from both branches
-    auto then_yield = FindYieldStmt(op->then_body_);
-    auto else_yield = op->else_body_.has_value() ? FindYieldStmt(op->else_body_.value()) : nullptr;
-    if (!then_yield && !else_yield) return;
-
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      // Try then branch first
-      if (then_yield && i < then_yield->value_.size()) {
-        if (auto yield_var = As<Var>(then_yield->value_[i])) {
-          auto it = var_memory_spaces_.find(yield_var);
-          if (it != var_memory_spaces_.end()) {
-            var_memory_spaces_[op->return_vars_[i]] = it->second;
-            continue;
-          }
-        }
-      }
-      // Fall back to else branch
-      if (else_yield && i < else_yield->value_.size()) {
-        if (auto yield_var = As<Var>(else_yield->value_[i])) {
-          auto it = var_memory_spaces_.find(yield_var);
-          if (it != var_memory_spaces_.end()) {
-            var_memory_spaces_[op->return_vars_[i]] = it->second;
-          }
-        }
-      }
-    }
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Visit body first to populate yield values' memory spaces
-    IRVisitor::VisitStmt_(op);
-
-    // Propagate memory spaces from yield values to return_vars
-    if (op->return_vars_.empty()) return;
-
-    auto yield_stmt = FindYieldStmt(op->body_);
-    if (!yield_stmt) return;
-
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      if (i < yield_stmt->value_.size()) {
-        if (auto yield_var = As<Var>(yield_stmt->value_[i])) {
-          auto it = var_memory_spaces_.find(yield_var);
-          if (it != var_memory_spaces_.end()) {
-            var_memory_spaces_[op->return_vars_[i]] = it->second;
-          }
-        }
-      }
-    }
-  }
-
- private:
-  std::map<VarPtr, MemorySpace> var_memory_spaces_;
-};
-
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  explicit InitMemRefMutator(const std::map<VarPtr, MemorySpace>& var_memory_spaces)
-      : var_memory_spaces_(var_memory_spaces) {}
+  InitMemRefMutator() = default;
 
-  [[nodiscard]] std::optional<MemorySpace> ResolveTileMemorySpace(const TypePtr& type, const VarPtr& var,
-                                                                  bool default_to_ddr = false) const {
-    if (var) {
-      auto it = var_memory_spaces_.find(var);
-      if (it != var_memory_spaces_.end()) {
-        return it->second;
-      }
-    }
-
+  // Resolve memory space from TileType::memory_space_ field (set by InferTileMemorySpace),
+  // falling back to DDR when default_to_ddr is true.
+  [[nodiscard]] static std::optional<MemorySpace> ResolveTileMemorySpace(const TypePtr& type,
+                                                                         bool default_to_ddr = false) {
     if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
       if (tile_type->memory_space_.has_value()) {
         return tile_type->memory_space_;
@@ -198,8 +78,9 @@ class InitMemRefMutator : public IRMutator {
     return std::nullopt;
   }
 
-  // Helper to calculate size and create MemRef
-  std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const VarPtr& var) {
+  // Calculate allocation size and create MemRef with the given memory space.
+  std::optional<MemRefPtr> CreateMemRef(const ShapedTypePtr& type, const VarPtr& var,
+                                        std::optional<MemorySpace> memory_space) {
     const std::string var_name = var ? var->name_hint_ : "<anonymous>";
     uint64_t size_bytes = 0;
     if (As<TileType>(type)) {
@@ -215,13 +96,10 @@ class InitMemRefMutator : public IRMutator {
         num_elements *= static_cast<uint64_t>(const_dim->value_);
       }
 
-      size_t bits = type->dtype_.GetBit();
-      // Round up to bytes
-      size_t bytes = (bits + 7) / 8;
-      size_bytes = num_elements * bytes;
+      size_bytes = num_elements * ((type->dtype_.GetBit() + 7) / 8);
     } else {
-      bool is_static = true;
       uint64_t num_elements = 1;
+      bool is_static = true;
       for (const auto& dim : type->shape_) {
         if (auto const_dim = As<ConstInt>(dim)) {
           num_elements *= static_cast<uint64_t>(const_dim->value_);
@@ -231,25 +109,16 @@ class InitMemRefMutator : public IRMutator {
         }
       }
       if (is_static) {
-        size_t bits = type->dtype_.GetBit();
-        size_t bytes = (bits + 7) / 8;
-        size_bytes = num_elements * bytes;
+        size_bytes = num_elements * ((type->dtype_.GetBit() + 7) / 8);
       }
     }
 
-    // Query memory space: var_memory_spaces_ map > TileType's own memory_space > DDR default
-    auto memory_space = ResolveTileMemorySpace(type, var, /*default_to_ddr=*/true);
     INTERNAL_CHECK(memory_space.has_value())
         << "Internal error: ResolveTileMemorySpace must return a value when default_to_ddr is enabled";
-    MemorySpace space = *memory_space;
 
-    // Addr is -1 (unallocated)
     auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
-
-    // Generate unique ID for this MemRef
     uint64_t id = next_id_++;
-
-    return std::make_shared<MemRef>(space, addr, size_bytes, id);
+    return std::make_shared<MemRef>(*memory_space, addr, size_bytes, id);
   }
 
   std::optional<MemorySpace> ExtractMemorySpaceFromType(const TypePtr& type) {
@@ -283,12 +152,12 @@ class InitMemRefMutator : public IRMutator {
     auto var_expr = std::static_pointer_cast<const Expr>(var);
     TypePtr new_type = var_expr->GetType();
 
-    // Process Type if it is ShapedType (TensorType or TileType)
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
-      auto memref = CreateMemRef(shaped_type, var);
+      // Resolve memory space once, pass to both CreateMemRef and CloneType
+      auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);
+      auto memref = CreateMemRef(shaped_type, var, memory_space);
       new_type = CloneTypeWithMemRefAndRemapExprs(
-          var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-          ResolveTileMemorySpace(var_expr->GetType(), var, /*default_to_ddr=*/true));
+          var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }, memory_space);
     }
 
     return std::make_shared<Var>(var->name_hint_, new_type, var->span_);
@@ -377,7 +246,7 @@ class InitMemRefMutator : public IRMutator {
           if (shared_memref.has_value()) {
             TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
                 op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-                ResolveTileMemorySpace(op->var_->GetType(), op->var_));
+                ResolveTileMemorySpace(op->var_->GetType()));
 
             VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
@@ -452,52 +321,81 @@ class InitMemRefMutator : public IRMutator {
                                              new_body, new_return_vars, op->span_, op->kind_, new_chunk_size,
                                              op->chunk_policy_, op->loop_origin_);
 
-    // Step 5: Patch return_vars to share yield value MemRefs.
-    // return_var receives the last yield value, so they must share the same MemRef.
+    // Patch return_vars so each shares its yield value's MemRef.
     auto yield_stmt = FindYieldStmt(new_body);
     if (!yield_stmt || new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
       return new_for;
     }
 
-    bool changed = false;
-    std::vector<VarPtr> patched_return_vars;
-    patched_return_vars.reserve(new_for->return_vars_.size());
-
-    for (size_t i = 0; i < new_for->return_vars_.size(); ++i) {
-      if (i >= yield_stmt->value_.size()) {
-        patched_return_vars.push_back(new_for->return_vars_[i]);
-        continue;
-      }
-
-      auto rv_tile = As<TileType>(new_for->return_vars_[i]->GetType());
-      auto yield_var = As<Var>(yield_stmt->value_[i]);
-      auto yield_tile = yield_var ? As<TileType>(yield_var->GetType()) : nullptr;
-      if (rv_tile && yield_tile && yield_tile->memref_.has_value()) {
-        auto new_type = CloneTypeWithMemRefAndRemapExprs(
-            new_for->return_vars_[i]->GetType(), yield_tile->memref_,
-            [this](const ExprPtr& expr) { return VisitExpr(expr); }, yield_tile->GetMemorySpace());
-        auto new_rv = std::make_shared<Var>(new_for->return_vars_[i]->name_hint_, new_type,
-                                            new_for->return_vars_[i]->span_);
-        var_map_[op->return_vars_[i]] = new_rv;
-        patched_return_vars.push_back(new_rv);
-        changed = true;
-      } else {
-        patched_return_vars.push_back(new_for->return_vars_[i]);
-      }
-    }
+    auto get_yield_var = [&](size_t i) -> VarPtr {
+      return (i < yield_stmt->value_.size()) ? As<Var>(yield_stmt->value_[i]) : nullptr;
+    };
+    auto [patched, changed] =
+        PatchReturnVarsFromYield(new_for->return_vars_, op->return_vars_, get_yield_var);
 
     if (!changed) return new_for;
 
     return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_, new_for->step_,
-                                     new_for->iter_args_, new_for->body_, std::move(patched_return_vars),
-                                     new_for->span_, new_for->kind_, new_for->chunk_size_,
-                                     new_for->chunk_policy_, new_for->loop_origin_);
+                                     new_for->iter_args_, new_for->body_, std::move(patched), new_for->span_,
+                                     new_for->kind_, new_for->chunk_size_, new_for->chunk_policy_,
+                                     new_for->loop_origin_);
+  }
+
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    auto new_if = As<IfStmt>(result);
+    if (!new_if || new_if->return_vars_.empty()) return result;
+
+    auto then_yield = FindYieldStmt(new_if->then_body_);
+    auto else_yield = new_if->else_body_.has_value() ? FindYieldStmt(new_if->else_body_.value()) : nullptr;
+    if (!then_yield && !else_yield) return result;
+
+    auto get_yield_var = [&](size_t i) -> VarPtr {
+      VarPtr var = nullptr;
+      if (then_yield && i < then_yield->value_.size()) var = As<Var>(then_yield->value_[i]);
+      if (!var && else_yield && i < else_yield->value_.size()) var = As<Var>(else_yield->value_[i]);
+      return var;
+    };
+    auto [patched, changed] = PatchReturnVarsFromYield(new_if->return_vars_, op->return_vars_, get_yield_var);
+
+    if (!changed) return result;
+
+    return std::make_shared<IfStmt>(new_if->condition_, new_if->then_body_, new_if->else_body_,
+                                    std::move(patched), new_if->span_);
   }
 
  private:
-  const std::map<VarPtr, MemorySpace>& var_memory_spaces_;
+  // Shared logic for ForStmt/IfStmt: patch each return_var to share its yield value's MemRef.
+  // get_yield_var(i) resolves the yield variable for the i-th return_var.
+  using YieldVarResolver = std::function<VarPtr(size_t)>;
+  std::pair<std::vector<VarPtr>, bool> PatchReturnVarsFromYield(const std::vector<VarPtr>& new_return_vars,
+                                                                const std::vector<VarPtr>& old_return_vars,
+                                                                const YieldVarResolver& get_yield_var) {
+    bool changed = false;
+    std::vector<VarPtr> patched;
+    patched.reserve(new_return_vars.size());
+
+    for (size_t i = 0; i < new_return_vars.size(); ++i) {
+      auto yield_var = get_yield_var(i);
+      auto yield_tile = yield_var ? GetTileTypeWithMemRef(yield_var->GetType()) : nullptr;
+      if (As<TileType>(new_return_vars[i]->GetType()) && yield_tile) {
+        auto new_type = CloneTypeWithMemRefAndRemapExprs(
+            new_return_vars[i]->GetType(), yield_tile->memref_,
+            [this](const ExprPtr& expr) { return VisitExpr(expr); }, yield_tile->GetMemorySpace());
+        auto new_rv =
+            std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+        var_map_[old_return_vars[i]] = new_rv;
+        patched.push_back(new_rv);
+        changed = true;
+      } else {
+        patched.push_back(new_return_vars[i]);
+      }
+    }
+    return {std::move(patched), changed};
+  }
+
   std::map<VarPtr, VarPtr> var_map_;
-  uint64_t next_id_ = 0;  // Counter for generating unique MemRef IDs
+  uint64_t next_id_ = 0;
 };
 
 // Visitor to collect unique non-DDR MemRef objects from TileType variables
@@ -577,22 +475,15 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * 2. Initializes the MemRef field for all Var nodes
  * 3. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
  *
- * Memory space assignment:
- * - Function parameters -> DDR
- * - tile.store return values -> DDR (special-cased, returns TensorType)
- * - Other tile ops -> resolved via OpRegistry memory specs (see OpMemorySpaceSpec)
- * - Non-tile variables -> DDR (default)
+ * Memory space is read from TileType::memory_space_ (set by InferTileMemorySpace).
+ * Variables without memory_space default to DDR.
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
-  // Step 2: Analyze usage to determine memory space for each variable
-  MemRefUsageVisitor visitor(normalized_func->params_, normalized_func->param_directions_);
-  visitor.VisitStmt(normalized_func->body_);
-
-  // Step 3: Mutate variables to initialize their MemRef
-  InitMemRefMutator mutator(visitor.GetVarMemorySpaces());
+  // Step 2: Mutate variables to initialize their MemRef
+  InitMemRefMutator mutator;
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -609,7 +500,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
       new_body, normalized_func->span_, normalized_func->func_type_, normalized_func->level_,
       normalized_func->role_);
 
-  // Step 4: Collect non-DDR MemRefs and create alloc statements
+  // Step 3: Collect non-DDR MemRefs and create alloc statements
   NonDDRMemRefCollector collector;
   for (const auto& param : new_params) {
     collector.VisitExpr(param);
@@ -625,7 +516,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
     alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
   }
 
-  // Step 5: Insert alloc statements at the beginning of the function body
+  // Step 4: Insert alloc statements at the beginning of the function body
   auto final_body = InsertAllocsIntoBody(new_body, alloc_stmts);
 
   return std::make_shared<Function>(result_func->name_, new_params, result_func->param_directions_,

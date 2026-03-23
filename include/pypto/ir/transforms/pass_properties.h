@@ -118,7 +118,7 @@ inline const PassProperties kExpandMixedKernelProperties{
 
 inline const PassProperties kInitMemRefProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::TileOps2D},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred},
     .produced = {IRProperty::HasMemRefs, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::SSAForm}};
 
