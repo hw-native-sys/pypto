@@ -113,33 +113,33 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
@@ -156,14 +156,14 @@ class TestOrchestration:
                 void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
                 // External tensors
-                uint64_t a_shapes[2] = {16, 16};
+                uint32_t a_shapes[2] = {16, 16};
                 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-                uint64_t b_shapes[2] = {16, 16};
+                uint32_t b_shapes[2] = {16, 16};
                 Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-                uint64_t d_shapes[2] = {16, 16};
+                uint32_t d_shapes[2] = {16, 16};
                 Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
-                uint64_t c_shapes[2] = {16, 16};
+                uint32_t c_shapes[2] = {16, 16};
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
@@ -427,33 +427,33 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
@@ -470,14 +470,14 @@ class TestOrchestration:
                 void* arg_f_ptr = reinterpret_cast<void*>(args[ARG_PTR_F]);
 
                 // External tensors
-                uint64_t a_shapes[2] = {16, 16};
+                uint32_t a_shapes[2] = {16, 16};
                 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-                uint64_t b_shapes[2] = {16, 16};
+                uint32_t b_shapes[2] = {16, 16};
                 Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-                uint64_t f_shapes[2] = {16, 16};
+                uint32_t f_shapes[2] = {16, 16};
                 Tensor ext_f = make_tensor_external(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
 
-                uint64_t c_shapes[2] = {16, 16};
+                uint32_t c_shapes[2] = {16, 16};
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
@@ -487,7 +487,7 @@ class TestOrchestration:
                     make_output_param(c),
                 };
                 pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
-                uint64_t d_shapes[2] = {16, 16};
+                uint32_t d_shapes[2] = {16, 16};
                 Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
                 // Task 1: kernel_add_scalar
@@ -497,7 +497,7 @@ class TestOrchestration:
                     make_output_param(d),
                 };
                 pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
-                uint64_t e_shapes[2] = {16, 16};
+                uint32_t e_shapes[2] = {16, 16};
                 Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
                 // Task 2: kernel_add_scalar
@@ -507,7 +507,7 @@ class TestOrchestration:
                     make_output_param(e),
                 };
                 pto2_rt_submit_aiv_task(rt, 1, params_t2, 3);
-                uint64_t g_shapes[2] = {16, 16};
+                uint32_t g_shapes[2] = {16, 16};
                 Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
                 // Task 3: kernel_mul
@@ -772,7 +772,7 @@ class TestOrchestration:
 
         # tensor.create generates make_tensor with shape/dtype
         # FP16 = DataType::FLOAT16
-        assert "buf_shapes[2] = {32, 32}" in code
+        assert "uint32_t buf_shapes[2] = {32, 32};" in code
         assert "Tensor buf = make_tensor(buf_shapes, 2, DataType::FLOAT16)" in code
 
     def test_inplace_tensor(self):
@@ -878,33 +878,33 @@ class TestOrchestration:
 
 
             static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
 
             static inline Tensor make_tensor_2d_dn(
-                const uint64_t shapes[],
-                uint64_t ndims,
+                const uint32_t shapes[],
+                uint32_t ndims,
                 DataType dtype = DataType::FLOAT32,
                 int32_t version = 0) {
                 debug_assert(ndims == 2);
-                static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
                 uint64_t total = 1;
-                for (uint64_t i = 0; i < ndims; i++) {
+                for (uint32_t i = 0; i < ndims; i++) {
                     total *= shapes[i];
                 }
-                uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+                uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
                     raw_shapes, shapes, zero_offsets, ndims, dtype, version);
             }
@@ -925,19 +925,19 @@ class TestOrchestration:
                 void* arg_dst_ptr = reinterpret_cast<void*>(args[ARG_PTR_DST]);
 
                 // External tensors
-                uint64_t mij_shapes[2] = {16, 1};
+                uint32_t mij_shapes[2] = {16, 1};
                 Tensor ext_mij = make_tensor_external(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
-                uint64_t lij_shapes[2] = {16, 1};
+                uint32_t lij_shapes[2] = {16, 1};
                 Tensor ext_lij = make_tensor_external(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
-                uint64_t oi_new_shapes[2] = {16, 16};
+                uint32_t oi_new_shapes[2] = {16, 16};
                 Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
-                uint64_t mi_shapes[2] = {16, 1};
+                uint32_t mi_shapes[2] = {16, 1};
                 Tensor ext_mi = make_tensor_external(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
-                uint64_t li_shapes[2] = {16, 1};
+                uint32_t li_shapes[2] = {16, 1};
                 Tensor ext_li = make_tensor_external(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
-                uint64_t oi_shapes[2] = {16, 16};
+                uint32_t oi_shapes[2] = {16, 16};
                 Tensor ext_oi = make_tensor_external(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
-                uint64_t dst_shapes[2] = {16, 16};
+                uint32_t dst_shapes[2] = {16, 16};
                 Tensor ext_dst = make_tensor_external(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
 
 
@@ -1046,8 +1046,8 @@ class TestOrchestration:
         assert "PTO2_SCOPE(rt)" in code
 
         # tensor.slice generates array variables and runtime .view() call with dynamic offset
-        assert "uint64_t chunk_shapes[2] = {16, 16};" in code
-        assert "uint64_t chunk_offsets[2] = {(i * 16), 0};" in code
+        assert "uint32_t chunk_shapes[2] = {16, 16};" in code
+        assert "uint32_t chunk_offsets[2] = {(i * 16), 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
         # tensor.read generates host pointer access
@@ -1078,8 +1078,8 @@ class TestOrchestration:
         files = generator.generate(ValidShapeSliceProgram)
         code = files["orchestration/orch_slice.cpp"]
 
-        assert "uint64_t chunk_shapes[2] = {16, 16};" in code
-        assert "uint64_t chunk_offsets[2] = {0, 0};" in code
+        assert "uint32_t chunk_shapes[2] = {16, 16};" in code
+        assert "uint32_t chunk_offsets[2] = {0, 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
     def test_if_statement(self):

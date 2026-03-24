@@ -101,11 +101,11 @@ void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
 void* arg_output_ptr = reinterpret_cast<void*>(args[ARG_PTR_OUTPUT]);
 
 // 阶段 7：外部张量（来自函数参数）
-uint64_t a_shapes[2] = {16, 16};
+uint32_t a_shapes[2] = {16, 16};
 Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
 
 // 阶段 8：内部张量（来自 pl.create_tensor — 仅中间变量）
-uint64_t tmp_shapes[2] = {16, 16};
+uint32_t tmp_shapes[2] = {16, 16};
 Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 ```
 
@@ -266,15 +266,15 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
 
     // 外部张量（来自参数）
-    uint64_t a_shapes[2] = {16, 16};
+    uint32_t a_shapes[2] = {16, 16};
     Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-    uint64_t b_shapes[2] = {16, 16};
+    uint32_t b_shapes[2] = {16, 16};
     Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-    uint64_t d_shapes[2] = {16, 16};
+    uint32_t d_shapes[2] = {16, 16};
     Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
     // 内部张量（中间变量）
-    uint64_t c_shapes[2] = {16, 16};
+    uint32_t c_shapes[2] = {16, 16};
     Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
     // 任务 0: kernel_add (a + b → c)

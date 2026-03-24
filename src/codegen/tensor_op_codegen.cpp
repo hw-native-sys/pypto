@@ -58,7 +58,7 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create -> uint64_t var_shapes[N] = {...}; Tensor var = make_tensor(var_shapes, N, DataType::XX);
+  // tensor.create -> uint32_t var_shapes[N] = {...}; Tensor var = make_tensor(var_shapes, N, DataType::XX);
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
@@ -66,7 +66,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   size_t ndim = result_type->shape_.size();
 
   std::ostringstream oss;
-  oss << "uint64_t " << result_var << "_shapes[" << ndim << "] = {";
+  oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(result_type->shape_[i]);
@@ -213,7 +213,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   std::ostringstream oss;
 
   // Generate shape array
-  oss << "uint64_t " << result_var << "_shapes[" << ndim << "] = {";
+  oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(shape_tuple->elements_[i]);
@@ -221,7 +221,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "};\n";
 
   // Generate offset array
-  oss << "uint64_t " << result_var << "_offsets[" << ndim << "] = {";
+  oss << "uint32_t " << result_var << "_offsets[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(offset_tuple->elements_[i]);
