@@ -64,6 +64,33 @@ class RewriteSimplifier:
         """Enter a constraint scope. Returns a recovery function that restores original state."""
         ...
 
+class CanonicalSimplifier:
+    """Simplifies integer/index expressions using canonical sum-of-products form.
+
+    Converts expressions to a canonical form that enables simplifications
+    pattern matching cannot achieve (e.g., x*2 + x -> 3*x,
+    (x//4)*4 + x%4 -> x). Float-typed expressions are returned unchanged.
+    """
+
+    def __init__(self) -> None:
+        """Create a standalone CanonicalSimplifier."""
+        ...
+
+    def __call__(self, expr: Expr) -> Expr:
+        """Simplify an expression using canonical form analysis."""
+        ...
+
+    def update(self, var: Var, new_expr: Expr | None) -> None:
+        """Register a variable substitution: replace var with new_expr during simplification.
+
+        Pass None to remove a previous substitution.
+        """
+        ...
+
+    def enter_constraint(self, constraint: Expr) -> Callable[[], None] | None:
+        """Enter a constraint scope. Returns a recovery function that restores original state."""
+        ...
+
 class ConstIntBound:
     """Inclusive integer bounds [min_value, max_value] for an expression."""
 

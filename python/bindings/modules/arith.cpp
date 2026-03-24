@@ -103,6 +103,21 @@ void BindArith(nb::module_& m) {
       .def("enter_constraint", &ir::arith::RewriteSimplifier::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function that restores original state.");
 
+  // CanonicalSimplifier
+  nb::class_<ir::arith::CanonicalSimplifier>(
+      arith, "CanonicalSimplifier",
+      "Simplifies integer/index expressions using canonical sum-of-products form.\n\n"
+      "Converts expressions to a canonical form that enables simplifications\n"
+      "pattern matching cannot achieve (e.g., x*2 + x -> 3*x,\n"
+      "(x//4)*4 + x%%4 -> x). Float-typed expressions are returned unchanged.")
+      .def(nb::init<>(), "Create a standalone CanonicalSimplifier.")
+      .def("__call__", &ir::arith::CanonicalSimplifier::operator(), nb::arg("expr"),
+           "Simplify an expression using canonical form analysis.")
+      .def("update", &ir::arith::CanonicalSimplifier::Update, nb::arg("var"), nb::arg("new_expr").none(),
+           "Register a variable substitution. Pass None to remove a previous substitution.")
+      .def("enter_constraint", &ir::arith::CanonicalSimplifier::EnterConstraint, nb::arg("constraint"),
+           "Enter a constraint scope. Returns a recovery function, or None in standalone mode.");
+
   // ConstIntBoundAnalyzer
   nb::class_<ir::arith::ConstIntBoundAnalyzer>(arith, "ConstIntBoundAnalyzer",
                                                "Propagates constant integer bounds through expression trees.")

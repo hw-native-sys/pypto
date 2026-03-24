@@ -172,6 +172,46 @@ class RewriteSimplifier {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Canonical form simplifier for integer/index expressions.
+///
+/// Converts expressions into a sum-of-products canonical form using internal
+/// SplitExpr/SumExpr representations. Enables simplifications that pattern
+/// matching cannot achieve, such as:
+/// - x*2 + x → 3*x (coefficient collection)
+/// - (x//4)*4 + x%4 → x (div-mod recombination)
+/// - (x//4)//3 → x//12 (nested division)
+/// Float-typed expressions are returned unchanged.
+class CanonicalSimplifier {
+ public:
+  /// Construct a standalone simplifier (no parent Analyzer).
+  CanonicalSimplifier();
+
+  ~CanonicalSimplifier();
+
+  CanonicalSimplifier(const CanonicalSimplifier&) = delete;
+  CanonicalSimplifier& operator=(const CanonicalSimplifier&) = delete;
+  CanonicalSimplifier(CanonicalSimplifier&&) noexcept;
+  CanonicalSimplifier& operator=(CanonicalSimplifier&&) noexcept;
+
+  /// Simplify an expression using canonical form analysis.
+  ExprPtr operator()(const ExprPtr& expr) const;
+
+  /// Register a variable substitution: replace var with new_expr during simplification.
+  /// Pass nullptr to remove a previous substitution.
+  void Update(const VarPtr& var, const ExprPtr& new_expr);
+
+  /// Enter a constraint scope (e.g., inside an if-branch where constraint is known true).
+  /// Returns a recovery function that restores original state.
+  std::function<void()> EnterConstraint(const ExprPtr& constraint);
+
+ private:
+  friend class Analyzer;
+  explicit CanonicalSimplifier(Analyzer* parent);
+
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 /// Coordinates all sub-analyzers for arithmetic expression analysis and simplification.
 ///
 /// Provides a unified interface for binding variable ranges, simplifying expressions,

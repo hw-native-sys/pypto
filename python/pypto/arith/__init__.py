@@ -15,6 +15,7 @@ Provides expression analysis, simplification, and arithmetic property proving.
 
 from pypto.pypto_core.arith import (
     Analyzer,
+    CanonicalSimplifier,
     ConstIntBound,
     ConstIntBoundAnalyzer,
     ConstraintContext,
@@ -31,6 +32,7 @@ from pypto.pypto_core.arith import (
 
 __all__ = [
     "Analyzer",
+    "CanonicalSimplifier",
     "ConstIntBound",
     "ConstIntBoundAnalyzer",
     "ConstraintContext",
