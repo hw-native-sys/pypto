@@ -200,9 +200,7 @@ def tensor_shape(request):
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "hardware: mark test as requiring hardware (--platform=a2a3)")
-    config.addinivalue_line(
-        "markers", "a5: mark test as requiring Ascend 950 (--platform=a5 or a5sim)"
-    )
+    config.addinivalue_line("markers", "a5: mark test as requiring Ascend 950 (--platform=a5 or a5sim)")
     config.addinivalue_line("markers", "slow: mark test as slow")
     config.addinivalue_line("markers", "fuzz: mark test as fuzz test")
 
