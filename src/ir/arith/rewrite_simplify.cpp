@@ -1280,7 +1280,7 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const XorPtr& op) {
   ExprPtr b = VisitExpr(op->right_);
   if (auto folded = TryConstFoldBinary(ObjectKind::Xor, a, b)) return folded;
   if (a.get() == op->left_.get() && b.get() == op->right_.get()) return op;
-  return std::make_shared<Xor>(a, b, DataType::BOOL, Span::unknown());
+  return std::make_shared<Xor>(a, b, DataType::BOOL, op->span_);
 }
 
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const BitAndPtr& op) {
@@ -1322,7 +1322,7 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const AbsPtr& op) {
   ExprPtr a = VisitExpr(op->operand_);
   if (auto folded = TryConstFoldUnary(ObjectKind::Abs, a)) return folded;
   if (a.get() == op->operand_.get()) return op;
-  return std::make_shared<Abs>(a, GetScalarDtype(a), Span::unknown());
+  return std::make_shared<Abs>(a, GetScalarDtype(a), op->span_);
 }
 
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const BitNotPtr& op) {
