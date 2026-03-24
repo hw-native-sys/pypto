@@ -367,18 +367,20 @@ class TestFloorDivRules:
         assert_is_const_int(result.right, 2)
 
     def test_floordiv_self(self):
-        """floordiv(x, x) => 1"""
+        """floordiv(x, x) => 1 is dormant in standalone mode (requires x != 0 proof)"""
         s = RewriteSimplifier()
         x = make_var("x")
         result = s(ir.FloorDiv(x, x, INT, S))
-        assert_is_const_int(result, 1)
+        # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
+        assert isinstance(result, ir.FloorDiv)
 
     def test_floordiv_mul_self(self):
-        """floordiv(x * c1, x) => c1"""
+        """floordiv(x * c1, x) => c1 is dormant in standalone mode (requires x != 0 proof)"""
         s = RewriteSimplifier()
         x = make_var("x")
         result = s(ir.FloorDiv(ir.Mul(x, ci(5), INT, S), x, INT, S))
-        assert_is_const_int(result, 5)
+        # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
+        assert isinstance(result, ir.FloorDiv)
 
     def test_floordiv_nested_offset(self):
         """floordiv(floordiv(x, c1) + c2, c3) => floordiv(x + c1*c2, c1*c3)"""
@@ -425,12 +427,13 @@ class TestFloorModRules:
         assert_is_const_int(result.right, 3)
 
     def test_floormod_mul_var(self):
-        """floormod(x * y, y) => 0"""
+        """floormod(x * y, y) => 0 is dormant in standalone mode (requires y != 0 proof)"""
         s = RewriteSimplifier()
         x = make_var("x")
         y = make_var("y")
         result = s(ir.FloorMod(ir.Mul(x, y, INT, S), y, INT, S))
-        assert_is_const_int(result, 0)
+        # In standalone mode, TryCompare returns kUnknown so the rule doesn't fire
+        assert isinstance(result, ir.FloorMod)
 
     def test_floormod_coeff_reduction(self):
         """floormod(x * c1, c2) => floormod(x * floormod(c1, c2), c2)"""

@@ -71,6 +71,7 @@ find_package(nanobind CONFIG REQUIRED)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR})
 
 # External dependencies
 include(${CMAKE_SOURCE_DIR}/cmake/libbacktrace.cmake)

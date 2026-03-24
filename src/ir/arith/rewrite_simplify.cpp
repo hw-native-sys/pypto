@@ -18,18 +18,24 @@
 #include "src/ir/arith/rewrite_simplify.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/arith/int_operator.h"
 #include "pypto/ir/arith/pattern_match.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/transforms/base/functor.h"
 
 namespace pypto {
 namespace ir {
@@ -95,8 +101,6 @@ std::function<void()> RewriteSimplifier::Impl::EnterConstraint(const ExprPtr& co
 
   for (auto& part : parts) {
     literal_constraints_.push_back(part);
-    // Also add the negation
-    literal_constraints_.push_back(MakeNot(part));
   }
 
   return [this, old_size]() { literal_constraints_.resize(old_size); };
@@ -155,14 +159,14 @@ template <typename NodeT>
 static ExprPtr MutateBinary(const std::shared_ptr<const NodeT>& op, const ExprPtr& a, const ExprPtr& b,
                             ExprPtr (*make_fn)(const ExprPtr&, const ExprPtr&, const Span&)) {
   if (a.get() == op->left_.get() && b.get() == op->right_.get()) return op;
-  return make_fn(a, b, Span::unknown());
+  return make_fn(a, b, op->span_);
 }
 
 template <typename NodeT>
 static ExprPtr MutateUnary(const std::shared_ptr<const NodeT>& op, const ExprPtr& a,
                            ExprPtr (*make_fn)(const ExprPtr&, const Span&)) {
   if (a.get() == op->operand_.get()) return op;
-  return make_fn(a, Span::unknown());
+  return make_fn(a, op->span_);
 }
 
 // ============================================================================
@@ -480,12 +484,13 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorDivPtr& op) {
                          c1.Eval()->value_ > 0 && c3.Eval()->value_ > 0);
   }
 
-  // floordiv(x, x) => 1
-  PYPTO_TRY_REWRITE(floordiv(x, x), MakeConstInt(1, GetScalarDtype(ret)));
-  // floordiv(x * c1, x) => c1
-  PYPTO_TRY_REWRITE(floordiv(x * c1, x), c1);
-  // floordiv(c1 * x, x) => c1
-  PYPTO_TRY_REWRITE(floordiv(c1 * x, x), c1);
+  // floordiv(x, x) => 1  (requires x != 0 to preserve semantics)
+  PYPTO_TRY_REWRITE_IF(floordiv(x, x), MakeConstInt(1, GetScalarDtype(ret)),
+                       CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
+  // floordiv(x * c1, x) => c1  (requires x != 0)
+  PYPTO_TRY_REWRITE_IF(floordiv(x * c1, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
+  // floordiv(c1 * x, x) => c1  (requires x != 0)
+  PYPTO_TRY_REWRITE_IF(floordiv(c1 * x, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
 
   // floordiv(x + c1, c2) => floordiv(x, c2) + c1/c2 when c2 > 0 and c1 % c2 == 0
   PYPTO_TRY_REWRITE_IF(floordiv(x + c1, c2), floordiv(x, c2) + floordiv(c1, c2),
@@ -525,9 +530,9 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorDivPtr& op) {
   // floordiv(x - floormod(x, c1), c1) => floordiv(x, c1) when c1 != 0
   PYPTO_TRY_REWRITE_IF(floordiv(x - floormod(x, c1), c1), floordiv(x, c1), c1.Eval()->value_ != 0);
 
-  // floordiv(x*y, y) => x when y >= 0 (dormant in PR 3)
-  PYPTO_TRY_REWRITE_IF(floordiv(x * y, y), x, CanProveGE(y.Eval(), 0));
-  PYPTO_TRY_REWRITE_IF(floordiv(y * x, y), x, CanProveGE(y.Eval(), 0));
+  // floordiv(x*y, y) => x when y != 0 (dormant in PR 3)
+  PYPTO_TRY_REWRITE_IF(floordiv(x * y, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+  PYPTO_TRY_REWRITE_IF(floordiv(y * x, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
 
   // floordiv(x*z + y, z) => x + floordiv(y, z) when z >= 0 (dormant)
   PYPTO_TRY_REWRITE_IF(floordiv(x * z + y, z), x + floordiv(y, z), CanProveGE(z.Eval(), 0));
@@ -591,9 +596,11 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorModPtr& op) {
       floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
       c2.Eval()->value_ != 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
 
-  // floormod(x * y, y) => 0
-  PYPTO_TRY_REWRITE(floormod(x * y, y), MakeConstInt(0, GetScalarDtype(ret)));
-  PYPTO_TRY_REWRITE(floormod(y * x, y), MakeConstInt(0, GetScalarDtype(ret)));
+  // floormod(x * y, y) => 0  (requires y != 0 to preserve semantics)
+  PYPTO_TRY_REWRITE_IF(floormod(x * y, y), MakeConstInt(0, GetScalarDtype(ret)),
+                       CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+  PYPTO_TRY_REWRITE_IF(floormod(y * x, y), MakeConstInt(0, GetScalarDtype(ret)),
+                       CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
 
   // floormod(x + y * c1, c2) => floormod(x + y * floormod(c1, c2), c2)
   // Guard: c2 > 0 and c1 is actually reduced
@@ -601,8 +608,9 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorModPtr& op) {
       floormod(x + y * c1, c2), floormod(x + y * floormod(c1, c2), c2),
       c2.Eval()->value_ > 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
 
-  // floormod(x * c1, x * c2) => x * floormod(c1, c2) when c2 != 0
-  PYPTO_TRY_REWRITE_IF(floormod(x * c1, x * c2), x * floormod(c1, c2), c2.Eval()->value_ != 0);
+  // floormod(x * c1, x * c2) => x * floormod(c1, c2) when c2 != 0 and x != 0
+  PYPTO_TRY_REWRITE_IF(floormod(x * c1, x * c2), x * floormod(c1, c2),
+                       c2.Eval()->value_ != 0 && (CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1)));
 
   // floormod(x + c1, c2) => floormod(x + floormod(c1, c2), c2)
   // when c2 > 0 and c1 % c2 != 0 and |c1| >= c2

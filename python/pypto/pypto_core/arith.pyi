@@ -49,8 +49,11 @@ class RewriteSimplifier:
         """Simplify an expression by applying rewrite rules."""
         ...
 
-    def update(self, var: Var, new_expr: Expr) -> None:
-        """Register a variable substitution: replace var with new_expr during simplification."""
+    def update(self, var: Var, new_expr: Expr | None) -> None:
+        """Register a variable substitution: replace var with new_expr during simplification.
+
+        Pass None to remove a previous substitution.
+        """
         ...
 
     def enter_constraint(self, constraint: Expr) -> Callable[[], None]:

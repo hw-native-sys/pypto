@@ -96,8 +96,8 @@ void BindArith(nb::module_& m) {
       .def(nb::init<>(), "Create a standalone RewriteSimplifier.")
       .def("__call__", &ir::arith::RewriteSimplifier::operator(), nb::arg("expr"),
            "Simplify an expression by applying rewrite rules.")
-      .def("update", &ir::arith::RewriteSimplifier::Update, nb::arg("var"), nb::arg("new_expr"),
-           "Register a variable substitution: replace var with new_expr during simplification.")
+      .def("update", &ir::arith::RewriteSimplifier::Update, nb::arg("var"), nb::arg("new_expr").none(),
+           "Register a variable substitution. Pass None to remove a previous substitution.")
       .def("enter_constraint", &ir::arith::RewriteSimplifier::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function that restores original state.");
 
