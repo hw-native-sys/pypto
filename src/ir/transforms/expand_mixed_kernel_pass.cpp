@@ -1120,18 +1120,32 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Collect CV boundary moves from explicit tile.move ops.
   // First, build a map from Var -> defining tpop Call so boundary moves can
   // propagate kwargs (e.g., split) from the original tpop to the replacement.
+  // Uses the already-collected tpop_vars set and rescans for the full Call objects.
   std::unordered_map<const Var*, CallPtr> var_to_tpop;
-  for (const auto& stmt : stmts) {
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
-        if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
-          if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
-            var_to_tpop[assign->var_.get()] = call;
+  auto collect_var_to_tpop = [&](const std::vector<StmtPtr>& ss, auto&& self) -> void {
+    for (const auto& stmt : ss) {
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+          if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
+            if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
+              var_to_tpop[assign->var_.get()] = call;
+            }
           }
         }
       }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        self(FlattenBody(for_stmt->body_), self);
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        self(FlattenBody(if_stmt->then_body_), self);
+        if (if_stmt->else_body_.has_value()) {
+          self(FlattenBody(if_stmt->else_body_.value()), self);
+        }
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        self(FlattenBody(while_stmt->body_), self);
+      }
     }
-  }
+  };
+  collect_var_to_tpop(stmts, collect_var_to_tpop);
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, var_to_tpop);
 

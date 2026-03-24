@@ -460,6 +460,21 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
   std::vector<const ir::Var*> tpop_order;
   std::vector<bool> in_chain(stmts.size(), false);
 
+  // Build a set of vars defined within the tpop region (after first tpop)
+  // to detect dependency hazards when reordering.
+  std::set<const ir::Var*> region_defined_vars;
+  bool seen_first_tpop = false;
+  for (const auto& stmt : stmts) {
+    if (auto assign = As<ir::AssignStmt>(stmt)) {
+      if (!seen_first_tpop && tpop_result_vars_.count(assign->var_.get()) > 0) {
+        seen_first_tpop = true;
+      }
+      if (seen_first_tpop) {
+        region_defined_vars.insert(assign->var_.get());
+      }
+    }
+  }
+
   for (size_t i = 0; i < stmts.size(); ++i) {
     if (auto assign = As<ir::AssignStmt>(stmts[i])) {
       // Tpop assignment itself
@@ -473,6 +488,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
       if (auto call = As<ir::Call>(assign->value_)) {
         const ir::Var* ref = nullptr;
         bool multi = false;
+        bool has_unsafe_dep = false;
         for (const auto& arg : call->args_) {
           if (auto v = ir::AsVarLike(arg); v && tpop_result_vars_.count(v.get()) > 0) {
             if (ref && ref != v.get()) {
@@ -480,9 +496,13 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
               break;
             }
             ref = v.get();
+          } else if (auto v = ir::AsVarLike(arg); v && region_defined_vars.count(v.get()) > 0) {
+            // This arg references a non-tpop var defined in the region —
+            // moving this stmt could create use-before-def.
+            has_unsafe_dep = true;
           }
         }
-        if (ref && !multi && chains.count(ref) > 0) {
+        if (ref && !multi && !has_unsafe_dep && chains.count(ref) > 0) {
           chains[ref].user_idxs.push_back(i);
           in_chain[i] = true;
         }
@@ -838,10 +858,9 @@ std::string PTOCodegen::GetImportBufferSSA() const { return import_buf_ssa_; }
 
 int PTOCodegen::GetTpopSplit(const ir::Var* var) const {
   auto it = tpop_result_vars_.find(var);
-  if (it != tpop_result_vars_.end()) {
-    return it->second;
-  }
-  return 0;
+  INTERNAL_CHECK(it != tpop_result_vars_.end())
+      << "Internal error: GetTpopSplit called for var not in tpop_result_vars_";
+  return it->second;
 }
 
 bool PTOCodegen::IsAICFunction() const {
@@ -864,7 +883,7 @@ void PTOCodegen::EmitExtraAllocTiles() {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (tpop_result_vars_.count(GetVarKey(op->var_)) == 0) {
+    if (tpop_result_vars_.count(op->var_.get()) == 0) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
