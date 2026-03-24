@@ -823,8 +823,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 }
 
 void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
-  for (size_t i = 0; i < func->params_.size(); i++) {
-    const auto& param = func->params_[i];
+  for (const auto& param : func->params_) {
     if (auto tensor_type = As<TensorType>(param->GetType())) {
       std::string tensor_view = tensor_to_view_.at(GetVarKey(param));
 

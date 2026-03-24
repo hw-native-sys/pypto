@@ -1388,7 +1388,7 @@ class TestOrchestration:
         code = files["orchestration/orch_assemble_view.cpp"]
 
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" in code
-        assert "make_output_param(row)" in code
+        assert "params_t0.add_output(row)" in code
         assert "Tensor row = make_tensor(" not in code
         assert "memcpy(" not in code
         assert "ext_out = out;" not in code
@@ -1432,7 +1432,7 @@ class TestOrchestration:
         files = generator.generate(transformed)
         code = files["orchestration/orch_duplicate_assemble.cpp"]
 
-        assert "Tensor row = make_tensor(row_shapes, 2, DataType::FLOAT32);" in code
+        assert "Tensor row = make_tensor_nd(row_shapes, 2, DataType::FLOAT32);" in code
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" not in code
 
     def test_tensor_assemble_slice_source_does_not_require_view_fast_path(self):
@@ -1558,13 +1558,13 @@ class TestOrchestration:
         files = generator.generate(transformed)
         code = files["orchestration/orch_repeat.cpp"]
 
-        assert code.count("Tensor ret0__out = make_tensor(") == 1
-        assert code.count("Tensor ret0__out_1 = make_tensor(") == 1
-        assert "make_output_param(ret0__out)" in code
-        assert "make_output_param(ret0__out_1)" in code
+        assert code.count("Tensor ret0__out = make_tensor_nd(") == 1
+        assert code.count("Tensor ret0__out_1 = make_tensor_nd(") == 1
+        assert "params_t0.add_output(ret0__out)" in code
+        assert "params_t1.add_output(ret0__out_1)" in code
         assert "Tensor& first = ret0__out;" in code
         assert "Tensor& second = ret0__out_1;" in code
-        assert "make_output_param(ret0)," not in code
+        assert "add_output(ret0)" not in code
 
 
 class TestTensorReadWriteOffsetCodegen:
@@ -1704,8 +1704,8 @@ class TestTensorReadWriteOffsetCodegen:
         files = generator.generate(transformed)
         code = files["orchestration/orch.cpp"]
 
-        assert "make_input_param(ext_x)" in code
-        assert "make_output_param(ext_out)" in code
+        assert "params_t0.add_input(ext_x)" in code
+        assert "params_t0.add_output(ext_out)" in code
 
     def test_infer_inout_param_from_loop_carried_read_modify_write(self):
         """Loop-carried read-modify-write should emit inout params."""
@@ -1744,8 +1744,8 @@ class TestTensorReadWriteOffsetCodegen:
         files = generator.generate(transformed)
         code = files["orchestration/orch.cpp"]
 
-        assert "make_input_param(ext_x)" in code
-        assert "make_inout_param(ext_acc)" in code
+        assert "params_t0.add_input(ext_x)" in code
+        assert "params_t0.add_inout(ext_acc)" in code
 
 
 if __name__ == "__main__":

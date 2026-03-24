@@ -275,6 +275,7 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
         golden_path=str(golden_path),
         platform=platform,
         device_id=device_id,
+        clone_protocol="https",
     ).run()
 
 

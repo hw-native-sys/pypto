@@ -276,6 +276,20 @@ void CCECodegen::GenerateBody(const ir::FunctionPtr& func) {
     VisitStmt(func->body_);
   }
 
+  // Emit pipeline completion sync before returning.
+  // This ensures all in-flight pipe operations finish before the kernel returns,
+  // so the runtime can safely read back results.
+  auto core_type = InferFunctionCoreType(func);
+  if (core_type == ir::CoreType::VECTOR) {
+    // AIV: wait for MTE3 (store pipeline) to complete
+    emitter_.EmitLine("set_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);");
+    emitter_.EmitLine("wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);");
+  } else {
+    // AIC: wait for FIX (cube unit pipeline) to complete
+    emitter_.EmitLine("set_flag(PIPE_FIX, PIPE_S, EVENT_ID7);");
+    emitter_.EmitLine("wait_flag(PIPE_FIX, PIPE_S, EVENT_ID7);");
+  }
+
   emitter_.DecreaseIndent();
   emitter_.EmitLine("}");
 }

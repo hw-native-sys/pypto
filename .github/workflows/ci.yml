@@ -123,8 +123,8 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
-      - name: Clone simpler repository (stable)
-        run: git clone --branch stable https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
+      - name: Clone simpler repository (main)
+        run: git clone --branch main https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
 
       - name: Test system tests
         run: pytest tests/st -v --device=$DEVICE_ID --forked
@@ -144,8 +144,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
-      - name: Clone simpler repository (stable)
-        run: git clone --branch stable https://github.com/hw-native-sys/simpler "${GITHUB_WORKSPACE}/simpler"
+      - name: Clone simpler repository (main)
+        run: git clone --branch main https://github.com/hw-native-sys/simpler "${GITHUB_WORKSPACE}/simpler"
 
       - name: Run fuzz tests (sim mode)
         id: run_fuzz
