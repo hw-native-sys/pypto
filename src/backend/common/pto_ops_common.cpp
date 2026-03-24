@@ -38,7 +38,6 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1023,55 +1022,17 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
   });
 
-  // In-place accumulation ops (matmul_acc, gemv_acc): the CUBE engine
-  // accumulates into the output buffer, NOT from a separate accumulator input.
-  // When memory reuse cannot merge c_in and c_out (touching lifetimes treated
-  // as overlapping), they get separate buffers.  We emit a pto.tmov to copy
-  // c_in → c_out so the hardware reads the correct accumulator value.
+  // In-place accumulation ops (matmul_acc, gemv_acc): ptoas expects the
+  // accumulator in ins() to be the same SSA value as outs().  InitMemRef
+  // guarantees that the output shares the MemRef of the accumulator input
+  // (via set_output_reuses_input), so we use the result buffer (dst) as the
+  // accumulator operand instead of the IR-level input arg.
   auto make_acc_codegen = [](const std::string& pto_op) {
     return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 3) << pto_op << " requires 3 arguments: acc, lhs, rhs";
 
-      std::string acc = codegen.GetExprAsCode(op->args_[0]);
       std::string dst = codegen.GetCurrentResultTarget();
-
-      // Copy accumulator to output buffer when they differ and occupy
-      // different physical storage.  With per-var alloc, two distinct SSA
-      // names may share the same MemRef (same addr/space), making the
-      // tmov a hardware-level no-op that must be suppressed.
-      bool need_tmov = (acc != dst);
-      if (need_tmov) {
-        auto acc_var = ir::As<ir::Var>(op->args_[0]);
-        auto result_var = codegen.GetCurrentResultVar();
-        if (acc_var && result_var) {
-          auto acc_tt = ir::GetTileTypeWithMemRef(acc_var->GetType());
-          auto dst_tt = ir::GetTileTypeWithMemRef(result_var->GetType());
-          if (acc_tt && dst_tt) {
-            auto acc_mr = ir::GetDefinedMemRef(acc_tt);
-            auto dst_mr = ir::GetDefinedMemRef(dst_tt);
-            if (acc_mr.get() == dst_mr.get()) {
-              need_tmov = false;
-            }
-          }
-        }
-      }
-      if (need_tmov) {
-        std::string acc_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-        std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
-        std::ostringstream mov;
-        mov << "pto.tmov ins(" << acc;
-        if (!acc_type.empty()) mov << " : " << acc_type;
-        mov << ") outs(" << dst;
-        if (!dst_type.empty()) mov << " : " << dst_type;
-        mov << ")";
-        codegen.Emit(mov.str());
-      }
-
-      // Emit the accumulation instruction with dst (accumulator), lhs, rhs
-      // as ins() operands.  ptoas expects all three in ins(); the hardware
-      // reads the accumulator from the output buffer, but the MLIR op still
-      // models it as an input for correct data-flow tracking.
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
       std::string rhs = codegen.GetExprAsCode(op->args_[2]);
       std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
