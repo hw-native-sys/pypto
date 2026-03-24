@@ -398,11 +398,11 @@ bool CanonicalSimplifier::Impl::TrySumFloorDiv(const SumExpr& sum, int64_t divis
   // Case 2: Single SplitExpr with base == 0.
   if (sum.args.size() == 1 && sum.base == 0) {
     const auto& split = sum.args[0];
-    int64_t abs_scale = split.scale > 0 ? split.scale : -split.scale;
 
-    // Sub-case 2a: |scale| is divisible by divisor.
+    // Sub-case 2a: scale is divisible by divisor.
     // e.g., (x * 4) // 2 = x * 2
-    if (abs_scale % divisor == 0) {
+    // Note: C++17 guarantees truncation toward zero for %, so this works for negative scales too.
+    if (split.scale % divisor == 0) {
       *result = sum;
       result->args[0].scale /= divisor;
       return true;
@@ -453,11 +453,11 @@ bool CanonicalSimplifier::Impl::TrySumFloorMod(const SumExpr& sum, int64_t divis
   // Case 2: Single SplitExpr with base == 0.
   if (sum.args.size() == 1 && sum.base == 0) {
     const auto& split = sum.args[0];
-    int64_t abs_scale = split.scale > 0 ? split.scale : -split.scale;
 
-    // Sub-case 2a: |scale| divisible by divisor → result is 0.
+    // Sub-case 2a: scale divisible by divisor → result is 0.
     // e.g., (x * 4) % 2 = 0
-    if (abs_scale != 0 && abs_scale % divisor == 0) {
+    // Note: C++17 guarantees truncation toward zero for %, so this works for negative scales too.
+    if (split.scale != 0 && split.scale % divisor == 0) {
       result->dtype = sum.dtype;
       result->base = 0;
       result->args.clear();
