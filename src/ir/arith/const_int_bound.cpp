@@ -166,7 +166,6 @@ static Bound BoundFloorMod(const Bound& a, const Bound& b) {
 
 class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
  public:
-  // parent is stored for future cross-analyzer queries (PR 6)
   explicit Impl(Analyzer* parent) : parent_(parent) {}
 
   void Bind(const VarPtr& var, const Bound& bound) { var_map_[var.get()] = bound; }
@@ -373,7 +372,7 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
  private:
-  [[maybe_unused]] Analyzer* parent_;
+  Analyzer* parent_;
   std::unordered_map<const Expr*, Bound> var_map_;
 };
 

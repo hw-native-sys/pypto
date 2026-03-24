@@ -19,8 +19,7 @@
  * @file arith.cpp
  * @brief Python bindings for arithmetic simplification utilities.
  *
- * Exposes constant folding and ConstIntBoundAnalyzer.
- * The full Analyzer API will be added in a later PR.
+ * Exposes constant folding, sub-analyzers, and the Analyzer coordinator.
  */
 
 #include <nanobind/nanobind.h>
@@ -32,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include "../module.h"
 #include "pypto/ir/arith/analyzer.h"
@@ -139,6 +139,52 @@ void BindArith(nb::module_& m) {
            "Update a variable's modular set information.")
       .def("enter_constraint", &ir::arith::ModularSetAnalyzer::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function, or None if constraint is not useful.");
+
+  // Analyzer (coordinator)
+  nb::class_<ir::arith::Analyzer>(
+      arith, "Analyzer",
+      "Coordinates all sub-analyzers for expression analysis and simplification.\n\n"
+      "Provides a unified interface for binding variable ranges, simplifying\n"
+      "expressions, and proving arithmetic properties.")
+      .def(nb::init<>(), "Create an Analyzer with all sub-analyzers.")
+      .def_ro("const_int_bound", &ir::arith::Analyzer::const_int_bound, "ConstIntBoundAnalyzer sub-analyzer.")
+      .def_ro("modular_set", &ir::arith::Analyzer::modular_set, "ModularSetAnalyzer sub-analyzer.")
+      .def_ro("rewrite_simplify", &ir::arith::Analyzer::rewrite_simplify, "RewriteSimplifier sub-analyzer.")
+      .def("bind", nb::overload_cast<const ir::VarPtr&, const ir::ExprPtr&, bool>(&ir::arith::Analyzer::Bind),
+           nb::arg("var"), nb::arg("expr"), nb::arg("allow_override") = false,
+           "Bind a variable to an expression, propagating information to all sub-analyzers.")
+      .def("bind", nb::overload_cast<const ir::VarPtr&, int64_t, int64_t, bool>(&ir::arith::Analyzer::Bind),
+           nb::arg("var"), nb::arg("min_val"), nb::arg("max_val_exclusive"),
+           nb::arg("allow_override") = false,
+           "Bind a variable to the half-open range [min_val, max_val_exclusive).")
+      .def("simplify", &ir::arith::Analyzer::Simplify, nb::arg("expr"), nb::arg("steps") = 2,
+           "Simplify an expression by iterative rewrite simplification.")
+      .def("can_prove_greater_equal", &ir::arith::Analyzer::CanProveGreaterEqual, nb::arg("expr"),
+           nb::arg("lower_bound"), "Prove that expr >= lower_bound for all possible variable values.")
+      .def("can_prove_less", &ir::arith::Analyzer::CanProveLess, nb::arg("expr"), nb::arg("upper_bound"),
+           "Prove that expr < upper_bound for all possible variable values.")
+      .def("can_prove_equal", &ir::arith::Analyzer::CanProveEqual, nb::arg("lhs"), nb::arg("rhs"),
+           "Prove that lhs and rhs are always equal.")
+      .def("can_prove", &ir::arith::Analyzer::CanProve, nb::arg("cond"),
+           "Prove that a boolean condition is always true.")
+      .def(
+          "constraint_context",
+          [](ir::arith::AnalyzerPtr self, const ir::ExprPtr& constraint) {
+            return self->GetConstraintContext(std::move(self), constraint);
+          },
+          nb::arg("constraint"),
+          "Create a constraint scope (context manager).\n\n"
+          "Usage: with analyzer.constraint_context(expr): ...");
+
+  // ConstraintContext (context manager — typically created via Analyzer.constraint_context())
+  nb::class_<ir::arith::ConstraintContext>(
+      arith, "ConstraintContext",
+      "RAII guard that enters a constraint scope on all sub-analyzers.\n\n"
+      "Prefer Analyzer.constraint_context() over direct construction.")
+      .def("exit_scope", &ir::arith::ConstraintContext::ExitScope,
+           "Explicitly exit the constraint scope (idempotent).")
+      .def("__enter__", [](nb::object self) -> nb::object { return self; })
+      .def("__exit__", [](ir::arith::ConstraintContext& self, const nb::args&) { self.ExitScope(); });
 }
 
 }  // namespace python

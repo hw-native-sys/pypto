@@ -22,6 +22,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <vector>
 
 #include "pypto/ir/expr.h"
 
@@ -46,8 +47,9 @@ struct ConstIntBound {
   [[nodiscard]] bool is_everything() const { return min_value == kNegInf && max_value == kPosInf; }
 };
 
-/// Forward declaration — completed in PR 6.
+// Forward declarations.
 class Analyzer;
+class ConstraintContext;
 
 /// Propagates constant integer bounds through expression trees.
 ///
@@ -168,6 +170,88 @@ class RewriteSimplifier {
 
   class Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+/// Coordinates all sub-analyzers for arithmetic expression analysis and simplification.
+///
+/// Provides a unified interface for binding variable ranges, simplifying expressions,
+/// and proving arithmetic properties. Each sub-analyzer can also be used standalone,
+/// but the coordinator enables cross-analyzer queries (e.g., rewrite rules that
+/// use bound information to determine applicability).
+class Analyzer {
+ public:
+  Analyzer();
+  ~Analyzer();
+
+  Analyzer(const Analyzer&) = delete;
+  Analyzer& operator=(const Analyzer&) = delete;
+
+  /// Sub-analyzers — public for direct access when needed.
+  ConstIntBoundAnalyzer const_int_bound;
+  ModularSetAnalyzer modular_set;
+  RewriteSimplifier rewrite_simplify;
+
+  /// Bind a variable to an expression: propagates information to all sub-analyzers.
+  /// \note allow_override is reserved for future use and currently has no effect.
+  void Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override = false);
+
+  /// Bind a variable to the half-open range [min_val, max_val_exclusive).
+  /// \note allow_override is reserved for future use and currently has no effect.
+  void Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override = false);
+
+  /// Simplify an expression by iterative rewrite simplification.
+  /// \param steps Number of simplification rounds (default 2).
+  ExprPtr Simplify(const ExprPtr& expr, int steps = 2);
+
+  /// Prove that expr >= lower_bound for all possible variable values.
+  bool CanProveGreaterEqual(const ExprPtr& expr, int64_t lower_bound);
+
+  /// Prove that expr < upper_bound for all possible variable values.
+  bool CanProveLess(const ExprPtr& expr, int64_t upper_bound);
+
+  /// Prove that lhs and rhs are always equal.
+  bool CanProveEqual(const ExprPtr& lhs, const ExprPtr& rhs);
+
+  /// Prove that a boolean condition is always true.
+  bool CanProve(const ExprPtr& cond);
+
+  /// Create a constraint scope (RAII guard).
+  /// Within the returned scope, the constraint is assumed true.
+  ConstraintContext GetConstraintContext(std::shared_ptr<Analyzer> self, const ExprPtr& constraint);
+};
+
+using AnalyzerPtr = std::shared_ptr<Analyzer>;
+
+/// RAII guard that enters a constraint scope on all sub-analyzers.
+///
+/// Within the scope, the constraint expression is assumed to be true,
+/// which tightens variable bounds and enables additional simplifications.
+/// On destruction, all sub-analyzers are restored to their pre-constraint state.
+///
+/// Usage:
+///   {
+///     auto ctx = analyzer->GetConstraintContext(analyzer, x >= 0);
+///     // Within this scope, analyzer knows x >= 0
+///     auto simplified = analyzer->Simplify(expr);
+///   }  // Bounds restored here
+class ConstraintContext {
+ public:
+  ConstraintContext(AnalyzerPtr analyzer, const ExprPtr& constraint);
+  ~ConstraintContext();
+
+  ConstraintContext(ConstraintContext&& other) noexcept;
+  ConstraintContext& operator=(ConstraintContext&&) = delete;
+  ConstraintContext(const ConstraintContext&) = delete;
+  ConstraintContext& operator=(const ConstraintContext&) = delete;
+
+  /// Explicitly exit the constraint scope (idempotent).
+  /// Called by the destructor, but can also be called earlier (e.g., from Python __exit__).
+  void ExitScope();
+
+ private:
+  AnalyzerPtr analyzer_;
+  bool exited_{false};
+  std::vector<std::function<void()>> recovery_functions_;
 };
 
 }  // namespace arith

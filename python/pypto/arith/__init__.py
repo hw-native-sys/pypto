@@ -10,12 +10,14 @@
 """
 PyPTO arithmetic simplification module.
 
-Provides constant folding and (future) expression analysis utilities.
+Provides expression analysis, simplification, and arithmetic property proving.
 """
 
 from pypto.pypto_core.arith import (
+    Analyzer,
     ConstIntBound,
     ConstIntBoundAnalyzer,
+    ConstraintContext,
     ModularSet,
     ModularSetAnalyzer,
     RewriteSimplifier,
@@ -28,8 +30,10 @@ from pypto.pypto_core.arith import (
 )
 
 __all__ = [
+    "Analyzer",
     "ConstIntBound",
     "ConstIntBoundAnalyzer",
+    "ConstraintContext",
     "ModularSet",
     "ModularSetAnalyzer",
     "RewriteSimplifier",

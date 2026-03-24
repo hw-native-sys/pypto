@@ -86,9 +86,15 @@ ExprPtr RewriteSimplifier::Impl::RecursiveRewrite(const ExprPtr& expr) {
   return result;
 }
 
-CompareResult RewriteSimplifier::Impl::TryCompare(const ExprPtr& /*x*/, int64_t /*val*/) {
-  // Full implementation using parent_->const_int_bound() comes in PR 6.
-  // In standalone mode (no parent), all comparisons are unknown.
+CompareResult RewriteSimplifier::Impl::TryCompare(const ExprPtr& x, int64_t val) {
+  if (!parent_) return CompareResult::kUnknown;
+
+  ConstIntBound bound = parent_->const_int_bound(x);
+  if (bound.min_value == val && bound.max_value == val) return CompareResult::kEQ;
+  if (bound.min_value > val) return CompareResult::kGT;
+  if (bound.min_value == val) return CompareResult::kGE;
+  if (bound.max_value < val) return CompareResult::kLT;
+  if (bound.max_value == val) return CompareResult::kLE;
   return CompareResult::kUnknown;
 }
 
