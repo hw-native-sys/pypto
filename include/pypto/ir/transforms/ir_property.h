@@ -175,8 +175,9 @@ enum class VerificationLevel {
 /**
  * @brief Get the set of properties automatically verified during compilation
  *
- * Returns {SSAForm, TypeChecked, AllocatedMemoryAddr, BreakContinueValid,
- * NoRedundantBlocks} — lightweight checks that catch the most common IR errors.
+ * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
+ * BreakContinueValid, NoRedundantBlocks} — lightweight checks that catch the
+ * most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 

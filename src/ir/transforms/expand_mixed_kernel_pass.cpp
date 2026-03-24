@@ -27,6 +27,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
@@ -377,6 +378,13 @@ CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const S
   auto effective_kwargs = kwargs.empty() ? MakeSplitKwargs() : kwargs;
   return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs),
                                 CleanTileType(tile_type), span);
+}
+
+CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr& result_type,
+                   const Span& span) {
+  auto op = OpRegistry::GetInstance().GetOp("tile.move");
+  std::vector<std::pair<std::string, std::any>> kwargs{{"target_memory", std::any(target_memory)}};
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
 }
 
 // ============================================================================
@@ -989,6 +997,27 @@ std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
 
 enum class CoreSide { AIC, AIV };
 
+MemorySpace GetBoundaryTpopMemory(CoreSide side) {
+  return (side == CoreSide::AIC) ? MemorySpace::Mat : MemorySpace::Vec;
+}
+
+TypePtr BuildBoundaryTpopType(CoreSide side, const TypePtr& original_type) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(original_type);
+  INTERNAL_CHECK(tt) << "Boundary-generated tpop requires TileType result";
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, std::nullopt,
+                                    GetBoundaryTpopMemory(side));
+}
+
+bool NeedsPostTpopMove(CoreSide side, const TileType& dest_type) {
+  INTERNAL_CHECK(dest_type.memory_space_.has_value())
+      << "Boundary move destination must have inferred memory_space before ExpandMixedKernel";
+  return dest_type.memory_space_.value() != GetBoundaryTpopMemory(side);
+}
+
+std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
+  return dest_name + ((side == CoreSide::AIC) ? "_mat" : "_vec");
+}
+
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
@@ -1029,21 +1058,35 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           result.push_back(
               std::make_shared<EvalStmt>(CreateTpush(push_op, bm.source_tile, stmt->span_), stmt->span_));
         } else {
-          // Use the dest_var's type (which has memory_space from infer_tile_memory_space)
-          // as the source, then strip TileView so the type is DSL-expressible.
-          auto clean_type = CleanTileType(bm.dest_var->GetType());
-          auto clean_var = std::make_shared<Var>(bm.dest_var->name_hint_, clean_type, stmt->span_);
-          tpop_var_remap[bm.dest_var.get()] = clean_var;
-          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-            tpop_var_remap[source_var.get()] = clean_var;
+          auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
+          INTERNAL_CHECK(dest_tile_type) << "Boundary move destination must have TileType";
+          auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
+          bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
+          std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
+                                                  : bm.dest_var->name_hint_;
+          auto tpop_var = std::make_shared<Var>(tpop_name, CleanTileType(tpop_type), stmt->span_);
+          if (!needs_post_move) {
+            tpop_var_remap[bm.dest_var.get()] = tpop_var;
           }
+          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+            tpop_var_remap[source_var.get()] = tpop_var;
+          }
+          tpop_var_remap[tpop_var.get()] = tpop_var;
           // Propagate kwargs from the original tpop (e.g., split=1) if available
           std::vector<std::pair<std::string, std::any>> kwargs;
           if (bm.source_tpop_call) {
             kwargs = bm.source_tpop_call->kwargs_;
           }
           result.push_back(std::make_shared<AssignStmt>(
-              clean_var, CreateTpop(pop_op, clean_type, stmt->span_, kwargs), stmt->span_));
+              tpop_var, CreateTpop(pop_op, tpop_type, stmt->span_, kwargs), stmt->span_));
+          if (needs_post_move) {
+            auto target_memory = dest_tile_type->memory_space_;
+            INTERNAL_CHECK(target_memory.has_value())
+                << "Boundary move destination must have memory_space before post-tpop move emission";
+            result.push_back(std::make_shared<AssignStmt>(
+                bm.dest_var, CreateMove(tpop_var, *target_memory, bm.dest_var->GetType(), stmt->span_),
+                stmt->span_));
+          }
         }
         continue;
       }
@@ -1620,6 +1663,54 @@ class MixedKernelExpandedVerifier : public IRVisitor {
   bool has_vector_ = false;
 };
 
+class TpopMemoryVerifier : public IRVisitor {
+ public:
+  TpopMemoryVerifier(std::vector<Diagnostic>& diagnostics, std::string func_name, FunctionType func_type)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)), func_type_(func_type) {}
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op) return;
+    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+    auto ir_op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    if (!ir_op) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    std::optional<MemorySpace> expected_memory;
+    if (func_type_ == FunctionType::AIC && ir_op->name_ == "tile.tpop_from_aiv") {
+      expected_memory = MemorySpace::Mat;
+    } else if (func_type_ == FunctionType::AIV && ir_op->name_ == "tile.tpop_from_aic") {
+      expected_memory = MemorySpace::Vec;
+    }
+
+    if (expected_memory.has_value()) {
+      auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
+      bool valid = tile_type && tile_type->memory_space_.has_value() &&
+                   tile_type->memory_space_.value() == expected_memory.value();
+      if (!valid) {
+        std::string func_kind = (func_type_ == FunctionType::AIC) ? "AIC" : "AIV";
+        std::string actual_memory = (tile_type && tile_type->memory_space_.has_value())
+                                        ? MemorySpaceToString(tile_type->memory_space_.value())
+                                        : "unset";
+        diagnostics_.emplace_back(
+            DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+            func_kind + " function '" + func_name_ + "' requires " + ir_op->name_ +
+                " result in MemorySpace::" + MemorySpaceToString(expected_memory.value()) +
+                ", got MemorySpace::" + actual_memory,
+            op->span_);
+      }
+    }
+
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  std::string func_name_;
+  FunctionType func_type_;
+};
+
 }  // namespace
 
 class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
@@ -1630,11 +1721,16 @@ class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      // Only check InCore functions (AIC/AIV are already split)
-      if (func->func_type_ != FunctionType::InCore) continue;
-      MixedKernelExpandedVerifier verifier(diagnostics, func->name_);
-      verifier.VisitStmt(func->body_);
-      verifier.CheckResult();
+      if (func->func_type_ == FunctionType::InCore) {
+        MixedKernelExpandedVerifier verifier(diagnostics, func->name_);
+        verifier.VisitStmt(func->body_);
+        verifier.CheckResult();
+        continue;
+      }
+      if (func->func_type_ == FunctionType::AIC || func->func_type_ == FunctionType::AIV) {
+        TpopMemoryVerifier verifier(diagnostics, func->name_, func->func_type_);
+        verifier.VisitStmt(func->body_);
+      }
     }
   }
 };

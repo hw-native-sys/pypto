@@ -407,6 +407,75 @@ class TestCrossCoreBoundaries:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_v2c_boundary_direct_to_left_keeps_mat_tpop(self):
+        """Direct V->C move to Left must become Mat tpop followed by move."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_left = pl.move(x_tile, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        After = _expand(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ):
+                x_left_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                    shape=[16, 128], dtype=pl.BF16
+                )
+                x_left = pl.move(x_left_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=0)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                pl.tpush_to_aic(x_tile, split=0)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                    shape=[16, 128], dtype=pl.FP32
+                )
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                self.main_incore_0_aic(x, y, out_0)
+                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
+                return result
+
+        ir.assert_structural_equal(After, Expected)
+
 
 # ---------------------------------------------------------------------------
 # Cube op variant classification
@@ -1291,6 +1360,40 @@ class TestPropertyVerification:
             After = _expand(Before)
 
         assert After.get_function("main_incore_0_aic") is not None
+
+    def test_verifier_rejects_aic_tpop_from_aiv_into_left(self):
+        """AIC tpop_from_aiv must land in Mat, not Left."""
+
+        @pl.program
+        class BadProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def bad_aic(self):
+                _: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.tpop_from_aiv(
+                    shape=[16, 128], dtype=pl.BF16
+                )
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
+        with pytest.raises(Exception, match="tile.tpop_from_aiv result in MemorySpace::Mat"):
+            passes.verify_properties(prop_set, BadProgram, "test")
+
+    def test_verifier_rejects_aiv_tpop_from_aic_into_mat(self):
+        """AIV tpop_from_aic must land in Vec, not Mat."""
+
+        @pl.program
+        class BadProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def bad_aiv(self):
+                _: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aic(
+                    shape=[16, 128], dtype=pl.BF16
+                )
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
+        with pytest.raises(Exception, match="tile.tpop_from_aic result in MemorySpace::Vec"):
+            passes.verify_properties(prop_set, BadProgram, "test")
 
 
 # ---------------------------------------------------------------------------

@@ -139,7 +139,9 @@ PropertyVerifierPtr CreateIncoreTileOpsPropertyVerifier();
 /**
  * @brief Factory function for creating MixedKernelExpanded property verifier
  *
- * Verifies that no InCore function contains both Cube and Vector tile ops.
+ * Verifies that no InCore function contains both Cube and Vector tile ops, and
+ * that split AIC/AIV functions keep cross-core tpop results in their required
+ * bridge memory spaces.
  * @return Shared pointer to MixedKernelExpanded PropertyVerifier
  */
 PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
