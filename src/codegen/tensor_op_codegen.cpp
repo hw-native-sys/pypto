@@ -74,7 +74,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   oss << "};\n";
 
   // check layout DN
-  std::string runtime_func = "make_tensor";
+  std::string runtime_func = "make_tensor_nd";
   if (result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN) {
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
     runtime_func = "make_tensor_2d_dn";

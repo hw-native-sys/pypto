@@ -112,6 +112,40 @@ class TestOrchestration:
             }
 
 
+            // ND layout: row-major, raw_shapes == shapes.
+            // These replace Simpler's make_tensor_external / make_tensor so that raw_shapes[]
+            // is always written into the Tensor struct. AICore kernels read raw_shapes[] directly
+            // from the struct layout and cannot observe the is_raw_eq_shapes flag.
+            static inline Tensor make_tensor_external_nd(void* addr,
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(addr, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
+            static inline Tensor make_tensor_nd(
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(0, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
             static inline Tensor make_tensor_external_2d_dn(void* addr,
                 const uint32_t shapes[],
                 uint32_t ndims,
@@ -157,14 +191,14 @@ class TestOrchestration:
 
                 // External tensors
                 uint32_t a_shapes[2] = {16, 16};
-                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                Tensor ext_a = make_tensor_external_nd(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
                 uint32_t b_shapes[2] = {16, 16};
-                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                Tensor ext_b = make_tensor_external_nd(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
                 uint32_t d_shapes[2] = {16, 16};
-                Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
+                Tensor ext_d = make_tensor_external_nd(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
 
                 uint32_t c_shapes[2] = {16, 16};
-                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
+                Tensor c = make_tensor_nd(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0;
@@ -424,6 +458,40 @@ class TestOrchestration:
             }
 
 
+            // ND layout: row-major, raw_shapes == shapes.
+            // These replace Simpler's make_tensor_external / make_tensor so that raw_shapes[]
+            // is always written into the Tensor struct. AICore kernels read raw_shapes[] directly
+            // from the struct layout and cannot observe the is_raw_eq_shapes flag.
+            static inline Tensor make_tensor_external_nd(void* addr,
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(addr, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
+            static inline Tensor make_tensor_nd(
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(0, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
             static inline Tensor make_tensor_external_2d_dn(void* addr,
                 const uint32_t shapes[],
                 uint32_t ndims,
@@ -469,14 +537,14 @@ class TestOrchestration:
 
                 // External tensors
                 uint32_t a_shapes[2] = {16, 16};
-                Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+                Tensor ext_a = make_tensor_external_nd(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
                 uint32_t b_shapes[2] = {16, 16};
-                Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
+                Tensor ext_b = make_tensor_external_nd(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
                 uint32_t f_shapes[2] = {16, 16};
-                Tensor ext_f = make_tensor_external(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
+                Tensor ext_f = make_tensor_external_nd(arg_f_ptr, f_shapes, 2, DataType::FLOAT32);
 
                 uint32_t c_shapes[2] = {16, 16};
-                Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
+                Tensor c = make_tensor_nd(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
                 PTOParam params_t0;
@@ -485,7 +553,7 @@ class TestOrchestration:
                 params_t0.add_output(c);
                 pto2_rt_submit_aiv_task(rt, 0, params_t0);
                 uint32_t d_shapes[2] = {16, 16};
-                Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
+                Tensor d = make_tensor_nd(d_shapes, 2, DataType::FLOAT32);
 
                 // Task 1: kernel_add_scalar
                 PTOParam params_t1;
@@ -494,7 +562,7 @@ class TestOrchestration:
                 params_t1.add_scalar(float_to_u64(1.000000f));
                 pto2_rt_submit_aiv_task(rt, 1, params_t1);
                 uint32_t e_shapes[2] = {16, 16};
-                Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
+                Tensor e = make_tensor_nd(e_shapes, 2, DataType::FLOAT32);
 
                 // Task 2: kernel_add_scalar
                 PTOParam params_t2;
@@ -503,7 +571,7 @@ class TestOrchestration:
                 params_t2.add_scalar(float_to_u64(2.000000f));
                 pto2_rt_submit_aiv_task(rt, 1, params_t2);
                 uint32_t g_shapes[2] = {16, 16};
-                Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
+                Tensor g = make_tensor_nd(g_shapes, 2, DataType::FLOAT32);
 
                 // Task 3: kernel_mul
                 PTOParam params_t3;
@@ -577,13 +645,13 @@ class TestOrchestration:
         files = generator.generate(TupleIntermediateProgram)
         code = files["orchestration/orch_tuple_mid.cpp"]
 
-        # Tuple elements x, y are intermediate: make_tensor (not external)
-        assert "Tensor x = make_tensor(" in code
-        assert "Tensor y = make_tensor(" in code
+        # Tuple elements x, y are intermediate: make_tensor_nd (not external)
+        assert "Tensor x = make_tensor_nd(" in code
+        assert "Tensor y = make_tensor_nd(" in code
         assert "DataType::FLOAT32" in code
 
         # Return tensor result is external
-        assert "make_tensor_external(arg_result_ptr" in code
+        assert "make_tensor_external_nd(arg_result_ptr" in code
 
         # Two tasks: kernel_pair + kernel_add
         assert code.count("pto2_rt_submit_aiv_task") == 2
@@ -629,11 +697,11 @@ class TestOrchestration:
         files = generator.generate(TupleOutputProgram)
         code = files["orchestration/orch_tuple_out.cpp"]
 
-        # Both x and y are return tensors: make_tensor_external
+        # Both x and y are return tensors: make_tensor_external_nd
         assert "ext_x" in code
         assert "ext_y" in code
-        assert "make_tensor_external(arg_x_ptr" in code
-        assert "make_tensor_external(arg_y_ptr" in code
+        assert "make_tensor_external_nd(arg_x_ptr" in code
+        assert "make_tensor_external_nd(arg_y_ptr" in code
 
         # Only one task: kernel_pair
         assert code.count("pto2_rt_submit_aiv_task") == 1
@@ -710,12 +778,12 @@ class TestOrchestration:
         code = files["orchestration/orch_four_tuple.cpp"]
 
         # All orch params are external tensors
-        assert "make_tensor_external(arg_mi_in_ptr" in code
-        assert "make_tensor_external(arg_oi_in_ptr" in code
-        assert "make_tensor_external(arg_dst_in_ptr" in code
+        assert "make_tensor_external_nd(arg_mi_in_ptr" in code
+        assert "make_tensor_external_nd(arg_oi_in_ptr" in code
+        assert "make_tensor_external_nd(arg_dst_in_ptr" in code
 
         # Final return tensor is external
-        assert "make_tensor_external(arg_final_ptr" in code
+        assert "make_tensor_external_nd(arg_final_ptr" in code
 
         # Two tasks: online_update + kernel_add
         assert code.count("pto2_rt_submit_aiv_task") == 2
@@ -766,7 +834,7 @@ class TestOrchestration:
         # tensor.create generates make_tensor with shape/dtype
         # FP16 = DataType::FLOAT16
         assert "uint32_t buf_shapes[2] = {32, 32};" in code
-        assert "Tensor buf = make_tensor(buf_shapes, 2, DataType::FLOAT16)" in code
+        assert "Tensor buf = make_tensor_nd(buf_shapes, 2, DataType::FLOAT16)" in code
 
     def test_inplace_tensor(self):
         """Test inplace tensors use make_inout_param when a tensor is both input and output.
@@ -870,6 +938,40 @@ class TestOrchestration:
             }
 
 
+            // ND layout: row-major, raw_shapes == shapes.
+            // These replace Simpler's make_tensor_external / make_tensor so that raw_shapes[]
+            // is always written into the Tensor struct. AICore kernels read raw_shapes[] directly
+            // from the struct layout and cannot observe the is_raw_eq_shapes flag.
+            static inline Tensor make_tensor_external_nd(void* addr,
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(addr, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
+            static inline Tensor make_tensor_nd(
+                const uint32_t shapes[],
+                uint32_t ndims,
+                DataType dtype = DataType::FLOAT32,
+                int32_t version = 0) {
+                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+                uint64_t total = 1;
+                for (uint32_t i = 0; i < ndims; i++) {
+                    total *= shapes[i];
+                }
+                return Tensor(0, total * get_element_size(dtype),
+                    shapes, shapes, zero_offsets, ndims, dtype, version,
+                    /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+            }
+
             static inline Tensor make_tensor_external_2d_dn(void* addr,
                 const uint32_t shapes[],
                 uint32_t ndims,
@@ -919,19 +1021,19 @@ class TestOrchestration:
 
                 // External tensors
                 uint32_t mij_shapes[2] = {16, 1};
-                Tensor ext_mij = make_tensor_external(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
+                Tensor ext_mij = make_tensor_external_nd(arg_mij_ptr, mij_shapes, 2, DataType::FLOAT32);
                 uint32_t lij_shapes[2] = {16, 1};
-                Tensor ext_lij = make_tensor_external(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
+                Tensor ext_lij = make_tensor_external_nd(arg_lij_ptr, lij_shapes, 2, DataType::FLOAT32);
                 uint32_t oi_new_shapes[2] = {16, 16};
-                Tensor ext_oi_new = make_tensor_external(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
+                Tensor ext_oi_new = make_tensor_external_nd(arg_oi_new_ptr, oi_new_shapes, 2, DataType::FLOAT32);
                 uint32_t mi_shapes[2] = {16, 1};
-                Tensor ext_mi = make_tensor_external(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
+                Tensor ext_mi = make_tensor_external_nd(arg_mi_ptr, mi_shapes, 2, DataType::FLOAT32);
                 uint32_t li_shapes[2] = {16, 1};
-                Tensor ext_li = make_tensor_external(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
+                Tensor ext_li = make_tensor_external_nd(arg_li_ptr, li_shapes, 2, DataType::FLOAT32);
                 uint32_t oi_shapes[2] = {16, 16};
-                Tensor ext_oi = make_tensor_external(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
+                Tensor ext_oi = make_tensor_external_nd(arg_oi_ptr, oi_shapes, 2, DataType::FLOAT32);
                 uint32_t dst_shapes[2] = {16, 16};
-                Tensor ext_dst = make_tensor_external(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
+                Tensor ext_dst = make_tensor_external_nd(arg_dst_ptr, dst_shapes, 2, DataType::FLOAT32);
 
 
                 // Task 0: online_update
@@ -1288,9 +1390,9 @@ class TestOrchestration:
         assert "b_acc = b_acc;" not in code
 
         # make_tensor declarations exist (exactly once each)
-        # a_acc is a return value → external (make_tensor_external)
-        assert code.count("Tensor ext_a_acc = make_tensor_external(") == 1
-        assert code.count("Tensor b_acc = make_tensor(") == 1
+        # a_acc is a return value → external (make_tensor_external_nd)
+        assert code.count("Tensor ext_a_acc = make_tensor_external_nd(") == 1
+        assert code.count("Tensor b_acc = make_tensor_nd(") == 1
 
         # For loop exists with correct structure
         assert "for (int64_t i = 0; i < 4; i += 1)" in code

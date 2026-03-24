@@ -519,6 +519,40 @@ std::string GenerateHelperFunctions() {
 }
 
 const char TENSOR_HELPER_FUNCTION[] = R"(
+// ND layout: row-major, raw_shapes == shapes.
+// These replace Simpler's make_tensor_external / make_tensor so that raw_shapes[]
+// is always written into the Tensor struct. AICore kernels read raw_shapes[] directly
+// from the struct layout and cannot observe the is_raw_eq_shapes flag.
+static inline Tensor make_tensor_external_nd(void* addr,
+    const uint32_t shapes[],
+    uint32_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    int32_t version = 0) {
+    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t total = 1;
+    for (uint32_t i = 0; i < ndims; i++) {
+        total *= shapes[i];
+    }
+    return Tensor(addr, total * get_element_size(dtype),
+        shapes, shapes, zero_offsets, ndims, dtype, version,
+        /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+}
+
+static inline Tensor make_tensor_nd(
+    const uint32_t shapes[],
+    uint32_t ndims,
+    DataType dtype = DataType::FLOAT32,
+    int32_t version = 0) {
+    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t total = 1;
+    for (uint32_t i = 0; i < ndims; i++) {
+        total *= shapes[i];
+    }
+    return Tensor(0, total * get_element_size(dtype),
+        shapes, shapes, zero_offsets, ndims, dtype, version,
+        /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/false);
+}
+
 static inline Tensor make_tensor_external_2d_dn(void* addr,
     const uint32_t shapes[],
     uint32_t ndims,
@@ -594,7 +628,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, const std::s
   oss << "};\n";
 
   // check layout DN
-  std::string runtime_func = "make_tensor_external";
+  std::string runtime_func = "make_tensor_external_nd";
   if (tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN) {
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
     runtime_func = "make_tensor_external_2d_dn";
