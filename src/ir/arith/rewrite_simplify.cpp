@@ -17,7 +17,7 @@
 
 #include "src/ir/arith/rewrite_simplify.h"
 
-#include <algorithm>
+#include <algorithm>  // NOLINT(misc-include-cleaner) required by cpplint for pattern-match max()
 #include <cstddef>
 #include <cstdint>
 #include <functional>

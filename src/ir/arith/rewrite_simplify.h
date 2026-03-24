@@ -25,6 +25,7 @@
 
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/functor.h"
 

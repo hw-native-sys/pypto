@@ -43,7 +43,7 @@
 #ifndef PYPTO_IR_ARITH_PATTERN_MATCH_H_
 #define PYPTO_IR_ARITH_PATTERN_MATCH_H_
 
-#include <algorithm>
+#include <algorithm>  // NOLINT(misc-include-cleaner) required by cpplint for hidden friend min/max
 #include <cstddef>
 #include <cstdint>
 #include <memory>
