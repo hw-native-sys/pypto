@@ -44,6 +44,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -71,49 +72,6 @@ std::string CastModeToString(int mode) {
       return "odd";
     default:
       throw ValueError("Cast round mode must be in range [0, 6], got " + std::to_string(mode));
-  }
-}
-
-template <typename DefNode>
-void BuildRenameMapForDefs(const std::vector<const DefNode*>& defs,
-                           std::unordered_map<const DefNode*, std::string>& rename_map,
-                           bool include_unique_names = false) {
-  rename_map.clear();
-
-  std::vector<const DefNode*> unique_defs;
-  unique_defs.reserve(defs.size());
-  std::unordered_set<const DefNode*> seen_defs;
-  for (const DefNode* def : defs) {
-    if (seen_defs.insert(def).second) unique_defs.push_back(def);
-  }
-
-  std::unordered_map<std::string, int> name_counts;
-  for (const DefNode* def : unique_defs) {
-    name_counts[def->name_hint_]++;
-  }
-
-  // Pre-pass: reserve names that are already unique so suffix generation
-  // for colliding names never picks a reserved name (e.g., defs [M, M, M_1]
-  // must not assign "M_1" to the second M when a real M_1 def exists).
-  std::set<std::string> used_names;
-  for (const DefNode* def : unique_defs) {
-    if (name_counts[def->name_hint_] == 1) {
-      used_names.insert(def->name_hint_);
-      if (include_unique_names) rename_map[def] = def->name_hint_;
-    }
-  }
-
-  for (const DefNode* def : unique_defs) {
-    const std::string& base_name = def->name_hint_;
-    if (name_counts[base_name] == 1) continue;  // Already handled above
-
-    std::string candidate = base_name;
-    int suffix = 0;
-    while (!used_names.insert(candidate).second) {
-      ++suffix;
-      candidate = base_name + "_" + std::to_string(suffix);
-    }
-    rename_map[def] = candidate;
   }
 }
 
@@ -1207,13 +1165,13 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   std::vector<const Var*> defs;
   for (auto& p : func->params_) defs.push_back(p.get());
   if (func->body_) CollectVarDefsInOrder(func->body_, defs);
-  BuildRenameMapForDefs(defs, var_rename_map_);
+  auto_name::BuildRenameMapForDefs(defs, var_rename_map_);
 }
 
 void IRPythonPrinter::BuildMemRefRenameMap(const FunctionPtr& func) {
   std::vector<const MemRef*> defs;
   if (func->body_) CollectMemRefDefsInOrder(func->body_, defs);
-  BuildRenameMapForDefs(defs, memref_rename_map_, true);
+  auto_name::BuildRenameMapForDefs(defs, memref_rename_map_, true);
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
@@ -1503,7 +1461,7 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
   // include_unique_names=true so VisitProgram can iterate the full map for
   // pl.dynamic() declarations.
   std::unordered_map<const Var*, std::string> result;
-  BuildRenameMapForDefs(dyn_var_ptrs, result, /*include_unique_names=*/true);
+  auto_name::BuildRenameMapForDefs(dyn_var_ptrs, result, /*include_unique_names=*/true);
   return result;
 }
 

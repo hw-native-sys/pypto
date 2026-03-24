@@ -842,12 +842,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string emit_var = result_var;
     if (op_name == "tensor.create" && assign_var) {
       declared_var_ptrs_.insert(assign_var);
-      // Ensure unique C++ variable name: if the preferred name collides with
-      // a previously emitted declaration, fall back to the raw name_hint_
-      if (declared_var_names_.count(emit_var)) {
-        emit_var = assign_var->name_hint_;
-      }
-      declared_var_names_.insert(emit_var);
+      emit_var = ReserveTensorCreateEmitName(assign_var, emit_var);
     }
 
     current_result_var_ = emit_var;
@@ -983,6 +978,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Resolve a Var to its C++ emit name: param name for param-derived vars,
   // GetSSABaseName for others, with collision defense against param names.
   std::string ResolveVarEmitName(const Var* var) const {
+    auto it = explicit_var_emit_names_.find(var);
+    if (it != explicit_var_emit_names_.end()) {
+      return it->second;
+    }
     const Var* param = ResolveToParam(var);
     if (param) {
       return GetParamEmitName(param);
@@ -1013,6 +1012,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return it->second;
   }
 
+  std::string ReserveTensorCreateEmitName(const Var* assign_var, const std::string& preferred_name) {
+    auto it = explicit_var_emit_names_.find(assign_var);
+    if (it != explicit_var_emit_names_.end()) {
+      return it->second;
+    }
+
+    auto parsed = auto_name::Parse(assign_var->name_hint_);
+    bool preserve_raw_name = parsed.role.has_value() && *parsed.role == "out";
+    std::string base_name = preferred_name;
+    if (preserve_raw_name || declared_var_names_.count(base_name)) {
+      base_name = assign_var->name_hint_;
+    }
+
+    std::string emit_name = auto_name::ReserveUniqueName(base_name, declared_var_names_);
+    explicit_var_emit_names_[assign_var] = emit_name;
+    return emit_name;
+  }
+
   const ProgramPtr& program_;
   std::map<std::string, int>* func_name_to_id_;
   std::map<std::string, CoreType>* func_name_to_core_type_;
@@ -1033,6 +1050,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> declared_var_ptrs_;
   // String-based dedup: ensures unique C++ variable names in generated code
   std::set<std::string> declared_var_names_;
+  // Stores the final emitted name for declared local vars, keyed by Var identity.
+  std::unordered_map<const Var*, std::string> explicit_var_emit_names_;
   // VarPtr-based tracking of task-submission results (no C++ declaration exists, skip in yield)
   std::unordered_set<const Var*> call_result_var_ptrs_;
 };

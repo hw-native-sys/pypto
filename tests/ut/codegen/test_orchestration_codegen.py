@@ -1418,6 +1418,48 @@ class TestOrchestration:
         # Tuple-return elements must not be collapsed into a single alias
         assert "Tensor& out =" not in code
 
+    def test_repeated_auto_output_buffers_get_unique_names(self):
+        """Repeated auto-generated output buffers should keep distinct emitted names."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class RepeatedAutoOutputProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
+                return z
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_repeat(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                first: pl.Tensor[[64], pl.FP32] = self.kernel_add(x, y)
+                second: pl.Tensor[[64], pl.FP32] = self.kernel_add(first, y)
+                return second
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(RepeatedAutoOutputProgram)
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(transformed)
+        code = files["orchestration/orch_repeat.cpp"]
+
+        assert code.count("Tensor ret0__out = make_tensor(") == 1
+        assert code.count("Tensor ret0__out_1 = make_tensor(") == 1
+        assert "make_output_param(ret0__out)" in code
+        assert "make_output_param(ret0__out_1)" in code
+        assert "Tensor& first = ret0__out;" in code
+        assert "Tensor& second = ret0__out_1;" in code
+        assert "make_output_param(ret0)," not in code
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

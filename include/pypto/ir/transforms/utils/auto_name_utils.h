@@ -16,8 +16,10 @@
 #include <cctype>
 #include <cstddef>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -242,6 +244,50 @@ inline std::string GetLegacyCompatibleBaseName(const std::string& name) {
     return parsed.base_name;
   }
   return StripLegacyBaseName(name);
+}
+
+inline std::string ReserveUniqueName(const std::string& base_name, std::set<std::string>& used_names) {
+  std::string candidate = base_name;
+  int suffix = 0;
+  while (!used_names.insert(candidate).second) {
+    ++suffix;
+    candidate = base_name + "_" + std::to_string(suffix);
+  }
+  return candidate;
+}
+
+template <typename DefNode>
+void BuildRenameMapForDefs(const std::vector<const DefNode*>& defs,
+                           std::unordered_map<const DefNode*, std::string>& rename_map,
+                           bool include_unique_names = false) {
+  rename_map.clear();
+
+  std::vector<const DefNode*> unique_defs;
+  unique_defs.reserve(defs.size());
+  std::unordered_set<const DefNode*> seen_defs;
+  for (const DefNode* def : defs) {
+    if (seen_defs.insert(def).second) unique_defs.push_back(def);
+  }
+
+  std::unordered_map<std::string, int> name_counts;
+  for (const DefNode* def : unique_defs) {
+    name_counts[def->name_hint_]++;
+  }
+
+  // Reserve unique names first so colliding defs never steal them.
+  std::set<std::string> used_names;
+  for (const DefNode* def : unique_defs) {
+    if (name_counts[def->name_hint_] == 1) {
+      used_names.insert(def->name_hint_);
+      if (include_unique_names) rename_map[def] = def->name_hint_;
+    }
+  }
+
+  for (const DefNode* def : unique_defs) {
+    const std::string& base_name = def->name_hint_;
+    if (name_counts[base_name] == 1) continue;
+    rename_map[def] = ReserveUniqueName(base_name, used_names);
+  }
 }
 
 inline std::string AddQualifier(const std::string& name, const std::string& qualifier) {
