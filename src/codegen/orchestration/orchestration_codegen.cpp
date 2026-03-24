@@ -520,33 +520,33 @@ std::string GenerateHelperFunctions() {
 
 const char TENSOR_HELPER_FUNCTION[] = R"(
 static inline Tensor make_tensor_external_2d_dn(void* addr,
-    const uint64_t shapes[],
-    uint64_t ndims,
+    const uint32_t shapes[],
+    uint32_t ndims,
     DataType dtype = DataType::FLOAT32,
     int32_t version = 0) {
     debug_assert(ndims == 2);
-    static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
     uint64_t total = 1;
-    for (uint64_t i = 0; i < ndims; i++) {
+    for (uint32_t i = 0; i < ndims; i++) {
         total *= shapes[i];
     }
-    uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+    uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
     return Tensor(addr, total * get_element_size(dtype),
         raw_shapes, shapes, zero_offsets, ndims, dtype, version);
 }
 
 static inline Tensor make_tensor_2d_dn(
-    const uint64_t shapes[],
-    uint64_t ndims,
+    const uint32_t shapes[],
+    uint32_t ndims,
     DataType dtype = DataType::FLOAT32,
     int32_t version = 0) {
     debug_assert(ndims == 2);
-    static uint64_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
+    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
     uint64_t total = 1;
-    for (uint64_t i = 0; i < ndims; i++) {
+    for (uint32_t i = 0; i < ndims; i++) {
         total *= shapes[i];
     }
-    uint64_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
+    uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
     return Tensor(0, total * get_element_size(dtype),
         raw_shapes, shapes, zero_offsets, ndims, dtype, version);
 }
@@ -595,7 +595,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, const std::s
   size_t shape_arr_len = (ndim == 0) ? 1 : ndim;
 
   // Declare shape array (minimum size 1 for valid C++)
-  oss << "    uint64_t " << var_name << "_shapes[" << shape_arr_len << "] = {";
+  oss << "    uint32_t " << var_name << "_shapes[" << shape_arr_len << "] = {";
   if (ndim == 0) {
     oss << "1";
   } else {
