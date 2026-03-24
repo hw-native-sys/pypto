@@ -709,11 +709,10 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tpop_from_aic {split = " << split << "} (" << result_buf;
+  oss << result_buf << " = pto.tpop_from_aic {split = " << split << "}";
   if (!result_type.empty()) {
-    oss << " : " << result_type;
+    oss << " -> " << result_type;
   }
-  oss << ")";
   codegen.Emit(oss.str());
 
   return "";
@@ -734,45 +733,51 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tpop_from_aiv {split = " << split << "} (" << result_buf;
+  oss << result_buf << " = pto.tpop_from_aiv {split = " << split << "}";
   if (!result_type.empty()) {
-    oss << " : " << result_type;
+    oss << " -> " << result_type;
   }
-  oss << ")";
   codegen.Emit(oss.str());
 
   return "";
 }
 
-// system.tfree_to_aic: Release slot back to Cube producer (called by Vector consumer)
+/// tfree codegen for system.tfree_to_aic: emits pto.tfree(%tile : type) {split = N}
 static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 0) << "tfree_to_aic takes no arguments, got " << op->args_.size();
+  CHECK(op->args_.size() == 1) << "tfree requires 1 argument (tile from tpop), got " << op->args_.size();
+  auto tile = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(tile) << "tfree first argument must be a Var or IterArg";
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tfree_to_aic requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  std::string tile_buf = codegen.GetVarName(tile);
+  std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  int split = codegen.GetTpopSplit(tile.get());
 
   std::ostringstream oss;
-  oss << "pto.tfree_to_aic {aiv_idx = " << aiv_idx << "}";
+  oss << "pto.tfree(" << tile_buf;
+  if (!tile_type.empty()) {
+    oss << " : " << tile_type;
+  }
+  oss << ") {split = " << split << "}";
   codegen.Emit(oss.str());
 
   return "";
 }
 
-// system.tfree_to_aiv: Release slot back to Vector producer (called by Cube consumer)
+// tfree codegen for system.tfree_to_aiv: emits pto.tfree_from_aiv {split = N}
 static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 0) << "tfree_to_aiv takes no arguments, got " << op->args_.size();
+  CHECK(op->args_.size() == 1) << "tfree_to_aiv requires 1 argument (tile from tpop), got "
+                               << op->args_.size();
+  auto tile = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(tile) << "tfree_to_aiv first argument must be a Var or IterArg";
 
-  const int aiv_idx = op->GetKwarg<int>("aiv_idx", -1);
-  CHECK(aiv_idx >= 0 && aiv_idx <= 1)
-      << "tfree_to_aiv requires 'aiv_idx' attribute (0 or 1), got " << aiv_idx;
+  int split = codegen.GetTpopSplit(tile.get());
 
   std::ostringstream oss;
-  oss << "pto.tfree_to_aiv {aiv_idx = " << aiv_idx << "}";
+  oss << "pto.tfree_from_aiv {split = " << split << "}";
   codegen.Emit(oss.str());
 
   return "";

@@ -258,6 +258,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   ssa_to_tile_buf_type_.clear();
   tile_var_allocs_.clear();
   emitted_tile_alloc_vars_.clear();
+  tpop_result_vars_.clear();
   reserve_buf_ssa_.clear();
   import_buf_ssa_.clear();
   constants_section_.str("");
@@ -381,6 +382,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   // Pre-emit i64 address constants now that indent_level_ is set
   for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
+    if (tpop_result_vars_.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
     if (memref && As<ir::ConstInt>(memref->addr_)) {
       GetOrEmitI64Constant(As<ir::ConstInt>(memref->addr_)->value_);
@@ -417,7 +419,19 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_ = std::move(body_section_);
 
   if (func->body_) {
-    VisitStmt(func->body_);
+    if (!tpop_result_vars_.empty()) {
+      auto seq = As<ir::SeqStmts>(func->body_);
+      if (seq) {
+        auto reordered = ReorderTpopChains(seq->stmts_);
+        for (const auto& stmt : reordered) {
+          VisitStmt(stmt);
+        }
+      } else {
+        VisitStmt(func->body_);
+      }
+    } else {
+      VisitStmt(func->body_);
+    }
   }
 
   std::string body_content = stream_.str();
@@ -433,17 +447,113 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_ << "  }\n";
 }
 
+std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts) const {
+  if (tpop_result_vars_.empty()) return stmts;
+
+  // Phase 1: classify statements into tpop chains
+  struct TpopChain {
+    size_t tpop_idx;
+    std::vector<size_t> user_idxs;
+    size_t tfree_idx = SIZE_MAX;
+  };
+  std::map<const ir::Var*, TpopChain> chains;
+  std::vector<const ir::Var*> tpop_order;
+  std::vector<bool> in_chain(stmts.size(), false);
+
+  for (size_t i = 0; i < stmts.size(); ++i) {
+    if (auto assign = As<ir::AssignStmt>(stmts[i])) {
+      // Tpop assignment itself
+      if (tpop_result_vars_.count(assign->var_.get()) > 0) {
+        chains[assign->var_.get()] = {i, {}, SIZE_MAX};
+        tpop_order.push_back(assign->var_.get());
+        in_chain[i] = true;
+        continue;
+      }
+      // Check if this is a direct user of exactly one tpop var
+      if (auto call = As<ir::Call>(assign->value_)) {
+        const ir::Var* ref = nullptr;
+        bool multi = false;
+        for (const auto& arg : call->args_) {
+          if (auto v = ir::AsVarLike(arg); v && tpop_result_vars_.count(v.get()) > 0) {
+            if (ref && ref != v.get()) {
+              multi = true;
+              break;
+            }
+            ref = v.get();
+          }
+        }
+        if (ref && !multi && chains.count(ref) > 0) {
+          chains[ref].user_idxs.push_back(i);
+          in_chain[i] = true;
+        }
+      }
+    } else if (auto eval = As<ir::EvalStmt>(stmts[i])) {
+      // tfree statement
+      if (auto call = As<ir::Call>(eval->expr_)) {
+        if (call->op_ &&
+            (call->op_->name_ == "system.tfree_to_aiv" || call->op_->name_ == "system.tfree_to_aic") &&
+            !call->args_.empty()) {
+          if (auto v = ir::AsVarLike(call->args_[0]); v && tpop_result_vars_.count(v.get()) > 0) {
+            if (chains.count(v.get()) > 0) {
+              chains[v.get()].tfree_idx = i;
+              in_chain[i] = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (tpop_order.empty()) return stmts;
+
+  // Phase 2: build reordered list
+  size_t first_tpop = chains[tpop_order[0]].tpop_idx;
+  std::vector<ir::StmtPtr> result;
+  result.reserve(stmts.size());
+
+  // Prefix: stmts before first tpop
+  for (size_t i = 0; i < first_tpop; ++i) {
+    result.push_back(stmts[i]);
+  }
+
+  // Chains in order: tpop → users → tfree
+  for (const auto* var : tpop_order) {
+    auto& ch = chains[var];
+    result.push_back(stmts[ch.tpop_idx]);
+    for (size_t ui : ch.user_idxs) {
+      result.push_back(stmts[ui]);
+    }
+    if (ch.tfree_idx != SIZE_MAX) {
+      result.push_back(stmts[ch.tfree_idx]);
+    }
+  }
+
+  // Remaining independent stmts (after first tpop, not in any chain)
+  for (size_t i = first_tpop; i < stmts.size(); ++i) {
+    if (!in_chain[i]) {
+      result.push_back(stmts[i]);
+    }
+  }
+
+  return result;
+}
+
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   class VarMemRefMapper : public ir::IRVisitor {
    public:
     std::map<const ir::Var*, const ir::MemRef*>& var_to_memref;
     std::map<const ir::MemRef*, std::string>& memref_to_var_name;
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
+    std::map<const ir::Var*, int>& tpop_result_vars;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
                     std::map<const ir::MemRef*, std::string>& reverse_mapping,
-                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs)
-        : var_to_memref(mapping), memref_to_var_name(reverse_mapping), tile_var_allocs(allocs) {}
+                    std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
+                    std::map<const ir::Var*, int>& tpop_vars)
+        : var_to_memref(mapping),
+          memref_to_var_name(reverse_mapping),
+          tile_var_allocs(allocs),
+          tpop_result_vars(tpop_vars) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -454,12 +564,22 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
           memref_to_var_name[ptr] = op->var_->name_hint_;
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
+
+        // Track tpop result vars with their split value so codegen can:
+        // 1. Skip alloc_tile for them
+        // 2. Propagate split to tfree
+        if (auto call = As<ir::Call>(op->value_)) {
+          if (call->op_->name_ == "tile.tpop_from_aiv" || call->op_->name_ == "tile.tpop_from_aic") {
+            int split = call->GetKwarg<int>("split", 0);
+            tpop_result_vars[op->var_.get()] = split;
+          }
+        }
       }
       ir::IRVisitor::VisitStmt_(op);
     }
   };
 
-  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_);
+  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_, tpop_result_vars_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -716,6 +836,14 @@ void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) {
 
 std::string PTOCodegen::GetImportBufferSSA() const { return import_buf_ssa_; }
 
+int PTOCodegen::GetTpopSplit(const ir::Var* var) const {
+  auto it = tpop_result_vars_.find(var);
+  if (it != tpop_result_vars_.end()) {
+    return it->second;
+  }
+  return 0;
+}
+
 bool PTOCodegen::IsAICFunction() const {
   return current_function_ && current_function_->func_type_ == ir::FunctionType::AIC;
 }
@@ -736,7 +864,9 @@ void PTOCodegen::EmitExtraAllocTiles() {
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    EmitAllocTileForVar(op->var_, tile_type);
+    if (tpop_result_vars_.count(GetVarKey(op->var_)) == 0) {
+      EmitAllocTileForVar(op->var_, tile_type);
+    }
   }
 
   if (auto call = As<ir::Call>(op->value_)) {

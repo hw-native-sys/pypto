@@ -19,7 +19,7 @@ System operations handle hardware synchronization and cross-core communication:
 """
 
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, PipeType, Span
+from pypto.pypto_core.ir import Call, Expr, PipeType, Span
 
 from ..utils import _get_span_or_capture
 from .tile_ops import (  # noqa: F401
@@ -223,27 +223,27 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
 # ============================================================================
 
 
-def tfree_to_aic(*, aiv_idx: int, span: Span | None = None) -> Call:
+def tfree_to_aic(tile: Expr, span: Span | None = None) -> Call:
     """Release ring buffer slot back to AIC producer.
 
     Called by AIV consumer after finishing with data from tpop_from_aic.
 
     Args:
-        aiv_idx: AIV core index releasing the slot
+        tile: Tile expression obtained from tpop_from_aic to release
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tfree_to_aic", [], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("system.tfree_to_aic", [tile], {}, actual_span)
 
 
-def tfree_to_aiv(*, aiv_idx: int, span: Span | None = None) -> Call:
+def tfree_to_aiv(tile: Expr, span: Span | None = None) -> Call:
     """Release ring buffer slot back to AIV producer.
 
     Called by AIC consumer after finishing with data from tpop_from_aiv.
 
     Args:
-        aiv_idx: AIV core index whose slot is being released
+        tile: Tile expression obtained from tpop_from_aiv to release
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tfree_to_aiv", [], {"aiv_idx": aiv_idx}, actual_span)
+    return _ir_core.create_op_call("system.tfree_to_aiv", [tile], {}, actual_span)

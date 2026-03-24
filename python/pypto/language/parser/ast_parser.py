@@ -399,6 +399,20 @@ class ASTParser:
                     and value_expr.type.dtype == DataType.INDEX
                 ):
                     override_type = resolved
+        # If the annotation resolved to a TileType and the value is a tpop call
+        # with UnknownType, reconstruct the Call carrying the resolved TileType
+        # so that codegen can emit SSA-result tpop without a separate alloc_tile.
+        if (
+            override_type is not None
+            and isinstance(override_type, ir.TileType)
+            and isinstance(value_expr, ir.Call)
+            and isinstance(value_expr.type, ir.UnknownType)
+            and value_expr.op.name in ("tile.tpop_from_aiv", "tile.tpop_from_aic")
+        ):
+            value_expr = ir.Call(
+                value_expr.op, value_expr.args, value_expr.kwargs, override_type, value_expr.span
+            )
+
         # Reuse existing Var on reassignment (override_type is intentionally
         # discarded — the Var's type was fixed at first definition; the SSA
         # pass will create properly typed versioned copies later).

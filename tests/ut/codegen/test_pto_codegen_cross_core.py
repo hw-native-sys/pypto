@@ -26,6 +26,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import _build_group_mapping
 
 # ============================================================================
 # Test Program: Vector Producer + Cube Consumer (V2C unidirectional)
@@ -34,11 +35,18 @@ from pypto.backend import BackendType
 
 @pl.program
 class CrossCoreTpushTpopProgram:
-    @pl.function(type=pl.FunctionType.InCore)
+    """V2C unidirectional cross-core program with orchestration wrapper.
+
+    Vector producer: loads tiles a and b, computes add and sub, pushes both to Cube.
+    Cube consumer: pops tiles, performs matmul, stores result.
+    """
+
+    @pl.function(type=pl.FunctionType.AIV)
     def vector_producer(
         self,
         a: pl.Tensor[[16, 16], pl.FP16],
         b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ):
         v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
         pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer.base)
@@ -51,26 +59,49 @@ class CrossCoreTpushTpopProgram:
         pl.tpush_to_aic(result_add, split=1)
         pl.tpush_to_aic(result_sub, split=1)
 
-    @pl.function(type=pl.FunctionType.InCore)
+    @pl.function(type=pl.FunctionType.AIC)
     def cube_consumer(
         self,
-        output: pl.Tensor[[16, 16], pl.FP32],
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
         pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
 
-        received_add: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=1)
-        received_sub: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=1)
+        received_add: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
+        received_sub: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
         received_add_left = pl.move(received_add, target_memory=pl.Mem.Left)
         received_sub_right = pl.move(received_sub, target_memory=pl.Mem.Right)
 
         mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received_add_left, received_sub_right)
 
-        pl.tfree_to_aiv(aiv_idx=0)
-        pl.tfree_to_aiv(aiv_idx=0)
+        pl.tfree_to_aiv(received_add)
+        pl.tfree_to_aiv(received_sub)
 
         updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(mm_result, [0, 0], output)
         return updated
+
+    @pl.function(type=pl.FunctionType.Group)
+    def group_func(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ):
+        updated = self.cube_consumer(a, b, output)
+        self.vector_producer(a, b, output)
+        return updated
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        out = self.group_func(a, b, output)
+        return out
 
 
 # ============================================================================
@@ -117,7 +148,7 @@ class BidirectionalCrossCorProgram:
         processed: pl.Tile[[16, 16], pl.FP32] = pl.exp(mm_result)
 
         # Release C2V slot
-        pl.tfree_to_aic(aiv_idx=0)
+        pl.tfree_to_aic(mm_result)
 
         # Store final result
         updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(processed, [0, 0], output)
@@ -145,7 +176,7 @@ class BidirectionalCrossCorProgram:
         mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received, w_tile)
 
         # Release V2C slot
-        pl.tfree_to_aiv(aiv_idx=0)
+        pl.tfree_to_aiv(received)
 
         # Push matmul result back to Vector for post-processing (C2V direction)
         pl.tpush_to_aiv(mm_result, split=0)
@@ -194,7 +225,18 @@ class TestCrossCoreTpushTpopCodegen:
 
         result = {}
         codegen_instance = codegen.PTOCodegen()
-        for func in optimized.functions.values():
+        groups, ungrouped = _build_group_mapping(optimized)
+
+        # Grouped: one module per group
+        for group_name, members in groups.items():
+            grouped_program = ir.Program(members, group_name, optimized.span)
+            mlir_code = codegen_instance.generate(grouped_program)
+            result[group_name] = mlir_code
+            for func in members:
+                result[func.name] = mlir_code
+
+        # Ungrouped: one module per function (existing behavior)
+        for func in ungrouped:
             single = ir.Program([func], func.name, optimized.span)
             mlir_code = codegen_instance.generate(single)
             result[func.name] = mlir_code
@@ -236,8 +278,36 @@ class TestCrossCoreTpushTpopCodegen:
         assert "c2v_consumer_buf = " in cube_code, "Should have c2v_consumer_buf as SSA reference"
         assert "arith.constant 0 : i32" in cube_code, "Should emit i32 constant for default consumer buf"
         assert "pto.tpop_from_aiv" in cube_code, "Should contain pto.tpop_from_aiv"
-        assert "pto.tfree_to_aiv" in cube_code, "Should contain pto.tfree_to_aiv"
+        assert "= pto.tpop_from_aiv" in cube_code, "tpop should produce SSA result"
+        assert "-> !pto.tile_buf<" in cube_code, "tpop should use -> result type syntax"
+        assert "pto.tfree" in cube_code, "Should contain pto.tfree"
+        assert "{split = " in cube_code, "tfree should have split attribute"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
+
+    def test_tpop_chain_ordering(self):
+        """Test that tpop chains follow pop-use-free ordering per hardware requirement."""
+        codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
+        cube_code = codes["cube_consumer"]
+        lines = cube_code.split("\n")
+
+        tpop_lines = [i for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
+        tfree_lines = [i for i, line in enumerate(lines) if "pto.tfree" in line]
+        tmov_lines = [i for i, line in enumerate(lines) if "pto.tmov" in line]
+
+        assert len(tpop_lines) == 2, f"Expected 2 tpop lines, got {len(tpop_lines)}"
+        assert len(tfree_lines) == 2, f"Expected 2 tfree lines, got {len(tfree_lines)}"
+        assert len(tmov_lines) >= 2, f"Expected at least 2 tmov lines, got {len(tmov_lines)}"
+
+        # pop1 < use1 < free1 < pop2 < use2 < free2
+        assert tpop_lines[0] < tmov_lines[0] < tfree_lines[0], (
+            f"First chain out of order: tpop={tpop_lines[0]}, tmov={tmov_lines[0]}, tfree={tfree_lines[0]}"
+        )
+        assert tfree_lines[0] < tpop_lines[1], (
+            f"Second tpop should come after first tfree: tfree1={tfree_lines[0]}, tpop2={tpop_lines[1]}"
+        )
+        assert tpop_lines[1] < tmov_lines[1] < tfree_lines[1], (
+            f"Second chain out of order: tpop={tpop_lines[1]}, tmov={tmov_lines[1]}, tfree={tfree_lines[1]}"
+        )
 
     @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_vector(self):
@@ -265,7 +335,7 @@ class TestCrossCoreTpushTpopCodegen:
         # C2V consumer side: receive matmul result + post-process
         assert "pto.tpop_from_aic" in vector_code, "Should pop from AIC"
         assert "pto.texp" in vector_code, "Should do exp post-processing (Vector op)"
-        assert "pto.tfree_to_aic" in vector_code, "Should free C2V slot"
+        assert "pto.tfree(" in vector_code, "Should free C2V slot"
 
     @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_cube(self):
@@ -289,7 +359,7 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C consumer side: receive preprocessed data
         assert "pto.tpop_from_aiv" in cube_code, "Should pop from AIV"
-        assert "pto.tfree_to_aiv" in cube_code, "Should free V2C slot"
+        assert "pto.tfree(" in cube_code, "Should free V2C slot"
         # C2V producer side: matmul + push back
         assert "pto.tpush_to_aiv" in cube_code, "Should push to AIV"
         assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
@@ -306,8 +376,7 @@ class TestCrossCoreTpushTpopCodegen:
             "pto.tpush_to_aic",
             "pto.tpop_from_aic",
             "pto.tpop_from_aiv",
-            "pto.tfree_to_aic",
-            "pto.tfree_to_aiv",
+            "pto.tfree(",
             "pto.aic_initialize_pipe",
             "pto.aiv_initialize_pipe",
             "pto.reserve_buffer",
@@ -354,7 +423,18 @@ class TestExpandMixedKernelCodegen:
 
         result = {}
         codegen_instance = codegen.PTOCodegen()
-        for func in optimized.functions.values():
+        groups, ungrouped = _build_group_mapping(optimized)
+
+        # Grouped: one module per group
+        for group_name, members in groups.items():
+            grouped_program = ir.Program(members, group_name, optimized.span)
+            mlir_code = codegen_instance.generate(grouped_program)
+            result[group_name] = mlir_code
+            for func in members:
+                result[func.name] = mlir_code
+
+        # Ungrouped: one module per function
+        for func in ungrouped:
             if not ir.is_incore_type(func.func_type):
                 continue
             single = ir.Program([func], func.name, optimized.span)

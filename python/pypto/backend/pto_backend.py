@@ -333,6 +333,54 @@ def _generate_config_file(
     return "\n".join(lines) + "\n"
 
 
+def _extract_group_member_names(
+    group_func: _ir_core.Function,
+) -> list[str]:
+    """Extract function names called by a Group function from its body."""
+    names: list[str] = []
+    stmts = _ir_core.flatten_to_stmts(group_func.body)
+    for stmt in stmts:
+        call = None
+        if isinstance(stmt, _ir_core.EvalStmt):
+            call = stmt.expr
+        elif isinstance(stmt, _ir_core.AssignStmt):
+            call = stmt.value
+        if isinstance(call, _ir_core.Call) and isinstance(call.op, _ir_core.GlobalVar):
+            names.append(call.op.name)
+    return names
+
+
+def _build_group_mapping(
+    program: _ir_core.Program,
+) -> tuple[dict[str, list[_ir_core.Function]], list[_ir_core.Function]]:
+    """Partition InCore functions into groups and ungrouped.
+
+    Returns:
+        (groups, ungrouped) where groups maps group_name to list of member
+        InCore functions, and ungrouped is a list of InCore functions not
+        belonging to any group.
+    """
+    func_by_name: dict[str, _ir_core.Function] = {f.name: f for f in program.functions.values()}
+    grouped_names: set[str] = set()
+    groups: dict[str, list[_ir_core.Function]] = {}
+
+    for func in program.functions.values():
+        if func.func_type != _ir_core.FunctionType.Group:
+            continue
+        member_names = _extract_group_member_names(func)
+        members = [func_by_name[n] for n in member_names if n in func_by_name]
+        if members:
+            groups[func.name] = members
+            grouped_names.update(n for n in member_names if n in func_by_name)
+
+    ungrouped = [
+        f
+        for f in program.functions.values()
+        if _ir_core.is_incore_type(f.func_type) and f.name not in grouped_names
+    ]
+    return groups, ungrouped
+
+
 def generate(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -361,29 +409,68 @@ def generate(
     for func in transformed_program.functions.values():
         if func.func_type == _ir_core.FunctionType.Orchestration:
             orch_func = func
-            continue
-        if not _ir_core.is_incore_type(func.func_type):
-            continue
 
+    groups, ungrouped = _build_group_mapping(transformed_program)
+
+    def _codegen_single_function(func: _ir_core.Function, pto_code: str) -> None:
+        """Compile one InCore function's MLIR through ptoas and emit its wrapper."""
+        core_type = _codegen_core.infer_function_core_type(func)
+        ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+
+        if skip_ptoas:
+            kernel_rel = os.path.join("kernels", ct_str, f"{func.name}.pto")
+            result_files[kernel_rel] = pto_code
+        else:
+            ptoas_dir = os.path.join(output_dir, "ptoas")
+            os.makedirs(ptoas_dir, exist_ok=True)
+
+            pto_path = os.path.join(ptoas_dir, f"{func.name}.pto")
+            with open(pto_path, "w") as f:
+                f.write(pto_code)
+
+            cpp_path = os.path.join(ptoas_dir, f"{func.name}.cpp")
+            _run_ptoas(
+                pto_path,
+                cpp_path,
+                ptoas_flags=[
+                    "--enable-insert-sync",
+                    "--pto-level=level3",
+                ]
+                + (
+                    ["--pto-arch", "a5"]
+                    if _backend_core.get_backend_type() == _backend_core.BackendType.Ascend950
+                    else []
+                ),
+            )
+
+            with open(cpp_path) as f:
+                ptoas_cpp = f.read()
+
+            wrapper_code = _generate_kernel_wrapper(func, ptoas_cpp)
+            kernel_rel = os.path.join("kernels", ct_str, f"{func.name}.cpp")
+            result_files[kernel_rel] = wrapper_code
+
+    # Grouped functions: one MLIR module per group
+    for group_name, members in groups.items():
         try:
-            single_program = _ir_core.Program([func], func.name, transformed_program.span)
+            grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
             codegen_instance = _codegen_core.PTOCodegen()
-            pto_code = codegen_instance.generate(single_program)
-            core_type = _codegen_core.infer_function_core_type(func)
-            ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+            pto_code = codegen_instance.generate(grouped_program)
 
             if skip_ptoas:
-                kernel_rel = os.path.join("kernels", ct_str, f"{func.name}.pto")
+                # One .pto file per group, keyed by group name
+                kernel_rel = os.path.join("kernels", f"{group_name}.pto")
                 result_files[kernel_rel] = pto_code
             else:
+                # ptoas: compile grouped .pto, then generate per-function wrappers
                 ptoas_dir = os.path.join(output_dir, "ptoas")
                 os.makedirs(ptoas_dir, exist_ok=True)
 
-                pto_path = os.path.join(ptoas_dir, f"{func.name}.pto")
+                pto_path = os.path.join(ptoas_dir, f"{group_name}.pto")
                 with open(pto_path, "w") as f:
                     f.write(pto_code)
 
-                cpp_path = os.path.join(ptoas_dir, f"{func.name}.cpp")
+                cpp_path = os.path.join(ptoas_dir, f"{group_name}.cpp")
                 _run_ptoas(
                     pto_path,
                     cpp_path,
@@ -401,13 +488,27 @@ def generate(
                 with open(cpp_path) as f:
                     ptoas_cpp = f.read()
 
-                wrapper_code = _generate_kernel_wrapper(func, ptoas_cpp)
-                kernel_rel = os.path.join("kernels", ct_str, f"{func.name}.cpp")
-                result_files[kernel_rel] = wrapper_code
+                for func in members:
+                    wrapper_code = _generate_kernel_wrapper(func, ptoas_cpp)
+                    core_type = _codegen_core.infer_function_core_type(func)
+                    ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
+                    kernel_rel = os.path.join("kernels", ct_str, f"{func.name}.cpp")
+                    result_files[kernel_rel] = wrapper_code
+        except Exception as e:
+            func_names = ", ".join(m.name for m in members)
+            logger.error("Failed to compile group '%s' [%s]: %s", group_name, func_names, e)
+            errors.append((group_name, e))
+
+    # Ungrouped functions: one MLIR module per function (existing behavior)
+    for func in ungrouped:
+        try:
+            single_program = _ir_core.Program([func], func.name, transformed_program.span)
+            codegen_instance = _codegen_core.PTOCodegen()
+            pto_code = codegen_instance.generate(single_program)
+            _codegen_single_function(func, pto_code)
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
             errors.append((func.name, e))
-            continue
 
     # Orchestration + config (shared codegen with CCE)
     if orch_func is not None:

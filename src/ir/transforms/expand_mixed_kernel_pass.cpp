@@ -13,6 +13,7 @@
 #include <any>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -199,43 +200,97 @@ StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
 // Recursive Affinity Analysis
 // ============================================================================
 
+/// Collect Vars defined by tpop operations (tile.tpop_from_aiv / tile.tpop_from_aic).
+/// Used to avoid misclassifying tile.move from a tpop result as a cross-core boundary.
+std::unordered_set<const Var*> CollectTpopVars(const std::vector<StmtPtr>& stmts) {
+  std::unordered_set<const Var*> result;
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+        if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
+          if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
+            result.insert(assign->var_.get());
+          }
+        }
+      }
+    }
+    // Recurse into compound statements
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      auto inner = CollectTpopVars(FlattenBody(for_stmt->body_));
+      result.insert(inner.begin(), inner.end());
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto inner = CollectTpopVars(FlattenBody(if_stmt->then_body_));
+      result.insert(inner.begin(), inner.end());
+      if (if_stmt->else_body_.has_value()) {
+        auto inner2 = CollectTpopVars(FlattenBody(if_stmt->else_body_.value()));
+        result.insert(inner2.begin(), inner2.end());
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto inner = CollectTpopVars(FlattenBody(while_stmt->body_));
+      result.insert(inner.begin(), inner.end());
+    }
+  }
+  return result;
+}
+
 // Forward declare
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity);
+                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity,
+                                 const std::unordered_set<const Var*>& tpop_vars);
 
 CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
                                   std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity) {
+                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
+                                  const std::unordered_set<const Var*>& tpop_vars = {}) {
   CoreAffinity combined = CoreAffinity::SHARED;
   for (const auto& stmt : stmts) {
-    combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity));
+    combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_vars));
   }
   return combined;
 }
 
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity) {
+                                 std::unordered_map<const Var*, CoreAffinity>& var_affinity,
+                                 const std::unordered_set<const Var*>& tpop_vars) {
   CoreAffinity result = CoreAffinity::SHARED;
 
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-    if (call) result = ClassifyCallAffinity(call);
+    if (call) {
+      result = ClassifyCallAffinity(call);
+      // tile.move from a tpop result is not a cross-core boundary: the data already
+      // arrived via tpop, so the move is just internal data placement on the consuming core.
+      if (result == CoreAffinity::BOUNDARY && !call->args_.empty()) {
+        if (auto src_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+          if (tpop_vars.count(src_var.get()) > 0) {
+            // Reclassify by target memory space (the consuming core's side)
+            for (const auto& [key, value] : call->kwargs_) {
+              if (key == "target_memory") {
+                auto target = AnyCast<MemorySpace>(value, "target_memory");
+                result = IsCubeMemorySpace(target) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
     var_affinity[assign->var_.get()] = result;
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyCallAffinity(call);
   } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity);
+    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_vars);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity);
+    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_vars);
     if (if_stmt->else_body_.has_value()) {
-      result = CombineAffinity(
-          result, AnalyzeStmtsAffinity(FlattenBody(if_stmt->else_body_.value()), stmt_map, var_affinity));
+      result = CombineAffinity(result, AnalyzeStmtsAffinity(FlattenBody(if_stmt->else_body_.value()),
+                                                            stmt_map, var_affinity, tpop_vars));
     }
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity);
+    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_vars);
   } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity);
+    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_vars);
   }
 
   stmt_map[stmt.get()] = result;
@@ -252,11 +307,17 @@ struct CVBoundaryMove {
   VarPtr dest_var;      // AssignStmt LHS
   ExprPtr source_tile;  // First arg of tile.move
   TypePtr result_type;  // Return type of the tile.move call
+  /// Original tpop Call that defines source_tile (nullptr if source is not a tpop result).
+  /// Used to propagate kwargs (e.g., split) from the user-written tpop to the replacement tpop.
+  CallPtr source_tpop_call;
 };
 
 /// Collect all CV boundary tile.move statements recursively.
+/// Also looks up whether the source tile is defined by a tpop call, so that kwargs
+/// (e.g., split) can be propagated to the replacement tpop.
 void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
-                            std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves) {
+                            std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+                            const std::unordered_map<const Var*, CallPtr>& var_to_tpop) {
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
@@ -264,21 +325,30 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {
           INTERNAL_CHECK(!call->args_.empty()) << "Internal error: tile.move must have at least one argument";
-          boundary_moves[stmt.get()] = CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType()};
+          // Look up whether the source tile was produced by a tpop call
+          CallPtr source_tpop;
+          if (auto source_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+            auto it = var_to_tpop.find(source_var.get());
+            if (it != var_to_tpop.end()) {
+              source_tpop = it->second;
+            }
+          }
+          boundary_moves[stmt.get()] =
+              CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType(), source_tpop};
         }
       }
     }
 
     // Recurse into compound statements
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(for_stmt->body_), boundary_moves);
+      CollectCVBoundaryMoves(FlattenBody(for_stmt->body_), boundary_moves, var_to_tpop);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(if_stmt->then_body_), boundary_moves);
+      CollectCVBoundaryMoves(FlattenBody(if_stmt->then_body_), boundary_moves, var_to_tpop);
       if (if_stmt->else_body_.has_value()) {
-        CollectCVBoundaryMoves(FlattenBody(if_stmt->else_body_.value()), boundary_moves);
+        CollectCVBoundaryMoves(FlattenBody(if_stmt->else_body_.value()), boundary_moves, var_to_tpop);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(while_stmt->body_), boundary_moves);
+      CollectCVBoundaryMoves(FlattenBody(while_stmt->body_), boundary_moves, var_to_tpop);
     }
   }
 }
@@ -301,10 +371,12 @@ TypePtr CleanTileType(const TypePtr& tile_type) {
   return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, std::nullopt, tt->memory_space_);
 }
 
-CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
+CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span,
+                   const std::vector<std::pair<std::string, std::any>>& kwargs = {}) {
   auto op = OpRegistry::GetInstance().GetOp(op_name);
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, MakeSplitKwargs(), CleanTileType(tile_type),
-                                span);
+  auto effective_kwargs = kwargs.empty() ? MakeSplitKwargs() : kwargs;
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs),
+                                CleanTileType(tile_type), span);
 }
 
 // ============================================================================
@@ -922,10 +994,13 @@ enum class CoreSide { AIC, AIV };
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
 /// -> clean-typed new_var mappings, so downstream references to either the pre-move or
 /// post-move variable can be updated via pointer-based substitution.
+/// superseded_tpop_vars tracks source Vars whose defining tpop is superseded by a
+/// boundary-generated tpop, so the original tpop can be eliminated.
 std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                   const std::unordered_map<const Stmt*, CVBoundaryMove>& boundary_moves,
-                                   std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+                                   const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+                                   std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+                                   std::unordered_set<const Var*>& superseded_tpop_vars) {
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
@@ -962,8 +1037,13 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
             tpop_var_remap[source_var.get()] = clean_var;
           }
+          // Propagate kwargs from the original tpop (e.g., split=1) if available
+          std::vector<std::pair<std::string, std::any>> kwargs;
+          if (bm.source_tpop_call) {
+            kwargs = bm.source_tpop_call->kwargs_;
+          }
           result.push_back(std::make_shared<AssignStmt>(
-              clean_var, CreateTpop(pop_op, clean_type, stmt->span_), stmt->span_));
+              clean_var, CreateTpop(pop_op, clean_type, stmt->span_, kwargs), stmt->span_));
         }
         continue;
       }
@@ -973,31 +1053,36 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 
     if (affinity == skip_affinity) continue;
 
+    // Skip original tpop statements whose results are superseded by boundary-generated tpops
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (superseded_tpop_vars.count(assign->var_.get()) > 0) continue;
+    }
+
     if (affinity == keep_affinity || affinity == CoreAffinity::SHARED) {
       result.push_back(stmt);
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body =
-            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tpop_var_remap);
+        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
+                                      tpop_var_remap, superseded_tpop_vars);
         result.push_back(std::make_shared<ForStmt>(
             for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
             MakeBody(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
             for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_));
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then =
-            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, tpop_var_remap);
+        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
+                                      tpop_var_remap, superseded_tpop_vars);
         std::optional<StmtPtr> new_else;
         if (if_stmt->else_body_.has_value()) {
           auto new_else_stmts = BuildCoreBody(side, FlattenBody(if_stmt->else_body_.value()), stmt_map,
-                                              boundary_moves, tpop_var_remap);
+                                              boundary_moves, tpop_var_remap, superseded_tpop_vars);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(new_then, if_stmt->span_),
                                                   new_else, if_stmt->return_vars_, if_stmt->span_));
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body =
-            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, tpop_var_remap);
+        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
+                                      tpop_var_remap, superseded_tpop_vars);
         result.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
                                                      MakeBody(new_body, while_stmt->span_),
                                                      while_stmt->return_vars_, while_stmt->span_));
@@ -1023,22 +1108,54 @@ struct ExpandedKernel {
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
   auto stmts = FlattenBody(func->body_);
 
+  // Pre-scan for tpop result vars (needed by affinity analysis to avoid
+  // misclassifying tile.move from tpop results as cross-core boundaries)
+  auto tpop_vars = CollectTpopVars(stmts);
+
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
   std::unordered_map<const Var*, CoreAffinity> var_affinity;
-  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
+  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_vars);
 
-  // Collect CV boundary moves from explicit tile.move ops
-  std::unordered_map<const Stmt*, CVBoundaryMove> boundary_moves;
-  CollectCVBoundaryMoves(stmts, boundary_moves);
+  // Collect CV boundary moves from explicit tile.move ops.
+  // First, build a map from Var -> defining tpop Call so boundary moves can
+  // propagate kwargs (e.g., split) from the original tpop to the replacement.
+  std::unordered_map<const Var*, CallPtr> var_to_tpop;
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+        if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
+          if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
+            var_to_tpop[assign->var_.get()] = call;
+          }
+        }
+      }
+    }
+  }
+  std::map<const Stmt*, CVBoundaryMove> boundary_moves;
+  CollectCVBoundaryMoves(stmts, boundary_moves, var_to_tpop);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
   BuildDefMap(stmts, original_def_map);
 
+  // Precompute the set of source Vars whose original tpop is superseded by a
+  // boundary-generated tpop.  This must be done before BuildCoreBody because
+  // the original tpop statement appears before the boundary tile.move in
+  // program order — computing it lazily inside the loop would be too late.
+  std::unordered_set<const Var*> superseded_tpop_vars;
+  for (const auto& [stmt_ptr, bm] : boundary_moves) {
+    if (bm.source_tpop_call) {
+      if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+        superseded_tpop_vars.insert(source_var.get());
+      }
+    }
+  }
+
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap);
+  auto aic_stmts =
+      BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap, superseded_tpop_vars);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -1051,7 +1168,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap);
+  auto aiv_stmts =
+      BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars);
   auto aiv_final = FinalizeSplitCoreBody(aiv_stmts, original_def_map);
 
   // Helper to create fresh params and build a DeepClone var_map
@@ -1393,9 +1511,10 @@ Pass ExpandMixedKernel() {
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
       auto stmts = FlattenBody(func->body_);
+      auto tpop_vars = CollectTpopVars(stmts);
       std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
       std::unordered_map<const Var*, CoreAffinity> var_affinity;
-      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity);
+      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_vars);
 
       // A function is mixed if the combined affinity is MIXED or BOUNDARY
       // (both imply cube+vector presence). Pure CUBE or pure VECTOR are not mixed.

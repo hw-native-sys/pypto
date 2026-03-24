@@ -35,20 +35,18 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 // (tile.tpush/tpop are registered in tile_ops/cross_core.cpp)
 // ============================================================================
 
-// Release slot back to AIC producer (called by AIV consumer)
+// Release slot back to AIC producer (called by AIV consumer after tpop_from_aic)
 REGISTER_OP("system.tfree_to_aic")
-    .set_description("Release ring buffer slot back to AIC producer (AIV consumer calls after tpop_from_aic)")
+    .set_description("Release ring buffer slot back to AIC producer")
     .set_op_category("CrossCoreOp")
-    .no_argument()
-    .set_attr<int>("aiv_idx")
+    .add_argument("tile", "Tile buffer obtained from tpop to release")
     .f_deduce_type(DeduceUnknownType);
 
-// Release slot back to AIV producer (called by AIC consumer)
+// Release slot back to AIV producer (called by AIC consumer after tpop_from_aiv)
 REGISTER_OP("system.tfree_to_aiv")
-    .set_description("Release ring buffer slot back to AIV producer (AIC consumer calls after tpop_from_aiv)")
+    .set_description("Release ring buffer slot back to AIV producer")
     .set_op_category("CrossCoreOp")
-    .no_argument()
-    .set_attr<int>("aiv_idx")
+    .add_argument("tile", "Tile buffer obtained from tpop to release")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIC side

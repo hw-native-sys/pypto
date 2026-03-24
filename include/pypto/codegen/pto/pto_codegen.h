@@ -233,6 +233,13 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetImportBufferSSA() const;
 
   /**
+   * @brief Get the split value for a tile var produced by a tpop operation
+   * @param var Raw pointer to the tile variable
+   * @return Split value from the originating tpop (0 if not found)
+   */
+  [[nodiscard]] int GetTpopSplit(const ir::Var* var) const;
+
+  /**
    * @brief Check if the current function is an AIC (Cube) function
    */
   [[nodiscard]] bool IsAICFunction() const;
@@ -295,6 +302,14 @@ class PTOCodegen : public CodegenBase {
    * @brief Generate PTO-ISA MLIR for a single function
    */
   void GenerateFunction(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Reorder top-level statements so each tpop chain follows pop-use-free order
+   *
+   * Hardware requires: tpop(tile) → use(tile) → tfree(tile) before the next tpop.
+   * Groups tpop assignment, its direct users, and its tfree into sequential chains.
+   */
+  std::vector<ir::StmtPtr> ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts) const;
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -380,6 +395,7 @@ class PTOCodegen : public CodegenBase {
   /// This is the single source of truth for per-variable alloc_tile emission.
   std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs_;
   std::set<const ir::Var*> emitted_tile_alloc_vars_;
+  std::map<const ir::Var*, int> tpop_result_vars_;  ///< Tile vars from tpop: var -> split value
 
   // Current function context
   ir::FunctionPtr current_function_;

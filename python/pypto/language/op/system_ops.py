@@ -24,8 +24,6 @@ from pypto.ir.op.system_ops import (
     bar_v,
     sync_dst,
     sync_src,
-    tfree_to_aic,
-    tfree_to_aiv,
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
@@ -95,6 +93,16 @@ def tpush_to_aiv(tile: Tile, *, split: int, span: Span | None = None) -> Call:
 def tpush_to_aic(tile: Tile, *, split: int, span: Span | None = None) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe."""
     return _ir_ops.tpush_to_aic(tile.unwrap(), split=split, span=span)
+
+
+def tfree_to_aic(tile: Tile, span: Span | None = None) -> Call:
+    """Release ring buffer slot back to AIC producer."""
+    return _ir_ops.tfree_to_aic(tile.unwrap(), span=span)
+
+
+def tfree_to_aiv(tile: Tile, span: Span | None = None) -> Call:
+    """Release ring buffer slot back to AIV producer."""
+    return _ir_ops.tfree_to_aiv(tile.unwrap(), span=span)
 
 
 def tpop_from_aic(
