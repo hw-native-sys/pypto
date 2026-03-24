@@ -86,6 +86,10 @@ class TestCCECodegenBasics:
         assert "TADDS(tile_" in code
         assert "TSTORE(" in code
 
+        # Verify AIV pipeline completion sync at end of kernel
+        assert "set_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);" in code
+        assert "wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);" in code
+
 
 class TestControlFlowCodegen:
     """Test control flow statement code generation."""
@@ -369,6 +373,10 @@ class TestMatmulCodegen:
         # Verify both TMATMUL and TMATMUL_ACC are generated
         assert "TMATMUL(" in code
         assert "TMATMUL_ACC(" in code
+
+        # Verify AIC pipeline completion sync at end of kernel
+        assert "set_flag(PIPE_FIX, PIPE_S, EVENT_ID7);" in code
+        assert "wait_flag(PIPE_FIX, PIPE_S, EVENT_ID7);" in code
 
 
 if __name__ == "__main__":
