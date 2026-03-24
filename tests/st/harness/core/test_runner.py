@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from pypto.backend import set_backend_type
+from pypto.backend import BackendType, set_backend_type
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
 from pypto.runtime.runner import RunConfig, RunResult, _execute_on_device
@@ -37,6 +37,27 @@ from harness.core.harness import PTOTestCase
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
 _PROJECT_ROOT = _ST_DIR.parent.parent
+
+# Map BackendType to the architecture prefix used by the platform string.
+# "a2a3" covers Ascend 910B (PTO and CCE backends); "a5" covers Ascend 950.
+_BACKEND_TO_ARCH: dict[BackendType, str] = {
+    BackendType.Ascend910B_PTO: "a2a3",
+    BackendType.Ascend910B_CCE: "a2a3",
+    BackendType.Ascend950: "a5",
+}
+
+
+def _resolve_platform(config_platform: str, backend_type: BackendType) -> str:
+    """Return the platform string required to compile for *backend_type*.
+
+    Preserves the sim/hardware distinction from *config_platform* (i.e. the
+    ``sim`` suffix) while replacing the architecture prefix to match the
+    backend.  For example, if the global config says ``"a2a3sim"`` but the
+    test case requests ``Ascend950``, this returns ``"a5sim"``.
+    """
+    is_sim = config_platform.endswith("sim")
+    arch = _BACKEND_TO_ARCH.get(backend_type, config_platform.rstrip("sim").rstrip("_"))
+    return f"{arch}sim" if is_sim else arch
 
 
 def _default_work_dir(test_name: str) -> Path:
@@ -185,7 +206,8 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
 
-            _execute_on_device(work_dir, golden_path, self.config.platform, self.config.device_id)
+            platform = _resolve_platform(self.config.platform, backend_type)
+            _execute_on_device(work_dir, golden_path, platform, self.config.device_id)
 
             return RunResult(
                 passed=True,

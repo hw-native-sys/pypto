@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
@@ -568,8 +570,21 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   return oss.str();
 }
 
-std::string CoreTypeToSubmitFunc(CoreType core_type) {
-  return core_type == CoreType::CUBE ? "pto2_rt_submit_aic_task" : "pto2_rt_submit_aiv_task";
+// Returns the submit-task call prefix for the given core type and backend.
+// A2/A3: pto2_rt_submit_aiv_task(rt, id, params, n)
+//         pto2_rt_submit_aic_task(rt, id, params, n)
+// A5:    pto2_rt_submit_task(rt, id, PTO2_WORKER_VECTOR, params, n)
+//         pto2_rt_submit_task(rt, id, PTO2_WORKER_CUBE,   params, n)
+// Returns {func_call_with_rt_and_id_prefix, extra_worker_arg_or_empty}.
+// Caller emits: prefix << func_id << extra << ", " << task_var << ", " << n << ");\n"
+std::pair<std::string, std::string> CoreTypeToSubmitParts(CoreType core_type) {
+  bool is_a5 = pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend950;
+  if (is_a5) {
+    std::string worker = core_type == CoreType::CUBE ? "PTO2_WORKER_CUBE" : "PTO2_WORKER_VECTOR";
+    return {"pto2_rt_submit_task(rt, ", ", " + worker};
+  }
+  std::string func = core_type == CoreType::CUBE ? "pto2_rt_submit_aic_task" : "pto2_rt_submit_aiv_task";
+  return {func + "(rt, ", ""};
 }
 
 // Removed DataTypeToPTO2Enum — now uses DataTypeToString from dtype.h
@@ -1102,8 +1117,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
     }
     code_ << ind << "};\n";
-    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ", "
-          << params.size() << ");\n";
+    auto [submit_prefix, worker_arg] = CoreTypeToSubmitParts(core_type);
+    code_ << ind << submit_prefix << func_id << worker_arg << ", " << task_var << ", " << params.size()
+          << ");\n";
 
     task_counter_++;
   }

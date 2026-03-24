@@ -58,8 +58,8 @@ class RunConfig:
     """Configuration for a :func:`run` invocation or harness test execution.
 
     Attributes:
-        platform: Target execution platform — ``"a2a3sim"`` (simulator) or
-            ``"a2a3"`` (real Ascend hardware).
+        platform: Target execution platform — ``"a2a3sim"`` / ``"a2a3"``
+            (Ascend 910B) or ``"a5sim"`` / ``"a5"`` (Ascend 950).
         device_id: Hardware device index (ignored for simulator).
         rtol: Relative tolerance for result comparison.
         atol: Absolute tolerance for result comparison.
@@ -89,8 +89,10 @@ class RunConfig:
     codegen_only: bool = False
 
     def __post_init__(self) -> None:
-        if self.platform not in ("a2a3sim", "a2a3"):
-            raise ValueError(f"Invalid platform {self.platform!r}. Expected 'a2a3sim' or 'a2a3'.")
+        if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
+            raise ValueError(
+                f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
+            )
 
 
 @dataclass
@@ -249,7 +251,8 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
         work_dir: Root output directory produced by :func:`compile_program`,
             containing ``kernels/`` and ``orchestration/``.
         golden_path: Path to the generated ``golden.py`` file.
-        platform: Target execution platform (``"a2a3sim"`` or ``"a2a3"``).
+        platform: Target execution platform (``"a2a3sim"``, ``"a2a3"``,
+            ``"a5sim"``, or ``"a5"``).
         device_id: Hardware device index.
     """
     simpler_root = os.environ.get("SIMPLER_ROOT")

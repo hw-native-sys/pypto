@@ -358,7 +358,15 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
       << "tile.assemble requires target and source to have the same dtype, but got "
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
-  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
+  // Inherit layout metadata (blayout, slayout, fractal, pad) from the target so that
+  // the result type carries the correct tile_buf type annotation for codegen.
+  TileView tile_view;
+  if (target_type->tile_view_.has_value()) {
+    tile_view = *target_type->tile_view_;
+  }
+  tile_view.valid_shape = target_type->shape_;
+  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
+                                    target_type->memory_space_);
 }
 
 REGISTER_OP("tile.assemble")

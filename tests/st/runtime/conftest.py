@@ -27,8 +27,8 @@ def check_hardware_availability(request):
     """
     platform = request.config.getoption("--platform")
 
-    # If platform is a2a3 (real hardware) but no hardware is available
-    if platform == "a2a3" and not is_hardware_available():
+    # If platform is real hardware but no hardware is available
+    if platform in ("a2a3", "a5") and not is_hardware_available():
         pytest.skip(
             "Hardware not available: Ascend NPU device nodes not found "
             "(checked /dev/davinci*, /dev/npu*, /dev/ascend*). "

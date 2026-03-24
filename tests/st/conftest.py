@@ -68,7 +68,7 @@ def pytest_addoption(parser):
         "--platform",
         action="store",
         default="a2a3",
-        choices=["a2a3sim", "a2a3"],
+        choices=["a2a3sim", "a2a3", "a5sim", "a5"],
         help="Target platform for tests (default: a2a3sim)",
     )
     parser.addoption(

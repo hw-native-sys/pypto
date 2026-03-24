@@ -202,6 +202,56 @@ static std::string MakeCmpsCodegenPTO(const std::string& pto_op_name, const Call
   return "";
 }
 
+// Helper function for tile.assemble → pto.tinsert
+// Inserts source tile into target tile at a given row/col offset (DPS pattern).
+// pto.tinsert semantics: dst[i+row, j+col] = src[i, j]
+// Arguments: args[0] = target (destination base), args[1] = source, args[2] = offset MakeTuple
+static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tile.assemble requires 3 arguments (target, source, offset), got "
+                               << op->args_.size();
+
+  std::string target = codegen.GetExprAsCode(op->args_[0]);
+  std::string src = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK(offset_tuple) << "tile.assemble third argument must be a tuple (offset)";
+  INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
+      << "tile.assemble offset tuple must have at least 2 elements (row, col), got "
+      << offset_tuple->elements_.size();
+  std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
+  std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+
+  // pto.tinsert writes src into dst at (row, col) in place — dst must already
+  // contain target's data.  When target and dst are different buffers (i.e.
+  // memory reuse did not merge them), copy target → dst first.
+  if (target != dst) {
+    std::string target_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+    std::ostringstream mov;
+    mov << "pto.tmov ins(" << target;
+    if (!target_type.empty()) mov << " : " << target_type;
+    mov << ") outs(" << dst;
+    if (!dst_type.empty()) mov << " : " << dst_type;
+    mov << ")";
+    codegen.Emit(mov.str());
+  }
+
+  // Emit pto.tinsert ins(src, row, col) outs(dst)
+  std::ostringstream oss;
+  oss << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
+  if (!src_type.empty()) {
+    oss << " : " << src_type << ", index, index";
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) oss << " : " << dst_type;
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for Assign
 static std::string MakeAssignCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
@@ -1196,6 +1246,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     oss << ")";
     codegen.Emit(oss.str());
     return std::string("");
+  });
+  reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTileAssembleCodegenPTO(op, codegen);
   });
   reg("tile.reshape", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);

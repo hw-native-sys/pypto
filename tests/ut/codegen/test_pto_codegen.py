@@ -789,11 +789,12 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
         def bad_kernel(
             self,
             a: pl.Tensor[[16, 16], pl.FP32],
-        ) -> pl.Tensor[[16, 16], pl.FP32]:
-            source = pl.slice(a, [16, 16], [0, 0])
-            result = pl.create_tensor([16, 16], dtype=pl.FP32)
-            result = pl.assemble(result, source, [0, 0])
-            return result
+            output: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            tile = pl.load(a, offsets=[0, 0], shapes=[16, 16])
+            result = pl.tile.sum(tile, axis=1)
+            out = pl.store(result, offsets=[0, 0], output_tensor=output)
+            return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def orch(self, a: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
