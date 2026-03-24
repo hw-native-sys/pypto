@@ -117,8 +117,8 @@ set(PYPTO_SOURCES
     src/ir/op/type_inference.cpp
 
     # IR - Arith
-    src/ir/arith/const_int_bound.cc
-    src/ir/arith/modular_set.cc
+    src/ir/arith/const_int_bound.cpp
+    src/ir/arith/modular_set.cpp
     src/ir/arith/rewrite_simplify.cpp
 
     # IR - Transforms
