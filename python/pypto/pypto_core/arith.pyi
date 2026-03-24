@@ -39,7 +39,10 @@ def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
     ...
 
 class RewriteSimplifier:
-    """Simplifies expressions by applying algebraic rewrite rules."""
+    """Simplifies integer/index expressions by applying algebraic rewrite rules.
+
+    Float-typed expressions are returned unchanged.
+    """
 
     def __init__(self) -> None:
         """Create a standalone RewriteSimplifier."""

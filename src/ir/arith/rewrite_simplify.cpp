@@ -67,6 +67,13 @@ static std::vector<ExprPtr> ExtractConstraints(const ExprPtr& expr) {
 RewriteSimplifier::Impl::Impl(Analyzer* parent) : parent_(parent) {}
 
 ExprPtr RewriteSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
+  // Skip algebraic rewrite rules for float-typed expressions.
+  // Integer-style identities (cancellation, associativity) are not
+  // semantics-preserving for floating-point (rounding, NaN).
+  if (auto stype = std::dynamic_pointer_cast<const ScalarType>(expr->GetType());
+      stype && stype->dtype_.IsFloat()) {
+    return expr;
+  }
   return ExprFunctor<ExprPtr>::VisitExpr(expr);
 }
 
@@ -900,6 +907,9 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const EqPtr& op) {
 
   ExprPtr ret = MutateBinary(op, a, b, MakeEq);
 
+  // Skip rewrite rules for float operands (NaN breaks reflexivity/trichotomy)
+  if (GetScalarDtype(a).IsFloat()) return ret;
+
   PVar<ExprPtr> x, y, z;
   PVar<ConstIntPtr> c1, c2;
 
@@ -941,6 +951,8 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const NePtr& op) {
 
   ExprPtr ret = MutateBinary(op, a, b, MakeNe);
 
+  if (GetScalarDtype(a).IsFloat()) return ret;
+
   PVar<ExprPtr> x, y, z;
   PVar<ConstIntPtr> c1, c2;
 
@@ -972,6 +984,8 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LtPtr& op) {
   if (auto folded = TryConstFoldBinary(ObjectKind::Lt, a, b)) return folded;
 
   ExprPtr ret = MutateBinary(op, a, b, MakeLt);
+
+  if (GetScalarDtype(a).IsFloat()) return ret;
 
   PVar<ExprPtr> x, y, z;
   PVar<ConstIntPtr> c1, c2;
@@ -1042,6 +1056,8 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LePtr& op) {
   if (auto folded = TryConstFoldBinary(ObjectKind::Le, a, b)) return folded;
 
   ExprPtr ret = MutateBinary(op, a, b, MakeLe);
+
+  if (GetScalarDtype(a).IsFloat()) return ret;
 
   PVar<ExprPtr> x, y, z;
   PVar<ConstIntPtr> c1, c2;

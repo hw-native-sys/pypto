@@ -91,8 +91,10 @@ void BindArith(nb::module_& m) {
       });
 
   // RewriteSimplifier
-  nb::class_<ir::arith::RewriteSimplifier>(arith, "RewriteSimplifier",
-                                           "Simplifies expressions by applying algebraic rewrite rules.")
+  nb::class_<ir::arith::RewriteSimplifier>(
+      arith, "RewriteSimplifier",
+      "Simplifies integer/index expressions by applying algebraic rewrite rules.\n\n"
+      "Float-typed expressions are returned unchanged.")
       .def(nb::init<>(), "Create a standalone RewriteSimplifier.")
       .def("__call__", &ir::arith::RewriteSimplifier::operator(), nb::arg("expr"),
            "Simplify an expression by applying rewrite rules.")

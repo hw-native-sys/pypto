@@ -132,10 +132,13 @@ class ModularSetAnalyzer {
   std::unique_ptr<Impl> impl_;
 };
 
-/// Pattern-matching rewrite engine for algebraic simplification of expressions.
+/// Pattern-matching rewrite engine for algebraic simplification of integer/index expressions.
 ///
-/// Applies algebraic identities (e.g., x + 0 -> x, x - x -> 0) using
-/// pattern matching. Supports variable substitution and constraint scoping.
+/// Designed primarily for index arithmetic and integer shape calculations.
+/// Applies ~180 algebraic identities (e.g., x + 0 -> x, x - x -> 0) using
+/// pattern matching. Float-typed expressions are returned unchanged since
+/// integer-style identities are not semantics-preserving for floating-point
+/// (rounding errors, NaN). Supports variable substitution and constraint scoping.
 class RewriteSimplifier {
  public:
   /// Construct a standalone simplifier (no parent Analyzer).
