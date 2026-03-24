@@ -88,7 +88,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
 }
 
 // Phase 5: Entry function signature
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 ```
 
@@ -117,7 +117,7 @@ PTOParam params_t0;
 params_t0.add_input(ext_a);
 params_t0.add_input(ext_b);
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 
 // Phase 10: Control flow (ForStmt example)
 PTO2_SCOPE {
@@ -162,7 +162,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 // Generated C++
 PTOParam params_t0;
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
@@ -194,7 +194,7 @@ params_t0.add_output(ext_pij);
 params_t0.add_output(ext_mij);
 params_t0.add_output(ext_lij);
 params_t0.add_scalar(float_to_u64(scale));  // scalar after all tensors
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group Functions (Mixed Kernels)
@@ -206,7 +206,7 @@ When a kernel uses both AIC and AIV cores (mixed kernel), the codegen generates 
 PTOParam params_t0;
 // ... add_input / add_output / add_scalar calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(rt, mixed_0, params_t0);
+pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
 ## Operation Mappings
@@ -257,7 +257,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 
     // Extract device pointers
@@ -282,14 +282,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
     params_t0.add_output(c);
-    pto2_rt_submit_aiv_task(rt, 0, params_t0);
+    pto2_rt_submit_aiv_task(0, params_t0);
 
     // Task 1: kernel_add (c + b → d)
     PTOParam params_t1;
     params_t1.add_input(c);
     params_t1.add_input(ext_b);
     params_t1.add_output(ext_d);
-    pto2_rt_submit_aiv_task(rt, 0, params_t1);
+    pto2_rt_submit_aiv_task(0, params_t1);
 }
 
 }  // extern "C"
@@ -336,7 +336,7 @@ PTO2_SCOPE {
     for (int64_t i = 0; i < 4; i += 1) {
         PTOParam params_t0;
         // ... add_input / add_output calls ...
-        pto2_rt_submit_aiv_task(rt, 0, params_t0);
+        pto2_rt_submit_aiv_task(0, params_t0);
     }
 }
 ```
@@ -358,11 +358,11 @@ else:
 if (condition) {
     PTOParam params_t0;
     // ... add_input / add_output calls ...
-    pto2_rt_submit_aiv_task(rt, 0, params_t0);
+    pto2_rt_submit_aiv_task(0, params_t0);
 } else {
     PTOParam params_t1;
     // ... add_input / add_output calls ...
-    pto2_rt_submit_aiv_task(rt, 1, params_t1);
+    pto2_rt_submit_aiv_task(1, params_t1);
 }
 ```
 

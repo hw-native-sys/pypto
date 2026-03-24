@@ -88,7 +88,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
 }
 
 // 阶段 5：入口函数签名
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 ```
 
@@ -117,7 +117,7 @@ PTOParam params_t0;
 params_t0.add_input(ext_a);
 params_t0.add_input(ext_b);
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 
 // 阶段 10：控制流（ForStmt 示例）
 PTO2_SCOPE {
@@ -162,7 +162,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 // 生成的 C++
 PTOParam params_t0;
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
 
@@ -194,7 +194,7 @@ params_t0.add_output(ext_pij);
 params_t0.add_output(ext_mij);
 params_t0.add_output(ext_lij);
 params_t0.add_scalar(float_to_u64(scale));  // 标量在所有张量之后
-pto2_rt_submit_aiv_task(rt, 0, params_t0);
+pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group 函数（混合核）
@@ -206,7 +206,7 @@ pto2_rt_submit_aiv_task(rt, 0, params_t0);
 PTOParam params_t0;
 // ... add_input / add_output / add_scalar 调用 ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(rt, mixed_0, params_t0);
+pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
 ## 操作映射
@@ -257,7 +257,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
+void aicpu_orchestration_entry(uint64_t* args,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 
     // 提取设备指针
@@ -282,14 +282,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
     params_t0.add_output(c);
-    pto2_rt_submit_aiv_task(rt, 0, params_t0);
+    pto2_rt_submit_aiv_task(0, params_t0);
 
     // 任务 1: kernel_add (c + b → d)
     PTOParam params_t1;
     params_t1.add_input(c);
     params_t1.add_input(ext_b);
     params_t1.add_output(ext_d);
-    pto2_rt_submit_aiv_task(rt, 0, params_t1);
+    pto2_rt_submit_aiv_task(0, params_t1);
 }
 
 }  // extern "C"
@@ -335,7 +335,7 @@ PTO2_SCOPE {
     for (int64_t i = 0; i < 4; i += 1) {
         PTOParam params_t0;
         // ... add_input / add_output 调用 ...
-        pto2_rt_submit_aiv_task(rt, 0, params_t0);
+        pto2_rt_submit_aiv_task(0, params_t0);
     }
 }
 ```
@@ -357,11 +357,11 @@ else:
 if (condition) {
     PTOParam params_t0;
     // ... add_input / add_output 调用 ...
-    pto2_rt_submit_aiv_task(rt, 0, params_t0);
+    pto2_rt_submit_aiv_task(0, params_t0);
 } else {
     PTOParam params_t1;
     // ... add_input / add_output 调用 ...
-    pto2_rt_submit_aiv_task(rt, 1, params_t1);
+    pto2_rt_submit_aiv_task(1, params_t1);
 }
 ```
 

@@ -755,7 +755,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+    code_ << Indent() << "PTO2_SCOPE() {\n";
     indent_ += 4;
 
     auto saved = current_return_var_names_;
@@ -782,7 +782,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     code_ << Indent() << "if (" << cond_expr << ") {\n";
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+    code_ << Indent() << "PTO2_SCOPE() {\n";
     indent_ += 4;
 
     auto saved = current_return_var_names_;
@@ -800,7 +800,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (if_stmt->else_body_.has_value()) {
       code_ << Indent() << "} else {\n";
       indent_ += 4;
-      code_ << Indent() << "PTO2_SCOPE(rt) {\n";
+      code_ << Indent() << "PTO2_SCOPE() {\n";
       indent_ += 4;
 
       auto saved2 = current_return_var_names_;
@@ -1139,7 +1139,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
-    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ");\n";
+    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(" << func_id << ", " << task_var << ");\n";
 
     task_counter_++;
   }
@@ -1185,7 +1185,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id
           << ", INVALID_KERNEL_ID};\n";
-    code_ << ind << "pto2_rt_submit_task(rt, mixed_" << task_counter_ << ", " << task_var << ");\n";
+    code_ << ind << "pto2_rt_submit_task(mixed_" << task_counter_ << ", " << task_var << ");\n";
 
     task_counter_++;
   }
@@ -1440,7 +1440,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // 6. Entry function
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count, "
+  oss << "void aicpu_orchestration_entry(uint64_t* args, int arg_count, "
          "int orch_thread_num, int orch_thread_index) {\n";
   oss << "    (void)arg_count;\n";
   oss << "    (void)orch_thread_num;\n";
