@@ -1521,6 +1521,84 @@ class TestTensorReadWriteOffsetCodegen:
         assert ("arg_t_ptr)[11]" in code) or ("1 * 8 + 3" in code)
         assert "arg_t_ptr)" in code
 
+    def test_infer_output_param_from_loop_carried_store(self):
+        """Loop-carried store to a default-In tensor should emit output params."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class OutputProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i, (out_iter,) in pl.range(0, 64, 16, init_values=(out,)):
+                    x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [i], [16])
+                    out_next: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [i], out_iter)
+                    result = pl.yield_(out_next)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.fill(x, out)
+                return out
+
+        generator = codegen.CCECodegen()
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(OutputProgram)
+        files = generator.generate(transformed)
+        code = files["orchestration/orch.cpp"]
+
+        assert "make_input_param(ext_x)" in code
+        assert "make_output_param(ext_out)" in code
+
+    def test_infer_inout_param_from_loop_carried_read_modify_write(self):
+        """Loop-carried read-modify-write should emit inout params."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class InOutProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def accumulate(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                acc: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc_iter,) in pl.range(0, 64, 16, init_values=(acc,)):
+                    x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [i], [16])
+                    acc_tile: pl.Tile[[16], pl.FP32] = pl.load(acc_iter, [i], [16])
+                    sum_tile: pl.Tile[[16], pl.FP32] = pl.add(x_tile, acc_tile)
+                    acc_next: pl.Tensor[[64], pl.FP32] = pl.store(sum_tile, [i], acc_iter)
+                    result = pl.yield_(acc_next)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                acc: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc = self.accumulate(x, acc)
+                return acc
+
+        generator = codegen.CCECodegen()
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(InOutProgram)
+        files = generator.generate(transformed)
+        code = files["orchestration/orch.cpp"]
+
+        assert "make_input_param(ext_x)" in code
+        assert "make_inout_param(ext_acc)" in code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
