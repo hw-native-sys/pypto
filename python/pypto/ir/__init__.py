@@ -32,13 +32,14 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 
+# Import python_print utility
+from .instruments import RoundtripInstrument, verify_roundtrip
+
 # Import op conversion utilities
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 
 # Import PassManager and OptimizationStrategy
 from .pass_manager import OptimizationStrategy, PassManager
-
-# Import python_print utility
 from .printer import python_print
 
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
@@ -74,6 +75,8 @@ __all__ = [
     "TensorType",
     "TileType",
     "python_print",
+    "verify_roundtrip",
+    "RoundtripInstrument",
     "compile",
     "PassManager",
     "OptimizationStrategy",

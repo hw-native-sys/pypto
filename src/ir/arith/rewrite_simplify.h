@@ -136,7 +136,7 @@ class RewriteSimplifier::Impl : public ExprFunctor<ExprPtr> {
 
   static constexpr int kMaxRecursiveDepth = 5;
 
-  [[maybe_unused]] Analyzer* parent_;
+  Analyzer* parent_;
   int recursive_depth_{0};
   int64_t num_attempted_rewrites_{0};
   int64_t num_rewrites_{0};

@@ -373,7 +373,7 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
  private:
-  [[maybe_unused]] Analyzer* parent_;
+  Analyzer* parent_;
   std::unordered_map<const Expr*, Bound> var_map_;
 };
 

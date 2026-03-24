@@ -166,10 +166,14 @@ struct PassProperties {
  *
  * When VerificationLevel is Basic, PassPipeline::Run() automatically verifies
  * a small set of lightweight properties exactly once each, throwing on errors.
+ * When VerificationLevel is Roundtrip, the pipeline performs the same property
+ * verification and also enables print-parse roundtrip checking through the
+ * active PassContext instrumentation layer.
  */
 enum class VerificationLevel {
-  None,   ///< No automatic verification (fastest)
-  Basic,  ///< Verify lightweight properties once per pipeline (default)
+  None,       ///< No automatic verification (fastest)
+  Basic,      ///< Verify lightweight properties once per pipeline (default)
+  Roundtrip,  ///< Basic verification + print-parse roundtrip checking
 };
 
 /**
@@ -201,7 +205,7 @@ const IRPropertySet& GetDefaultVerifyProperties();
  * @brief Get the default verification level from environment
  *
  * Checks the PYPTO_VERIFY_LEVEL environment variable on first call
- * (values: "none", "basic"). Defaults to Basic.
+ * (values: "none", "basic", "roundtrip"). Defaults to Basic.
  * Used as the default for PassContext when no explicit level is provided.
  */
 VerificationLevel GetDefaultVerificationLevel();

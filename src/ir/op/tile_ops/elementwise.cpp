@@ -45,6 +45,17 @@ static std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>&
   return tile_type->shape_;
 }
 
+static std::optional<TileView> PreserveTileView(const std::shared_ptr<const TileType>& tile_type) {
+  if (!tile_type->tile_view_.has_value()) {
+    return std::nullopt;
+  }
+  TileView tile_view = tile_type->tile_view_.value();
+  if (tile_view.valid_shape.empty()) {
+    tile_view.valid_shape = tile_type->shape_;
+  }
+  return tile_view;
+}
+
 TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
                                           const std::string& op_name, bool require_int = false) {
@@ -81,8 +92,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -111,8 +121,7 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
@@ -135,8 +144,7 @@ TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
   // Result preserves the tile's element type. The hardware scalar instructions
   // (e.g. pto.tmuls) require src and dst to share the same element type; the
   // scalar operand is implicitly narrowed to match the tile dtype at runtime.
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
+  auto tile_view = PreserveTileView(tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -164,8 +172,7 @@ TypePtr DeduceTileOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
                                      << scalar_type->dtype_.ToString();
 
   // Result has the same shape and dtype as the input tile; the shift amount does not change element type.
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
+  auto tile_view = PreserveTileView(tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -484,8 +491,7 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -518,8 +524,7 @@ TypePtr DeduceTileOpTriTileType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes all src tiles have the same valid_shape; may need refinement
   // for cases where tiles have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -552,8 +557,7 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs tiles have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -584,8 +588,7 @@ TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
       << args[2]->GetType()->TypeName();
 
   // Result has the same shape and dtype as the input tile; bitwise ops do not change element type.
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
+  auto tile_view = PreserveTileView(tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -737,8 +740,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -790,8 +792,7 @@ TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
 
   // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-  TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type1);
+  auto tile_view = PreserveTileView(tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 

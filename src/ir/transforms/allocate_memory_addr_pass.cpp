@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -29,6 +30,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -37,6 +39,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -121,6 +124,52 @@ class MemRefUpdateMutator : public IRMutator {
       return new_iter_arg;
     }
     return op;
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    std::vector<ExprPtr> new_args;
+    bool changed = false;
+    new_args.reserve(op->args_.size());
+
+    for (size_t i = 0; i < op->args_.size(); ++i) {
+      INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
+      auto new_arg = IRMutator::VisitExpr(op->args_[i]);
+      INTERNAL_CHECK(new_arg) << "Call argument at index " << i << " mutated to null";
+      if (new_arg.get() != op->args_[i].get()) {
+        changed = true;
+      }
+      new_args.push_back(std::move(new_arg));
+    }
+
+    if (!changed) {
+      return op;
+    }
+
+    const auto updated_type = UpdateTypeMemRef(op->GetType());
+
+    if (std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+      return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, updated_type, op->span_);
+    }
+
+    auto opnode = std::dynamic_pointer_cast<const Op>(op->op_);
+    if (!opnode) {
+      return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, updated_type, op->span_);
+    }
+
+    const auto& op_name = opnode->name_;
+    if (op_name == "tile.tpush_to_aic" || op_name == "tile.tpush_to_aiv" || op_name == "tile.tpop_from_aic" ||
+        op_name == "tile.tpop_from_aiv") {
+      return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, updated_type, op->span_);
+    }
+
+    auto deduced_original = OpRegistry::GetInstance().Create(op_name, op->args_, op->kwargs_, op->span_);
+    const bool had_explicit_type =
+        !structural_equal(op->GetType(), deduced_original->GetType(), /*enable_auto_mapping=*/true);
+    if (had_explicit_type) {
+      return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, updated_type, op->span_);
+    }
+
+    return OpRegistry::GetInstance().Create(op_name, new_args, op->kwargs_, op->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

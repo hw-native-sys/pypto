@@ -460,6 +460,15 @@ void BindIR(nb::module_& m) {
            " The memory space is kept only in the generated name for compatibility.")
       .def(nb::init<ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
            nb::arg("span") = Span::unknown(), "Create a memory reference with addr, size, id, and span")
+      .def(
+          "__init__",
+          [](MemRef* self, int64_t addr, uint64_t size, uint64_t id, Span span) {
+            auto const_addr = std::make_shared<ConstInt>(addr, DataType::INDEX, Span::unknown());
+            new (self) MemRef(const_addr, size, id, std::move(span));
+          },
+          nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
+          "Create a memory reference with a constant integer address. The address is converted to "
+          "ConstInt(INDEX) to support parsing printer-emitted MemRef literals.")
       .def_rw("addr_", &MemRef::addr_, "Starting address expression")
       .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
       .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");

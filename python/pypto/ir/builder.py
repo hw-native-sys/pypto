@@ -25,6 +25,19 @@ from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 from .utils import _normalize_expr
 
 
+def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether two IR types are equivalent in builder-visible syntax."""
+    if lhs is rhs:
+        return True
+    if lhs is None or rhs is None:
+        return lhs is rhs
+    try:
+        ir.assert_structural_equal(lhs, rhs, enable_auto_mapping=True)
+    except ValueError:
+        return ir.python_print_type(lhs) == ir.python_print_type(rhs)
+    return True
+
+
 class IRBuilder:
     """IR Builder with context management and automatic span tracking.
 
@@ -886,7 +899,7 @@ class ForLoopBuilder:
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and not _types_match(type, inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -939,7 +952,7 @@ class ForLoopBuilder:
             final_type = inferred_type
         else:
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and not _types_match(type, inferred_type):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"
@@ -1071,7 +1084,7 @@ class WhileLoopBuilder:
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and not _types_match(type, inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -1142,7 +1155,7 @@ class WhileLoopBuilder:
             final_type = inferred_type
         else:
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and not _types_match(type, inferred_type):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"

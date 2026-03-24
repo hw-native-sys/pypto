@@ -109,6 +109,9 @@ VerificationLevel GetDefaultVerificationLevel() {
     if (val == "none") {
       return VerificationLevel::None;
     }
+    if (val == "roundtrip") {
+      return VerificationLevel::Roundtrip;
+    }
     return VerificationLevel::Basic;
   }();
   return level;

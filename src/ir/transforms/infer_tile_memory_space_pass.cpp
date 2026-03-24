@@ -272,6 +272,31 @@ class TileMemorySpaceMutator : public IRMutator {
     return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
   }
 
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    INTERNAL_CHECK(op->var_) << "AssignStmt has null var";
+    INTERNAL_CHECK(op->value_) << "AssignStmt has null value";
+
+    auto new_var_expr = VisitExpr(op->var_);
+    auto new_var = As<Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "AssignStmt var mutated to non-Var";
+
+    auto new_value = VisitExpr(op->value_);
+    if (auto call = As<Call>(new_value)) {
+      auto var_tile = As<TileType>(new_var->GetType());
+      auto call_tile = As<TileType>(call->GetType());
+      if (var_tile && call_tile &&
+          (!call_tile->memory_space_.has_value() || call_tile->memory_space_ != var_tile->memory_space_)) {
+        new_value =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_var->GetType(), call->span_);
+      }
+    }
+
+    if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
+      return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+    }
+    return op;
+  }
+
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     bool changed = false;
     auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);

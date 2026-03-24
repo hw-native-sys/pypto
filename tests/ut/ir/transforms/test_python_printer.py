@@ -392,7 +392,8 @@ class TestDynVarAndSSARename:
         assert len(lines) == 2, f"Expected 2 pl.dynamic() declarations, got {len(lines)}: {lines}"
         # One should be M, the other M_1
         assert 'M = pl.dynamic("M")' in src
-        assert 'M_1 = pl.dynamic("M_1")' in src
+        assert 'M_1 = pl.dynamic("M")' in src
+        ir.verify_roundtrip(prog)
 
     def test_dyn_var_unique_names_not_disambiguated(self):
         """Distinct Var objects with different names are not affected (issue #618)."""
@@ -454,3 +455,23 @@ class TestOpOutputNormalization:
         src = python_print(Prog)
         assert "dtype=pl.FP32" in src
         assert "value=" in src
+
+    def test_chunked_loops_print_loop_origin_keyword(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 16, 1, chunk=4):
+                        x = pl.assemble(x, pl.slice(x, [1], [i]), [i])
+                return x
+
+        after = passes.split_chunked_loops()(Prog)
+        src = python_print(after)
+        assert 'loop_origin="chunk_outer"' in src
+        assert 'loop_origin="chunk_inner"' in src
+        reparsed = pl.parse_program(src)
+        reparsed_src = python_print(reparsed)
+        assert 'loop_origin="chunk_outer"' in reparsed_src
+        assert 'loop_origin="chunk_inner"' in reparsed_src
+        ir.verify_roundtrip(after)

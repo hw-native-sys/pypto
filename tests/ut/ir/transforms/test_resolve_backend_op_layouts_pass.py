@@ -53,7 +53,10 @@ class TestResolveBackendOpLayouts:
         assert "pl.tile.reshape(acc_1, [1, 16])" in printed
         assert "pl.tile.reshape(partial, [1, 16])" in printed
         assert "pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec] = pl.tile.add(" in printed
-        assert "updated: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.reshape(" in printed
+        assert (
+            "updated: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec, "
+            "pl.TileView(blayout=pl.TileLayout.col_major)] = pl.tile.reshape("
+        ) in printed
 
 
 if __name__ == "__main__":

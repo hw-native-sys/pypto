@@ -18,6 +18,7 @@
 #include <ios>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -187,6 +188,26 @@ bool IsRightAssociative(const ExprPtr& expr) {
   return IsA<Pow>(expr);
 }
 
+TileLayout InferPrintedTileLayoutFromShape(const std::vector<ExprPtr>& shape) {
+  if (shape.size() != 2) {
+    return TileLayout::row_major;
+  }
+
+  auto rows_const = As<ConstInt>(shape[0]);
+  auto cols_const = As<ConstInt>(shape[1]);
+  if (!rows_const || !cols_const) {
+    return TileLayout::row_major;
+  }
+  return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
+}
+
+std::vector<ExprPtr> GetPrintedValidShape(const TileTypePtr& tile_type) {
+  if (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty()) {
+    return tile_type->tile_view_->valid_shape;
+  }
+  return tile_type->shape_;
+}
+
 /**
  * @brief Python-style IR printer
  *
@@ -287,6 +308,11 @@ class IRPythonPrinter : public IRVisitor {
   // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
   std::unordered_map<const Var*, std::string> var_rename_map_;
 
+  // Per-function printed type overrides for Vars whose printed annotation is
+  // richer than the underlying IR Var type (for example filling omitted
+  // TileView/TensorView metadata from the defining expression).
+  std::unordered_map<const Var*, TypePtr> var_print_type_map_;
+
   // Per-function MemRef name map: MemRef pointer → printed alloc name.
   // Built from tile.alloc definition sites so tile/tensor annotations can refer
   // to the same named buffers instead of re-printing inline pl.MemRef(...).
@@ -323,7 +349,11 @@ class IRPythonPrinter : public IRVisitor {
 
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
-  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
+  void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
+                                const std::vector<ExprPtr>& yield_values = {});
+  TypePtr GetPrintedExprType(const ExprPtr& expr) const;
+  TypePtr GetPrintedBindingType(const VarPtr& var, const ExprPtr& value);
+  std::optional<TileView> InferPrintedTileViewFromCall(const CallPtr& call, const TileTypePtr& declared_tile);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -442,7 +472,6 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       if (!tv_str.empty()) {
         oss << ", " << tv_str;
       }
-      // When all TileView fields are at defaults, omit entirely.
     }
 
     oss << "]";
@@ -538,12 +567,35 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
 
-  // Normalize tensor.add with scalar rhs to tensor.adds (matches Python API dispatch)
-  if (op_name == "tensor.add" && op->args_.size() == 2) {
-    if (std::dynamic_pointer_cast<const ConstFloat>(op->args_[1]) ||
-        std::dynamic_pointer_cast<const ConstInt>(op->args_[1])) {
+  // Normalize tensor.{add,sub,mul,div} with scalar rhs to the scalar op name
+  // (matches Python API dispatch and keeps print->parse->print stable).
+  if (op->args_.size() == 2 && As<ScalarType>(op->args_[1]->GetType())) {
+    if (op_name == "tensor.add") {
       op_name = "tensor.adds";
+    } else if (op_name == "tensor.sub") {
+      op_name = "tensor.subs";
+    } else if (op_name == "tensor.mul") {
+      op_name = "tensor.muls";
+    } else if (op_name == "tensor.div") {
+      op_name = "tensor.divs";
     }
+  }
+
+  // Special handling for low-level handwritten tile.create(value) forms.
+  // These are not part of the Python DSL surface API, so print them as the
+  // equivalent high-level tile.full(shape, dtype=..., value=...) form.
+  if (op->op_->name_ == "tile.create" && op->args_.size() == 1 && !As<MakeTuple>(op->args_[0])) {
+    auto tile_type = As<TileType>(op->GetType());
+    INTERNAL_CHECK(tile_type) << "tile.create(value) must have TileType result";
+    stream_ << prefix_ << ".tile.full([";
+    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << PrintExprForType(tile_type->shape_[i]);
+    }
+    stream_ << "], dtype=" << prefix_ << "." << DataTypeToString(tile_type->dtype_) << ", value=";
+    VisitExpr(op->args_[0]);
+    stream_ << ")";
+    return;
   }
 
   // Check if this is a registered operation (contains a dot)
@@ -822,9 +874,11 @@ void IRPythonPrinter::VisitExpr_(const BitNotPtr& op) {
 void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // Print with type annotation: var: type = value
   // In concise mode, omit the type annotation: var = value
+  TypePtr printed_type = GetPrintedBindingType(op->var_, op->value_);
+  var_print_type_map_[op->var_.get()] = printed_type;
   VisitExpr(op->var_);
   if (!concise_) {
-    stream_ << ": " << Print(op->var_->GetType());
+    stream_ << ": " << Print(printed_type);
   }
   stream_ << " = ";
   VisitExpr(op->value_);
@@ -870,6 +924,26 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
+  auto print_loop_origin = [&]() {
+    switch (op->loop_origin_) {
+      case LoopOrigin::Original:
+        stream_ << "original";
+        break;
+      case LoopOrigin::ChunkOuter:
+        stream_ << "chunk_outer";
+        break;
+      case LoopOrigin::ChunkInner:
+        stream_ << "chunk_inner";
+        break;
+      case LoopOrigin::ChunkRemainder:
+        stream_ << "chunk_remainder";
+        break;
+      default:
+        INTERNAL_CHECK(false) << "Unknown LoopOrigin in python_printer: "
+                              << LoopOriginToString(op->loop_origin_);
+    }
+  };
+
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << GetVarName(op->loop_var_.get());
 
@@ -891,7 +965,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   const char* range_func = ".range(";
   switch (op->kind_) {
     case ForKind::Unroll:
-      range_func = ".unroll(";
+      range_func = op->iter_args_.empty() ? ".unroll(" : ".range(";
       break;
     case ForKind::Parallel:
       range_func = ".parallel(";
@@ -935,12 +1009,6 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     VisitExpr(op->step_);
   }
 
-  // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
-  // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
-  // always take the simple (no iter_args) path.
-  if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
-    INTERNAL_CHECK(false) << "ForKind::Unroll does not support iter_args/init_values";
-  }
   if (!op->iter_args_.empty()) {
     stream_ << ", init_values=(";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
@@ -959,6 +1027,11 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     if (op->chunk_policy_ != ChunkPolicy::LeadingFull) {
       stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_policy_) << "\"";
     }
+  }
+  if (op->loop_origin_ != LoopOrigin::Original) {
+    stream_ << ", loop_origin=\"";
+    print_loop_origin();
+    stream_ << "\"";
   }
 
   stream_ << "):\n";
@@ -1048,6 +1121,10 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
+  if (op->stmts_.empty()) {
+    stream_ << "pass";
+    return;
+  }
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     PrintStmtBlock(op->stmts_[i]);
     if (i < op->stmts_.size() - 1) {
@@ -1058,6 +1135,10 @@ void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
 
 void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
+    if (seq->stmts_.empty()) {
+      stream_ << GetIndent() << "pass";
+      return;
+    }
     for (size_t i = 0; i < seq->stmts_.size(); ++i) {
       PrintStmtBlock(seq->stmts_[i]);
       if (i < seq->stmts_.size() - 1) stream_ << "\n";
@@ -1079,11 +1160,13 @@ void IRPythonPrinter::VisitStmt_(const ContinueStmtPtr& op) { stream_ << "contin
 
 void IRPythonPrinter::VisitStmt_(const StmtPtr& op) { stream_ << op->TypeName(); }
 
-void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars) {
+void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars,
+                                               const std::vector<ExprPtr>& yield_values) {
   if (return_vars.size() == 1) {
     stream_ << GetVarName(return_vars[0].get());
     if (!concise_) {
-      stream_ << ": " << Print(return_vars[0]->GetType());
+      ExprPtr yield_value = yield_values.size() == 1 ? yield_values[0] : nullptr;
+      stream_ << ": " << Print(GetPrintedBindingType(return_vars[0], yield_value));
     }
   } else {
     for (size_t i = 0; i < return_vars.size(); ++i) {
@@ -1099,7 +1182,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
-      PrintYieldAssignmentVars(return_vars);
+      PrintYieldAssignmentVars(return_vars, yield_stmt->value_);
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
         if (i > 0) stream_ << ", ";
@@ -1111,6 +1194,10 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       VisitStmt(yield_stmt);
     }
   } else if (auto seq_stmts = As<SeqStmts>(body)) {
+    if (seq_stmts->stmts_.empty()) {
+      stream_ << GetIndent() << "pass";
+      return;
+    }
     // Process each statement in sequence
     for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
       auto stmt = seq_stmts->stmts_[i];
@@ -1121,7 +1208,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment
           stream_ << GetIndent();
-          PrintYieldAssignmentVars(return_vars);
+          PrintYieldAssignmentVars(return_vars, yield_stmt->value_);
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
             if (j > 0) stream_ << ", ";
@@ -1220,6 +1307,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   BuildMemRefRenameMap(func);
   // Build rename map for this function to handle SSA name shadowing.
   BuildVarRenameMap(func);
+  var_print_type_map_.clear();
 
   // Print decorator
   stream_ << GetIndent() << "@" << prefix_ << ".function";
@@ -1529,7 +1617,7 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
     std::sort(sorted_dyn_vars.begin(), sorted_dyn_vars.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
     for (const auto& [var, name] : sorted_dyn_vars) {
-      stream_ << name << " = " << prefix_ << ".dynamic(\"" << name << "\")\n";
+      stream_ << name << " = " << prefix_ << ".dynamic(\"" << var->name_hint_ << "\")\n";
     }
     stream_ << "\n";
   }
@@ -1572,6 +1660,159 @@ std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
   IRPythonPrinter temp_printer(prefix_);
   temp_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
   return temp_printer.Print(expr);
+}
+
+TypePtr IRPythonPrinter::GetPrintedExprType(const ExprPtr& expr) const {
+  if (auto var = As<Var>(expr)) {
+    auto it = var_print_type_map_.find(var.get());
+    if (it != var_print_type_map_.end()) {
+      return it->second;
+    }
+  }
+  return expr ? expr->GetType() : TypePtr();
+}
+
+std::optional<TileView> IRPythonPrinter::InferPrintedTileViewFromCall(const CallPtr& call,
+                                                                      const TileTypePtr& declared_tile) {
+  if (!call || !call->op_) return std::nullopt;
+
+  const std::string& op_name = call->op_->name_;
+  TileView tile_view;
+
+  if (op_name == "tile.create" || op_name == "tile.full") {
+    tile_view.valid_shape = declared_tile->shape_;
+    tile_view.blayout = InferPrintedTileLayoutFromShape(declared_tile->shape_);
+    return PrintTileView(tile_view, declared_tile->shape_).empty() ? std::nullopt
+                                                                   : std::optional<TileView>(tile_view);
+  }
+
+  if (op_name == "tile.load") {
+    tile_view.valid_shape = declared_tile->shape_;
+    if (call->args_.size() >= 4) {
+      if (auto valid_shapes = As<MakeTuple>(call->args_[3])) {
+        tile_view.valid_shape = valid_shapes->elements_;
+      }
+    }
+
+    MemorySpace target_memory = MemorySpace::Vec;
+    bool transpose = false;
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key == "target_memory" && value.type() == typeid(MemorySpace)) {
+        target_memory = AnyCast<MemorySpace>(value, "tile.load target_memory");
+      } else if (key == "transpose" && value.type() == typeid(bool)) {
+        transpose = AnyCast<bool>(value, "tile.load transpose");
+      }
+    }
+
+    if (target_memory == MemorySpace::Mat) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::row_major;
+      if (transpose) std::swap(tile_view.blayout, tile_view.slayout);
+    } else if (InferPrintedTileLayoutFromShape(declared_tile->shape_) == TileLayout::col_major) {
+      tile_view.blayout = TileLayout::col_major;
+    }
+
+    return PrintTileView(tile_view, declared_tile->shape_).empty() ? std::nullopt
+                                                                   : std::optional<TileView>(tile_view);
+  }
+
+  if (op_name == "tile.move") {
+    TileTypePtr src_tile = nullptr;
+    if (!call->args_.empty()) {
+      src_tile = As<TileType>(GetPrintedExprType(call->args_[0]));
+    }
+    tile_view.valid_shape = src_tile ? GetPrintedValidShape(src_tile) : declared_tile->shape_;
+
+    MemorySpace target_memory = MemorySpace::Vec;
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key == "target_memory" && value.type() == typeid(MemorySpace)) {
+        target_memory = AnyCast<MemorySpace>(value, "tile.move target_memory");
+      }
+    }
+
+    if (target_memory == MemorySpace::Left) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::row_major;
+    } else if (target_memory == MemorySpace::Right) {
+      tile_view.slayout = TileLayout::col_major;
+    }
+
+    return PrintTileView(tile_view, declared_tile->shape_).empty() ? std::nullopt
+                                                                   : std::optional<TileView>(tile_view);
+  }
+
+  if (op_name == "tile.reshape") {
+    std::vector<ExprPtr> reshaped = declared_tile->shape_;
+    if (call->args_.size() >= 2) {
+      if (auto shape_tuple = As<MakeTuple>(call->args_[1])) {
+        reshaped = shape_tuple->elements_;
+      }
+    }
+    tile_view.valid_shape = reshaped;
+    tile_view.blayout = InferPrintedTileLayoutFromShape(reshaped);
+    return PrintTileView(tile_view, declared_tile->shape_).empty() ? std::nullopt
+                                                                   : std::optional<TileView>(tile_view);
+  }
+
+  if (op_name == "tile.row_sum" || op_name == "tile.row_max" || op_name == "tile.row_min") {
+    tile_view.valid_shape = declared_tile->shape_;
+    tile_view.blayout = TileLayout::col_major;
+    return PrintTileView(tile_view, declared_tile->shape_).empty() ? std::nullopt
+                                                                   : std::optional<TileView>(tile_view);
+  }
+
+  return std::nullopt;
+}
+
+TypePtr IRPythonPrinter::GetPrintedBindingType(const VarPtr& var, const ExprPtr& value) {
+  TypePtr declared_type = var->GetType();
+  if (!value) return declared_type;
+
+  TypePtr value_type = GetPrintedExprType(value);
+
+  if (auto declared_tensor = As<TensorType>(declared_type)) {
+    if (auto value_tensor = As<TensorType>(value_type)) {
+      std::optional<MemRefPtr> memref =
+          declared_tensor->memref_.has_value() ? declared_tensor->memref_ : value_tensor->memref_;
+      std::optional<TensorView> tensor_view = declared_tensor->tensor_view_;
+      bool declared_tensor_view_printable =
+          declared_tensor->tensor_view_.has_value() &&
+          !PrintTensorView(declared_tensor->tensor_view_.value(), declared_tensor->shape_).empty();
+      if (!declared_tensor_view_printable && value_tensor->tensor_view_.has_value() &&
+          !PrintTensorView(value_tensor->tensor_view_.value(), declared_tensor->shape_).empty()) {
+        tensor_view = value_tensor->tensor_view_;
+      }
+      return std::make_shared<TensorType>(declared_tensor->shape_, declared_tensor->dtype_, memref,
+                                          tensor_view);
+    }
+    return declared_type;
+  }
+
+  if (auto declared_tile = As<TileType>(declared_type)) {
+    if (auto value_tile = As<TileType>(value_type)) {
+      std::optional<MemRefPtr> memref =
+          declared_tile->memref_.has_value() ? declared_tile->memref_ : value_tile->memref_;
+      std::optional<TileView> tile_view = declared_tile->tile_view_;
+      bool declared_tile_view_printable =
+          declared_tile->tile_view_.has_value() &&
+          !PrintTileView(declared_tile->tile_view_.value(), declared_tile->shape_).empty();
+      if (!declared_tile_view_printable) {
+        if (value_tile->tile_view_.has_value() &&
+            !PrintTileView(value_tile->tile_view_.value(), declared_tile->shape_).empty()) {
+          tile_view = value_tile->tile_view_;
+        } else if (auto call = As<Call>(value)) {
+          tile_view = InferPrintedTileViewFromCall(call, declared_tile);
+        }
+      }
+      std::optional<MemorySpace> memory_space =
+          declared_tile->memory_space_.has_value() ? declared_tile->memory_space_ : value_tile->memory_space_;
+      return std::make_shared<TileType>(declared_tile->shape_, declared_tile->dtype_, memref, tile_view,
+                                        memory_space);
+    }
+    return declared_type;
+  }
+
+  return declared_type;
 }
 
 void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<ExprPtr>& shape) {

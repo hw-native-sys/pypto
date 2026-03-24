@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from typing import overload
 
 __all__ = [
+    "alloc",
     "create_tile",
     "create",
     "read",
@@ -151,6 +152,14 @@ def create(
 
 
 create_tile = create
+
+
+def alloc(memory_space: MemorySpace, addr: IntLike, size: IntLike, id: IntLike) -> _ir_core.Expr:
+    """Create a MemRef allocation call used by printed low-level IR."""
+    addr_expr = addr.unwrap() if isinstance(addr, Scalar) else addr
+    size_expr = size.unwrap() if isinstance(size, Scalar) else size
+    id_expr = id.unwrap() if isinstance(id, Scalar) else id
+    return _ir_ops.alloc(memory_space, addr_expr, size_expr, id_expr)
 
 
 def read(tile: Tile, indices: IntLike | Sequence[IntLike]) -> Scalar:

@@ -121,6 +121,14 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
   return oss.str();
 }
 
+static std::vector<ir::ExprPtr> GetTileStoreValidShape(const std::shared_ptr<const ir::TileType>& tile_type) {
+  INTERNAL_CHECK(tile_type) << "tile.store tile type must not be null";
+  if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+    return tile_type->tile_view_->valid_shape;
+  }
+  return tile_type->shape_;
+}
+
 // Helper function for N-ary operations (unary, binary, ternary, etc.)
 static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t arity, const CallPtr& op,
                                       codegen::CodegenBase& codegen_base) {
@@ -332,8 +340,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   auto tile_type = As<ir::TileType>(tile->GetType());
   INTERNAL_CHECK(tile_type) << "tile.store first argument must have TileType";
-  INTERNAL_CHECK(tile_type->tile_view_.has_value()) << "tile.store tile must have TileView with valid_shape";
-  auto& valid_shape = tile_type->tile_view_->valid_shape;
+  auto valid_shape = GetTileStoreValidShape(tile_type);
   INTERNAL_CHECK(valid_shape.size() == 2) << "tile.store tile valid_shape must be 2D";
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);

@@ -30,6 +30,61 @@ def _try_get_static_dim(dim: ir.Expr) -> int | None:
     return None
 
 
+def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
+    """Return whether two shape-like expression lists are statically identical."""
+    if len(lhs) != len(rhs):
+        return False
+    for lhs_dim, rhs_dim in zip(lhs, rhs):
+        if lhs_dim is rhs_dim:
+            continue
+        lhs_value = _try_get_static_dim(lhs_dim)
+        rhs_value = _try_get_static_dim(rhs_dim)
+        if lhs_value is None or rhs_value is None or lhs_value != rhs_value:
+            return False
+    return True
+
+
+def _flatten_shape(shape: Sequence[ir.Expr]) -> list[ir.Expr] | None:
+    """Flatten an ND tile shape to 2D, or return None when not statically flattenable."""
+    if len(shape) <= 2:
+        return None
+
+    flat_rows = 1
+    for dim in shape[:-1]:
+        static_dim = _try_get_static_dim(dim)
+        if static_dim is None:
+            return None
+        flat_rows *= static_dim
+
+    last_dim = _try_get_static_dim(shape[-1])
+    if last_dim is None:
+        return None
+
+    return [
+        ir.ConstInt(flat_rows, DataType.INDEX, ir.Span.unknown()),
+        ir.ConstInt(last_dim, DataType.INDEX, ir.Span.unknown()),
+    ]
+
+
+def _get_tile_valid_shape(tile_type: ir.TileType) -> list[ir.Expr]:
+    """Return logical valid_shape for a tile, falling back to its physical shape."""
+    if tile_type.tile_view is not None and tile_type.tile_view.valid_shape:
+        return list(tile_type.tile_view.valid_shape)
+    return list(tile_type.shape)
+
+
+def _is_flattened_tile_annotation_compatible(
+    annotation_type: ir.TileType, inferred_type: ir.TileType
+) -> bool:
+    """Return whether a 2D tile annotation is a valid flattened view of an ND tile expression."""
+    flattened_shape = _flatten_shape(inferred_type.shape)
+    if flattened_shape is None:
+        return False
+    if not _shape_exprs_match(annotation_type.shape, flattened_shape):
+        return False
+    return _shape_exprs_match(_get_tile_valid_shape(annotation_type), _get_tile_valid_shape(inferred_type))
+
+
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
@@ -106,7 +161,7 @@ class TypeResolver:
         expr_evaluator: ExprEvaluator,
         scope_lookup: Callable[[str], Any | None] | None = None,
         span_tracker: "SpanTracker | None" = None,
-        dyn_var_cache: dict[str, ir.Var] | None = None,
+        dyn_var_cache: dict[object, ir.Var] | None = None,
     ):
         """Initialize type resolver.
 
@@ -115,15 +170,25 @@ class TypeResolver:
             scope_lookup: Callback to look up variables in the parser scope
                 (for Scalar IR vars used in inline annotations)
             span_tracker: Optional span tracker for accurate source locations
-            dyn_var_cache: Optional shared cache mapping dynamic var names to ir.Var
-                objects. When provided, multiple TypeResolvers share the same cache,
-                ensuring the same DynVar produces the same ir.Var across functions
-                in a program.
+            dyn_var_cache: Optional shared cache mapping DynVar object identity
+                (or synthetic string fallback keys) to ir.Var objects. When
+                provided, multiple TypeResolvers share the same cache, ensuring
+                the same DynVar produces the same ir.Var across functions in a
+                program while still keeping distinct DynVar objects separate.
         """
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
-        self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
+        self._dyn_var_cache: dict[object, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
+
+    def _get_or_create_dyn_var(self, key: object, name: str, span: ir.Span) -> ir.Var:
+        """Return the cached ir.Var for a dynamic dimension key."""
+        cached = self._dyn_var_cache.get(key)
+        if cached is not None:
+            return cached
+        var = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+        self._dyn_var_cache[key] = var
+        return var
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -635,10 +700,7 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                name = elem.name
-                if name not in self._dyn_var_cache:
-                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-                dims.append(self._dyn_var_cache[name])
+                dims.append(self._get_or_create_dyn_var(elem, elem.name, span))
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -661,10 +723,7 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            name = value.name
-            if name not in self._dyn_var_cache:
-                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-            return self._dyn_var_cache[name]
+            return self._get_or_create_dyn_var(value, value.name, span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -911,6 +970,13 @@ class TypeResolver:
         # Check dtype for types that expose it (ScalarType and ShapedType)
         self._check_dtype_consistency(annotation_type, inferred_type, var_name, span)
 
+        if (
+            isinstance(annotation_type, ir.TileType)
+            and isinstance(inferred_type, ir.TileType)
+            and _is_flattened_tile_annotation_compatible(annotation_type, inferred_type)
+        ):
+            return
+
         # ShapedType (TensorType / TileType): also check rank and dims
         if not (isinstance(annotation_type, ir.ShapedType) and isinstance(inferred_type, ir.ShapedType)):
             return
@@ -1121,11 +1187,7 @@ class TypeResolver:
             if name in self.expr_evaluator.closure_vars:
                 value = self.expr_evaluator.closure_vars[name]
                 if isinstance(value, DynVar):
-                    if value.name not in self._dyn_var_cache:
-                        self._dyn_var_cache[value.name] = ir.Var(
-                            value.name, ir.ScalarType(DataType.INDEX), self._get_span(node)
-                        )
-                    return self._dyn_var_cache[value.name]
+                    return self._get_or_create_dyn_var(value, value.name, self._get_span(node))
                 if isinstance(value, int):
                     return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
                 raise ParserTypeError(
@@ -1135,9 +1197,7 @@ class TypeResolver:
             # Auto-create a dynamic variable for unknown names to support roundtrip with dynamic shapes.
             # When re-parsing printed IR, dynamic vars like M, N are defined as pl.dynamic() at module
             # scope but may not be captured in closure_vars from the decorator frame.
-            if name not in self._dyn_var_cache:
-                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
-            return self._dyn_var_cache[name]
+            return self._get_or_create_dyn_var(name, name, self._get_span(node))
         raise ParserTypeError(
             f"TileView expression must be an integer constant, got: {ast.unparse(node)}",
             hint="Use an integer literal for TileView fields",
@@ -1175,13 +1235,15 @@ class TypeResolver:
         )
 
     def _is_memref_node(self, node: ast.expr) -> bool:
-        """Check if an AST node is a pl.MemRef(...) call."""
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        return (isinstance(func, ast.Attribute) and func.attr == "MemRef") or (
-            isinstance(func, ast.Name) and func.id == "MemRef"
-        )
+        """Check if an AST node is a pl.MemRef(...) call or a MemRef variable."""
+        if isinstance(node, ast.Call):
+            func = node.func
+            return (isinstance(func, ast.Attribute) and func.attr == "MemRef") or (
+                isinstance(func, ast.Name) and func.id == "MemRef"
+            )
+        if isinstance(node, ast.Name) and self.scope_lookup is not None:
+            return isinstance(self.scope_lookup(node.id), ir.MemRef)
+        return False
 
     def _is_memory_space_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.Mem.<space> or pl.MemorySpace.<space> reference."""
@@ -1213,6 +1275,16 @@ class TypeResolver:
         Raises:
             ParserTypeError: If the MemRef call is malformed
         """
+        if isinstance(node, ast.Name) and self.scope_lookup is not None:
+            value = self.scope_lookup(node.id)
+            if isinstance(value, ir.MemRef):
+                return value
+            value_type = type(value).__name__ if value is not None else "None"
+            raise ParserTypeError(
+                f"Expected '{node.id}' to be a MemRef variable, got {value_type}",
+                hint="Bind the result of pl.tile.alloc(...) to a MemRef variable first",
+            )
+
         if not isinstance(node, ast.Call):
             raise ParserTypeError(
                 f"Expected pl.MemRef(...) call, got: {ast.unparse(node)}",

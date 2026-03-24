@@ -293,12 +293,21 @@ CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span&
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(), span);
 }
 
-/// Build a clean TileType with only shape, dtype, and memory_space (no TileView/memref).
-/// tpop results should be expressible in the Python DSL without requiring TileView metadata.
+/// Build a clean TileType for tpop results: strip MemRef, preserve/synthesize logical TileView.
+/// Default TileView metadata is still omitted by the Python printer, so this remains DSL-expressible
+/// while keeping loop-carried/value-producing tile types semantically consistent.
 TypePtr CleanTileType(const TypePtr& tile_type) {
   auto tt = std::dynamic_pointer_cast<const TileType>(tile_type);
   if (!tt) return tile_type;
-  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, std::nullopt, tt->memory_space_);
+  std::optional<TileView> tile_view = tt->tile_view_;
+  if (!tile_view.has_value()) {
+    TileView default_view;
+    default_view.valid_shape = tt->shape_;
+    tile_view = default_view;
+  } else if (tile_view->valid_shape.empty()) {
+    tile_view->valid_shape = tt->shape_;
+  }
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, tile_view, tt->memory_space_);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span) {

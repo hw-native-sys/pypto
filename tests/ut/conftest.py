@@ -10,18 +10,24 @@
 """Shared fixtures for unit tests."""
 
 import pytest
+from pypto import ir
 from pypto.pypto_core import passes
 
 
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    """Enable BEFORE_AND_AFTER property verification for all pass executions.
+    """Enable property and roundtrip verification for all pass executions.
 
     This ensures that for every pass run in a test:
     - Before execution, its required properties are verified.
     - After execution, its produced properties are verified.
+    - Before and after execution, the IR survives print-parse roundtrip.
 
     This helps keep pass property declarations accurate.
     """
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    instruments = [
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+        ir.RoundtripInstrument(passes.VerificationMode.AFTER),
+    ]
+    with passes.PassContext(instruments):
         yield

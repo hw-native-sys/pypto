@@ -17,7 +17,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -34,6 +36,52 @@ namespace pypto {
 namespace python {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
+
+namespace {
+
+bool HasInstrumentNamed(const std::vector<PassInstrumentPtr>& instruments, const std::string& name) {
+  for (const auto& instrument : instruments) {
+    if (instrument && instrument->GetName() == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void RunPythonRoundtripInstrumentCheck(const Pass& pass, const ProgramPtr& program, const char* phase) {
+  nb::gil_scoped_acquire gil;
+  nb::module_ instruments = nb::module_::import_("pypto.ir.instruments");
+  instruments.attr("_run_roundtrip_instrument_check")(pass.GetName(), program, phase);
+}
+
+PassInstrumentPtr MakeStrictRoundtripInstrument(VerificationMode mode) {
+  CallbackInstrument::Callback before_pass = nullptr;
+  CallbackInstrument::Callback after_pass = nullptr;
+
+  if (mode == VerificationMode::Before || mode == VerificationMode::BeforeAndAfter) {
+    before_pass = [](const Pass& pass, const ProgramPtr& program) {
+      RunPythonRoundtripInstrumentCheck(pass, program, "before");
+    };
+  }
+  if (mode == VerificationMode::After || mode == VerificationMode::BeforeAndAfter) {
+    after_pass = [](const Pass& pass, const ProgramPtr& program) {
+      RunPythonRoundtripInstrumentCheck(pass, program, "after");
+    };
+  }
+
+  return std::make_shared<CallbackInstrument>(before_pass, after_pass, "RoundtripInstrument");
+}
+
+PassContext MakePassContext(std::vector<PassInstrumentPtr> instruments,
+                            VerificationLevel verification_level) {
+  if (verification_level == VerificationLevel::Roundtrip &&
+      !HasInstrumentNamed(instruments, "RoundtripInstrument")) {
+    instruments.push_back(MakeStrictRoundtripInstrument(VerificationMode::After));
+  }
+  return PassContext(std::move(instruments), verification_level);
+}
+
+}  // namespace
 
 void BindPass(nb::module_& m) {
   // Create a new 'passes' submodule (using 'passes' instead of 'pass' to avoid Python keyword)
@@ -94,14 +142,17 @@ void BindPass(nb::module_& m) {
   // Bind VerificationLevel enum
   nb::enum_<VerificationLevel>(passes, "VerificationLevel", "Controls automatic verification in PassPipeline")
       .value("NONE", VerificationLevel::None, "No automatic verification (fastest)")
-      .value("BASIC", VerificationLevel::Basic, "Verify lightweight properties once per pipeline (default)");
+      .value("BASIC", VerificationLevel::Basic, "Verify lightweight properties once per pipeline (default)")
+      .value("ROUNDTRIP", VerificationLevel::Roundtrip,
+             "Basic verification plus strict print-parse roundtrip checking");
 
   // Verification functions
   passes.def(
       "get_verified_properties", []() { return GetVerifiedProperties(); },
       "Get the set of properties automatically verified during compilation");
   passes.def("get_default_verification_level", &GetDefaultVerificationLevel,
-             "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
+             "Get the default verification level (from PYPTO_VERIFY_LEVEL env var: none/basic/roundtrip, "
+             "default: Basic)");
   passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
              nb::arg("pass_name"), "Verify properties on a program and throw on errors");
 
@@ -148,9 +199,14 @@ void BindPass(nb::module_& m) {
                           "When active, Pass.__call__ will run the context's instruments\n"
                           "before/after each pass execution. Also controls automatic\n"
                           "verification level for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), nb::arg("instruments"),
-           nb::arg("verification_level") = VerificationLevel::Basic,
-           "Create a PassContext with instruments and optional verification level")
+      .def(
+          "__init__",
+          [](PassContext* self, std::vector<PassInstrumentPtr> instruments,
+             VerificationLevel verification_level) {
+            new (self) PassContext(MakePassContext(std::move(instruments), verification_level));
+          },
+          nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
+          "Create a PassContext with instruments and optional verification level")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();

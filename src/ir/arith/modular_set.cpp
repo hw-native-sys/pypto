@@ -265,7 +265,7 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   Entry VisitExpr_(const CastPtr& op) override { return VisitExpr(op->operand_); }
 
  private:
-  [[maybe_unused]] Analyzer* parent_;
+  Analyzer* parent_;
   std::unordered_map<const Expr*, Entry> var_map_;
 
   /// Floor division by a known constant.

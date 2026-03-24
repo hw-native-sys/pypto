@@ -467,7 +467,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto flat_shape_exprs = Make2DShapeExprs(merged, last, span);
         std::optional<TileView> flat_tile_view;
         if (result_tile->tile_view_.has_value()) {
-          flat_tile_view = TileView(flat_shape_exprs, /*stride=*/{}, /*start_offset=*/nullptr);
+          TileView tile_view = result_tile->tile_view_.value();
+          if (tile_view.valid_shape.empty()) {
+            tile_view.valid_shape = result_tile->shape_;
+          }
+          flat_tile_view = tile_view;
         }
         auto flat_tile_type = std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_, std::nullopt,
                                                          flat_tile_view, result_tile->memory_space_);
@@ -478,12 +482,18 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         ctx.Insert(assign->var_, flat_var);
         continue;
       }
-      // ≤2D tile.load: honor any pending var_map substitutions
-      auto new_call = op_registry.Create(op_name, sub_args, call->kwargs_, span);
-      auto new_var =
-          std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
-      result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
-      ctx.Insert(assign->var_, new_var);
+      // ≤2D tile.load: keep the original type so the pass remains a no-op on
+      // already-legal 1D/2D tiles.
+      if (sub_args == call->args_) {
+        result.push_back(stmt);
+      } else {
+        auto new_call =
+            std::make_shared<Call>(call->op_, sub_args, call->kwargs_, call->GetType(), call->span_);
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, assign->var_->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
+        ctx.Insert(assign->var_, new_var);
+      }
       continue;
     }
 
