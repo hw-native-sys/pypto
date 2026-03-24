@@ -54,9 +54,12 @@ void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusiv
   CHECK(max_val_exclusive > min_val) << "Bind requires max_val_exclusive > min_val, got [" << min_val << ", "
                                      << max_val_exclusive << ")";
   const_int_bound.Bind(var, min_val, max_val_exclusive);
-  // If the range is a single value, also inform the rewrite simplifier.
+  // If the range is a single value, propagate exact value to all sub-analyzers.
   if (max_val_exclusive - min_val == 1) {
-    rewrite_simplify.Update(var, MakeConstInt(min_val, DataType::INT64));
+    DataType dtype = GetScalarDtype(var);
+    ExprPtr bound_value = MakeConstInt(min_val, dtype);
+    rewrite_simplify.Update(var, bound_value);
+    modular_set.Update(var, modular_set(bound_value));
   }
 }
 
@@ -94,6 +97,11 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
   if (auto cb = As<ConstBool>(simplified)) return cb->value_;
   if (auto ci = As<ConstInt>(simplified)) return ci->value_ != 0;
 
+  // Recursively handle logical And: both sides must be provable.
+  if (auto op = As<And>(simplified)) {
+    return CanProve(op->left_) && CanProve(op->right_);
+  }
+
   // Decompose comparison expressions and check via bounds analysis.
   // For a < b: prove max(a - b) < 0
   if (auto op = As<Lt>(simplified)) {
@@ -130,8 +138,8 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
   return false;
 }
 
-ConstraintContext Analyzer::GetConstraintContext(AnalyzerPtr self, const ExprPtr& constraint) {
-  return ConstraintContext(std::move(self), constraint);
+ConstraintContext Analyzer::GetConstraintContext(const ExprPtr& constraint) {
+  return ConstraintContext(shared_from_this(), constraint);
 }
 
 // ============================================================================

@@ -170,7 +170,7 @@ void BindArith(nb::module_& m) {
       .def(
           "constraint_context",
           [](ir::arith::AnalyzerPtr self, const ir::ExprPtr& constraint) {
-            return self->GetConstraintContext(std::move(self), constraint);
+            return self->GetConstraintContext(constraint);
           },
           nb::arg("constraint"),
           "Create a constraint scope (context manager).\n\n"

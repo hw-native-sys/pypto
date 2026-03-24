@@ -178,7 +178,7 @@ class RewriteSimplifier {
 /// and proving arithmetic properties. Each sub-analyzer can also be used standalone,
 /// but the coordinator enables cross-analyzer queries (e.g., rewrite rules that
 /// use bound information to determine applicability).
-class Analyzer {
+class Analyzer : public std::enable_shared_from_this<Analyzer> {
  public:
   Analyzer();
   ~Analyzer();
@@ -217,7 +217,8 @@ class Analyzer {
 
   /// Create a constraint scope (RAII guard).
   /// Within the returned scope, the constraint is assumed true.
-  ConstraintContext GetConstraintContext(std::shared_ptr<Analyzer> self, const ExprPtr& constraint);
+  /// \note Analyzer must be managed by shared_ptr (use std::make_shared<Analyzer>()).
+  ConstraintContext GetConstraintContext(const ExprPtr& constraint);
 };
 
 using AnalyzerPtr = std::shared_ptr<Analyzer>;
@@ -230,7 +231,7 @@ using AnalyzerPtr = std::shared_ptr<Analyzer>;
 ///
 /// Usage:
 ///   {
-///     auto ctx = analyzer->GetConstraintContext(analyzer, x >= 0);
+///     auto ctx = analyzer->GetConstraintContext(x >= 0);
 ///     // Within this scope, analyzer knows x >= 0
 ///     auto simplified = analyzer->Simplify(expr);
 ///   }  // Bounds restored here

@@ -76,7 +76,7 @@ class TestBindRange:
     def test_bind_range_invalid_raises(self):
         ana = Analyzer()
         x = make_var("x")
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ana.bind(x, 5, 5)  # empty range
 
     def test_bind_range_negative(self):
