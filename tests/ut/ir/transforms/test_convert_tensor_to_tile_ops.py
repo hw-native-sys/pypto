@@ -604,18 +604,18 @@ class TestConvertTensorToTileOps:
             def main_incore_0(
                 self,
                 lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                y: pl.Tensor[[16, 128], pl.BF16] = pl.matmul(lhs, rhs, b_trans=True)
+                rhs: pl.Tensor[[64, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                y: pl.Tensor[[16, 64], pl.BF16] = pl.matmul(lhs, rhs, b_trans=True)
                 return y
 
             @pl.function
             def main(
                 self,
                 lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(lhs, rhs)
+                rhs: pl.Tensor[[64, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                y: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(lhs, rhs)
                 return y
 
         @pl.program
@@ -624,27 +624,27 @@ class TestConvertTensorToTileOps:
             def main_incore_0(
                 self,
                 lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                rhs: pl.Tensor[[64, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
                 lhs_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
                     lhs, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
-                rhs_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    rhs, [0, 0], [128, 128], [128, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+                rhs_mat: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                    rhs, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
-                y_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
-                out_0_store: pl.Tensor[[16, 128], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
+                y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
+                out_0_store: pl.Tensor[[16, 64], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0_store
 
             @pl.function
             def main(
                 self,
                 lhs: pl.Tensor[[16, 128], pl.BF16],
-                rhs: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.BF16]:
-                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
-                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(lhs, rhs, out_0)
+                rhs: pl.Tensor[[64, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                y: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(lhs, rhs, out_0)
                 return y
 
         After = passes.convert_tensor_to_tile_ops()(Before)

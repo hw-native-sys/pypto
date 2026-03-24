@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -149,6 +150,11 @@ struct TupleElement {
   const Var* var;             // VarPtr for identity-based emit name resolution
 };
 
+struct AssembleViewInfo {
+  ExprPtr target_expr;
+  MakeTuplePtr offset_tuple;
+};
+
 // Collect metadata from IR (tuple info) for orchestration codegen
 class OrchestrationInfoCollector : public IRVisitor {
  public:
@@ -191,6 +197,158 @@ class OrchestrationInfoCollector : public IRVisitor {
   int tuple_call_counter_ = 0;
   // Maps raw var name (from assign->var_->name_hint_) to the unique key of the most recent tuple call
   std::map<std::string, std::string> current_tuple_key_;
+};
+
+class OrchestrationBufferInfoCollector : public IRVisitor {
+ public:
+  explicit OrchestrationBufferInfoCollector(ProgramPtr program) : program_(std::move(program)) {}
+
+  void Initialize(const std::vector<VarPtr>& params) {
+    for (const auto& param : params) {
+      buffer_roots[param.get()] = param.get();
+    }
+  }
+
+  std::unordered_map<const Var*, const Var*> buffer_roots;
+  std::unordered_map<const Var*, AssembleViewInfo> assemble_view_infos;
+  std::unordered_set<const Var*> non_optimizable_assemble_roots;
+
+ protected:
+  void VisitStmt_(const ForStmtPtr& for_stmt) override {
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      const auto& iter_arg = for_stmt->iter_args_[i];
+      const Var* root = ResolveExpr(iter_arg->initValue_);
+      if (root) {
+        buffer_roots[iter_arg.get()] = root;
+        if (i < for_stmt->return_vars_.size()) {
+          buffer_roots[for_stmt->return_vars_[i].get()] = root;
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(for_stmt);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& while_stmt) override {
+    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+      const auto& iter_arg = while_stmt->iter_args_[i];
+      const Var* root = ResolveExpr(iter_arg->initValue_);
+      if (root) {
+        buffer_roots[iter_arg.get()] = root;
+        if (i < while_stmt->return_vars_.size()) {
+          buffer_roots[while_stmt->return_vars_[i].get()] = root;
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(while_stmt);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& assign) override {
+    tuple_values_.erase(assign->var_.get());
+    if (auto tuple_value = As<MakeTuple>(assign->value_)) {
+      tuple_values_[assign->var_.get()] = tuple_value;
+    } else if (auto call = As<Call>(assign->value_)) {
+      const std::string& op_name = call->op_->name_;
+      if (op_name == "tensor.create" || op_name == "tensor.slice") {
+        buffer_roots[assign->var_.get()] = assign->var_.get();
+      } else if (op_name == "tensor.assemble") {
+        if (call->args_.size() == 3) {
+          const Var* source_root = ResolveExpr(call->args_[1]);
+          auto offset_tuple = ResolveTupleExpr(call->args_[2]);
+          if (source_root && offset_tuple) {
+            RecordAssembleViewInfo(source_root, call->args_[0], offset_tuple);
+          }
+          if (const Var* target_root = ResolveExpr(call->args_[0])) {
+            buffer_roots[assign->var_.get()] = target_root;
+          }
+        }
+      } else if (!IsBuiltinOp(op_name)) {
+        auto out_roots = CollectCallOutputRoots(call);
+        if (As<TupleType>(call->GetType())) {
+          tuple_output_roots_[assign->var_.get()] = std::move(out_roots);
+        } else if (!out_roots.empty() && out_roots[0]) {
+          buffer_roots[assign->var_.get()] = out_roots[0];
+        }
+      }
+    } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
+      if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
+        auto it = tuple_output_roots_.find(tuple_var.get());
+        if (it != tuple_output_roots_.end() && tuple_get->index_ < static_cast<int>(it->second.size()) &&
+            it->second[tuple_get->index_]) {
+          buffer_roots[assign->var_.get()] = it->second[tuple_get->index_];
+        }
+      }
+    } else if (auto src_var = AsVarLike(assign->value_)) {
+      if (const Var* root = ResolveVar(src_var.get())) {
+        buffer_roots[assign->var_.get()] = root;
+      }
+      if (auto it = tuple_values_.find(src_var.get()); it != tuple_values_.end()) {
+        tuple_values_[assign->var_.get()] = it->second;
+      }
+    }
+    IRVisitor::VisitStmt_(assign);
+  }
+
+ private:
+  void RecordAssembleViewInfo(const Var* source_root, const ExprPtr& target_expr,
+                              const MakeTuplePtr& offset_tuple) {
+    if (non_optimizable_assemble_roots.count(source_root) > 0) {
+      return;
+    }
+    auto [it, inserted] =
+        assemble_view_infos.emplace(source_root, AssembleViewInfo{target_expr, offset_tuple});
+    if (!inserted) {
+      assemble_view_infos.erase(source_root);
+      non_optimizable_assemble_roots.insert(source_root);
+    }
+  }
+
+  [[nodiscard]] const Var* ResolveVar(const Var* var) const {
+    auto it = buffer_roots.find(var);
+    return it != buffer_roots.end() ? it->second : nullptr;
+  }
+
+  [[nodiscard]] const Var* ResolveExpr(const ExprPtr& expr) const {
+    if (auto var = AsVarLike(expr)) {
+      return ResolveVar(var.get());
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] MakeTuplePtr ResolveTupleExpr(const ExprPtr& expr) const {
+    if (auto tuple = As<MakeTuple>(expr)) {
+      return tuple;
+    }
+    if (auto var = AsVarLike(expr)) {
+      auto it = tuple_values_.find(var.get());
+      if (it != tuple_values_.end()) {
+        return it->second;
+      }
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] std::vector<const Var*> CollectCallOutputRoots(const CallPtr& call) const {
+    auto callee = program_->GetFunction(call->op_->name_);
+    if (!callee) return {};
+
+    std::vector<const Var*> roots;
+    for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
+      if (callee->param_directions_[i] != ParamDirection::Out &&
+          callee->param_directions_[i] != ParamDirection::InOut) {
+        continue;
+      }
+      if (auto arg_var = AsVarLike(call->args_[i])) {
+        roots.push_back(ResolveVar(arg_var.get()));
+      } else {
+        roots.push_back(nullptr);
+      }
+    }
+    return roots;
+  }
+
+  ProgramPtr program_;
+  std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
+  std::unordered_map<const Var*, MakeTuplePtr> tuple_values_;
 };
 
 /**
@@ -258,7 +416,7 @@ class VarLineageCollector : public IRVisitor {
     return it != var_to_param.end() ? it->second : nullptr;
   }
 
-  const Var* ResolveExpr(const ExprPtr& expr) const {
+  [[nodiscard]] const Var* ResolveExpr(const ExprPtr& expr) const {
     // Use AsVarLike to match both Var and IterArg (As<Var> won't match IterArg)
     if (auto var = AsVarLike(expr)) {
       return ResolveVar(var.get());
@@ -480,6 +638,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Set Call* → unique key mapping for tuple-returning calls
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
+  void SetBufferRoots(const std::unordered_map<const Var*, const Var*>& mapping) {
+    buffer_root_map_ = mapping;
+  }
+
+  void SetAssembleViewInfos(const std::unordered_map<const Var*, AssembleViewInfo>& infos) {
+    assemble_view_infos_ = infos;
+  }
+
+  void SetNonOptimizableAssembleRoots(const std::unordered_set<const Var*>& roots) {
+    non_optimizable_assemble_roots_ = roots;
+  }
+
   std::string GetGeneratedCode() const { return code_.str(); }
 
   // --- CodegenBase pure virtual implementations ---
@@ -557,7 +727,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto saved = current_return_var_names_;
     current_return_var_names_.clear();
     for (const auto& rv : for_stmt->return_vars_) {
-      current_return_var_names_.push_back(GetVarName(rv));
+      current_return_var_names_.push_back(ResolveReturnTargetName(rv));
     }
     VisitStmt(for_stmt->body_);
     current_return_var_names_ = saved;
@@ -584,7 +754,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto saved = current_return_var_names_;
     current_return_var_names_.clear();
     for (const auto& rv : if_stmt->return_vars_) {
-      current_return_var_names_.push_back(GetVarName(rv));
+      current_return_var_names_.push_back(ResolveReturnTargetName(rv));
     }
     VisitStmt(if_stmt->then_body_);
     current_return_var_names_ = saved;
@@ -602,7 +772,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       auto saved2 = current_return_var_names_;
       current_return_var_names_.clear();
       for (const auto& rv : if_stmt->return_vars_) {
-        current_return_var_names_.push_back(GetVarName(rv));
+        current_return_var_names_.push_back(ResolveReturnTargetName(rv));
       }
       VisitStmt(*if_stmt->else_body_);
       current_return_var_names_ = saved2;
@@ -621,7 +791,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (auto call = As<Call>(assign->value_)) {
       const std::string& op_name = call->op_->name_;
       if (IsTensorOp(op_name)) {
-        GenerateTensorOpCode(call, var_name, assign->var_.get());
+        if (op_name == "tensor.assemble") {
+          HandleTensorAssembleAssign(assign, call);
+        } else {
+          GenerateTensorOpCode(call, var_name, assign->var_.get());
+        }
       } else if (!IsBuiltinOp(op_name)) {
         // For tuple-returning calls, look up the unique key via Call* pointer
         std::string result_key;
@@ -709,7 +883,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const YieldStmtPtr& yield_stmt) override {
     for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
-      std::string value_expr = GenerateExprString(yield_stmt->value_[i]);
+      std::string value_expr = ResolveYieldValueExpr(yield_stmt->value_[i]);
       if (i < current_return_var_names_.size()) {
         // Skip yield when:
         // 1. Self-assignment (e.g., "oi = oi;" for inplace tensor iter_args)
@@ -847,7 +1021,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     current_result_var_ = emit_var;
 
-    std::string gen_code = (*codegen_func)(call, *this);
+    std::string gen_code;
+    if (op_name == "tensor.create" && assign_var) {
+      auto assemble_view = TryGenerateAssembleViewForCreate(call, assign_var, emit_var);
+      if (assemble_view.has_value()) {
+        gen_code = *assemble_view;
+      }
+    }
+    if (gen_code.empty()) {
+      gen_code = (*codegen_func)(call, *this);
+    }
 
     std::istringstream iss(gen_code);
     std::string line;
@@ -1012,6 +1195,106 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return it->second;
   }
 
+  std::string ResolveReturnTargetName(const VarPtr& var) const {
+    std::string name = ResolveVarEmitName(var.get());
+    if (As<TensorType>(var->GetType())) {
+      if (const Var* param = ResolveToParam(var.get())) {
+        return "ext_" + GetParamEmitName(param);
+      }
+    }
+    return name;
+  }
+
+  std::string ResolveYieldValueExpr(const ExprPtr& expr) const {
+    if (auto var = AsVarLike(expr)) {
+      if (As<TensorType>(var->GetType())) {
+        if (const Var* param = ResolveToParam(var.get())) {
+          return "ext_" + GetParamEmitName(param);
+        }
+      }
+      return ResolveVarEmitName(var.get());
+    }
+    return GenerateExprString(expr);
+  }
+
+  const Var* ResolveBufferRoot(const Var* var) const {
+    auto it = buffer_root_map_.find(var);
+    return it != buffer_root_map_.end() ? it->second : var;
+  }
+
+  std::optional<std::string> TryGenerateAssembleViewForCreate(const CallPtr& call, const Var* assign_var,
+                                                              const std::string& emit_var) {
+    const Var* root = ResolveBufferRoot(assign_var);
+    if (root != assign_var) {
+      return std::nullopt;
+    }
+    if (non_optimizable_assemble_roots_.count(root) > 0) {
+      return std::nullopt;
+    }
+    auto it = assemble_view_infos_.find(root);
+    if (it == assemble_view_infos_.end()) {
+      return std::nullopt;
+    }
+
+    auto result_type = As<TensorType>(call->GetType());
+    INTERNAL_CHECK(result_type) << "Internal error: tensor.create must return TensorType";
+
+    size_t ndim = result_type->shape_.size();
+    size_t array_len = ndim == 0 ? 1 : ndim;
+    std::ostringstream oss;
+    oss << "uint64_t " << emit_var << "_shapes[" << array_len << "] = {";
+    if (ndim == 0) {
+      oss << "1";
+    } else {
+      for (size_t i = 0; i < ndim; ++i) {
+        if (i > 0) oss << ", ";
+        oss << GenerateExprString(result_type->shape_[i]);
+      }
+    }
+    oss << "};\n";
+
+    INTERNAL_CHECK(it->second.offset_tuple != nullptr)
+        << "Internal error: tensor.assemble offset must be MakeTuple";
+    oss << "uint64_t " << emit_var << "_offsets[" << array_len << "] = {";
+    if (ndim == 0) {
+      oss << "0";
+    } else {
+      for (size_t i = 0; i < ndim; ++i) {
+        if (i > 0) oss << ", ";
+        INTERNAL_CHECK(i < it->second.offset_tuple->elements_.size())
+            << "Internal error: tensor.assemble offset rank mismatch";
+        oss << GenerateExprString(it->second.offset_tuple->elements_[i]);
+      }
+    }
+    oss << "};\n";
+
+    std::string target_name = GenerateExprString(it->second.target_expr);
+    target_name = GetExternalTensorName(target_name);
+    oss << "Tensor " << emit_var << " = " << target_name << ".view(" << emit_var << "_shapes, " << emit_var
+        << "_offsets);";
+
+    emitted_assemble_view_roots_.insert(root);
+    return oss.str();
+  }
+
+  bool HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
+    INTERNAL_CHECK(call->args_.size() == 3) << "Internal error: tensor.assemble expects 3 arguments";
+
+    std::string target_name = GenerateExprString(call->args_[0]);
+    target_name = GetExternalTensorName(target_name);
+    explicit_var_emit_names_[assign->var_.get()] = target_name;
+
+    auto source_var = AsVarLike(call->args_[1]);
+    if (!source_var) {
+      return false;
+    }
+    const Var* source_root = ResolveBufferRoot(source_var.get());
+    if (non_optimizable_assemble_roots_.count(source_root) > 0) {
+      return false;
+    }
+    return emitted_assemble_view_roots_.count(source_root) > 0;
+  }
+
   std::string ReserveTensorCreateEmitName(const Var* assign_var, const std::string& preferred_name) {
     auto it = explicit_var_emit_names_.find(assign_var);
     if (it != explicit_var_emit_names_.end()) {
@@ -1038,6 +1321,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const Var*, std::string> param_to_emit_name_;
   std::unordered_map<const Var*, const Var*> var_to_param_;
   std::set<std::string> param_name_set_;  // For string-only contexts (op codegen callbacks)
+  std::unordered_map<const Var*, const Var*> buffer_root_map_;
+  std::unordered_map<const Var*, AssembleViewInfo> assemble_view_infos_;
+  std::unordered_set<const Var*> non_optimizable_assemble_roots_;
   std::ostringstream code_;
   int indent_ = 4;
   std::map<const IterArg*, std::string> iter_arg_to_var_;
@@ -1052,6 +1338,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   // Stores the final emitted name for declared local vars, keyed by Var identity.
   std::unordered_map<const Var*, std::string> explicit_var_emit_names_;
+  // Roots whose tensor.create was rewritten to a target.view for tensor.assemble.
+  std::unordered_set<const Var*> emitted_assemble_view_roots_;
   // VarPtr-based tracking of task-submission results (no C++ declaration exists, skip in yield)
   std::unordered_set<const Var*> call_result_var_ptrs_;
 };
@@ -1076,6 +1364,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   VarLineageCollector lineage;
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
+
+  OrchestrationBufferInfoCollector buffer_info(program);
+  buffer_info.Initialize(func->params_);
+  buffer_info.VisitStmt(func->body_);
 
   std::unordered_map<const Var*, std::string> param_to_emit_name;
   std::set<std::string> param_name_set;
@@ -1138,6 +1430,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_set));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
+  stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
+  stmt_codegen.SetAssembleViewInfos(buffer_info.assemble_view_infos);
+  stmt_codegen.SetNonOptimizableAssembleRoots(buffer_info.non_optimizable_assemble_roots);
 
   // 8. External tensors (make_tensor_external with shape/dtype — all from params)
   oss << "\n    // External tensors\n";
