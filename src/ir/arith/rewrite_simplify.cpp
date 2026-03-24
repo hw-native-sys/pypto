@@ -36,6 +36,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
