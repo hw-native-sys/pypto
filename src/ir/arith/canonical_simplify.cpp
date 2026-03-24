@@ -408,10 +408,11 @@ bool CanonicalSimplifier::Impl::TrySumFloorDiv(const SumExpr& sum, int64_t divis
       return true;
     }
 
-    // Sub-case 2b: divisor is divisible by |scale|.
+    // Sub-case 2b: divisor is divisible by scale (positive scale only).
     // ((index % U) / L) * S  //  (S * K) = (index % U) / (L * K)
-    if (abs_scale != 0 && divisor % abs_scale == 0) {
-      int64_t k = divisor / abs_scale;
+    // Only valid for positive scale because floor_div(-S*x, S*K) != -floor_div(x, K).
+    if (split.scale > 0 && divisor % split.scale == 0) {
+      int64_t k = divisor / split.scale;
       if (MulWouldOverflow(split.lower_factor, k)) return false;
       int64_t new_lower = split.lower_factor * k;
       // Validity: new_lower must divide upper_factor (or upper == kPosInf)
@@ -420,7 +421,7 @@ bool CanonicalSimplifier::Impl::TrySumFloorDiv(const SumExpr& sum, int64_t divis
       }
       *result = sum;
       result->args[0].lower_factor = new_lower;
-      result->args[0].scale = (split.scale > 0) ? 1 : -1;
+      result->args[0].scale = 1;
       return true;
     }
   }
@@ -472,13 +473,11 @@ bool CanonicalSimplifier::Impl::TrySumFloorMod(const SumExpr& sum, int64_t divis
       return true;
     }
 
-    // Sub-case 2c: simple index (no mod/div), apply upper_factor.
-    // index % divisor → SplitExpr{index, 1, divisor, 1}
-    if (split.scale == 1 && split.IsSimpleIndex()) {
-      *result = sum;
-      result->args[0].upper_factor = divisor;
-      return true;
-    }
+    // Sub-case 2c: simple index (no mod/div).
+    // index % divisor would just reconstruct the same FloorMod node.
+    // Return false to let the caller preserve the original node via MutateBinary,
+    // which avoids unnecessary allocation and preserves pointer identity.
+    // The FloorMod visitor will still cache the SplitExpr representation.
   }
 
   return false;
@@ -782,7 +781,11 @@ CanonicalSimplifier::~CanonicalSimplifier() = default;
 CanonicalSimplifier::CanonicalSimplifier(CanonicalSimplifier&&) noexcept = default;
 CanonicalSimplifier& CanonicalSimplifier::operator=(CanonicalSimplifier&&) noexcept = default;
 
-ExprPtr CanonicalSimplifier::operator()(const ExprPtr& expr) const { return impl_->VisitExpr(expr); }
+ExprPtr CanonicalSimplifier::operator()(const ExprPtr& expr) const {
+  // Clear per-call cache to prevent stale entries and unbounded memory growth.
+  impl_->ClearSumCache();
+  return impl_->VisitExpr(expr);
+}
 
 void CanonicalSimplifier::Update(const VarPtr& var, const ExprPtr& new_expr) { impl_->Update(var, new_expr); }
 

@@ -82,6 +82,9 @@ class CanonicalSimplifier::Impl : public ExprFunctor<ExprPtr> {
 
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
+  /// Clear the per-call sum cache (called from operator() before each top-level visit).
+  void ClearSumCache() { sum_cache_.clear(); }
+
  protected:
   // --- Leaf nodes ---
   ExprPtr VisitExpr_(const VarPtr& op) override;
@@ -191,6 +194,7 @@ class CanonicalSimplifier::Impl : public ExprFunctor<ExprPtr> {
 
   /// Cache mapping ExprPtr (by raw pointer) to its SumExpr representation.
   /// Populated by arithmetic visitors so parent expressions can decompose children.
+  /// Cleared at the start of each top-level operator() call.
   std::unordered_map<const Expr*, SumExpr> sum_cache_;
 };
 
