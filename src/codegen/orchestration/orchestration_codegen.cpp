@@ -927,7 +927,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   struct ParamEntry {
-    std::string kind;  // "make_input_param", "make_output_param", "make_inout_param", "make_scalar_param"
+    std::string kind;  // "add_input", "add_output", "add_inout", "add_scalar"
     std::string value;
   };
 
@@ -939,13 +939,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
       const auto& arg = call->args_[arg_idx];
       std::string var_name = TryGetVarName(arg);
       if (!var_name.empty()) {
-        // Check if this is a scalar variable (not a tensor) -> make_scalar_param
+        // Check if this is a scalar variable (not a tensor) -> add_scalar
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
           if (cpp_type == "float") {
-            params.push_back({"make_scalar_param", "float_to_u64(" + var_name + ")"});
+            params.push_back({"add_scalar", "float_to_u64(" + var_name + ")"});
           } else {
-            params.push_back({"make_scalar_param", var_name});
+            params.push_back({"add_scalar", var_name});
           }
           continue;
         }
@@ -965,28 +965,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
         ParamDirection dir = callee_func->param_directions_[arg_idx];
         if (dir == ParamDirection::Out) {
-          params.push_back({"make_output_param", ext_name});
+          params.push_back({"add_output", ext_name});
         } else if (dir == ParamDirection::InOut) {
-          params.push_back({"make_inout_param", ext_name});
+          params.push_back({"add_inout", ext_name});
         } else {
-          params.push_back({"make_input_param", ext_name});
+          params.push_back({"add_input", ext_name});
         }
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({"make_scalar_param", "(uint64_t)" + value});
+        params.push_back({"add_scalar", "(uint64_t)" + value});
       } else if (auto const_float = As<ConstFloat>(arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
         if (cpp_type == "float") {
-          params.push_back({"make_scalar_param", "float_to_u64(" + value + "f)"});
+          params.push_back({"add_scalar", "float_to_u64(" + value + "f)"});
         } else {
-          params.push_back({"make_scalar_param", "(uint64_t)" + value});
+          params.push_back({"add_scalar", "(uint64_t)" + value});
         }
       } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({"make_scalar_param", const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+        params.push_back({"add_scalar", const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
       }
     }
+
+    // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
+    std::stable_partition(params.begin(), params.end(),
+                          [](const ParamEntry& p) { return p.kind != "add_scalar"; });
 
     return params;
   }
@@ -1093,17 +1097,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string ind = Indent();
 
-    // Generate PTOParam array and submit_task
+    // Generate PTOParam object and submit_task
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
-    code_ << ind << "PTOParam " << task_var << "[] = {\n";
+    code_ << ind << "PTOParam " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
+      code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
-    code_ << ind << "};\n";
-    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ", "
-          << params.size() << ");\n";
+    code_ << ind << CoreTypeToSubmitFunc(core_type) << "(rt, " << func_id << ", " << task_var << ");\n";
 
     task_counter_++;
   }
@@ -1143,15 +1145,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     code_ << "\n";
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV)\n";
-    code_ << ind << "PTOParam " << task_var << "[] = {\n";
+    code_ << ind << "PTOParam " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << "    " << p.kind << "(" << p.value << "),\n";
+      code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
-    code_ << ind << "};\n";
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id
           << ", INVALID_KERNEL_ID};\n";
-    code_ << ind << "pto2_rt_submit_task(rt, mixed_" << task_counter_ << ", " << task_var << ", "
-          << params.size() << ");\n";
+    code_ << ind << "pto2_rt_submit_task(rt, mixed_" << task_counter_ << ", " << task_var << ");\n";
 
     task_counter_++;
   }

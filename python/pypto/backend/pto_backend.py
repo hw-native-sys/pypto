@@ -208,51 +208,66 @@ def _preprocess_ptoas_output(content: str) -> str:
 def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
     """Generate C++ code to unpack ``int64_t* args`` into typed locals.
 
+    Args[] are dispatched in tensors-first order (all tensors, then scalars),
+    matching the PTOParam dispatch convention and the MLIR func.func signature
+    order emitted by PTOCodegen. The returned var_names list is also in
+    tensors-first order, matching the compiled ptoas function parameter order.
+
     Returns:
-        A tuple of (C++ unpacking code, list of local variable names in order).
+        A tuple of (C++ unpacking code, list of local variable names in
+        tensors-first order).
     """
     lines: list[str] = []
     var_names: list[str] = []
 
-    for i, param in enumerate(func.params):
+    # Separate params into tensors and scalars for tensors-first dispatch order
+    tensor_params = [p for p in func.params if isinstance(p.type, _ir_core.TensorType)]
+    scalar_params = [p for p in func.params if isinstance(p.type, _ir_core.ScalarType)]
+    other_params = [
+        p for p in func.params if not isinstance(p.type, (_ir_core.TensorType, _ir_core.ScalarType))
+    ]
+    if other_params:
+        raise ValueError(
+            f"Unsupported parameter type(s) for wrapper generation in function {func.name}: "
+            + ", ".join(f"{p.name_hint}: {type(p.type).__name__}" for p in other_params)
+        )
+
+    scalar_start_idx = len(tensor_params)
+
+    # Unpack tensors: args[0..N_tensors-1]
+    for i, param in enumerate(tensor_params):
         param_name = param.name_hint
-        param_type = param.type
+        assert isinstance(param.type, _ir_core.TensorType)
+        c_type = param.type.dtype.to_c_type_string()
+        lines.append(f"    // Unpack tensor: {param_name}")
+        lines.append(
+            f"    __gm__ TensorData* {param_name}_tensor = reinterpret_cast<__gm__ TensorData*>(args[{i}]);"
+        )
+        lines.append(
+            f"    __gm__ {c_type}* {param_name} = "
+            f"reinterpret_cast<__gm__ {c_type}*>("
+            f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
+        )
+        lines.append("")
+        var_names.append(param_name)
 
-        if isinstance(param_type, _ir_core.TensorType):
-            c_type = param_type.dtype.to_c_type_string()
-            lines.append(f"    // Unpack tensor: {param_name}")
-            lines.append(
-                f"    __gm__ TensorData* {param_name}_tensor = "
-                f"reinterpret_cast<__gm__ TensorData*>(args[{i}]);"
-            )
-            lines.append(
-                f"    __gm__ {c_type}* {param_name} = "
-                f"reinterpret_cast<__gm__ {c_type}*>("
-                f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
-            )
-            var_names.append(param_name)
-
-        elif isinstance(param_type, _ir_core.ScalarType):
-            c_type = param_type.dtype.to_c_type_string()
-            lines.append(f"    // Unpack scalar: {param_name}")
-            lines.append(f"    union {{ uint64_t u64; {c_type} val; }} {param_name}_conv;")
-            lines.append(f"    {param_name}_conv.u64 = args[{i}];")
-            lines.append(f"    {c_type} {param_name} = {param_name}_conv.val;")
-            var_names.append(param_name)
-
-        else:
-            raise ValueError(
-                f"Unsupported parameter type for wrapper generation: "
-                f"{type(param_type).__name__} in function {func.name}"
-            )
-
-        lines.append("")  # blank line between params
+    # Unpack scalars: args[N_tensors..]
+    for j, param in enumerate(scalar_params):
+        param_name = param.name_hint
+        assert isinstance(param.type, _ir_core.ScalarType)
+        c_type = param.type.dtype.to_c_type_string()
+        arg_idx = scalar_start_idx + j
+        lines.append(f"    // Unpack scalar: {param_name}")
+        lines.append(f"    union {{ uint64_t u64; {c_type} val; }} {param_name}_conv;")
+        lines.append(f"    {param_name}_conv.u64 = args[{arg_idx}];")
+        lines.append(f"    {c_type} {param_name} = {param_name}_conv.val;")
+        lines.append("")
+        var_names.append(param_name)
 
     # Extract dynamic dimension values from tensor structs (shapes[] holds current view shape at runtime)
     seen_dyn_vars: set[str] = set()
-    for param in func.params:
-        if not isinstance(param.type, _ir_core.TensorType):
-            continue
+    for param in tensor_params:
+        assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
             if isinstance(dim, _ir_core.Var) and dim.name_hint not in seen_dyn_vars:
                 var_name = dim.name_hint

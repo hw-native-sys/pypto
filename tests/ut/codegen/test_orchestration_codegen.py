@@ -167,20 +167,18 @@ class TestOrchestration:
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
-                PTOParam params_t0[] = {
-                    make_input_param(ext_a),
-                    make_input_param(ext_b),
-                    make_output_param(c),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+                PTOParam params_t0;
+                params_t0.add_input(ext_a);
+                params_t0.add_input(ext_b);
+                params_t0.add_output(c);
+                pto2_rt_submit_aiv_task(rt, 0, params_t0);
 
                 // Task 1: kernel_add
-                PTOParam params_t1[] = {
-                    make_input_param(c),
-                    make_input_param(ext_b),
-                    make_output_param(ext_d),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t1, 3);
+                PTOParam params_t1;
+                params_t1.add_input(c);
+                params_t1.add_input(ext_b);
+                params_t1.add_output(ext_d);
+                pto2_rt_submit_aiv_task(rt, 0, params_t1);
             }
 
             }  // extern "C"
@@ -481,50 +479,45 @@ class TestOrchestration:
                 Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
                 // Task 0: kernel_add
-                PTOParam params_t0[] = {
-                    make_input_param(ext_a),
-                    make_input_param(ext_b),
-                    make_output_param(c),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+                PTOParam params_t0;
+                params_t0.add_input(ext_a);
+                params_t0.add_input(ext_b);
+                params_t0.add_output(c);
+                pto2_rt_submit_aiv_task(rt, 0, params_t0);
                 uint32_t d_shapes[2] = {16, 16};
                 Tensor d = make_tensor(d_shapes, 2, DataType::FLOAT32);
 
                 // Task 1: kernel_add_scalar
-                PTOParam params_t1[] = {
-                    make_input_param(c),
-                    make_scalar_param(float_to_u64(1.000000f)),
-                    make_output_param(d),
-                };
-                pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
+                PTOParam params_t1;
+                params_t1.add_input(c);
+                params_t1.add_output(d);
+                params_t1.add_scalar(float_to_u64(1.000000f));
+                pto2_rt_submit_aiv_task(rt, 1, params_t1);
                 uint32_t e_shapes[2] = {16, 16};
                 Tensor e = make_tensor(e_shapes, 2, DataType::FLOAT32);
 
                 // Task 2: kernel_add_scalar
-                PTOParam params_t2[] = {
-                    make_input_param(c),
-                    make_scalar_param(float_to_u64(2.000000f)),
-                    make_output_param(e),
-                };
-                pto2_rt_submit_aiv_task(rt, 1, params_t2, 3);
+                PTOParam params_t2;
+                params_t2.add_input(c);
+                params_t2.add_output(e);
+                params_t2.add_scalar(float_to_u64(2.000000f));
+                pto2_rt_submit_aiv_task(rt, 1, params_t2);
                 uint32_t g_shapes[2] = {16, 16};
                 Tensor g = make_tensor(g_shapes, 2, DataType::FLOAT32);
 
                 // Task 3: kernel_mul
-                PTOParam params_t3[] = {
-                    make_input_param(d),
-                    make_input_param(e),
-                    make_output_param(g),
-                };
-                pto2_rt_submit_aiv_task(rt, 2, params_t3, 3);
+                PTOParam params_t3;
+                params_t3.add_input(d);
+                params_t3.add_input(e);
+                params_t3.add_output(g);
+                pto2_rt_submit_aiv_task(rt, 2, params_t3);
 
                 // Task 4: kernel_add
-                PTOParam params_t4[] = {
-                    make_input_param(g),
-                    make_input_param(c),
-                    make_output_param(ext_f),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t4, 3);
+                PTOParam params_t4;
+                params_t4.add_input(g);
+                params_t4.add_input(c);
+                params_t4.add_output(ext_f);
+                pto2_rt_submit_aiv_task(rt, 0, params_t4);
             }
 
             }  // extern "C"
@@ -728,13 +721,13 @@ class TestOrchestration:
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
         # online_update: 3 In + 3 InOut + 1 Out = 7 params
-        assert "make_input_param(ext_mij)" in code
-        assert "make_inout_param(ext_mi_in)" in code
-        assert "make_output_param(ext_dst_in)" in code
+        assert "params_t0.add_input(ext_mij)" in code
+        assert "params_t0.add_inout(ext_mi_in)" in code
+        assert "params_t0.add_output(ext_dst_in)" in code
 
         # kernel_add: 2 In + 1 Out = 3 params
-        assert "make_input_param(ext_oi_in)" in code
-        assert "make_output_param(ext_final)" in code
+        assert "params_t1.add_input(ext_oi_in)" in code
+        assert "params_t1.add_output(ext_final)" in code
 
         # No PTO2_SCOPE: no control flow
         assert "PTO2_SCOPE" not in code
@@ -942,16 +935,15 @@ class TestOrchestration:
 
 
                 // Task 0: online_update
-                PTOParam params_t0[] = {
-                    make_input_param(ext_mij),
-                    make_input_param(ext_lij),
-                    make_input_param(ext_oi_new),
-                    make_inout_param(ext_mi),
-                    make_inout_param(ext_li),
-                    make_inout_param(ext_oi),
-                    make_output_param(ext_dst),
-                };
-                pto2_rt_submit_aiv_task(rt, 0, params_t0, 7);
+                PTOParam params_t0;
+                params_t0.add_input(ext_mij);
+                params_t0.add_input(ext_lij);
+                params_t0.add_input(ext_oi_new);
+                params_t0.add_inout(ext_mi);
+                params_t0.add_inout(ext_li);
+                params_t0.add_inout(ext_oi);
+                params_t0.add_output(ext_dst);
+                pto2_rt_submit_aiv_task(rt, 0, params_t0);
             }
 
             }  // extern "C"
@@ -1194,23 +1186,23 @@ class TestOrchestration:
         # kernel_b should only have a and b params (2 inout), not x or y
         assert code.count("params_t1") >= 2
 
-        # Count make_inout_param per task block: each should have exactly 2
+        # Count add_inout per task block: each should have exactly 2
         lines = code.split("\n")
         task0_params = []
         task1_params = []
         in_task0 = False
         in_task1 = False
         for line in lines:
-            if "params_t0[]" in line:
+            if "PTOParam params_t0" in line:
                 in_task0 = True
-            elif "params_t1[]" in line:
+            elif "PTOParam params_t1" in line:
                 in_task1 = True
-            elif "};" in line:
+            elif "pto2_rt_submit" in line:
                 in_task0 = False
                 in_task1 = False
-            if in_task0 and ("make_" in line):
+            if in_task0 and ("params_t0.add_" in line):
                 task0_params.append(line.strip())
-            if in_task1 and ("make_" in line):
+            if in_task1 and ("params_t1.add_" in line):
                 task1_params.append(line.strip())
 
         # kernel_a: x, y as inout → 2 params

@@ -193,7 +193,18 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
 
   emitter_.EmitLine("// Unpack arguments and type declarations");
 
+  // New PTOParam dispatch order: tensors first, then scalars.
+  // Pre-compute the args index for each parameter based on this ordering.
+  size_t scalar_start_idx = 0;
+  for (const auto& param : func->params_) {
+    if (std::dynamic_pointer_cast<const ir::TensorType>(param->GetType())) {
+      scalar_start_idx++;
+    }
+  }
+
   // First pass: Unpack arguments
+  size_t tensor_idx = 0;
+  size_t scalar_idx = scalar_start_idx;
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
     const std::string param_name = context_.SanitizeName(param);
@@ -203,10 +214,10 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Extract element type
       std::string element_type = tensor_type->dtype_.ToCTypeString();
 
-      // Emit argument unpacking via TensorData* indirection
+      // Emit argument unpacking via TensorData* indirection (tensors come first)
       std::string tensor_var = param_name + "_tensor";
       emitter_.EmitLine("__gm__ TensorData* " + tensor_var + " = reinterpret_cast<__gm__ TensorData*>(args[" +
-                        std::to_string(i) + "]);");
+                        std::to_string(tensor_idx) + "]);");
       emitter_.EmitLine("__gm__ " + element_type + "* " + param_name + " = reinterpret_cast<__gm__ " +
                         element_type + "*>(" + tensor_var + "->buffer.addr) + " + tensor_var +
                         "->start_offset;");
@@ -214,18 +225,20 @@ void CCECodegen::GeneratePrologue(const ir::FunctionPtr& func) {
       // Register pointer/struct by IR var name for later lookup in tile.load/store
       context_.RegisterPointer(param->name_hint_, param_name);
       context_.RegisterTensorStruct(param->name_hint_, tensor_var);
+      tensor_idx++;
     } else if (auto scalar_type = std::dynamic_pointer_cast<const ir::ScalarType>(param->GetType())) {
       // Generate scalar type declaration
       std::string cpp_type = scalar_type->dtype_.ToCTypeString();
 
-      // Emit argument unpacking via union converter
+      // Emit argument unpacking via union converter (scalars come after all tensors)
       std::string conv_name = param_name + "_conv";
       emitter_.EmitLine("union { uint64_t u64; " + cpp_type + " val; } " + conv_name + ";");
-      emitter_.EmitLine(conv_name + ".u64 = args[" + std::to_string(i) + "];");
+      emitter_.EmitLine(conv_name + ".u64 = args[" + std::to_string(scalar_idx) + "];");
       emitter_.EmitLine(cpp_type + " " + param_name + " = " + conv_name + ".val;");
 
       // Register scalar variable
       context_.RegisterVar(param, param_name);
+      scalar_idx++;
     } else {
       throw pypto::RuntimeError("Unsupported parameter type in function " + func->name_);
     }

@@ -337,20 +337,48 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   stream_ << "  func.func @" << func->name_ << "(";
 
-  std::set<const ir::Var*> param_keys;
+  // Separate params into tensors and scalars for tensors-first dispatch order.
+  // PTOParam dispatches args as [tensors..., scalars...] regardless of function
+  // signature order, so the MLIR function signature must match that layout.
+  std::vector<size_t> tensor_param_indices;
+  std::vector<size_t> scalar_param_indices;
   for (size_t i = 0; i < func->params_.size(); i++) {
-    if (i > 0) stream_ << ", ";
-    const auto& param = func->params_[i];
-    std::string arg_name = "%arg" + std::to_string(i);
-    stream_ << arg_name << ": ";
+    if (As<TensorType>(func->params_[i]->GetType())) {
+      tensor_param_indices.push_back(i);
+    } else {
+      scalar_param_indices.push_back(i);
+    }
+  }
 
-    auto param_key = GetVarKey(param);
-    BindVarToMlir(param, arg_name);
-    param_keys.insert(param_key);
+  // Assign %argN names: tensors get indices 0..N_tensors-1, scalars get N_tensors..
+  size_t scalar_start_idx = tensor_param_indices.size();
+  std::set<const ir::Var*> param_keys;
+  for (size_t j = 0; j < tensor_param_indices.size(); j++) {
+    const auto& param = func->params_[tensor_param_indices[j]];
+    BindVarToMlir(param, "%arg" + std::to_string(j));
+    param_keys.insert(GetVarKey(param));
+  }
+  for (size_t j = 0; j < scalar_param_indices.size(); j++) {
+    const auto& param = func->params_[scalar_param_indices[j]];
+    BindVarToMlir(param, "%arg" + std::to_string(scalar_start_idx + j));
+    param_keys.insert(GetVarKey(param));
+  }
 
-    if (auto tensor_type = As<TensorType>(param->GetType())) {
-      stream_ << "!pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
-    } else if (auto scalar_type = As<ScalarType>(param->GetType())) {
+  // Emit signature: tensors first, then scalars
+  bool first_param = true;
+  for (size_t j = 0; j < tensor_param_indices.size(); j++) {
+    if (!first_param) stream_ << ", ";
+    first_param = false;
+    const auto& param = func->params_[tensor_param_indices[j]];
+    auto tensor_type = As<TensorType>(param->GetType());
+    stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
+  }
+  for (size_t j = 0; j < scalar_param_indices.size(); j++) {
+    if (!first_param) stream_ << ", ";
+    first_param = false;
+    const auto& param = func->params_[scalar_param_indices[j]];
+    stream_ << "%arg" << (scalar_start_idx + j) << ": ";
+    if (auto scalar_type = As<ScalarType>(param->GetType())) {
       stream_ << GetTypeString(scalar_type->dtype_);
     } else {
       stream_ << "!pto.ptr<f32>";
@@ -641,7 +669,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
 
       stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
-      stream_ << "%arg" << i;
+      stream_ << GetVarName(param);
 
       stream_ << ", shape = [";
       for (size_t j = 0; j < tensor_type->shape_.size(); j++) {

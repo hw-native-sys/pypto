@@ -665,11 +665,12 @@ class TestGenerateArgUnpacking:
     def test_mixed_tensor_scalar(self):
         func = _make_func("test_fn", [("input", "tensor"), ("scale", "scalar"), ("output", "tensor")])
         code, names = _generate_arg_unpacking(func)
+        # Tensors-first: input=args[0], output=args[1], scale=args[2]
         assert "reinterpret_cast<__gm__ TensorData*>(args[0])" in code
-        assert "scale_conv.u64 = args[1];" in code
+        assert "reinterpret_cast<__gm__ TensorData*>(args[1])" in code
+        assert "scale_conv.u64 = args[2];" in code
         assert "float scale = scale_conv.val;" in code
-        assert "reinterpret_cast<__gm__ TensorData*>(args[2])" in code
-        assert names == ["input", "scale", "output"]
+        assert names == ["input", "output", "scale"]
 
     def test_scalar_only(self):
         func = _make_func("test_fn", [("x", "scalar"), ("y", "scalar")])
@@ -716,7 +717,8 @@ class TestGenerateKernelWrapper:
     def test_contains_forward_call(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        assert "my_kernel(a, s, out);" in wrapper
+        # Tensors-first: a=arg0, out=arg1, s=arg2
+        assert "my_kernel(a, out, s);" in wrapper
 
     def test_ptoas_code_made_static(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])

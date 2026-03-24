@@ -5,7 +5,7 @@
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [CCE codegen](01-cce_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
 - Wraps device memory pointers into `Tensor` objects
-- Builds `PTOParam` arrays classifying each tensor as input/output/inout
+- Builds `PTOParam` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
 - Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `pto2_rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
 
@@ -112,13 +112,12 @@ Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 ### Phase 9–10: Task Submission and Control Flow
 
 ```cpp
-// Phase 9: Task submission
-PTOParam params_t0[] = {
-    make_input_param(ext_a),
-    make_input_param(ext_b),
-    make_output_param(ext_output),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+// Phase 9: Task submission — tensors first, then scalars
+PTOParam params_t0;
+params_t0.add_input(ext_a);
+params_t0.add_input(ext_b);
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(rt, 0, params_t0);
 
 // Phase 10: Control flow (ForStmt example)
 PTO2_SCOPE {
@@ -145,10 +144,10 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 
 | Direction | Python Annotation | C++ Task Param | Semantics |
 | --------- | ----------------- | -------------- | --------- |
-| `In` | `pl.Tensor[...]` (default) | `make_input_param(ext_x)` | Read-only |
-| `Out` | `pl.Out[pl.Tensor[...]]` | `make_output_param(ext_x)` | Write-only |
-| `InOut` | `pl.InOut[pl.Tensor[...]]` | `make_inout_param(ext_x)` | Read-write |
-| Scalar | `pl.Scalar[...]` | `make_scalar_param(value)` | Scalar constant |
+| `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only |
+| `Out` | `pl.Out[pl.Tensor[...]]` | `params.add_output(ext_x)` | Write-only |
+| `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
+| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (after all tensors) |
 
 ### Alias Generation
 
@@ -161,8 +160,9 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 
 ```cpp
 // Generated C++
-PTOParam params_t0[] = { ... make_output_param(ext_output) ... };
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+PTOParam params_t0;
+params_t0.add_output(ext_output);
+pto2_rt_submit_aiv_task(rt, 0, params_t0);
 Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
@@ -187,15 +187,14 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 ```
 
 ```cpp
-// Generated C++ — each element maps to its Out/InOut arg
-PTOParam params_t0[] = {
-    make_input_param(ext_sij),
-    make_scalar_param(float_to_u64(scale)),
-    make_output_param(ext_pij),
-    make_output_param(ext_mij),
-    make_output_param(ext_lij),
-};
-pto2_rt_submit_aiv_task(rt, 0, params_t0, 5);
+// Generated C++ — tensors first, then scalars
+PTOParam params_t0;
+params_t0.add_input(ext_sij);
+params_t0.add_output(ext_pij);
+params_t0.add_output(ext_mij);
+params_t0.add_output(ext_lij);
+params_t0.add_scalar(float_to_u64(scale));  // scalar after all tensors
+pto2_rt_submit_aiv_task(rt, 0, params_t0);
 ```
 
 ### Group Functions (Mixed Kernels)
@@ -204,9 +203,10 @@ When a kernel uses both AIC and AIV cores (mixed kernel), the codegen generates 
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-PTOParam params_t0[] = { ... };
+PTOParam params_t0;
+// ... add_input / add_output / add_scalar calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(rt, mixed_0, params_t0, param_count);
+pto2_rt_submit_task(rt, mixed_0, params_t0);
 ```
 
 ## Operation Mappings
@@ -278,20 +278,18 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args,
     Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
     // Task 0: kernel_add (a + b → c)
-    PTOParam params_t0[] = {
-        make_input_param(ext_a),
-        make_input_param(ext_b),
-        make_output_param(c),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    params_t0.add_input(ext_a);
+    params_t0.add_input(ext_b);
+    params_t0.add_output(c);
+    pto2_rt_submit_aiv_task(rt, 0, params_t0);
 
     // Task 1: kernel_add (c + b → d)
-    PTOParam params_t1[] = {
-        make_input_param(c),
-        make_input_param(ext_b),
-        make_output_param(ext_d),
-    };
-    pto2_rt_submit_aiv_task(rt, 0, params_t1, 3);
+    PTOParam params_t1;
+    params_t1.add_input(c);
+    params_t1.add_input(ext_b);
+    params_t1.add_output(ext_d);
+    pto2_rt_submit_aiv_task(rt, 0, params_t1);
 }
 
 }  // extern "C"
@@ -336,8 +334,9 @@ for i in pl.range(0, 4):
 Tensor acc = ext_acc;  // iter_arg initialization
 PTO2_SCOPE {
     for (int64_t i = 0; i < 4; i += 1) {
-        PTOParam params_t0[] = { ... };
-        pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+        PTOParam params_t0;
+        // ... add_input / add_output calls ...
+        pto2_rt_submit_aiv_task(rt, 0, params_t0);
     }
 }
 ```
@@ -357,11 +356,13 @@ else:
 ```cpp
 // Generated C++
 if (condition) {
-    PTOParam params_t0[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 0, params_t0, 3);
+    PTOParam params_t0;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(rt, 0, params_t0);
 } else {
-    PTOParam params_t1[] = { ... };
-    pto2_rt_submit_aiv_task(rt, 1, params_t1, 3);
+    PTOParam params_t1;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(rt, 1, params_t1);
 }
 ```
 
