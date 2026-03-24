@@ -75,7 +75,10 @@ inline bool MulWouldOverflow(int64_t a, int64_t b) {
     if (a < std::numeric_limits<int64_t>::min() / b) return true;
     if (a > std::numeric_limits<int64_t>::max() / b) return true;
   } else {
-    if (b == -1 && a == std::numeric_limits<int64_t>::min()) return true;
+    // b == -1 must be handled separately: INT64_MIN / (-1) is undefined behavior
+    // (triggers SIGFPE on x86_64). When a == INT64_MIN, a * (-1) overflows;
+    // otherwise -a is always representable.
+    if (b == -1) return a == std::numeric_limits<int64_t>::min();
     if (a > std::numeric_limits<int64_t>::min() / b) return true;
     if (a < std::numeric_limits<int64_t>::max() / b) return true;
   }
