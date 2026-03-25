@@ -1,21 +1,13 @@
 ---
 name: code-review
 description: Review code changes against PyPTO project standards before committing. Use when reviewing code, preparing commits, checking pull requests, or when the user asks for code review.
+context: fork
+allowed-tools: Read, Grep, Glob, Bash
 ---
 
-# PyPTO Code Review Skill
+# PyPTO Code Review
 
-## Overview
-
-This skill provides comprehensive code review guidelines for the PyPTO project, checking code quality, documentation alignment, and cross-layer consistency.
-
-## How to Use
-
-When you need to perform a code review:
-
-1. Read the agent instructions at `.claude/agents/code-review/AGENT.md`
-2. Invoke the Task tool with `subagent_type="generalPurpose"` and include the agent instructions
-3. The agent will analyze changes and provide feedback using the guidelines below
+You are a specialized code review agent. Review all code changes in the current git diff against PyPTO's quality standards. You MUST NOT modify any files — only analyze and report.
 
 ## Review Process
 
@@ -52,7 +44,7 @@ When you need to perform a code review:
 - [ ] Documentation reflects code changes
 - [ ] Examples in docs still work
 - [ ] Documentation files ≤500 lines (split if >700 lines)
-- [ ] AI rules/skills/agents ≤200 lines
+- [ ] AI rules/skills ≤200 lines
 - [ ] C++ implementation matches Python bindings
 - [ ] Type stubs (`.pyi`) match actual API
 - [ ] Docstrings complete and accurate
@@ -142,7 +134,13 @@ Provide your review as:
 **WARNINGS:** Non-critical issues that should be addressed but don't block commit
 **FAIL:** Critical issues that must be fixed before committing
 
-## Related Skills
+## Key Focus Areas
 
-- **`testing`** - Build and test verification (can run in parallel with code review)
-- **`git-commit`** - Complete commit workflow
+1. **Code Quality**: Style, error handling (`CHECK` vs `INTERNAL_CHECK`), PyPTO exceptions (not C++), no debug code, error messages with context
+2. **Pass Complexity**: All passes must be O(N log N) or better — no nested full scans over IR node collections, no linear scans for lookups
+3. **Python Style**: `@overload` for multiple signatures (not `Union`), modern type syntax (`list[int]` not `List[int]`), f-strings, Google-style docstrings, type hints on public APIs
+4. **Testing Standards**: pytest only (no `unittest`), `assert` for verification (no `print`), `pytest.raises()` for exceptions, tests only in `tests/`
+5. **Documentation**: Alignment with code changes, examples still work, file lengths (≤500 for docs, ≤200 for rules/skills), pass doc numbering matches pass manager execution order
+6. **Cross-Layer Sync**: C++ headers, Python bindings, and type stubs must all be updated together
+7. **Commit Content**: Only relevant changes, no artifacts, no sensitive data, no AI co-author lines, no hardcoded absolute paths
+8. **Multi-Language Doc Sync**: When English docs (`docs/en/dev/` or `README.md`) are modified, verify corresponding `docs/zh-cn/` and `README.zh-CN.md` are also updated or flagged

@@ -7,7 +7,6 @@
 - **Documentation files** (`docs/`): ≤500 lines
 - **AI rules** (`.claude/rules/`): ≤200 lines
 - **AI skills** (`.claude/skills/`): ≤200 lines
-- **AI agents** (`.claude/agents/`): ≤200 lines
 
 ## When to Split vs Condense
 
@@ -76,7 +75,7 @@ Combine similar sections that repeat the same pattern.
 - Bullet points over paragraphs
 - Examples after concepts (not interleaved)
 
-### For AI Rules/Skills/Agents
+### For AI Rules/Skills
 
 **Essential content only:**
 

@@ -7,34 +7,39 @@ description: Complete git commit workflow for PyPTO including pre-commit review,
 
 ## Task Tracking
 
-Create tasks to track progress through this workflow:
+Create tasks and check them off as you complete each step:
 
-1. Code simplification (optional)
-2. Analyze changes & launch review/test agents
-3. Address issues from review/testing
-4. Stage changes & commit
-5. Post-commit verification
+```text
+- [ ] Step 0: Code simplification decision
+- [ ] Step 1: Analyze changes & launch review/test skills
+- [ ] Step 2: Address issues, stage & commit
+- [ ] Step 3: Post-commit verification
+```
 
-## Step 0: Optional Code Simplification
+## Step 0: Code Simplification Decision (MANDATORY checkpoint)
 
-**Before reviewing and committing, ask the user if they want to simplify the changed code first.**
+**You MUST ask the user this question before proceeding. Do NOT skip this step.**
 
-> Run code simplification before committing? This refines your changed code for clarity, consistency, and maintainability while preserving all functionality. May take extra time.
+Ask the user:
 
-If the user agrees, review and simplify the changed code. Then proceed to Prerequisites.
+> Run code simplification before committing? This refines your changed code for clarity, consistency, and maintainability while preserving all functionality. May take extra time. (yes/no)
 
-If the user declines, skip directly to Prerequisites.
+**If YES** → Run code simplification on changed files, then proceed to Step 1.
 
-## Prerequisites
+**If NO** → Proceed directly to Step 1.
 
-**Check what changed to determine which agents to run:**
+**You MUST wait for the user's answer before continuing.**
+
+## Step 1: Analyze Changes & Launch Review/Test Skills
+
+**Check what changed:**
 
 ```bash
 git diff --name-only
 git diff --cached --name-only
 ```
 
-**Determine testing needs based on changed files:**
+**Determine what to run based on changed files:**
 
 | File Types Changed | Run Code Review | Run Testing | Run Clang-Tidy |
 | ------------------ | --------------- | ----------- | -------------- |
@@ -45,26 +50,15 @@ git diff --cached --name-only
 | Config only (`.json`, `.yaml`, `.toml`, `.github/`) | ✅ Yes | ❌ Skip | ❌ Skip |
 | Mixed (code + docs/config) | ✅ Yes | ✅ Yes | If C++ changed |
 
-**Launch appropriate agents IN PARALLEL:**
+**Launch in parallel (each runs in its own forked context):**
 
-- **`code-reviewer`** - ALWAYS run for all changes
-- **`testing`** - ONLY run if code files changed
-- **`clang-tidy`** - Run `python tests/lint/clang_tidy.py --diff-base HEAD` if C++ files changed (via Bash agent)
+- **`code-review`** skill — ALWAYS run for all changes
+- **`testing`** skill — ONLY run if code files changed
+- **`clang-tidy`** via Bash: `python tests/lint/clang_tidy.py --diff-base HEAD` — ONLY if C++ changed
 
-## Workflow
+Wait for all to complete, then address any issues found.
 
-1. Analyze changed files to determine testing needs
-2. Launch in parallel (single message with multiple Task tool calls):
-   - **code-reviewer** agent (always)
-   - **testing** agent (if code changed)
-   - **clang-tidy** via Bash agent: `python tests/lint/clang_tidy.py --diff-base HEAD` (if C++ changed)
-3. Wait for all agents to complete
-4. Address any issues found
-5. Stage changes
-6. Generate commit message
-7. Commit and verify
-
-## Stage Changes
+## Step 2: Stage Changes & Commit
 
 **Related changes together**:
 
@@ -134,7 +128,7 @@ Updates tests with edge case coverage.
 
 **Why?** AI tools are not collaborators. Commits reflect human authorship.
 
-## Post-Commit Verification
+## Step 3: Post-Commit Verification
 
 ```bash
 git show HEAD              # View commit
@@ -153,6 +147,7 @@ git add file && git commit --amend --no-edit   # Add forgotten file
 
 ## Checklist
 
+- [ ] Code simplification decision obtained from user (Step 0)
 - [ ] Changed files analyzed (code vs docs/config only)
 - [ ] Code review completed
 - [ ] Tests passed (if code changed) or skipped (if docs/config only)

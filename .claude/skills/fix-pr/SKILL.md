@@ -1,6 +1,7 @@
 ---
 name: fix-pr
 description: Fix GitHub PR issues — address review comments and resolve CI failures in a loop until the PR is fully clean. Fetches CI errors online and triages review feedback. Use when fixing PR problems, addressing review comments, or resolving CI failures.
+argument-hint: [pr-number]
 ---
 
 # Fix PR Workflow

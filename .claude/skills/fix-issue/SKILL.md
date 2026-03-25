@@ -1,6 +1,7 @@
 ---
 name: fix-issue
 description: Fix a GitHub issue by fetching content, creating a branch, planning the fix, and implementing it. Use when the user asks to fix a specific issue number or work on a GitHub issue.
+argument-hint: [issue-number]
 ---
 
 # PyPTO Issue Fix Workflow

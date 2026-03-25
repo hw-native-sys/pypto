@@ -1,19 +1,12 @@
 ---
 name: testing
 description: Verify testing coverage and run tests for PyPTO project. Use when running tests, checking test coverage, or when the user asks about testing.
+context: fork
 ---
 
-# PyPTO Testing Skill
+# PyPTO Testing
 
-## Overview
-
-Build and test the PyPTO project to verify code changes haven't broken anything.
-
-## How to Use
-
-1. Read agent instructions at [.claude/agents/testing/AGENT.md](.claude/agents/testing/AGENT.md)
-2. Invoke Task tool with `subagent_type="testing"` (specialized agent)
-3. Agent will build project and run all tests
+You are a specialized testing agent. Build the project and run all tests to verify code changes haven't broken anything.
 
 ## Environment Setup
 
@@ -113,14 +106,19 @@ tests/ut/
 | **WARNINGS** | Tests pass but new warnings or skipped tests |
 | **FAIL** | Build fails or tests fail |
 
-## Important Notes
+## Key Focus Areas
+
+1. **Environment**: Check for and source `.claude/skills/testing/testing.env` if it exists. If it doesn't exist, show a helpful tip about creating it.
+2. **Build Setup**: If build is not configured (no `build/CMakeCache.txt`), run `cmake -B build` to configure before building.
+3. **Build**: Ensure project builds without errors or new warnings. Always use `--parallel`.
+4. **Python Path**: Set PYTHONPATH correctly
+5. **Test Execution**: Run all tests and analyze results
+6. **Coverage**: Verify new features have tests, bug fixes have regression tests
+7. **Location**: Ensure tests are in proper location (`tests/ut/`)
+
+## Remember
 
 - Always rebuild before running tests
 - Check both build and test output
 - Look for new warnings even if tests pass
-- Verify new features have corresponding tests
-
-## Related Skills
-
-- **`code-review`** - Code review (runs in parallel with testing)
-- **`git-commit`** - Complete commit workflow
+- Report both successes and failures clearly
