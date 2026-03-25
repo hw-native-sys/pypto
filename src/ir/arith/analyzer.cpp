@@ -38,11 +38,7 @@ namespace arith {
 // ============================================================================
 
 Analyzer::Analyzer()
-    : const_int_bound(this),
-      modular_set(this),
-      rewrite_simplify(this),
-      transitive_cmp(this),
-      int_set(this) {}
+    : const_int_bound(this), modular_set(this), rewrite_simplify(this), transitive_cmp(this), int_set(this) {}
 
 Analyzer::~Analyzer() = default;
 
@@ -132,12 +128,6 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
   // "other" side to preserve symbolic relationships. Guarded by
   // in_int_set_eval_ to prevent CanProve -> int_set -> SymMin -> CanProve.
 
-  // Standalone CanonicalSimplifier (no parent) for algebraic cancellations like
-  // (n-1)-n -> -1. Intentionally parent-less to avoid recursion back into Analyzer.
-  // The heap allocation is acceptable since this fallback path is rare.
-  CanonicalSimplifier canon_simplify;
-  auto DeepSimplify = [&](const ExprPtr& expr) -> ExprPtr { return canon_simplify(Simplify(expr)); };
-
   // RAII guard for in_int_set_eval_ flag to ensure exception safety.
   struct IntSetEvalGuard {
     bool& flag;
@@ -147,12 +137,17 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
 
   // Symbolic fallback helper: evaluates int_set on lhs/rhs, then checks if a
   // symbolic bound satisfies the comparison threshold via const_int_bound.
+  // Constructs CanonicalSimplifier lazily (only when this fallback is actually reached).
   //   check_upper=true:  prove max(lhs - rhs) </<= threshold (Lt/Le)
   //   check_upper=false: prove min(lhs - rhs) >/>= threshold (Gt/Ge)
-  auto TrySymbolicFallback = [&](const ExprPtr& lhs, const ExprPtr& rhs, bool check_upper,
-                                 bool strict) -> bool {
+  auto TrySymbolicFallback = [this](const ExprPtr& lhs, const ExprPtr& rhs, bool check_upper,
+                                    bool strict) -> bool {
     if (in_int_set_eval_) return false;
     IntSetEvalGuard guard(in_int_set_eval_);
+    // Standalone CanonicalSimplifier (no parent) for algebraic cancellations like
+    // (n-1)-n -> -1. Intentionally parent-less to avoid recursion back into Analyzer.
+    CanonicalSimplifier canon_simplify;
+    auto DeepSimplify = [&](const ExprPtr& e) -> ExprPtr { return canon_simplify(Simplify(e)); };
     auto lhs_set = int_set(lhs);
     auto rhs_set = int_set(rhs);
     if (check_upper) {
@@ -248,7 +243,7 @@ ConstraintContext::ConstraintContext(AnalyzerPtr analyzer, const ExprPtr& constr
   if (auto fn = analyzer_->transitive_cmp.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
-  if (auto fn = analyzer_->int_set.EnterConstraint(normalized)) {
+  if (auto fn = analyzer_->int_set.EnterConstraint(normalized)) {  // Use normalized, not raw constraint
     recovery_functions_.push_back(std::move(fn));
   }
 }

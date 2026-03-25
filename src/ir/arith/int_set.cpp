@@ -209,16 +209,14 @@ Interval CombineFloorDiv(const Interval& a, const Interval& b, Analyzer* p) {
   return {SymFloorDiv(a.min_value, b.min_value, p), SymFloorDiv(a.max_value, b.min_value, p)};
 }
 
-/// FloorMod with single-point positive divisor: result in [0, d - 1].
-Interval CombineFloorMod(const Interval& a, const Interval& b, Analyzer* p) {
+/// FloorMod with single-point positive divisor: conservatively returns [0, d - 1].
+Interval CombineFloorMod(const Interval& /*a*/, const Interval& b, Analyzer* /*p*/) {
   if (!b.is_single_point()) return IntSet::Everything();
   auto ci = As<ConstInt>(b.min_value);
   if (!ci || ci->value_ <= 0) return IntSet::Everything();
 
-  // Check if the dividend's range fits entirely within one modular period.
-  // If a.max - a.min < d and a.min // d == a.max // d, then:
-  //   result is [a.min % d, a.max % d]
-  // Otherwise conservatively: [0, d - 1]
+  // Conservative: [0, d - 1]. Could be tightened when the dividend range
+  // fits within one modular period (a.max - a.min < d).
   ExprPtr zero = MakeConstInt(0, DataType::INT64);
   ExprPtr denom_minus_one = MakeConstInt(ci->value_ - 1, DataType::INT64);
   return {zero, denom_minus_one};
