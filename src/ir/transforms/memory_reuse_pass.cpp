@@ -858,7 +858,7 @@ class YieldFixupMutator : public IRMutator {
       std::vector<StmtPtr> stmts;
       stmts.insert(stmts.end(), move_stmts.begin(), move_stmts.end());
       stmts.push_back(new_yield);
-      return std::make_shared<SeqStmts>(stmts, body->span_);
+      return SeqStmts::Flatten(std::move(stmts), body->span_);
     }
     if (auto seq = As<SeqStmts>(body)) {
       std::vector<StmtPtr> new_children;
@@ -871,7 +871,7 @@ class YieldFixupMutator : public IRMutator {
           new_children.push_back(child);
         }
       }
-      return std::make_shared<SeqStmts>(new_children, body->span_);
+      return SeqStmts::Flatten(std::move(new_children), body->span_);
     }
     return body;
   }
@@ -920,7 +920,7 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Me
   }
 
   if (!changed) return body;
-  return std::make_shared<SeqStmts>(new_seq_stmts, body->span_);
+  return SeqStmts::Flatten(std::move(new_seq_stmts), body->span_);
 }
 
 /**
@@ -960,8 +960,10 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   used_collector.VisitStmt(new_body);
   new_body = RemoveUnusedAllocStatements(new_body, used_collector.GetUsedPtrs());
 
-  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                          func->return_types_, new_body, func->span_, func->func_type_);
+  auto result =
+      std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                       func->return_types_, new_body, func->span_, func->func_type_);
+  return result;
 }
 
 }  // namespace

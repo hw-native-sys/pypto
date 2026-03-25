@@ -57,11 +57,13 @@ class PassManager:
             ("UnrollLoops", lambda: passes.unroll_loops()),
             ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
             ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]
         cce_prefix_passes: list[PassSpec] = [
             ("UnrollLoops", lambda: passes.unroll_loops()),
             ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]
         tensor_only_passes: list[PassSpec] = [
@@ -77,6 +79,7 @@ class PassManager:
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
+            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),

@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
@@ -24,7 +25,6 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -188,7 +188,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const SeqStmtsPtr& op) {
     new_stmts.push_back(new_stmt);
   }
 
-  return std::make_shared<SeqStmts>(new_stmts, op->span_);
+  return SeqStmts::Flatten(std::move(new_stmts), op->span_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const IfStmtPtr& op) {
@@ -339,23 +339,14 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CastPtr& op) { return ProcessUn
 
 /**
  * @brief Transform a function by flattening nested call expressions
- *
- * Pipeline:
- * 1. NormalizeStmtStructure - ensure bodies are SeqStmts (no nested SeqStmts)
- * 2. FlattenCallExprMutator - extract nested calls into temporaries
  */
 FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "FlattenCallExpr cannot run on null function";
 
-  // Step 1: Normalize statement structure
-  auto normalized = NormalizeStmtStructure(func);
-
-  // Step 2: Flatten call expressions
   FlattenCallExprMutator mutator;
-  auto new_body = mutator.VisitStmt(normalized->body_);
-  return std::make_shared<Function>(normalized->name_, normalized->params_, normalized->param_directions_,
-                                    normalized->return_types_, new_body, normalized->span_,
-                                    normalized->func_type_, normalized->level_, normalized->role_);
+  auto new_body = mutator.VisitStmt(func->body_);
+  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                    new_body, func->span_, func->func_type_, func->level_, func->role_);
 }
 
 }  // namespace

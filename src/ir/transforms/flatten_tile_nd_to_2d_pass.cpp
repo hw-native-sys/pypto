@@ -271,7 +271,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformBody(body_stmts, ctx, op_registry, span);
       result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
+          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -282,18 +282,19 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto then_ctx = ctx;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then = TransformBody(then_stmts, then_ctx, op_registry, span);
-      auto new_then_body = std::make_shared<SeqStmts>(new_then, if_stmt->then_body_->span_);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then);
+      auto new_then_body = SeqStmts::Flatten(std::move(new_then), if_stmt->then_body_->span_);
 
       FlattenContext else_ctx = ctx;
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else = TransformBody(else_stmts, else_ctx, op_registry, span);
-        new_else_body = std::make_shared<SeqStmts>(new_else, (*if_stmt->else_body_)->span_);
+        new_else_body = SeqStmts::Flatten(std::move(new_else), (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (positional matching)
-      auto yield_types = FindYieldTypes(new_then);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }
@@ -338,7 +339,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;
@@ -381,7 +382,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto new_cond = SubstituteExpr(while_stmt->condition_, body_ctx.var_map);
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types (positional matching)
       std::vector<VarPtr> new_return_vars;
@@ -647,12 +648,14 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   FlattenContext ctx;
   auto body_stmts = FlattenToStmts(func->body_);
   auto new_stmts = TransformBody(body_stmts, ctx, op_registry, span);
-  auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
 
   // return_types_ are unchanged: InCore functions return tensors (not tiles),
   // and this pass only flattens tile ops. Tensor types are never modified.
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, span, func->func_type_, func->level_, func->role_);
+  auto result =
+      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                 new_body, span, func->func_type_, func->level_, func->role_);
+  return result;
 }
 
 // ============================================================================

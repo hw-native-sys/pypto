@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
@@ -249,7 +250,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
 
   auto flush = [&]() {
     if (pending.empty()) return;
-    StmtPtr content = (pending.size() == 1) ? pending[0] : std::make_shared<SeqStmts>(pending, span);
+    StmtPtr content = SeqStmts::Flatten(std::vector<StmtPtr>(pending), span);
     result.push_back(std::make_shared<ScopeStmt>(ScopeKind::InCore, content, span));
     pending.clear();
   };
@@ -264,8 +265,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   }
   flush();
 
-  if (result.size() == 1) return result[0];
-  return std::make_shared<SeqStmts>(result, span);
+  return SeqStmts::Flatten(std::move(result), span);
 }
 
 /**
@@ -349,7 +349,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     if (!changed) {
       return op;
     }
-    return std::make_shared<SeqStmts>(new_stmts, op->span_);
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
  private:
@@ -520,7 +520,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
         }
       }
       if (!changed) return body;
-      return std::make_shared<SeqStmts>(new_stmts, span);
+      return SeqStmts::Flatten(std::move(new_stmts), span);
     }
 
     // Single statement
@@ -683,7 +683,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
         if (!yield_values.empty()) {
           auto yield_stmt = std::make_shared<YieldStmt>(yield_values, span);
-          current = std::make_shared<SeqStmts>(std::vector<StmtPtr>{current, yield_stmt}, span);
+          current = SeqStmts::Flatten(std::vector<StmtPtr>{current, yield_stmt}, span);
         }
       }
 
@@ -719,11 +719,11 @@ class InterchangeChunkLoopsMutator : public IRMutator {
           if (incore_stmts.size() == 1) {
             incore_content = incore_stmts[0];
           } else {
-            incore_content = std::make_shared<SeqStmts>(incore_stmts, span);
+            incore_content = SeqStmts::Flatten(std::move(incore_stmts), span);
           }
 
           auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_content, span);
-          auto new_body = std::make_shared<SeqStmts>(std::vector<StmtPtr>{incore_scope, last_stmt}, span);
+          auto new_body = SeqStmts::Flatten(std::vector<StmtPtr>{incore_scope, last_stmt}, span);
 
           current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
                                               outer_for->step_, outer_for->iter_args_, new_body,
@@ -762,8 +762,10 @@ FunctionPtr TransformInterchangeChunkLoops(const FunctionPtr& func) {
     return func;
   }
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_);
+  auto result =
+      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                 new_body, func->span_, func->func_type_, func->level_, func->role_);
+  return result;
 }
 
 }  // namespace

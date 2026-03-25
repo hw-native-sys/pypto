@@ -338,7 +338,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
       result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
+          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -350,7 +350,9 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       auto then_map = tensor_to_tile;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = TransformIncoreBody(then_stmts, then_map, conv_registry, op_registry, span);
-      auto new_then_body = std::make_shared<SeqStmts>(new_then_stmts, if_stmt->then_body_->span_);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then_stmts);
+      auto new_then_body = SeqStmts::Flatten(std::move(new_then_stmts), if_stmt->then_body_->span_);
 
       // Recurse into else branch with a copy of the map
       std::optional<StmtPtr> new_else_body;
@@ -358,11 +360,10 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         auto else_map = tensor_to_tile;
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else_stmts = TransformIncoreBody(else_stmts, else_map, conv_registry, op_registry, span);
-        new_else_body = std::make_shared<SeqStmts>(new_else_stmts, (*if_stmt->else_body_)->span_);
+        new_else_body = SeqStmts::Flatten(std::move(new_else_stmts), (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
-      auto yield_types = FindYieldTypes(new_then_stmts);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }
@@ -411,7 +412,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       // Recurse into body
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
       std::vector<VarPtr> new_return_vars;
@@ -460,7 +461,7 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       // Recurse into body
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = TransformIncoreBody(body_stmts, body_map, conv_registry, op_registry, span);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), while_stmt->body_->span_);
 
       // Update return_vars types to match iter_arg types
       std::vector<VarPtr> new_return_vars;
@@ -1254,7 +1255,7 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
     auto new_for_stmt =
         std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
                                   std::vector<IterArgPtr>{new_iter_arg},
-                                  std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_),
+                                  SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_),
                                   std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_,
                                   for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_);
 
@@ -1435,7 +1436,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
   UpgradeWrittenTensorParamDirections(new_stmts, new_params, new_param_directions);
 
-  auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
                                              new_body, span, FunctionType::InCore);
 
@@ -1500,7 +1501,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto inner = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
       result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, std::make_shared<SeqStmts>(inner, scope->body_->span_), scope->span_));
+          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
       continue;
     }
 
@@ -1512,7 +1513,9 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = UpdateCallSitesBody(then_stmts, then_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_then_body = std::make_shared<SeqStmts>(new_then_stmts, if_stmt->then_body_->span_);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then_stmts);
+      auto new_then_body = SeqStmts::Flatten(std::move(new_then_stmts), if_stmt->then_body_->span_);
 
       std::optional<StmtPtr> new_else_body;
       if (if_stmt->else_body_.has_value()) {
@@ -1520,11 +1523,10 @@ std::vector<StmtPtr> UpdateCallSitesBody(
         auto else_stmts = FlattenToStmts(*if_stmt->else_body_);
         auto new_else_stmts = UpdateCallSitesBody(else_stmts, else_map, incore_added_outputs,
                                                   transformed_incore_funcs, op_registry, span, changed);
-        new_else_body = std::make_shared<SeqStmts>(new_else_stmts, (*if_stmt->else_body_)->span_);
+        new_else_body = SeqStmts::Flatten(std::move(new_else_stmts), (*if_stmt->else_body_)->span_);
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
-      auto yield_types = FindYieldTypes(new_then_stmts);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }
@@ -1572,7 +1574,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(for_stmt->body_);
       auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, for_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_);
 
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(for_stmt->return_vars_.size());
@@ -1618,7 +1620,7 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = UpdateCallSitesBody(body_stmts, body_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
-      auto new_body = std::make_shared<SeqStmts>(new_body_stmts, while_stmt->body_->span_);
+      auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), while_stmt->body_->span_);
 
       std::vector<VarPtr> new_return_vars;
       new_return_vars.reserve(while_stmt->return_vars_.size());
@@ -1768,7 +1770,7 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
     return func;
   }
 
-  auto new_body = std::make_shared<SeqStmts>(new_stmts, span);
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, span, func->func_type_, func->level_, func->role_);
 }

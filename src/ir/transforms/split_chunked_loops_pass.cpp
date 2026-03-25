@@ -126,13 +126,7 @@ static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::st
  * size==1, or a SeqStmts wrapping multiple statements.
  */
 static StmtPtr MakeResultStmt(const std::vector<StmtPtr>& stmts, const Span& span) {
-  if (stmts.empty()) {
-    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
-  }
-  if (stmts.size() == 1) {
-    return stmts[0];
-  }
-  return std::make_shared<SeqStmts>(stmts, span);
+  return SeqStmts::Flatten(std::vector<StmtPtr>(stmts), span);
 }
 
 /**
@@ -256,7 +250,7 @@ class ChunkedLoopSplitter : public IRMutator {
       }
       RestoreSubstitution(prev_loop_sub);
       RestoreSubstitutions(prev_ia_subs);
-      return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+      return SeqStmts::Flatten(std::vector<StmtPtr>{}, op->span_);
     }
 
     // SSA path: propagate iter_args through outer/inner/remainder loops
@@ -325,7 +319,7 @@ class ChunkedLoopSplitter : public IRMutator {
       // Outer body = [inner_for, yield(inner_return_vars)]
       auto outer_yield = std::make_shared<YieldStmt>(
           std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), op->span_);
-      auto outer_body = std::make_shared<SeqStmts>(std::vector<StmtPtr>{inner_for, outer_yield}, op->span_);
+      auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, op->span_);
 
       // Outer loop
       auto outer_for = std::make_shared<ForStmt>(
@@ -444,7 +438,7 @@ class ChunkedLoopSplitter : public IRMutator {
     if (!changed) {
       return op;
     }
-    return std::make_shared<SeqStmts>(new_stmts, op->span_);
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
  private:
@@ -582,8 +576,10 @@ FunctionPtr TransformSplitChunkedLoops(const FunctionPtr& func) {
     return func;
   }
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_);
+  auto result =
+      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                 new_body, func->span_, func->func_type_, func->level_, func->role_);
+  return result;
 }
 
 }  // namespace

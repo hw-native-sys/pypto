@@ -34,13 +34,15 @@ inline const PassProperties kCtrlFlowTransformProperties{.produced = {IRProperty
 
 // -- Loop chunking pass (runs after SSA) --------------------------------------
 
-inline const PassProperties kSplitChunkedLoopsProperties{.required = {IRProperty::SSAForm},
-                                                         .produced = {IRProperty::SSAForm}};
+inline const PassProperties kSplitChunkedLoopsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure}};
 
 // -- Chunk loop interchange pass (runs after SplitChunkedLoops) ---------------
 
-inline const PassProperties kInterchangeChunkLoopsProperties{.required = {IRProperty::SSAForm},
-                                                             .produced = {IRProperty::SSAForm}};
+inline const PassProperties kInterchangeChunkLoopsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure}};
 
 // -- SSA conversion pass ------------------------------------------------------
 
@@ -50,9 +52,8 @@ inline const PassProperties kConvertToSSAProperties{.produced = {IRProperty::SSA
 // -- Expression / statement normalisation passes ------------------------------
 
 inline const PassProperties kFlattenCallExprProperties{
-    .required = {IRProperty::SSAForm},
-    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls},
-    .invalidated = {IRProperty::NormalizedStmtStructure}};
+    .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
@@ -79,20 +80,21 @@ inline const PassProperties kOutlineHierarchyScopesProperties{
 // -- Tensor-to-tile conversion pass ------------------------------------------
 
 inline const PassProperties kConvertTensorToTileOpsProperties{
-    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch},
-    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps}};
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure}};
 
 // -- Tile ND-to-2D flattening pass --------------------------------------------
 
 inline const PassProperties kFlattenTileNdTo2DProperties{
-    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps},
-    .produced = {IRProperty::SSAForm, IRProperty::TileOps2D}};
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
 // -- Tile memory space inference pass -----------------------------------------
 
 inline const PassProperties kInferTileMemorySpaceProperties{
-    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch},
-    .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred}};
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
+                 IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
 
 // -- Resolve transpose layout pass --------------------------------------------
 
@@ -115,8 +117,8 @@ inline const PassProperties kResolveBackendOpLayoutsProperties{
 
 inline const PassProperties kExpandMixedKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred},
-    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded}};
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure}};
 
 // -- Memory / codegen passes --------------------------------------------------
 
@@ -128,7 +130,8 @@ inline const PassProperties kInitMemRefProperties{
 
 inline const PassProperties kMemoryReuseProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
-                 IRProperty::TileOps2D}};
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::NormalizedStmtStructure}};
 
 inline const PassProperties kInsertSyncProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,

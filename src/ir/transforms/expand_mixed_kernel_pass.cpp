@@ -204,9 +204,7 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
-  if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
-  if (stmts.size() == 1) return stmts[0];
-  return std::make_shared<SeqStmts>(stmts, span);
+  return SeqStmts::Flatten(std::vector<StmtPtr>(stmts), span);
 }
 
 struct PipeDirectionMetadata {
@@ -2084,7 +2082,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     group_stmts.push_back(std::make_shared<ReturnStmt>(return_exprs, func->span_));
   }
 
-  auto group_body = std::make_shared<SeqStmts>(group_stmts, func->span_);
+  auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);
   auto group_func =
       std::make_shared<Function>(group_name, group_params, func->param_directions_, func->return_types_,
                                  group_body, func->span_, FunctionType::Group);
@@ -2138,10 +2136,11 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
     new_stmts.push_back(stmt);
   }
 
-  auto new_body = std::make_shared<SeqStmts>(new_stmts, group_func->span_);
-  return std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
-                                    group_func->return_types_, new_body, group_func->span_,
-                                    FunctionType::Group);
+  auto new_body = SeqStmts::Flatten(std::move(new_stmts), group_func->span_);
+  auto result =
+      std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
+                                 group_func->return_types_, new_body, group_func->span_, FunctionType::Group);
+  return result;
 }
 
 /// Check if a Group function body contains a call to a given function name.
