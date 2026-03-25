@@ -106,8 +106,9 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops that manage their own data loading (they create block.load
       // with specific offsets/memory-spaces during conversion, so an extra
       // Phase-1 default Vec load would be redundant or wrong).
-      static const std::unordered_set<std::string> kSelfLoadingOps = {
-          "tensor.slice", "tensor.matmul", "tensor.assemble", "tensor.read", "tensor.write"};
+      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice",      "tensor.matmul",
+                                                                      "tensor.matmul_acc", "tensor.assemble",
+                                                                      "tensor.read",       "tensor.write"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;
@@ -176,9 +177,9 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
 }
 
 /**
- * @brief Info about a tensor.slice result that feeds into a tensor.matmul operand.
+ * @brief Info about a tensor.slice result that feeds into a tensor.matmul/tensor.matmul_acc operand.
  *
- * When a tensor.slice result is consumed by tensor.matmul, the slice conversion
+ * When a tensor.slice result is consumed by tensor.matmul or tensor.matmul_acc, the slice conversion
  * should produce tile.load(Mat, transpose=...) instead of tile.load(Vec) so that
  * the matmul conversion can skip the load and directly use the Mat-space tile.
  */
@@ -188,7 +189,7 @@ struct MatmulSliceInfo {
 };
 
 /**
- * @brief Pre-scan statements to find tensor.slice results consumed by tensor.matmul.
+ * @brief Pre-scan statements to find tensor.slice results consumed by tensor.matmul/tensor.matmul_acc.
  *
  * Scans a flat list of statements to build a map from slice result variable names
  * to their matmul usage info (which side and transpose flag).
@@ -213,8 +214,16 @@ std::unordered_map<const Var*, MatmulSliceInfo> PreScanSliceMatmulPatterns(
     auto assign = As<AssignStmt>(stmt);
     if (!assign) continue;
     auto call = As<Call>(assign->value_);
-    if (!call || call->op_->name_ != "tensor.matmul") continue;
-    if (call->args_.size() < 2) continue;
+    if (!call || (call->op_->name_ != "tensor.matmul" && call->op_->name_ != "tensor.matmul_acc")) {
+      continue;
+    }
+
+    // tensor.matmul: args = [lhs, rhs]
+    // tensor.matmul_acc: args = [acc, lhs, rhs]
+    bool is_acc = (call->op_->name_ == "tensor.matmul_acc");
+    size_t lhs_idx = is_acc ? 1 : 0;
+    size_t rhs_idx = is_acc ? 2 : 1;
+    if (call->args_.size() <= rhs_idx) continue;
 
     bool a_trans = false;
     bool b_trans = false;
@@ -223,13 +232,13 @@ std::unordered_map<const Var*, MatmulSliceInfo> PreScanSliceMatmulPatterns(
       if (k == "b_trans") b_trans = std::any_cast<bool>(v);
     }
 
-    if (auto lhs_var = As<Var>(call->args_[0])) {
+    if (auto lhs_var = As<Var>(call->args_[lhs_idx])) {
       if (slice_results.count(lhs_var.get())) {
         result[lhs_var.get()] = MatmulSliceInfo{false, a_trans};
       }
     }
 
-    if (auto rhs_var = As<Var>(call->args_[1])) {
+    if (auto rhs_var = As<Var>(call->args_[rhs_idx])) {
       if (slice_results.count(rhs_var.get())) {
         result[rhs_var.get()] = MatmulSliceInfo{true, b_trans};
       }

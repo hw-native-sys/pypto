@@ -24,6 +24,7 @@ __all__ = [
     "slice",
     "fillpad",
     "matmul",
+    "matmul_acc",
     "mul",
     "muls",
     "add",
@@ -209,6 +210,29 @@ def matmul(
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap()
     call_expr = _ir_ops.matmul(lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz)
+    return Tensor(expr=call_expr)
+
+
+def matmul_acc(
+    acc: Tensor,
+    lhs: Tensor,
+    rhs: Tensor,
+    a_trans: bool = False,
+    b_trans: bool = False,
+) -> Tensor:
+    """Matrix multiplication with accumulation: acc += lhs @ rhs.
+
+    Args:
+        acc: Accumulator tensor
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor
+        a_trans: Whether to transpose lhs
+        b_trans: Whether to transpose rhs
+
+    Returns:
+        Tensor wrapping the matmul_acc operation
+    """
+    call_expr = _ir_ops.matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap(), a_trans, b_trans)
     return Tensor(expr=call_expr)
 
 

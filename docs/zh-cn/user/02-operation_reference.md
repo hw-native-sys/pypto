@@ -21,6 +21,7 @@
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | 交换两个轴 |
 | `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | 带偏移的切片 |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
+| `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | 带累加的矩阵乘法：`acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create`） |
@@ -52,6 +53,7 @@
 | `exp` | `(input: Tensor) -> Tensor` | 逐元素指数 |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | 类型转换 |
 | `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` | 矩阵乘法 |
+| `matmul_acc` | `(acc: Tensor, lhs: Tensor, rhs: Tensor, a_trans=False, b_trans=False) -> Tensor` | 带累加的矩阵乘法：`acc += lhs @ rhs` |
 
 ## 数据搬运（`pl.tile.*`）
 

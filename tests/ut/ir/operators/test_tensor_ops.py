@@ -109,6 +109,60 @@ def test_tensor_matmul_with_transpose():
     assert isinstance(result_type, ir.TensorType)
 
 
+def test_tensor_matmul_acc():
+    """Test tensor.matmul_acc operation."""
+    span = ir.Span.unknown()
+
+    # acc[4, 16] FP32 += lhs[4, 8] FP32 @ rhs[8, 16] FP32
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    acc_type = ir.TensorType([dim4, dim16], DataType.FP32)
+    lhs_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    rhs_type = ir.TensorType([dim8, dim16], DataType.FP32)
+
+    acc = ir.Var("acc", acc_type, span)
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = ir.op.tensor.matmul_acc(acc, lhs, rhs)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.matmul_acc"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_matmul_acc_with_transpose():
+    """Test tensor.matmul_acc with a_trans=True."""
+    span = ir.Span.unknown()
+
+    # acc[4, 16] += lhs[8, 4]^T @ rhs[8, 16]
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    acc_type = ir.TensorType([dim4, dim16], DataType.FP32)
+    lhs_type = ir.TensorType([dim8, dim4], DataType.FP32)  # [8, 4], transposed to [4, 8]
+    rhs_type = ir.TensorType([dim8, dim16], DataType.FP32)
+
+    acc = ir.Var("acc", acc_type, span)
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = ir.op.tensor.matmul_acc(acc, lhs, rhs, a_trans=True)
+
+    assert isinstance(call, ir.Call)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
 def test_tensor_row_max():
     """Test tensor.row_max reduction."""
     span = ir.Span.unknown()

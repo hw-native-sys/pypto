@@ -650,6 +650,39 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_matmul_acc_conversion(self):
+        """tensor.matmul + tensor.matmul_acc -> tile.matmul + tile.matmul_acc.
+
+        Verifies that tensor.matmul_acc is converted to tile.matmul_acc,
+        with lhs/rhs loaded to Mat space and acc passed through from matmul result.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP32],
+                rhs: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                acc: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(lhs, rhs)
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.matmul_acc(acc, lhs, rhs)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP32],
+                rhs: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(lhs, rhs)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.matmul_acc" in ir_str
+        assert "tile.matmul" in ir_str
+
     def test_assemble_tile_tile_then_cast_conversion(self):
         """tensor.create + tensor.assemble(tile,tile) + tensor.cast must not crash.
 

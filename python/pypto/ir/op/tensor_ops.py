@@ -204,6 +204,32 @@ def matmul(
     return _ir_core.create_op_call("tensor.matmul", args, kwargs, actual_span)
 
 
+def matmul_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Matrix multiplication with accumulation: acc = acc + lhs @ rhs.
+
+    Args:
+        acc: Accumulator tensor
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor
+        a_trans: Whether to transpose lhs
+        b_trans: Whether to transpose rhs
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for matrix multiplication with accumulation
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"a_trans": a_trans, "b_trans": b_trans}
+    return _ir_core.create_op_call("tensor.matmul_acc", [acc, lhs, rhs], kwargs, actual_span)
+
+
 def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tensor and tensor or scalar.
 

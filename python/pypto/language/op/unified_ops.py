@@ -45,6 +45,7 @@ __all__ = [
     "slice",
     "fillpad",
     "matmul",
+    "matmul_acc",
     "row_max",
     "row_sum",
     "row_min",
@@ -391,6 +392,42 @@ def matmul(
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.matmul(lhs, rhs)
     raise TypeError(f"matmul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# matmul_acc (Tensor or Tile)
+# ---------------------------------------------------------------------------
+
+
+@overload
+def matmul_acc(
+    acc: Tensor,
+    lhs: Tensor,
+    rhs: Tensor,
+    a_trans: bool = ...,
+    b_trans: bool = ...,
+) -> Tensor: ...
+@overload
+def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile: ...
+
+
+def matmul_acc(
+    acc: T,
+    lhs: T,
+    rhs: T,
+    a_trans: bool = False,
+    b_trans: bool = False,
+) -> T:
+    """Matrix multiplication with accumulation, dispatched by input type.
+
+    Tensor path accepts extra kwargs (a_trans, b_trans).
+    Tile path ignores them.
+    """
+    if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans)
+    if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.matmul_acc(acc, lhs, rhs)
+    raise TypeError(f"matmul_acc: expected all Tensor or all Tile, got {type(acc).__name__}")
 
 
 def row_max(input: T, tmp_tile: Tile | None = None) -> T:

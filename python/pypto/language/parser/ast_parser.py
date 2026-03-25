@@ -2412,7 +2412,6 @@ class ASTParser:
         "move",
         "log",
         "relu",
-        "matmul_acc",
         "minimum",
         "cmp",
         "cmps",

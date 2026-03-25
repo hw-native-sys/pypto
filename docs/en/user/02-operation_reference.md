@@ -21,6 +21,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `transpose` | `(input: T, axis1: int, axis2: int) -> T` | Swap two axes |
 | `slice` | `(input: T, shape: Sequence[IntLike], offset: Sequence[IntLike]) -> T` | Slice with offset |
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
+| `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
@@ -55,6 +56,7 @@ Operate on `Tensor` objects (DDR memory).
 | `exp` | `(input: Tensor) -> Tensor` | Element-wise exponential |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | Type cast |
 | `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` | Matrix multiplication |
+| `matmul_acc` | `(acc: Tensor, lhs: Tensor, rhs: Tensor, a_trans=False, b_trans=False) -> Tensor` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 
 ## Data Movement (`pl.tile.*`)
 
