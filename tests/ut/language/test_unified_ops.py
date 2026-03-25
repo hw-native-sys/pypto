@@ -19,7 +19,6 @@ import pytest
 from pypto import DataType, ir
 from pypto.language.op import unified_ops
 from pypto.language.typing import Tensor, Tile
-from pypto.pypto_core import ir as _ir_core
 
 
 class TestUnifiedTensorDispatch:
@@ -844,9 +843,9 @@ class TestUnifiedOpsTypeErrors:
 
     def test_add_mixed_tensor_tile(self):
         """Mixing Tensor and Tile in add gives a clear mixed-type error."""
-        span = _ir_core.Span("<test>", 0, 0, 0, 0)
-        t = Tensor(expr=_ir_core.Var("x", _ir_core.TensorType([64], DataType.FP32), span))
-        ti = Tile(expr=_ir_core.Var("y", _ir_core.TileType([64], DataType.FP32), span))
+        span = ir.Span.unknown()
+        t = Tensor(expr=ir.Var("x", ir.TensorType([64], DataType.FP32), span))
+        ti = Tile(expr=ir.Var("y", ir.TileType([64], DataType.FP32), span))
         with pytest.raises(TypeError, match="cannot mix Tensor and Tile"):
             unified_ops.add(t, ti)  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="cannot mix Tensor and Tile"):
