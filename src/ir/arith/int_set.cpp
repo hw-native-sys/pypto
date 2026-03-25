@@ -180,6 +180,11 @@ Interval CombineMul(const Interval& a, const Interval& b, Analyzer* p) {
     return {val, val};
   }
 
+  // Normalize: ensure singleton factor is on the RHS for symmetric handling.
+  if (a.is_single_point() && !b.is_single_point()) {
+    return CombineMul(b, a, p);
+  }
+
   // When b is a single-point non-negative constant: [a.min * b, a.max * b]
   if (b.is_single_point() && IsNonNeg(b.min_value, p)) {
     return {SymMul(a.min_value, b.min_value, p), SymMul(a.max_value, b.min_value, p)};
@@ -358,8 +363,14 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
   IntSet VisitExpr_(const BitNotPtr& /*op*/) override { return IntSet::Everything(); }
 
   IntSet VisitExpr_(const CastPtr& op) override {
-    // Propagate through casts (approximate — ignores narrowing).
-    return VisitExpr(op->operand_);
+    // Only propagate bounds through widening casts (target >= source bits).
+    // Narrowing casts can wrap/truncate, making interval propagation unsound.
+    DataType src_dtype = GetScalarDtype(op->operand_);
+    DataType dst_dtype = GetScalarDtype(std::static_pointer_cast<const Expr>(op));
+    if (dst_dtype.GetBit() >= src_dtype.GetBit() && dst_dtype.IsInt() == src_dtype.IsInt()) {
+      return VisitExpr(op->operand_);
+    }
+    return IntSet::Everything();
   }
 
  private:
