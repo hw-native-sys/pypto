@@ -273,6 +273,9 @@ class TransitiveComparisonAnalyzer {
   /// Bind a variable to the half-open range [min_val, max_val_exclusive).
   void Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override = false);
 
+  /// Remove all known comparisons involving a variable, restoring it to an unbound state.
+  void Unbind(const VarPtr& var);
+
   /// Enter a constraint scope. Returns a recovery function that restores original state.
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 

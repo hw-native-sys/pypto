@@ -10,13 +10,13 @@
 """Type stubs for the arith submodule (arithmetic simplification utilities)."""
 
 from collections.abc import Callable
-from enum import IntEnum
+from enum import IntFlag
 from types import TracebackType
 from typing import ClassVar, overload
 
 from pypto.pypto_core.ir import Expr, Var
 
-class CompareResult(IntEnum):
+class CompareResult(IntFlag):
     """Result of comparing two expressions.
 
     Uses bitwise encoding: bit0=EQ, bit1=LT, bit2=GT.
@@ -219,6 +219,10 @@ class TransitiveComparisonAnalyzer:
     def bind(self, var: Var, min_val: int, max_val_exclusive: int, allow_override: bool = False) -> None: ...
     def bind(self, var: Var, *args, **kwargs) -> None:
         """Bind a variable to an expression or half-open range [min_val, max_val_exclusive)."""
+        ...
+
+    def unbind(self, var: Var) -> None:
+        """Remove all known comparisons involving a variable."""
         ...
 
     def enter_constraint(self, constraint: Expr) -> Callable[[], None]:

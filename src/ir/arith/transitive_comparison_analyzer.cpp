@@ -15,6 +15,7 @@
  * - MLC-Python (https://github.com/mlc-ai/mlc-python), Apache License 2.0
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -116,6 +117,7 @@ class TransitiveComparisonAnalyzer::Impl {
 
   void Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override);
   void Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override);
+  void Unbind(const VarPtr& var);
 
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
@@ -171,6 +173,9 @@ class TransitiveComparisonAnalyzer::Impl {
 
   /// Map from expression pointer to Key.
   std::unordered_map<const Expr*, Key> expr_to_key_;
+
+  /// Owned expression pointers to ensure keys in expr_to_key_ remain valid.
+  std::vector<ExprPtr> key_exprs_;
 
   /// Known comparisons from Bind calls (always true by definition).
   std::vector<Comparison> knowns_;
@@ -273,6 +278,7 @@ TransitiveComparisonAnalyzer::Impl::Key TransitiveComparisonAnalyzer::Impl::Expr
   }
   Key new_key = Key(expr_to_key_.size());
   expr_to_key_[raw] = new_key;
+  key_exprs_.push_back(expr);  // Keep ExprPtr alive for the lifetime of the analyzer.
   return new_key;
 }
 
@@ -395,11 +401,11 @@ TransitiveComparisonAnalyzer::Impl::CollectIndirectComparisons(Key lhs_key, Key 
 
 std::vector<TransitiveComparisonAnalyzer::Impl::Comparison> TransitiveComparisonAnalyzer::Impl::DFSFromLHS(
     Key lhs_key, Key rhs_key) const {
-  std::unordered_set<Key, KeyHash> seen;
   std::unordered_set<Key, KeyHash> to_visit;
   std::unordered_map<Key, std::vector<Comparison>, KeyHash> compared_to_lhs;
 
   // Utility to add a new known comparison, managing redundancy.
+  // Re-enqueues cmp.rhs_ for visitation whenever the derived fact set changes.
   auto declare_known = [&](Comparison cmp) {
     std::vector<Comparison>& knowns = compared_to_lhs[cmp.rhs_];
 
@@ -410,22 +416,23 @@ std::vector<TransitiveComparisonAnalyzer::Impl::Comparison> TransitiveComparison
       }
     }
 
-    // Mark for visitation if new.
-    if (cmp.rhs_ != rhs_key && seen.count(cmp.rhs_) == 0) {
-      to_visit.insert(cmp.rhs_);
-      seen.insert(cmp.rhs_);
-    }
-
     // Check if this replaces a weaker existing comparison.
     for (auto& prev_known : knowns) {
       if (cmp.Implies(prev_known)) {
         prev_known = cmp;
+        // Strengthened — re-enqueue to recompute outgoing edges.
+        if (cmp.rhs_ != rhs_key) {
+          to_visit.insert(cmp.rhs_);
+        }
         return;
       }
     }
 
-    // Independent knowledge — track separately.
+    // Independent knowledge — track separately and enqueue.
     knowns.push_back(cmp);
+    if (cmp.rhs_ != rhs_key) {
+      to_visit.insert(cmp.rhs_);
+    }
   };
 
   // Seed with direct comparisons involving the LHS.
@@ -577,17 +584,19 @@ CompareResult TransitiveComparisonAnalyzer::Impl::TryCompare(const ExprPtr& lhs_
 
   auto [lhs, rhs, offset] = ExtractOffsets(lhs_expr, rhs_expr);
 
+  // Tautological case: same base expression (e.g., x+1 vs x+2).
+  if (lhs && rhs && lhs.get() == rhs.get()) {
+    if (offset < 0) return CompareResult::kGT;
+    if (offset > 0) return CompareResult::kLT;
+    return CompareResult::kEQ;
+  }
+
   // Use zero sentinel for pure-constant sides.
   auto lhs_key = lhs ? ExprToPreviousKey(lhs) : ExprToPreviousKey(GetZeroExpr());
   auto rhs_key = rhs ? ExprToPreviousKey(rhs) : ExprToPreviousKey(GetZeroExpr());
 
   if (!lhs_key.has_value() || !rhs_key.has_value()) {
     return CompareResult::kUnknown;
-  }
-
-  // Same expression with zero offset is always equal.
-  if (lhs_key.value() == rhs_key.value() && offset == 0) {
-    return CompareResult::kEQ;
   }
 
   auto lhs_to_rhs = propagate_inequalities ? CollectIndirectComparisons(lhs_key.value(), rhs_key.value())
@@ -615,13 +624,22 @@ void TransitiveComparisonAnalyzer::Impl::Bind(const VarPtr& var, int64_t min_val
   }
 }
 
+void TransitiveComparisonAnalyzer::Impl::Unbind(const VarPtr& var) {
+  auto key = ExprToPreviousKey(std::static_pointer_cast<const Expr>(var));
+  if (!key.has_value()) return;
+
+  Key var_key = key.value();
+  auto involves_var = [var_key](const Comparison& cmp) { return cmp.lhs_ == var_key || cmp.rhs_ == var_key; };
+  knowns_.erase(std::remove_if(knowns_.begin(), knowns_.end(), involves_var), knowns_.end());
+}
+
 std::function<void()> TransitiveComparisonAnalyzer::Impl::EnterConstraint(const ExprPtr& constraint) {
   size_t old_size = scoped_knowns_.size();
   AddKnown(constraint, &scoped_knowns_);
   size_t new_size = scoped_knowns_.size();
 
   if (old_size == new_size) {
-    return {};  // No constraints extracted — no cleanup needed.
+    return []() {};  // No constraints extracted — return no-op for consistent callable return.
   }
 
   return [old_size, new_size, this]() {
@@ -659,6 +677,8 @@ void TransitiveComparisonAnalyzer::Bind(const VarPtr& var, int64_t min_val, int6
                                         bool allow_override) {
   impl_->Bind(var, min_val, max_val_exclusive, allow_override);
 }
+
+void TransitiveComparisonAnalyzer::Unbind(const VarPtr& var) { impl_->Unbind(var); }
 
 std::function<void()> TransitiveComparisonAnalyzer::EnterConstraint(const ExprPtr& constraint) {
   return impl_->EnterConstraint(constraint);

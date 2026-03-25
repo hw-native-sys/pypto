@@ -28,17 +28,20 @@ namespace pypto {
 namespace ir {
 namespace arith {
 
-/// Decompose an AND-chain into individual constraints.
-/// For `a && b`, returns `[a && b, a, b]`.
+/// Decompose an AND-chain into individual constraints using an iterative worklist.
+/// For `a && b`, returns `[a && b, a, b]` (pre-order traversal).
 inline std::vector<ExprPtr> ExtractConstraints(const ExprPtr& expr) {
   std::vector<ExprPtr> result;
-  result.push_back(expr);
-  auto and_node = As<And>(expr);
-  if (and_node) {
-    auto left_parts = ExtractConstraints(and_node->left_);
-    auto right_parts = ExtractConstraints(and_node->right_);
-    result.insert(result.end(), left_parts.begin(), left_parts.end());
-    result.insert(result.end(), right_parts.begin(), right_parts.end());
+  std::vector<ExprPtr> worklist({expr});
+  while (!worklist.empty()) {
+    ExprPtr current = worklist.back();
+    worklist.pop_back();
+    result.push_back(current);
+    if (auto and_node = As<And>(current)) {
+      // Push right then left to process left first, maintaining pre-order traversal.
+      worklist.push_back(and_node->right_);
+      worklist.push_back(and_node->left_);
+    }
   }
   return result;
 }

@@ -83,8 +83,8 @@ class TestBind:
         assert t.try_compare(v, ci(5)) == CompareResult.kEQ
 
     def test_bind_range_bounds(self):
-        # x is already bound to [-100, 100) on the shared tca
-        assert tca.try_compare(x, ci(0)) in (CompareResult.kGE, CompareResult.kUnknown)
+        # x is bound to [-100, 100) — not enough to prove x >= 0
+        assert tca.try_compare(x, ci(0)) == CompareResult.kUnknown
 
 
 # ============================================================================
@@ -190,7 +190,7 @@ class TestOffsets:
         assert tca.try_compare(x, y_plus_3) == CompareResult.kLE
         # x compared to y+4: we know x <= y+3, i.e. x < y+4
         y_plus_4 = ir.Add(y, ci(4), INT, S)
-        assert tca.try_compare(x, y_plus_4) in (CompareResult.kLT, CompareResult.kLE)
+        assert tca.try_compare(x, y_plus_4) == CompareResult.kLT
         # x compared to y+2 — cannot prove
         y_plus_2 = ir.Add(y, ci(2), INT, S)
         assert tca.try_compare(x, y_plus_2) == CompareResult.kUnknown
@@ -223,8 +223,8 @@ class TestAnalyzerIntegration:
         assert a2.transitive_cmp.try_compare(p, q) == CompareResult.kEQ
 
     def test_bind_range_propagates(self):
-        result = ana.transitive_cmp.try_compare(ax, ci(0))
-        assert result in (CompareResult.kGE, CompareResult.kUnknown)
+        # ax is bound to [-100, 100) — not enough to prove ax >= 0
+        assert ana.transitive_cmp.try_compare(ax, ci(0)) == CompareResult.kUnknown
 
     def test_constraint_context_propagates(self):
         with ana.constraint_context(ir.Lt(ax, ay, BOOL, S)):

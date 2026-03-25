@@ -70,6 +70,7 @@ void Analyzer::Unbind(const VarPtr& var) {
   const_int_bound.Unbind(var);
   modular_set.Unbind(var);
   rewrite_simplify.Update(var, nullptr);
+  transitive_cmp.Unbind(var);
 }
 
 ExprPtr Analyzer::Simplify(const ExprPtr& expr, int steps) {

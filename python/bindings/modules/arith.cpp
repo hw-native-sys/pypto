@@ -161,7 +161,8 @@ void BindArith(nb::module_& m) {
   // CompareResult enum
   nb::enum_<ir::arith::CompareResult>(arith, "CompareResult",
                                       "Result of comparing two expressions.\n\n"
-                                      "Uses bitwise encoding: bit0=EQ, bit1=LT, bit2=GT.")
+                                      "Uses bitwise encoding: bit0=EQ, bit1=LT, bit2=GT.",
+                                      nb::is_arithmetic())
       .value("kInconsistent", ir::arith::CompareResult::kInconsistent, "Contradiction.")
       .value("kEQ", ir::arith::CompareResult::kEQ, "lhs == rhs.")
       .value("kLT", ir::arith::CompareResult::kLT, "lhs < rhs.")
@@ -191,6 +192,8 @@ void BindArith(nb::module_& m) {
            nb::arg("var"), nb::arg("min_val"), nb::arg("max_val_exclusive"),
            nb::arg("allow_override") = false,
            "Bind a variable to the half-open range [min_val, max_val_exclusive).")
+      .def("unbind", &ir::arith::TransitiveComparisonAnalyzer::Unbind, nb::arg("var"),
+           "Remove all known comparisons involving a variable.")
       .def("enter_constraint", &ir::arith::TransitiveComparisonAnalyzer::EnterConstraint,
            nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function that restores original state.");
