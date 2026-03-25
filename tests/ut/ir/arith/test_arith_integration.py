@@ -51,25 +51,21 @@ def assert_same_expr(result: ir.Expr, expected: ir.Expr) -> None:
 class TestTilingPatterns:
     """End-to-end tiling index simplification through the full Analyzer.
 
-    Note: Analyzer.simplify() uses rewrite_simplify only. The rewrite rule
-    for div-mod recombination requires the divisor to be the *same* ExprPtr
-    object across floordiv, mul, and floormod. This mirrors how the IR is
-    actually constructed by the compiler (loop split produces shared refs).
+    The PEqualChecker<ExprPtr> uses value-based comparison for ConstInt nodes,
+    so separate ci(8) calls are correctly matched as equal by the pattern matcher.
     """
 
-    def test_div_mod_recombination_shared_divisor(self):
-        """(i // c) * c + i % c -> i when c is a shared ExprPtr."""
-        c8 = ci(8)
-        div_part = ir.Mul(ir.FloorDiv(x, c8, INT, S), c8, INT, S)
-        mod_part = ir.FloorMod(x, c8, INT, S)
+    def test_div_mod_recombination(self):
+        """(i // 8) * 8 + i % 8 -> i with separate constant objects."""
+        div_part = ir.Mul(ir.FloorDiv(x, ci(8), INT, S), ci(8), INT, S)
+        mod_part = ir.FloorMod(x, ci(8), INT, S)
         result = ana.simplify(ir.Add(div_part, mod_part, INT, S))
         assert_same_expr(result, x)
 
-    def test_div_mod_recombination_reversed_shared(self):
-        """i % c + (i // c) * c -> i with shared divisor."""
-        c8 = ci(8)
-        mod_part = ir.FloorMod(x, c8, INT, S)
-        div_part = ir.Mul(ir.FloorDiv(x, c8, INT, S), c8, INT, S)
+    def test_div_mod_recombination_reversed(self):
+        """i % 8 + (i // 8) * 8 -> i (reversed operand order)."""
+        mod_part = ir.FloorMod(x, ci(8), INT, S)
+        div_part = ir.Mul(ir.FloorDiv(x, ci(8), INT, S), ci(8), INT, S)
         result = ana.simplify(ir.Add(mod_part, div_part, INT, S))
         assert_same_expr(result, x)
 
@@ -87,25 +83,35 @@ class TestTilingPatterns:
         assert_same_expr(result, x)
         ana.unbind(x)
 
-    def test_two_level_tiling_shared_divisor(self):
-        """Two-level tiling: (i // c) * c + i % c -> i with shared divisor."""
-        c8 = ci(8)
-        outer = ir.FloorDiv(x, c8, INT, S)
-        inner = ir.FloorMod(x, c8, INT, S)
-        reconstructed = ir.Add(ir.Mul(outer, c8, INT, S), inner, INT, S)
+    def test_two_level_tiling(self):
+        """Two-level tiling: (i // 8) * 8 + i % 8 -> i."""
+        ana.bind(x, 0, 64)
+        outer = ir.FloorDiv(x, ci(8), INT, S)
+        inner = ir.FloorMod(x, ci(8), INT, S)
+        reconstructed = ir.Add(ir.Mul(outer, ci(8), INT, S), inner, INT, S)
         result = ana.simplify(reconstructed)
         assert_same_expr(result, x)
+        ana.unbind(x)
 
-    def test_tiling_with_offset_shared_divisor(self):
-        """(i // c) * c + i % c + base -> i + base with shared divisor."""
-        c4 = ci(4)
-        div_part = ir.Mul(ir.FloorDiv(x, c4, INT, S), c4, INT, S)
-        mod_part = ir.FloorMod(x, c4, INT, S)
+    def test_tiling_with_offset(self):
+        """(i // 4) * 4 + i % 4 + base -> i + base."""
+        ana.bind(x, 0, 64)
+        div_part = ir.Mul(ir.FloorDiv(x, ci(4), INT, S), ci(4), INT, S)
+        mod_part = ir.FloorMod(x, ci(4), INT, S)
         recombined = ir.Add(div_part, mod_part, INT, S)
         with_offset = ir.Add(recombined, ci(100), INT, S)
         result = ana.simplify(with_offset)
         expected = ir.Add(x, ci(100), INT, S)
         assert_same_expr(result, expected)
+        ana.unbind(x)
+
+    def test_different_divisor_values_no_recombination(self):
+        """(i // 8) * 4 + i % 8 should NOT recombine (divisor mismatch: 8 vs 4)."""
+        div_part = ir.Mul(ir.FloorDiv(x, ci(8), INT, S), ci(4), INT, S)
+        mod_part = ir.FloorMod(x, ci(8), INT, S)
+        result = ana.simplify(ir.Add(div_part, mod_part, INT, S))
+        # Should not simplify to x — divisor in mul (4) != divisor in floordiv (8)
+        assert not (isinstance(result, ir.Var) and result is x)
 
 
 # ============================================================================
@@ -424,26 +430,6 @@ class TestRealisticScenarios:
         div_result = ana.simplify(ir.FloorDiv(combined, ci(4), INT, S))
         assert_same_expr(div_result, x)
 
-        mod_result = ana.simplify(ir.FloorMod(combined, ci(4), INT, S))
-        assert_same_expr(mod_result, y)
-        ana.unbind(x)
-        ana.unbind(y)
-
-    def test_split_reconstruct_inner_outer(self):
-        """Split then reconstruct: (outer * 4 + inner) // 4 -> outer, % 4 -> inner.
-
-        This is the realistic split pattern: after splitting loop with factor 4,
-        the outer and inner indices are used to reconstruct the original index.
-        """
-        ana.bind(x, 0, 4)  # outer
-        ana.bind(y, 0, 4)  # inner
-        combined = ir.Add(ir.Mul(x, ci(4), INT, S), y, INT, S)
-
-        # (outer * 4 + inner) // 4 -> outer (via modular + bound info)
-        div_result = ana.simplify(ir.FloorDiv(combined, ci(4), INT, S))
-        assert_same_expr(div_result, x)
-
-        # (outer * 4 + inner) % 4 -> inner
         mod_result = ana.simplify(ir.FloorMod(combined, ci(4), INT, S))
         assert_same_expr(mod_result, y)
         ana.unbind(x)
