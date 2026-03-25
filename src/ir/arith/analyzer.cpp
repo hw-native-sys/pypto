@@ -63,6 +63,12 @@ void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusiv
   }
 }
 
+void Analyzer::Unbind(const VarPtr& var) {
+  const_int_bound.Unbind(var);
+  modular_set.Unbind(var);
+  rewrite_simplify.Update(var, nullptr);
+}
+
 ExprPtr Analyzer::Simplify(const ExprPtr& expr, int steps) {
   CHECK(steps >= 0) << "Simplify requires non-negative steps, got " << steps;
   ExprPtr result = expr;

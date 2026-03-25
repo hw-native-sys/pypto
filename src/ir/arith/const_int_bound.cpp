@@ -170,6 +170,8 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
 
   void Bind(const VarPtr& var, const Bound& bound) { var_map_[var.get()] = bound; }
 
+  void Unbind(const VarPtr& var) { var_map_.erase(var.get()); }
+
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
   Bound VisitExpr(const ExprPtr& expr) override { return ExprFunctor<Bound>::VisitExpr(expr); }
@@ -500,6 +502,8 @@ void ConstIntBoundAnalyzer::Update(const VarPtr& var, const Bound& bound) {
       << "Update requires min_value <= max_value, got [" << bound.min_value << ", " << bound.max_value << "]";
   impl_->Bind(var, bound);
 }
+
+void ConstIntBoundAnalyzer::Unbind(const VarPtr& var) { impl_->Unbind(var); }
 
 std::function<void()> ConstIntBoundAnalyzer::EnterConstraint(const ExprPtr& constraint) {
   return impl_->EnterConstraint(constraint);

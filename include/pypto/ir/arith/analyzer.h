@@ -76,6 +76,9 @@ class ConstIntBoundAnalyzer {
   /// Update a variable's bound (inclusive on both ends).
   void Update(const VarPtr& var, const ConstIntBound& bound);
 
+  /// Remove a variable's binding, restoring it to the default (everything) state.
+  void Unbind(const VarPtr& var);
+
   /// Enter a constraint scope (e.g., inside an if-branch where expr is known true).
   /// Returns a recovery function that restores original bounds.
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
@@ -122,6 +125,9 @@ class ModularSetAnalyzer {
 
   /// Update a variable's modular set information.
   void Update(const VarPtr& var, const ModularSet& info);
+
+  /// Remove a variable's modular set information, restoring it to the default (everything) state.
+  void Unbind(const VarPtr& var);
 
   /// Enter a constraint scope. Returns a recovery function.
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
@@ -238,6 +244,9 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   /// Bind a variable to the half-open range [min_val, max_val_exclusive).
   /// \note allow_override is reserved for future use and currently has no effect.
   void Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override = false);
+
+  /// Remove a variable's binding from all sub-analyzers, restoring it to an unbound state.
+  void Unbind(const VarPtr& var);
 
   /// Simplify an expression by iterative rewrite simplification.
   /// \param steps Number of simplification rounds (default 2).

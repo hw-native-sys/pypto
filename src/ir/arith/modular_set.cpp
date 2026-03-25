@@ -110,6 +110,8 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
 
   void Update(const VarPtr& var, const Entry& entry) { var_map_[var.get()] = entry; }
 
+  void Unbind(const VarPtr& var) { var_map_.erase(var.get()); }
+
   std::function<void()> EnterConstraint(const ExprPtr& constraint);
 
   Entry VisitExpr(const ExprPtr& expr) override { return ExprFunctor<Entry>::VisitExpr(expr); }
@@ -361,6 +363,8 @@ void ModularSetAnalyzer::Update(const VarPtr& var, const ModularSet& info) {
   CHECK(info.coeff >= 0) << "ModularSet coeff must be non-negative, got " << info.coeff;
   impl_->Update(var, {info.coeff, info.base});
 }
+
+void ModularSetAnalyzer::Unbind(const VarPtr& var) { impl_->Unbind(var); }
 
 std::function<void()> ModularSetAnalyzer::EnterConstraint(const ExprPtr& constraint) {
   return impl_->EnterConstraint(constraint);

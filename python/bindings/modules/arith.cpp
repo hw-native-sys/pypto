@@ -128,7 +128,9 @@ void BindArith(nb::module_& m) {
            nb::arg("max_val_exclusive"),
            "Bind a variable to the half-open range [min_val, max_val_exclusive).")
       .def("update", &ir::arith::ConstIntBoundAnalyzer::Update, nb::arg("var"), nb::arg("bound"),
-           "Update a variable's bound (inclusive on both ends).");
+           "Update a variable's bound (inclusive on both ends).")
+      .def("unbind", &ir::arith::ConstIntBoundAnalyzer::Unbind, nb::arg("var"),
+           "Remove a variable's binding, restoring it to the default (everything) state.");
 
   // ModularSet
   nb::class_<ir::arith::ModularSet>(arith, "ModularSet",
@@ -152,6 +154,8 @@ void BindArith(nb::module_& m) {
            "Compute modular set for an expression.")
       .def("update", &ir::arith::ModularSetAnalyzer::Update, nb::arg("var"), nb::arg("info"),
            "Update a variable's modular set information.")
+      .def("unbind", &ir::arith::ModularSetAnalyzer::Unbind, nb::arg("var"),
+           "Remove a variable's modular set information, restoring it to the default (everything) state.")
       .def("enter_constraint", &ir::arith::ModularSetAnalyzer::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function, or None if constraint is not useful.");
 
@@ -180,6 +184,8 @@ void BindArith(nb::module_& m) {
            "Prove that expr < upper_bound for all possible variable values.")
       .def("can_prove_equal", &ir::arith::Analyzer::CanProveEqual, nb::arg("lhs"), nb::arg("rhs"),
            "Prove that lhs and rhs are always equal.")
+      .def("unbind", &ir::arith::Analyzer::Unbind, nb::arg("var"),
+           "Remove a variable's binding from all sub-analyzers, restoring it to an unbound state.")
       .def("can_prove", &ir::arith::Analyzer::CanProve, nb::arg("cond"),
            "Prove that a boolean condition is always true.")
       .def(

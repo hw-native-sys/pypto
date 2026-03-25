@@ -138,6 +138,10 @@ class ConstIntBoundAnalyzer:
         """Update a variable's bound (inclusive on both ends)."""
         ...
 
+    def unbind(self, var: Var) -> None:
+        """Remove a variable's binding, restoring it to the default (everything) state."""
+        ...
+
 class ModularSet:
     """Modular arithmetic properties: value = coeff * k + base."""
 
@@ -171,6 +175,10 @@ class ModularSetAnalyzer:
         """Update a variable's modular set information."""
         ...
 
+    def unbind(self, var: Var) -> None:
+        """Remove a variable's modular set information, restoring it to the default (everything) state."""
+        ...
+
     def enter_constraint(self, constraint: Expr) -> Callable[[], None] | None:
         """Enter a constraint scope. Returns a recovery function, or None."""
         ...
@@ -192,6 +200,10 @@ class Analyzer:
     def bind(self, var: Var, min_val: int, max_val_exclusive: int, allow_override: bool = False) -> None: ...
     def bind(self, var: Var, *args, **kwargs) -> None:
         """Bind a variable to an expression or half-open range [min_val, max_val_exclusive)."""
+        ...
+
+    def unbind(self, var: Var) -> None:
+        """Remove a variable's binding from all sub-analyzers, restoring it to an unbound state."""
         ...
 
     def simplify(self, expr: Expr, steps: int = 2) -> Expr:
