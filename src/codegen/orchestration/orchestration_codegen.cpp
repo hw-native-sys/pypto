@@ -1113,9 +1113,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (!callee) return;
 
     auto out_indices = CollectOutIndices(callee);
-    for (size_t ei = 0; ei < elements_it->second.size() && ei < out_indices.size(); ++ei) {
-      std::string elem_name = ReserveVarEmitName(elements_it->second[ei].var);
-      EmitTensorAlias(elem_name, call, out_indices[ei]);
+    for (const auto& elem : elements_it->second) {
+      INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
+          << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
+          << " (has " << out_indices.size() << " Out/InOut params)";
+      std::string elem_name = ReserveVarEmitName(elem.var);
+      EmitTensorAlias(elem_name, call, out_indices[static_cast<size_t>(elem.index)]);
     }
   }
 
