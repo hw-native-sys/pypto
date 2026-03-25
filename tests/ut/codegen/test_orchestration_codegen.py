@@ -687,13 +687,14 @@ class TestOrchestration:
         files = generator.generate(FourTupleProgram)
         code = files["orchestration/orch_four_tuple.cpp"]
 
-        # All orch params are external tensors
-        assert "orch[3].to_tensor()" in code  # mi_in
-        assert "orch[4].to_tensor()" in code  # oi_in
-        assert "orch[5].to_tensor()" in code  # dst_in
+        # All orch params are external tensors (mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7)
+        assert "Tensor ext_mi_in = orch[3].to_tensor()" in code
+        assert "Tensor ext_li_in = orch[4].to_tensor()" in code
+        assert "Tensor ext_oi_in = orch[5].to_tensor()" in code
+        assert "Tensor ext_dst_in = orch[6].to_tensor()" in code
 
         # Final return tensor is external
-        assert "orch[6].to_tensor()" in code  # final
+        assert "Tensor ext_final = orch[7].to_tensor()" in code
 
         # Two tasks: online_update + kernel_add
         assert code.count("pto2_rt_submit_aiv_task") == 2

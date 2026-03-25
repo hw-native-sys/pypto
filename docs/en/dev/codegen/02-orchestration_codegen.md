@@ -4,7 +4,7 @@
 
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [CCE codegen](01-cce_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
-- Wraps device memory pointers into `Tensor` objects
+- Wraps device memory pointers (via `OrchArg`) into `Tensor` objects
 - Builds `PTOParam` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
 - Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `pto2_rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
@@ -39,8 +39,8 @@ An IR visitor that pre-scans the function body to collect:
 The main code generator. Visits each IR statement and emits corresponding C++:
 
 - **AssignStmt** → tensor operations, function calls, or alias generation
-- **ForStmt** → `PTO2_SCOPE` with iter_arg initialization and yield updates
-- **IfStmt** → conditional blocks with return variable handling
+- **ForStmt** → `for` loop with iter_arg initialization and yield updates
+- **IfStmt** → conditional blocks with `PTO2_SCOPE` per branch and return variable handling
 - **YieldStmt** → variable reassignment for loop-carried values
 
 ### Operation Registry
@@ -57,9 +57,9 @@ This allows extensible operation codegen without modifying the core visitor.
 
 ## Code Generation Flow
 
-`GenerateOrchestration()` produces C++ in 10 phases:
+`GenerateOrchestration()` produces C++ in 9 phases:
 
-### Phase 1–3: Boilerplate
+### Phase 1–2: Boilerplate
 
 ```cpp
 // Phase 1: Includes
@@ -68,61 +68,58 @@ This allows extensible operation codegen without modifying the core visitor.
 #include <stdio.h>
 #include "pto_orchestration_api.h"
 
-// Phase 2: ARG defines (one per tensor parameter)
-#define ARG_PTR_A 0
-#define ARG_PTR_B 1
-#define ARG_PTR_OUTPUT 2
-
-// Phase 3: Helper functions
+// Phase 2: Helper functions
 static uint64_t float_to_u64(float f) { ... }
 static inline Tensor make_tensor_external_2d_dn(...) { ... }
 static inline Tensor make_tensor_2d_dn(...) { ... }
 ```
 
-### Phase 4–5: Entry Points
+### Phase 3–4: Entry Points
 
 ```cpp
-// Phase 4: Config function — returns expected argument count
-PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
+// Phase 3: Config function — returns expected argument count
+PTO2OrchestrationConfig aicpu_orchestration_config(OrchArg* orch_args) {
+    (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-// Phase 5: Entry function signature
-void aicpu_orchestration_entry(uint64_t* args,
+// Phase 4: Entry function signature
+void aicpu_orchestration_entry(OrchArg* orch,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 ```
 
-### Phase 6–8: Tensor Setup
+### Phase 5–6: Tensor Setup
 
 ```cpp
-// Phase 6: Extract device pointers from args array
-void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
-void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
-void* arg_output_ptr = reinterpret_cast<void*>(args[ARG_PTR_OUTPUT]);
+// Phase 5: External tensors — ND layout via to_tensor()
+Tensor ext_a = orch[0].to_tensor();
+Tensor ext_b = orch[1].to_tensor();
 
-// Phase 7: External tensors (from function parameters)
-uint32_t a_shapes[2] = {16, 16};
-Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
+// DN layout: pass logical shape — make_tensor_external_2d_dn handles axis transposition internally
+uint32_t dn_shapes[2] = {orch[2].tensor.shapes[0], orch[2].tensor.shapes[1]};
+Tensor ext_dn = make_tensor_external_2d_dn(orch[2].data<void>(), dn_shapes, 2, DataType::FLOAT32);
 
-// Phase 8: Internal tensors (from pl.create_tensor — intermediates only)
+// Phase 6: Internal tensors (from pl.create_tensor — intermediates only)
 uint32_t tmp_shapes[2] = {16, 16};
 Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 ```
 
-### Phase 9–10: Task Submission and Control Flow
+### Phase 7–9: Task Submission and Control Flow
+
+All task submission is wrapped in a top-level `PTO2_SCOPE()`:
 
 ```cpp
-// Phase 9: Task submission — tensors first, then scalars
-PTOParam params_t0;
-params_t0.add_input(ext_a);
-params_t0.add_input(ext_b);
-params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(0, params_t0);
+// Phase 7–9: Top-level PTO2_SCOPE wraps all task submissions
+PTO2_SCOPE() {
+    PTOParam params_t0;
+    params_t0.add_input(ext_a);
+    params_t0.add_input(ext_b);
+    params_t0.add_output(ext_output);
+    pto2_rt_submit_aiv_task(0, params_t0);
 
-// Phase 10: Control flow (ForStmt example)
-PTO2_SCOPE {
+    // ForStmt example — plain for loop, no nested PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
-        // task submissions inside loop
+        // task submissions
     }
 }
 ```
@@ -131,12 +128,13 @@ PTO2_SCOPE {
 
 ### External vs Internal Tensors
 
-| Type | Source | C++ Function | Naming |
-| ---- | ------ | ------------ | ------ |
-| External | Function parameters (`In`/`Out`/`InOut`) | `make_tensor_external(ptr, shapes, ndims, dtype)` | `ext_<name>` |
+| Type | Source | C++ Construction | Naming |
+| ---- | ------ | ---------------- | ------ |
+| External (ND) | Function parameters (`In`/`Out`/`InOut`) | `orch[N].to_tensor()` | `ext_<name>` |
+| External (DN) | Function parameters, DN layout | `make_tensor_external_2d_dn(orch[N].data<void>(), {orch[N].tensor.shapes[0], orch[N].tensor.shapes[1]}, ...)` — axis ordering handled internally | `ext_<name>` |
 | Internal | `pl.create_tensor(...)` in function body | `make_tensor(shapes, ndims, dtype)` | `<name>` (no prefix) |
 
-External tensors wrap device memory pointers passed from the host. Internal tensors are temporary workspace allocated by the runtime.
+External tensors wrap device memory pointers passed from the host via `OrchArg`. Internal tensors are temporary workspace allocated by the runtime.
 
 ### Parameter Direction
 
@@ -151,7 +149,7 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 
 ### Alias Generation
 
-When an InCore call returns a value with a different name than the `Out`/`InOut` argument, the codegen emits a C++ reference alias:
+When an InCore call returns a value with a different name than the `Out` argument, the codegen emits a C++ reference alias:
 
 ```python
 # Python IR
@@ -166,7 +164,7 @@ pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
-If the return name matches the `Out`/`InOut` arg name, no alias is needed.
+If the return name matches the `Out`/`InOut` arg name, no alias is needed. `InOut` params are never aliased — they are already the external tensor.
 
 ### Core Type Inference
 
@@ -216,7 +214,8 @@ pto2_rt_submit_task(mixed_0, params_t0);
 | `tensor.create` | `make_tensor(shapes, ndims, dtype)` | Allocate internal tensor |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
-| `tensor.dim` | `int64_t d0 = <compile_time_value>` | Extract dimension (compile-time) |
+| `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
+| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch[N].tensor.shapes[axis]` | Runtime dimension from OrchArg |
 
 ## Complete Example
 
@@ -245,51 +244,45 @@ def orch_basic(
 #include <stdio.h>
 #include "pto_orchestration_api.h"
 
-#define ARG_PTR_A 0
-#define ARG_PTR_B 1
-#define ARG_PTR_D 2
-
 static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 
-PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
+PTO2OrchestrationConfig aicpu_orchestration_config(OrchArg* orch_args) {
+    (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(uint64_t* args,
+void aicpu_orchestration_entry(OrchArg* orch,
     int arg_count, int orch_thread_num, int orch_thread_index) {
+    (void)arg_count;
+    (void)orch_thread_num;
+    (void)orch_thread_index;
 
-    // Extract device pointers
-    void* arg_a_ptr = reinterpret_cast<void*>(args[ARG_PTR_A]);
-    void* arg_b_ptr = reinterpret_cast<void*>(args[ARG_PTR_B]);
-    void* arg_d_ptr = reinterpret_cast<void*>(args[ARG_PTR_D]);
-
-    // External tensors (from params)
-    uint32_t a_shapes[2] = {16, 16};
-    Tensor ext_a = make_tensor_external(arg_a_ptr, a_shapes, 2, DataType::FLOAT32);
-    uint32_t b_shapes[2] = {16, 16};
-    Tensor ext_b = make_tensor_external(arg_b_ptr, b_shapes, 2, DataType::FLOAT32);
-    uint32_t d_shapes[2] = {16, 16};
-    Tensor ext_d = make_tensor_external(arg_d_ptr, d_shapes, 2, DataType::FLOAT32);
+    // External tensors (from OrchArg)
+    Tensor ext_a = orch[0].to_tensor();
+    Tensor ext_b = orch[1].to_tensor();
+    Tensor ext_d = orch[2].to_tensor();
 
     // Internal tensor (intermediate)
     uint32_t c_shapes[2] = {16, 16};
     Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
 
-    // Task 0: kernel_add (a + b → c)
-    PTOParam params_t0;
-    params_t0.add_input(ext_a);
-    params_t0.add_input(ext_b);
-    params_t0.add_output(c);
-    pto2_rt_submit_aiv_task(0, params_t0);
+    PTO2_SCOPE() {
+        // Task 0: kernel_add (a + b → c)
+        PTOParam params_t0;
+        params_t0.add_input(ext_a);
+        params_t0.add_input(ext_b);
+        params_t0.add_output(c);
+        pto2_rt_submit_aiv_task(0, params_t0);
 
-    // Task 1: kernel_add (c + b → d)
-    PTOParam params_t1;
-    params_t1.add_input(c);
-    params_t1.add_input(ext_b);
-    params_t1.add_output(ext_d);
-    pto2_rt_submit_aiv_task(0, params_t1);
+        // Task 1: kernel_add (c + b → d)
+        PTOParam params_t1;
+        params_t1.add_input(c);
+        params_t1.add_input(ext_b);
+        params_t1.add_output(ext_d);
+        pto2_rt_submit_aiv_task(1, params_t1);
+    }
 }
 
 }  // extern "C"
@@ -313,11 +306,10 @@ names in the output), but never for identity decisions.
 
 | Entity | Pattern | Example |
 | ------ | ------- | ------- |
-| ARG define | `ARG_PTR_<UPPER>` | `ARG_PTR_A` |
-| Device pointer | `arg_<name>_ptr` | `arg_a_ptr` |
 | External tensor | `ext_<name>` | `ext_a` |
 | Internal tensor | `<name>` (no prefix) | `c` |
 | Task params | `params_t<N>` | `params_t0` |
+| OrchArg index | `orch[N]` (N-th tensor parameter) | `orch[0]` |
 
 ## Control Flow Generation
 
@@ -330,14 +322,12 @@ for i in pl.range(0, 4):
 ```
 
 ```cpp
-// Generated C++
+// Generated C++ (inside top-level PTO2_SCOPE)
 Tensor acc = ext_acc;  // iter_arg initialization
-PTO2_SCOPE {
-    for (int64_t i = 0; i < 4; i += 1) {
-        PTOParam params_t0;
-        // ... add_input / add_output calls ...
-        pto2_rt_submit_aiv_task(0, params_t0);
-    }
+for (int64_t i = 0; i < 4; i += 1) {
+    PTOParam params_t0;
+    // ... add_input / add_output calls ...
+    pto2_rt_submit_aiv_task(0, params_t0);
 }
 ```
 
@@ -356,13 +346,17 @@ else:
 ```cpp
 // Generated C++
 if (condition) {
-    PTOParam params_t0;
-    // ... add_input / add_output calls ...
-    pto2_rt_submit_aiv_task(0, params_t0);
+    PTO2_SCOPE() {
+        PTOParam params_t0;
+        // ... add_input / add_output calls ...
+        pto2_rt_submit_aiv_task(0, params_t0);
+    }
 } else {
-    PTOParam params_t1;
-    // ... add_input / add_output calls ...
-    pto2_rt_submit_aiv_task(1, params_t1);
+    PTO2_SCOPE() {
+        PTOParam params_t1;
+        // ... add_input / add_output calls ...
+        pto2_rt_submit_aiv_task(1, params_t1);
+    }
 }
 ```
 

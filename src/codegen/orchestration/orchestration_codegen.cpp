@@ -574,8 +574,8 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
     size_t ndim = tensor_type->shape_.size();
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
     oss << "    uint32_t " << var_name << "_shapes[2] = {"
-        << "orch[" << orch_index << "].tensor.shapes[1], "
-        << "orch[" << orch_index << "].tensor.shapes[0]};\n";
+        << "orch[" << orch_index << "].tensor.shapes[0], "
+        << "orch[" << orch_index << "].tensor.shapes[1]};\n";
     oss << "    Tensor ext_" << var_name << " = make_tensor_external_2d_dn("
         << "orch[" << orch_index << "].data<void>(), " << var_name << "_shapes, " << ndim << ", "
         << codegen.GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
