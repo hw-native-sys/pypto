@@ -56,44 +56,12 @@ class SimplifyExprMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Simplify loop bounds.
+    // Simplify loop bounds (pre-loop, before binding).
     auto new_start = analyzer_->Simplify(op->start_);
     auto new_stop = analyzer_->Simplify(op->stop_);
     auto new_step = analyzer_->Simplify(op->step_);
 
-    // Bind loop variable to simplified range [start, stop).
-    auto start_ci = As<ConstInt>(new_start);
-    auto stop_ci = As<ConstInt>(new_stop);
-    if (start_ci && stop_ci && stop_ci->value_ > start_ci->value_) {
-      analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
-    }
-
-    // Visit iter_args (their init values may contain simplifiable expressions).
-    std::vector<IterArgPtr> new_iter_args;
-    bool iter_args_changed = false;
-    new_iter_args.reserve(op->iter_args_.size());
-    for (const auto& iter_arg : op->iter_args_) {
-      auto new_init = analyzer_->Simplify(iter_arg->initValue_);
-      if (new_init.get() != iter_arg->initValue_.get()) {
-        auto new_ia =
-            std::make_shared<IterArg>(iter_arg->name_hint_, iter_arg->GetType(), new_init, iter_arg->span_);
-        new_iter_args.push_back(new_ia);
-        var_remap_[iter_arg.get()] = new_ia;
-        iter_args_changed = true;
-      } else {
-        new_iter_args.push_back(iter_arg);
-      }
-    }
-
-    // Visit body with bindings active.
-    auto new_body = VisitStmt(op->body_);
-
-    // Clean up iter_arg remappings.
-    for (const auto& old_ia : op->iter_args_) {
-      var_remap_.erase(old_ia.get());
-    }
-
-    // Visit chunk_size if present.
+    // Simplify chunk_size (pre-loop, before binding).
     std::optional<ExprPtr> new_chunk_size = op->chunk_size_;
     bool chunk_size_changed = false;
     if (op->chunk_size_.has_value()) {
@@ -104,12 +72,28 @@ class SimplifyExprMutator : public arith::IRMutatorWithAnalyzer {
       }
     }
 
+    // Bind loop variable to simplified range [start, stop).
+    auto start_ci = As<ConstInt>(new_start);
+    auto stop_ci = As<ConstInt>(new_stop);
+    bool bound = start_ci && stop_ci && stop_ci->value_ > start_ci->value_;
+    if (bound) {
+      analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
+    }
+
+    // Visit body with binding active.
+    auto new_body = VisitStmt(op->body_);
+
+    // Unbind loop variable so binding doesn't leak past the loop.
+    if (bound) {
+      analyzer_->Unbind(op->loop_var_);
+    }
+
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
-                   (new_step.get() != op->step_.get()) || iter_args_changed ||
-                   (new_body.get() != op->body_.get()) || chunk_size_changed;
+                   (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||
+                   chunk_size_changed;
     if (!changed) return op;
 
-    return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, new_iter_args, new_body,
+    return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
                                      op->return_vars_, op->span_, op->kind_, new_chunk_size,
                                      op->chunk_policy_, op->loop_origin_);
   }
@@ -141,35 +125,10 @@ class SimplifyExprMutator : public arith::IRMutatorWithAnalyzer {
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
     auto new_condition = analyzer_->Simplify(op->condition_);
-
-    // Simplify iter_args init values.
-    std::vector<IterArgPtr> new_iter_args;
-    bool iter_args_changed = false;
-    new_iter_args.reserve(op->iter_args_.size());
-    for (const auto& iter_arg : op->iter_args_) {
-      auto new_init = analyzer_->Simplify(iter_arg->initValue_);
-      if (new_init.get() != iter_arg->initValue_.get()) {
-        auto new_ia =
-            std::make_shared<IterArg>(iter_arg->name_hint_, iter_arg->GetType(), new_init, iter_arg->span_);
-        new_iter_args.push_back(new_ia);
-        var_remap_[iter_arg.get()] = new_ia;
-        iter_args_changed = true;
-      } else {
-        new_iter_args.push_back(iter_arg);
-      }
-    }
-
     auto new_body = VisitStmt(op->body_);
-
-    // Clean up iter_arg remappings.
-    for (const auto& old_ia : op->iter_args_) {
-      var_remap_.erase(old_ia.get());
-    }
-
-    bool changed = (new_condition.get() != op->condition_.get()) || iter_args_changed ||
-                   (new_body.get() != op->body_.get());
+    bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
     if (!changed) return op;
-    return std::make_shared<WhileStmt>(new_condition, new_iter_args, new_body, op->return_vars_, op->span_);
+    return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
   }
 
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {

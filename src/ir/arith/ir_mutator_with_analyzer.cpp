@@ -19,6 +19,7 @@
 
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 
 namespace pypto {
 namespace ir {
@@ -31,12 +32,20 @@ StmtPtr IRMutatorWithAnalyzer::VisitStmt_(const ForStmtPtr& op) {
   auto start_ci = As<ConstInt>(op->start_);
   auto stop_ci = As<ConstInt>(op->stop_);
 
-  if (start_ci && stop_ci && stop_ci->value_ > start_ci->value_) {
+  bool bound = start_ci && stop_ci && stop_ci->value_ > start_ci->value_;
+  if (bound) {
     analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
   }
 
   // Delegate to base IRMutator for standard child visiting and reconstruction.
-  return IRMutator::VisitStmt_(op);
+  auto result = IRMutator::VisitStmt_(op);
+
+  // Unbind loop variable so the binding doesn't leak past the loop.
+  if (bound) {
+    analyzer_->Unbind(op->loop_var_);
+  }
+
+  return result;
 }
 
 }  // namespace arith
