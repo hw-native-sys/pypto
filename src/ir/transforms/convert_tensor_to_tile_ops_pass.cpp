@@ -97,6 +97,28 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
 
   [[nodiscard]] const std::unordered_set<const Var*>& GetUsed() const { return used_; }
 
+  /**
+   * @brief Trace from collected IterArgs to their ForStmt/WhileStmt initValue_ expressions.
+   *
+   * When an IterArg is in used_ (consumed by a converted op), its initValue_ may be a
+   * function parameter that also needs a Phase-1 tile.load.  This fixpoint loop propagates
+   * through chains of IterArgs (e.g. nested loops) until no new entries are added.
+   */
+  void TraceIterArgInitValues() {
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const auto& [iter_arg_ptr, init_expr] : iter_arg_to_init_) {
+        if (used_.count(iter_arg_ptr) == 0) continue;
+        if (auto var = As<Var>(init_expr)) {
+          if (As<TensorType>(var->GetType()) && used_.insert(var.get()).second) {
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
@@ -124,9 +146,26 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (!op) return;
+    for (const auto& iter_arg : op->iter_args_) {
+      iter_arg_to_init_[iter_arg.get()] = iter_arg->initValue_;
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (!op) return;
+    for (const auto& iter_arg : op->iter_args_) {
+      iter_arg_to_init_[iter_arg.get()] = iter_arg->initValue_;
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
  private:
   const OpConversionRegistry& conv_registry_;
   std::unordered_set<const Var*> used_;
+  std::unordered_map<const Var*, ExprPtr> iter_arg_to_init_;
 };
 
 /**
@@ -1278,6 +1317,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   // NOT get an additional Vec-space load inserted here.
   TensorArgsInConvertedOpsCollector collector(conv_registry);
   collector.VisitStmt(func->body_);
+  collector.TraceIterArgInitValues();
   const auto& params_used_by_converted_ops = collector.GetUsed();
 
   for (const auto& var : func->params_) {

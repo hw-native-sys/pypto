@@ -1543,6 +1543,67 @@ class TestNestedControlFlow:
         with pytest.raises(Exception, match="has no registered tile conversion"):
             passes.convert_tensor_to_tile_ops()(prog)
 
+    def test_iter_arg_init_from_tensor_param_gets_preloaded(self):
+        """Tensor parameter used only as ForStmt iter_arg initValue must be pre-loaded.
+
+        Regression test: when a TensorType function parameter is used exclusively as
+        the init value of a ForStmt iter_arg (not as a direct argument to any converted
+        op), Phase 1 must still insert a tile.load for it. Otherwise the iter_arg stays
+        TensorType and later tile ops (e.g. tile.add) fail type-checking.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i, (running_sum,) in pl.range(3, init_values=(acc,)):
+                    new_sum: pl.Tensor[[64], pl.FP32] = pl.add(running_sum, x)
+                    result = pl.yield_(new_sum)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, x)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc_tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                for i, (running_sum,) in pl.range(3, init_values=(acc_tile,)):
+                    new_sum_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(running_sum, x_tile)
+                    result = pl.yield_(new_sum_tile)
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(result, [0], out_0)
+                return out_0_store
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, x, out_0)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestGmLocalTensorConversion:
     """Test gm_tensor vs local_tensor differentiated conversion."""
