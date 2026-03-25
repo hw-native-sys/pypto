@@ -85,9 +85,10 @@ TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tile_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
-  // Output has the same shape as the main tile
+  // Output has the same shape as the main tile, inheriting pad and blayout from src0
   TileView tile_view;
   tile_view.valid_shape = tile_shape;
+  InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -114,6 +115,7 @@ TypePtr DeduceTileColExpandType(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   tile_view.valid_shape = target_type->shape_;
+  InheritTileViewLayout(tile_view, target_type);
   return std::make_shared<TileType>(target_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -140,6 +142,7 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   tile_view.valid_shape = tile_type->shape_;
+  InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -166,6 +169,7 @@ REGISTER_OP("tile.row_expand")
           << " to have at least 2 dimensions, but got " << tile_type->shape_.size() << " dimensions";
       TileView tile_view;
       tile_view.valid_shape = tile_type->shape_;
+      InheritTileViewLayout(tile_view, tile_type);
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });
 

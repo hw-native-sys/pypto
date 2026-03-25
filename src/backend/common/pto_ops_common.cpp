@@ -49,12 +49,42 @@ using ir::CallPtr;
 using ir::TensorType;
 using ir::Var;
 
-static bool RequiresRowMajorElementwiseLayout(std::string_view op_name) {
-  static const std::unordered_set<std::string_view> kRowMajorElementwiseOps = {
-      "tile.add", "tile.and", "tile.div", "tile.maximum", "tile.minimum", "tile.mul", "tile.or",
-      "tile.rem", "tile.sel", "tile.shl", "tile.shr",     "tile.sub",     "tile.xor",
+static bool RequiresRowMajorLayout(std::string_view op_name) {
+  static const std::unordered_set<std::string_view> kRowMajorOps = {
+      // Tile x Tile binary ops
+      "tile.add",
+      "tile.and",
+      "tile.div",
+      "tile.maximum",
+      "tile.minimum",
+      "tile.mul",
+      "tile.or",
+      "tile.rem",
+      "tile.sel",
+      "tile.shl",
+      "tile.shr",
+      "tile.sub",
+      "tile.xor",
+      // Unary ops
+      "tile.abs",
+      "tile.exp",
+      "tile.log",
+      "tile.sqrt",
+      "tile.rsqrt",
+      "tile.recip",
+      "tile.not",
+      "tile.relu",
+      // Tile x Scalar ops
+      "tile.adds",
+      "tile.muls",
+      "tile.divs",
+      "tile.maxs",
+      "tile.lrelu",
+      // Ternary scalar ops (Tile x Scalar x Tile)
+      "tile.addsc",
+      "tile.subsc",
   };
-  return kRowMajorElementwiseOps.count(op_name) > 0;
+  return kRowMajorOps.count(op_name) > 0;
 }
 
 // Validate that a string is a safe MLIR identifier (alphanumeric + underscores).
@@ -1033,7 +1063,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     reg_entry.f_codegen([pto_op, arity](const CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeNaryCodegenPTO(pto_op, arity, op, codegen);
     });
-    if (RequiresRowMajorElementwiseLayout(entry.op_name)) {
+    if (RequiresRowMajorLayout(entry.op_name)) {
       for (size_t i = 0; i < arity; ++i) {
         reg_entry.set_input_layout(i, ir::TileLayout::row_major);
       }
@@ -1082,12 +1112,23 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.cast", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileCvtCodegenPTO("pto.tcvt", op, codegen);
   });
-  reg("tile.full", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeFullCodegenPTO("pto.texpands", op, codegen);
-  });
-  reg("tile.cmps", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeCmpsCodegenPTO("pto.tcmps", op, codegen);
-  });
+  // tile.full (TEXPANDS): output is row_major per ISA
+  if (exclude_ops.count("tile.full") == 0) {
+    backend.RegisterOp("tile.full")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeFullCodegenPTO("pto.texpands", op, codegen);
+        })
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+  // tile.cmps (TCMPS): tile input and output must be row_major per ISA
+  if (exclude_ops.count("tile.cmps") == 0) {
+    backend.RegisterOp("tile.cmps")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeCmpsCodegenPTO("pto.tcmps", op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   reg("tile.assign", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeAssignCodegenPTO("pto.tassign", op, codegen);
   });

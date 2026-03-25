@@ -83,6 +83,7 @@ TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -113,6 +114,7 @@ TypePtr DeduceTileOpShiftBinaryType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, tile_type1->dtype_, std::nullopt, tile_view);
 }
 
@@ -137,6 +139,7 @@ TypePtr DeduceTileOpScalarBinaryType(const std::vector<ExprPtr>& args,
   // scalar operand is implicitly narrowed to match the tile dtype at runtime.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
+  InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -166,6 +169,7 @@ TypePtr DeduceTileOpIntScalarBinaryType(const std::vector<ExprPtr>& args,
   // Result has the same shape and dtype as the input tile; the shift amount does not change element type.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
+  InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -486,6 +490,7 @@ TypePtr DeduceTileOpTernaryType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -520,6 +525,7 @@ TypePtr DeduceTileOpTriTileType(const std::vector<ExprPtr>& args,
   // for cases where tiles have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -554,6 +560,7 @@ TypePtr DeduceTileOpTileScalarTileType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs tiles have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -586,6 +593,7 @@ TypePtr DeduceTileOpXorScalarType(const std::vector<ExprPtr>& args,
   // Result has the same shape and dtype as the input tile; bitwise ops do not change element type.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);
+  InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -739,6 +747,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -792,6 +801,7 @@ TypePtr DeduceTileSelScalarType(const std::vector<ExprPtr>& args,
   // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type1);
+  InheritTileViewLayout(tile_view, tile_type1);
   return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
 }
 
@@ -845,6 +855,7 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
 
     TileView tile_view;
     tile_view.valid_shape = GetValidShape(tile_type1);
+    InheritTileViewLayout(tile_view, tile_type1);
     return std::make_shared<TileType>(tile_type1->shape_, *result_dtype, std::nullopt, tile_view);
   } else {
     // Second argument must be TileType
@@ -866,6 +877,7 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
     // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
     TileView tile_view;
     tile_view.valid_shape = GetValidShape(tile_type1);
+    InheritTileViewLayout(tile_view, tile_type1);
     return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
   }
 }

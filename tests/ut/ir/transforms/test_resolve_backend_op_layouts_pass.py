@@ -50,10 +50,81 @@ class TestResolveBackendOpLayouts:
             backend.reset_for_testing()
 
         printed = ir.python_print(after)
+        # tile.muls is now also constrained to row_major, so acc_0 gets reshaped too
+        assert "pl.tile.reshape(acc_0, [1, 16])" in printed
+        assert "pl.tile.muls(" in printed
         assert "pl.tile.reshape(acc_1, [1, 16])" in printed
         assert "pl.tile.reshape(partial, [1, 16])" in printed
         assert "pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec] = pl.tile.add(" in printed
-        assert "updated: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.reshape(" in printed
+        assert "updated:" in printed and "= pl.tile.reshape(" in printed
+
+    def test_rewrites_column_vector_abs_through_row_major_reshape(self):
+        """`tile.abs` (unary) on `[N, 1]` col_major vector should be repaired."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                data: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(partial)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        try:
+            after = passes.resolve_backend_op_layouts()(Before)
+        finally:
+            backend.reset_for_testing()
+
+        printed = ir.python_print(after)
+        assert "pl.tile.reshape(partial, [1, 16])" in printed
+        assert "pl.tile.abs(" in printed
+        assert "result:" in printed and "= pl.tile.reshape(" in printed
+
+    def test_rewrites_column_vector_muls_through_row_major_reshape(self):
+        """`tile.muls` (tile x scalar) on `[N, 1]` col_major should repair only the tile input."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                data: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                chunk: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
+                scaled: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(partial, 2.0)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(scaled, [0, 0], out)
+                return stored
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        try:
+            after = passes.resolve_backend_op_layouts()(Before)
+        finally:
+            backend.reset_for_testing()
+
+        printed = ir.python_print(after)
+        assert "pl.tile.reshape(partial, [1, 16])" in printed
+        assert "pl.tile.muls(" in printed
+        assert "scaled:" in printed and "= pl.tile.reshape(" in printed
 
 
 if __name__ == "__main__":

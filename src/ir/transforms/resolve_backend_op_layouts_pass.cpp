@@ -100,7 +100,7 @@ bool IsRepairableCall(const CallPtr& call, const backend::BackendTileLayoutSpec&
     }
     auto tile_type = As<TileType>(call->args_[i]->GetType());
     if (!tile_type) {
-      return false;
+      continue;  // Non-tile inputs (scalars, shapes) are not subject to layout repair
     }
     if (GetTileLayout(tile_type) == TileLayout::row_major) {
       continue;

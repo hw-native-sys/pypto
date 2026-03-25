@@ -22,6 +22,7 @@
 #define PYPTO_IR_TYPE_INFERENCE_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -185,6 +186,22 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim);
  * @return String representation of the shape
  */
 std::string FormatShape(const std::vector<ExprPtr>& shape);
+
+/**
+ * @brief Propagate blayout and pad from a source TileType's tile_view into a new TileView
+ *
+ * Many tile ops preserve the layout properties of their primary input. This helper copies
+ * blayout and pad when the source has a tile_view, avoiding repeated inline checks.
+ *
+ * @param dst Destination TileView (valid_shape should already be set)
+ * @param src Source TileType whose tile_view properties are inherited
+ */
+inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const TileType>& src) {
+  if (src->tile_view_.has_value()) {
+    dst.blayout = src->tile_view_->blayout;
+    dst.pad = src->tile_view_->pad;
+  }
+}
 
 }  // namespace ir
 }  // namespace pypto
