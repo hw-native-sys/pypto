@@ -37,23 +37,26 @@ namespace arith {
 // Analyzer
 // ============================================================================
 
-Analyzer::Analyzer() : const_int_bound(this), modular_set(this), rewrite_simplify(this) {}
+Analyzer::Analyzer()
+    : const_int_bound(this), modular_set(this), rewrite_simplify(this), transitive_cmp(this) {}
 
 Analyzer::~Analyzer() = default;
 
-void Analyzer::Bind(const VarPtr& var, const ExprPtr& expr, bool /*allow_override*/) {
+void Analyzer::Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override) {
   ExprPtr simplified = rewrite_simplify(expr);
 
   // Propagate to all sub-analyzers.
   const_int_bound.Update(var, const_int_bound(simplified));
   modular_set.Update(var, modular_set(simplified));
   rewrite_simplify.Update(var, simplified);
+  transitive_cmp.Bind(var, simplified, allow_override);
 }
 
-void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool /*allow_override*/) {
+void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override) {
   CHECK(max_val_exclusive > min_val) << "Bind requires max_val_exclusive > min_val, got [" << min_val << ", "
                                      << max_val_exclusive << ")";
   const_int_bound.Bind(var, min_val, max_val_exclusive);
+  transitive_cmp.Bind(var, min_val, max_val_exclusive, allow_override);
   // If the range is a single value, propagate exact value to all sub-analyzers.
   if (max_val_exclusive - min_val == 1) {
     DataType dtype = GetScalarDtype(var);
@@ -97,6 +100,13 @@ bool Analyzer::CanProveEqual(const ExprPtr& lhs, const ExprPtr& rhs) {
   return bound.is_const(0);
 }
 
+/// Check if a CompareResult satisfies a required comparison kind.
+static bool ResultImplies(CompareResult result, CompareResult required) {
+  // Using the bitwise encoding: result must be a subset of required.
+  return (result & required) == result && result != CompareResult::kUnknown &&
+         result != CompareResult::kInconsistent;
+}
+
 bool Analyzer::CanProve(const ExprPtr& cond) {
   ExprPtr simplified = Simplify(cond);
 
@@ -112,33 +122,39 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
   // For a < b: prove max(a - b) < 0
   if (auto op = As<Lt>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
-    return const_int_bound(diff).max_value < 0;
+    if (const_int_bound(diff).max_value < 0) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLT);
   }
   // For a <= b: prove max(a - b) <= 0
   if (auto op = As<Le>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
-    return const_int_bound(diff).max_value <= 0;
+    if (const_int_bound(diff).max_value <= 0) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLE);
   }
   // For a > b: prove min(a - b) > 0
   if (auto op = As<Gt>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
-    return const_int_bound(diff).min_value > 0;
+    if (const_int_bound(diff).min_value > 0) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGT);
   }
   // For a >= b: prove min(a - b) >= 0
   if (auto op = As<Ge>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
-    return const_int_bound(diff).min_value >= 0;
+    if (const_int_bound(diff).min_value >= 0) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGE);
   }
   // For a == b: prove a - b == 0
   if (auto op = As<Eq>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
-    return const_int_bound(diff).is_const(0);
+    if (const_int_bound(diff).is_const(0)) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kEQ);
   }
   // For a != b: prove a - b never zero
   if (auto op = As<Ne>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
     auto bound = const_int_bound(diff);
-    return bound.min_value > 0 || bound.max_value < 0;
+    if (bound.min_value > 0 || bound.max_value < 0) return true;
+    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kNE);
   }
 
   return false;
@@ -167,6 +183,9 @@ ConstraintContext::ConstraintContext(AnalyzerPtr analyzer, const ExprPtr& constr
     recovery_functions_.push_back(std::move(fn));
   }
   if (auto fn = analyzer_->rewrite_simplify.EnterConstraint(normalized)) {
+    recovery_functions_.push_back(std::move(fn));
+  }
+  if (auto fn = analyzer_->transitive_cmp.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
 }

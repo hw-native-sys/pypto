@@ -37,29 +37,11 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
+#include "src/ir/arith/constraint_extract.h"
 
 namespace pypto {
 namespace ir {
 namespace arith {
-
-// ============================================================================
-// Constraint extraction helpers (inlined from constraint_extract.h/cc)
-// ============================================================================
-
-/// Decompose an AND-chain into individual constraints.
-/// For `a && b`, returns `[a && b, a, b]`.
-static std::vector<ExprPtr> ExtractConstraints(const ExprPtr& expr) {
-  std::vector<ExprPtr> result;
-  result.push_back(expr);
-  auto and_node = As<And>(expr);
-  if (and_node) {
-    auto left_parts = ExtractConstraints(and_node->left_);
-    auto right_parts = ExtractConstraints(and_node->right_);
-    result.insert(result.end(), left_parts.begin(), left_parts.end());
-    result.insert(result.end(), right_parts.begin(), right_parts.end());
-  }
-  return result;
-}
 
 // ============================================================================
 // Constructor and common methods

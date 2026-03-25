@@ -30,6 +30,32 @@ namespace pypto {
 namespace ir {
 namespace arith {
 
+/// Result of comparing two expressions.
+///
+/// Values use a bitwise encoding where bit0=EQ, bit1=LT, bit2=GT.
+/// This allows intersecting possible outcomes via bitwise AND:
+///   kLE & kGE = kEQ  (if both <= and >= hold, then == must hold).
+enum class CompareResult : int {
+  kInconsistent = 0,  ///< Contradiction (no relationship possible)
+  kEQ = 1,            ///< lhs == rhs
+  kLT = 2,            ///< lhs < rhs
+  kLE = 3,            ///< lhs <= rhs (kEQ | kLT)
+  kGT = 4,            ///< lhs > rhs
+  kGE = 5,            ///< lhs >= rhs (kEQ | kGT)
+  kNE = 6,            ///< lhs != rhs (kLT | kGT)
+  kUnknown = 7,       ///< Cannot determine (kEQ | kLT | kGT)
+};
+
+/// Intersect two comparison results (bitwise AND).
+inline CompareResult operator&(CompareResult lhs, CompareResult rhs) {
+  return static_cast<CompareResult>(static_cast<int>(lhs) & static_cast<int>(rhs));
+}
+
+inline CompareResult& operator&=(CompareResult& lhs, CompareResult rhs) {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
 /// Inclusive integer bounds [min_value, max_value] for an expression.
 struct ConstIntBound {
   int64_t min_value;
@@ -218,6 +244,46 @@ class CanonicalSimplifier {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Derives transitive comparison results from known inequalities.
+///
+/// Given known comparisons like `x < y` and `y < z`, can derive `x < z`.
+/// Maintains a graph of known comparisons and uses DFS-based propagation
+/// to find transitive chains. Useful for proving comparison properties
+/// within conditional branches.
+class TransitiveComparisonAnalyzer {
+ public:
+  /// Construct a standalone analyzer (no parent Analyzer).
+  TransitiveComparisonAnalyzer();
+
+  ~TransitiveComparisonAnalyzer();
+
+  TransitiveComparisonAnalyzer(const TransitiveComparisonAnalyzer&) = delete;
+  TransitiveComparisonAnalyzer& operator=(const TransitiveComparisonAnalyzer&) = delete;
+  TransitiveComparisonAnalyzer(TransitiveComparisonAnalyzer&&) noexcept;
+  TransitiveComparisonAnalyzer& operator=(TransitiveComparisonAnalyzer&&) noexcept;
+
+  /// Compare two expressions using known comparisons and transitive propagation.
+  /// \param propagate_inequalities If true, chase transitive chains; if false, only use direct comparisons.
+  [[nodiscard]] CompareResult TryCompare(const ExprPtr& lhs, const ExprPtr& rhs,
+                                         bool propagate_inequalities = true) const;
+
+  /// Bind a variable as equal to an expression.
+  void Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override = false);
+
+  /// Bind a variable to the half-open range [min_val, max_val_exclusive).
+  void Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override = false);
+
+  /// Enter a constraint scope. Returns a recovery function that restores original state.
+  std::function<void()> EnterConstraint(const ExprPtr& constraint);
+
+ private:
+  friend class Analyzer;
+  explicit TransitiveComparisonAnalyzer(Analyzer* parent);
+
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 /// Coordinates all sub-analyzers for arithmetic expression analysis and simplification.
 ///
 /// Provides a unified interface for binding variable ranges, simplifying expressions,
@@ -236,6 +302,7 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   ConstIntBoundAnalyzer const_int_bound;
   ModularSetAnalyzer modular_set;
   RewriteSimplifier rewrite_simplify;
+  TransitiveComparisonAnalyzer transitive_cmp;
 
   /// Bind a variable to an expression: propagates information to all sub-analyzers.
   /// \note allow_override is reserved for future use and currently has no effect.

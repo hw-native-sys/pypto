@@ -31,7 +31,6 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
-#include <utility>
 
 #include "../module.h"
 #include "pypto/ir/arith/analyzer.h"
@@ -159,6 +158,43 @@ void BindArith(nb::module_& m) {
       .def("enter_constraint", &ir::arith::ModularSetAnalyzer::EnterConstraint, nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function, or None if constraint is not useful.");
 
+  // CompareResult enum
+  nb::enum_<ir::arith::CompareResult>(arith, "CompareResult",
+                                      "Result of comparing two expressions.\n\n"
+                                      "Uses bitwise encoding: bit0=EQ, bit1=LT, bit2=GT.")
+      .value("kInconsistent", ir::arith::CompareResult::kInconsistent, "Contradiction.")
+      .value("kEQ", ir::arith::CompareResult::kEQ, "lhs == rhs.")
+      .value("kLT", ir::arith::CompareResult::kLT, "lhs < rhs.")
+      .value("kLE", ir::arith::CompareResult::kLE, "lhs <= rhs.")
+      .value("kGT", ir::arith::CompareResult::kGT, "lhs > rhs.")
+      .value("kGE", ir::arith::CompareResult::kGE, "lhs >= rhs.")
+      .value("kNE", ir::arith::CompareResult::kNE, "lhs != rhs.")
+      .value("kUnknown", ir::arith::CompareResult::kUnknown, "Cannot determine.");
+
+  // TransitiveComparisonAnalyzer
+  nb::class_<ir::arith::TransitiveComparisonAnalyzer>(
+      arith, "TransitiveComparisonAnalyzer",
+      "Derives transitive comparison results from known inequalities.\n\n"
+      "Given known comparisons like x < y and y < z, can derive x < z.")
+      .def(nb::init<>(), "Create a standalone TransitiveComparisonAnalyzer.")
+      .def("try_compare", &ir::arith::TransitiveComparisonAnalyzer::TryCompare, nb::arg("lhs"),
+           nb::arg("rhs"), nb::arg("propagate_inequalities") = true,
+           "Compare two expressions using known comparisons and transitive propagation.")
+      .def("bind",
+           nb::overload_cast<const ir::VarPtr&, const ir::ExprPtr&, bool>(
+               &ir::arith::TransitiveComparisonAnalyzer::Bind),
+           nb::arg("var"), nb::arg("expr"), nb::arg("allow_override") = false,
+           "Bind a variable as equal to an expression.")
+      .def("bind",
+           nb::overload_cast<const ir::VarPtr&, int64_t, int64_t, bool>(
+               &ir::arith::TransitiveComparisonAnalyzer::Bind),
+           nb::arg("var"), nb::arg("min_val"), nb::arg("max_val_exclusive"),
+           nb::arg("allow_override") = false,
+           "Bind a variable to the half-open range [min_val, max_val_exclusive).")
+      .def("enter_constraint", &ir::arith::TransitiveComparisonAnalyzer::EnterConstraint,
+           nb::arg("constraint"),
+           "Enter a constraint scope. Returns a recovery function that restores original state.");
+
   // Analyzer (coordinator)
   nb::class_<ir::arith::Analyzer>(
       arith, "Analyzer",
@@ -169,6 +205,8 @@ void BindArith(nb::module_& m) {
       .def_ro("const_int_bound", &ir::arith::Analyzer::const_int_bound, "ConstIntBoundAnalyzer sub-analyzer.")
       .def_ro("modular_set", &ir::arith::Analyzer::modular_set, "ModularSetAnalyzer sub-analyzer.")
       .def_ro("rewrite_simplify", &ir::arith::Analyzer::rewrite_simplify, "RewriteSimplifier sub-analyzer.")
+      .def_ro("transitive_cmp", &ir::arith::Analyzer::transitive_cmp,
+              "TransitiveComparisonAnalyzer sub-analyzer.")
       .def("bind", nb::overload_cast<const ir::VarPtr&, const ir::ExprPtr&, bool>(&ir::arith::Analyzer::Bind),
            nb::arg("var"), nb::arg("expr"), nb::arg("allow_override") = false,
            "Bind a variable to an expression, propagating information to all sub-analyzers.")

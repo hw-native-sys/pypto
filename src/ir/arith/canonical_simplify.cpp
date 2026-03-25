@@ -38,7 +38,6 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
-#include "src/ir/arith/rewrite_simplify.h"  // CompareResult
 
 namespace pypto {
 namespace ir {

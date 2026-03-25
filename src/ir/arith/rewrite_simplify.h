@@ -33,17 +33,6 @@ namespace pypto {
 namespace ir {
 namespace arith {
 
-/// Result of TryCompare(expr, val).
-enum class CompareResult {
-  kEQ,       ///< expr == val
-  kGT,       ///< expr > val
-  kGE,       ///< expr >= val
-  kLT,       ///< expr < val
-  kLE,       ///< expr <= val
-  kNE,       ///< expr != val
-  kUnknown,  ///< cannot determine
-};
-
 class RewriteSimplifier::Impl : public ExprFunctor<ExprPtr> {
  public:
   explicit Impl(Analyzer* parent);
