@@ -120,7 +120,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             static inline Tensor make_tensor_2d_dn(
@@ -136,7 +136,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             __attribute__((visibility("default")))
@@ -421,7 +421,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             static inline Tensor make_tensor_2d_dn(
@@ -437,7 +437,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             __attribute__((visibility("default")))
@@ -853,7 +853,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(addr, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             static inline Tensor make_tensor_2d_dn(
@@ -869,7 +869,7 @@ class TestOrchestration:
                 }
                 uint32_t raw_shapes[RUNTIME_MAX_TENSOR_DIMS] = {shapes[1], shapes[0]};
                 return Tensor(0, total * get_element_size(dtype),
-                    raw_shapes, shapes, zero_offsets, ndims, dtype, version);
+                    raw_shapes, shapes, zero_offsets, ndims, dtype, version, true, false);
             }
 
             __attribute__((visibility("default")))

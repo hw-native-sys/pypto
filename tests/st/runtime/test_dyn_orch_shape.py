@@ -277,6 +277,7 @@ class DynOrchLoopMixedDimsAddTestCase(PTOTestCase):
             ) -> pl.Tensor[[M, cols], pl.FP32]:
                 """Iterate over M rows in pairs and add tiles element-wise."""
                 M_dim = pl.tensor.dim(a, 0)
+
                 for i in pl.range(0, M_dim, 2):
                     offset = i
                     a_tile = pl.load(a, [offset, 0], [2, cols], target_memory=pl.MemorySpace.Vec)

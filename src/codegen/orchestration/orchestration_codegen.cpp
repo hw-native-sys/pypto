@@ -677,7 +677,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (it != param_name_to_orch_index_.end()) {
       return "(int64_t)orch[" + std::to_string(it->second) + "].tensor.shapes[" + std::to_string(axis) + "]";
     }
-    return "";
+    // Fallback for non-parameter tensors (views, aliases, internal tensors):
+    // read the shape from the runtime Tensor object directly.
+    return "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
   }
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
@@ -1291,6 +1293,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
       param_name_to_orch_index[emit_name] = tensor_param_count;
       tensor_param_count++;
     }
+    // Non-tensor (scalar) params are registered in emit_name_map for IR name
+    // resolution but do not occupy an OrchArg slot. They are used as compile-time
+    // shape hints and are not emitted in the entry-point setup.
   }
 
   // Step 4c: Lineage alias — map iter_args/return_vars to their param's emit name
