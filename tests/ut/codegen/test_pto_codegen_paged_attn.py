@@ -183,5 +183,82 @@ def test_tile_ops_codegen():
         assert mlir_code, f"Generated MLIR code for {func_name} should not be empty"
 
 
+@pl.program
+class UnalignedPagedAttention:
+    """Unaligned paged attention with dynamic valid_len for softmax_prepare."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def softmax_prepare_unaligned(
+        self,
+        sij: pl.Tensor[[16, 128], pl.FP32],
+        pij: pl.Tensor[[16, 128], pl.BF16],
+        mij: pl.Tensor[[16, 1], pl.FP32],
+        lij: pl.Tensor[[16, 1], pl.FP32],
+        scale_value: pl.Scalar[pl.FP32],
+        valid_len: pl.Scalar[pl.INDEX],
+    ):
+        sij_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.load(
+            sij,
+            [0, 0],
+            [16, 128],
+            [16, valid_len],
+            target_memory=pl.MemorySpace.Vec,
+        )
+        sij_padded = pl.tile.fillpad(sij_tile, pad_value=pl.PadValue.min)
+        tmp_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.sub(sij_padded, sij_padded)
+        sij_scaled = pl.tile.muls(sij_padded, scale_value)
+        max_tile: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_max(sij_scaled, tmp_tile)
+        pij_tile: pl.Tile[[16, 128], pl.FP32] = pl.tile.row_expand_sub(sij_scaled, max_tile)
+        pij_tile = pl.tile.exp(pij_tile)
+        pij_bf16_tile = pl.tile.cast(pij_tile, mode="round", target_type=pl.BF16)
+        pij_fp16_tile = pl.tile.cast(pij_bf16_tile, mode="round", target_type=pl.FP16)
+        sum_tile: pl.Tile[[16, 1], pl.FP16] = pl.tile.row_sum(pij_fp16_tile, tmp_tile)
+        pl.store(max_tile, [0, 0], mij)
+        pl.store(sum_tile, [0, 0], lij)
+        pl.store(pij_bf16_tile, [0, 0], pij)
+
+
+def test_unaligned_tile_ops_codegen():
+    """Test that unaligned paged attention emits pto.set_validshape."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B_PTO)
+
+    program = UnalignedPagedAttention
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    optimized_program = pm.run_passes(program)
+    codegen_instance = codegen.PTOCodegen()
+
+    # Generate MLIR for the softmax_prepare_unaligned function
+    func = None
+    for f in optimized_program.functions.values():
+        if f.name == "softmax_prepare_unaligned":
+            func = f
+            break
+    assert func is not None, "softmax_prepare_unaligned function not found in optimized program"
+    single_func_program = ir.Program([func], func.name, optimized_program.span)
+    mlir_code = codegen_instance.generate(single_func_program)
+    assert mlir_code, "Generated MLIR code should not be empty"
+
+    # pto.set_validshape must be present
+    assert "pto.set_validshape" in mlir_code, f"Expected pto.set_validshape in MLIR output, got:\n{mlir_code}"
+
+    # sij_tile alloc: dynamic type (v_row=?, v_col=?)
+    alloc_lines = [line.strip() for line in mlir_code.split("\n") if "pto.alloc_tile" in line]
+    sij_alloc = [line for line in alloc_lines if "sij_tile" in line or "s_tile" in line]
+    assert len(sij_alloc) >= 1, f"Expected sij/s_tile alloc, got alloc_lines: {alloc_lines}"
+    assert "v_col=?" in sij_alloc[0], f"Expected dynamic v_col=? in sij_tile alloc: {sij_alloc[0]}"
+    assert "v_row=?" in sij_alloc[0], f"Expected dynamic v_row=? in sij_tile alloc: {sij_alloc[0]}"
+
+    # sij_padded alloc: static v_col=128 and pad=3 (PadValue.min)
+    sij_padded_alloc = [line for line in alloc_lines if "sij_padded" in line or "s_padded" in line]
+    assert len(sij_padded_alloc) >= 1, f"Expected sij_padded/s_padded alloc, got: {alloc_lines}"
+    assert "pad=3>" in sij_padded_alloc[0], (
+        f"Expected pad=3 (PadValue.min) in sij_padded alloc: {sij_padded_alloc[0]}"
+    )
+    assert "v_col=128" in sij_padded_alloc[0], (
+        f"Expected static v_col=128 in padded alloc: {sij_padded_alloc[0]}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

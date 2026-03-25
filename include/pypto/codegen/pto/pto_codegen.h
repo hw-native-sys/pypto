@@ -116,6 +116,21 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrEmitI32Constant(int32_t value);
 
   /**
+   * @brief Emit arith.index_cast if var is not already index type
+   *
+   * Valid_shape vars may be INT64/INT32 (from pl.min(...)), but pto.alloc_tile
+   * and pto.set_validshape need index type operands.
+   *
+   * @param var IR variable to cast
+   * @param mlir_name Current MLIR SSA name for the variable
+   * @return SSA name of the index-typed value (original if already index)
+   */
+  std::string EmitCastToIndex(const ir::VarPtr& var, const std::string& mlir_name);
+
+  /// Check if a tile variable is consumed by a tile.fillpad operation.
+  bool HasFillpadConsumer(const ir::Var* var) const;
+
+  /**
    * @brief Register a variable to an MLIR SSA name
    *
    * @param var IR variable
@@ -187,7 +202,8 @@ class PTOCodegen : public CodegenBase {
    * Needed when multiple variables with different shapes share the same MemRef
    * (e.g., reshape input/output).
    */
-  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type) const;
+  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type,
+                                               bool force_all_dynamic = false) const;
 
   /**
    * @brief Allocate a new tile buffer for codegen (emitted at function scope)
@@ -417,7 +433,8 @@ class PTOCodegen : public CodegenBase {
     std::string op_name;
   };
   std::map<const ir::Var*, TpopResultInfo>
-      tpop_result_vars_;  ///< Tile vars from tpop: var -> split + op name
+      tpop_result_vars_;                         ///< Tile vars from tpop: var -> split + op name
+  std::set<const ir::Var*> fillpad_input_vars_;  ///< Tile vars consumed by tile.fillpad
 
   // Current function context
   ir::FunctionPtr current_function_;

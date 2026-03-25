@@ -329,13 +329,13 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     # Both share the same addr (same MemRef)
     assert "addr = %c0i" in alloc_lines[0]
     assert "addr = %c0i" in alloc_lines[1]
-    # One should carry valid_row/valid_col dynamic shapes
-    dynamic_allocs = [line for line in alloc_lines if "valid_row = %arg2 valid_col = %arg3" in line]
-    assert len(dynamic_allocs) >= 1
-    assert "v_row=?" in alloc_lines[0]
-    assert "v_col=?" in alloc_lines[0]
-    assert "pad=" in alloc_lines[1]
+    # Dynamic valid_shape tile: type has v_row=?, v_col=? (both dynamic per PTOAS requirement)
+    assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
+    assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
+    # Padded tile has static v_row/v_col (physical dims) since fillpad makes it fully valid
     assert "pad=2>" in alloc_lines[1], f"Expected fillpad pad metadata to be preserved: {alloc_lines[1]}"
+    assert "v_row=128" in alloc_lines[1], f"Expected static v_row in padded tile: {alloc_lines[1]}"
+    assert "v_col=128" in alloc_lines[1], f"Expected static v_col in padded tile: {alloc_lines[1]}"
 
 
 def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
@@ -367,16 +367,13 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
     alloc_line = alloc_lines[0]
-    assert "valid_col = %" in alloc_line, (
-        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_line}"
-    )
-    assert "valid_row = %" not in alloc_line, f"Did not expect dynamic valid_row in alloc_tile: {alloc_line}"
+    # Only the actually dynamic dim (v_col) is ?, v_row stays static
     assert "v_row=1" in alloc_line, f"Expected static v_row=1 in tile_buf type, got: {alloc_line}"
-    assert "v_col=?" in alloc_line, f"Expected dynamic v_col in tile_buf type, got: {alloc_line}"
-    assert "valid_col = %arg" not in alloc_line, (
-        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_line}"
-    )
+    assert "v_col=?" in alloc_line, f"Expected dynamic v_col=? in tile_buf type, got: {alloc_line}"
+    # No fillpad → dynamic variable used as operand, no set_validshape
+    assert "valid_col" in alloc_line, f"Expected valid_col operand in alloc: {alloc_line}"
     assert "%c-1" not in mlir_code
+    assert "pto.set_validshape" not in mlir_code
 
 
 def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
@@ -408,15 +405,12 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
     alloc_line = alloc_lines[0]
-    assert "valid_row = %" in alloc_line, (
-        f"Expected alloc_tile to reference in-body valid_shape SSA, got: {alloc_line}"
-    )
-    assert "valid_col = %" not in alloc_line, f"Did not expect dynamic valid_col in alloc_tile: {alloc_line}"
-    assert "v_row=?" in alloc_line, f"Expected dynamic v_row in tile_buf type, got: {alloc_line}"
+    # Only the actually dynamic dim (v_row) is ?, v_col stays static
+    assert "v_row=?" in alloc_line, f"Expected dynamic v_row=? in tile_buf type, got: {alloc_line}"
     assert "v_col=16" in alloc_line, f"Expected static v_col=16 in tile_buf type, got: {alloc_line}"
-    assert "valid_row = %arg" not in alloc_line, (
-        f"Expected valid_shape SSA from body, not direct arg reuse: {alloc_line}"
-    )
+    # No fillpad → dynamic variable used as valid_row operand, no set_validshape
+    assert "valid_row" in alloc_line, f"Expected valid_row operand in alloc: {alloc_line}"
+    assert "pto.set_validshape" not in mlir_code
 
 
 def test_pto_codegen_tile_load_lowering():

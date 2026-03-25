@@ -41,10 +41,12 @@ from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.ir_parser.paged_attention_example import (
     build_paged_attention_program,
+    build_paged_attention_unaligned_program,
     kernel_online_update,
     kernel_pv_matmul,
     kernel_qk_matmul,
     kernel_softmax_prepare,
+    kernel_softmax_prepare_unaligned,
 )
 
 DEFAULT_SCALE = 0.0884
@@ -166,6 +168,94 @@ class SoftmaxPrepareTestCase(PTOTestCase):
         scale = tensors["config"][0]
 
         sij = tensors["sij"]
+        sij_scaled = sij * scale
+        mij = torch.max(sij_scaled, axis=1, keepdims=True).values
+        pij = torch.exp(sij_scaled - mij)
+        pij_bf16 = pij.to(torch.bfloat16)
+        pij = pij_bf16.to(torch.float32)
+        lij = torch.sum(pij, axis=1, keepdims=True)
+
+        tensors["pij"][:] = pij_bf16
+        tensors["mij"][:] = mij
+        tensors["lij"][:] = lij
+
+
+class SoftmaxPrepareUnalignedTestCase(PTOTestCase):
+    """Test case for softmax_prepare with unaligned valid_len.
+
+    Uses pl.load(..., valid_shapes=[16, valid_len]) + fillpad(pad_value=min)
+    to handle non-block-aligned KV cache lengths. Columns beyond valid_len
+    are padded with -inf before softmax.
+    """
+
+    def __init__(
+        self,
+        num_heads: int = 16,
+        block_size: int = 128,
+        valid_len: int = 100,
+        scale: float = DEFAULT_SCALE,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.block_size = block_size
+        self.valid_len = valid_len
+        self.scale = scale
+
+    def get_name(self) -> str:
+        return f"softmax_prepare_unaligned_{self.num_heads}h_{self.block_size}b_{self.valid_len}v"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "sij", [self.num_heads, self.block_size], DataType.FP32, init_value=torch.randn
+            ),  # attention scores input
+            TensorSpec(
+                "config", [1], DataType.FP32, init_value=self.scale
+            ),  # single-element FP32 tensor storing the scale factor
+            TensorSpec(
+                "valid_len_cfg",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([self.valid_len], dtype=torch.int64),
+            ),  # valid_len as INT64 config
+            TensorSpec("pij", [self.num_heads, self.block_size], DataType.BF16, is_output=True),  # exp output
+            TensorSpec("mij", [self.num_heads, 1], DataType.FP32, is_output=True),  # row-max output
+            TensorSpec("lij", [self.num_heads, 1], DataType.FP32, is_output=True),  # row-sum of pij output
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class SoftmaxPrepareUnalignedProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                sij: pl.Tensor[[16, 128], pl.FP32],
+                config: pl.Tensor[[1], pl.FP32],
+                valid_len_cfg: pl.Tensor[[1], pl.INT64],
+                pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+            ]:
+                scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                valid_len: pl.Scalar[pl.INT64] = pl.tensor.read(valid_len_cfg, [0])
+                pij_out, mij_out, lij_out = kernel_softmax_prepare_unaligned(
+                    sij, scale, valid_len, pij_out, mij_out, lij_out
+                )
+                return pij_out, mij_out, lij_out
+
+        return SoftmaxPrepareUnalignedProgram
+
+    def compute_expected(self, tensors, params=None):
+        scale = tensors["config"][0]
+        valid_len = int(tensors["valid_len_cfg"][0].item())
+        block_size = tensors["sij"].shape[1]  # derive from tensor shape (golden_writer can't access self.*)
+
+        sij = tensors["sij"].clone()
+        # Mask columns beyond valid_len to -inf (fillpad with PadValue.min)
+        sij[:, valid_len:block_size] = float("-inf")
         sij_scaled = sij * scale
         mij = torch.max(sij_scaled, axis=1, keepdims=True).values
         pij = torch.exp(sij_scaled - mij)
@@ -498,6 +588,137 @@ class PagedAttentionTestCase(PTOTestCase):
         tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
 
 
+class UnalignedPagedAttentionTestCase(PTOTestCase):
+    """Full paged attention with unaligned context_len (not a multiple of block_size).
+
+    Uses build_paged_attention_unaligned_program which calls
+    kernel_softmax_prepare_unaligned (set_validshape + fillpad) instead of
+    slicing sij to valid_len.
+    """
+
+    def __init__(
+        self,
+        batch: int = 64,
+        num_heads: int = 16,
+        head_dim: int = 128,
+        block_size: int = 128,
+        context_len: int = 8100,
+        max_model_len: int = 32768,
+        scale: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.config.atol = 2e-2
+        self.config.rtol = 2e-2
+        self.batch = batch
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.block_size = block_size
+        self.context_len = context_len
+        self.max_model_len = max_model_len
+        self.scale = scale
+        self.max_num_blocks_per_req = max_model_len // block_size
+
+    def get_name(self) -> str:
+        return (
+            f"paged_attention_unaligned_{self.batch}bat_{self.num_heads}h_"
+            f"{self.head_dim}d_{self.block_size}bs_{self.context_len}ctx"
+        )
+
+    def define_tensors(self) -> list[TensorSpec]:
+        B = self.batch
+        H = self.num_heads
+        D = self.head_dim
+        BS = self.block_size
+        max_blocks = self.max_num_blocks_per_req
+        total_pool_rows = B * max_blocks * BS
+
+        scale_bits = struct.unpack("I", struct.pack("f", self.scale))[0]
+        config = torch.tensor(
+            [B, H, 1, D, BS, max_blocks, scale_bits],
+            dtype=torch.int64,
+        )
+        block_table = torch.randint(
+            0, max(B * max_blocks, 1), size=(B, max_blocks), dtype=torch.int32
+        ).flatten()
+        context_lens = torch.full((B,), self.context_len, dtype=torch.int32)
+
+        return [
+            TensorSpec("query", [B * H, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("key_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("value_cache", [total_pool_rows, D], DataType.BF16, init_value=torch.randn),
+            TensorSpec("block_table", [B * max_blocks], DataType.INT32, init_value=block_table),
+            TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
+            TensorSpec("out", [B * H, D], DataType.FP32, is_output=True),
+            TensorSpec("config", [7], DataType.INT64, init_value=config),
+        ]
+
+    def get_program(self) -> Any:
+        return build_paged_attention_unaligned_program(
+            batch=self.batch,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            block_size=self.block_size,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+        )
+
+    def compute_expected(self, tensors, params=None):
+        config = tensors["config"]
+        batch = int(config[0].item())
+        num_heads = int(config[1].item())
+        head_dim = int(config[3].item())
+        block_size = int(config[4].item())
+        max_num_blocks_per_req = int(config[5].item())
+        scale_bits = int(config[6].item())
+        scale_value = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
+
+        query = tensors["query"].float().reshape(batch, num_heads, head_dim)
+        total_pool_blocks = batch * max_num_blocks_per_req
+        key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
+        block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+        context_lens = tensors["context_lens"]
+
+        out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
+        q_tile = 16
+        max_bn = int((context_lens.max().item() + block_size - 1) // block_size)
+
+        for q_offset in range(0, num_heads, q_tile):
+            q_tile_size = min(q_tile, num_heads - q_offset)
+            qi = query[:, q_offset : q_offset + q_tile_size, :]
+            oi, li, mi = None, None, None
+
+            for bn in range(max_bn):
+                valid_lens = torch.clamp(context_lens - bn * block_size, min=0, max=block_size)
+                if not (valid_lens > 0).any():
+                    break
+                block_indices = block_table[:, bn]
+                kj_all = key_cache[block_indices].float()
+                vj_all = value_cache[block_indices].float()
+                sij = torch.bmm(qi, kj_all.transpose(1, 2)) * scale_value
+                pos = torch.arange(block_size).unsqueeze(0)
+                valid_mask = (pos < valid_lens.unsqueeze(1)).unsqueeze(1)
+                sij = sij.masked_fill(~valid_mask, float("-inf"))
+                mij = sij.max(dim=-1, keepdim=True)[0].clamp(min=-1e30)
+                pij = torch.exp(sij - mij).masked_fill(~valid_mask, 0.0)
+                pij = pij.to(torch.bfloat16).to(torch.float32)
+                lij = pij.sum(dim=-1, keepdim=True)
+                oi_new = torch.bmm(pij, vj_all)
+                if bn == 0:
+                    oi, li, mi = oi_new, lij, mij
+                else:
+                    mi_new = torch.maximum(mi, mij)
+                    alpha = torch.exp(mi - mi_new)
+                    beta = torch.exp(mij - mi_new)
+                    li = alpha * li + beta * lij
+                    oi = alpha * oi + beta * oi_new
+                    mi = mi_new
+
+            out[:, q_offset : q_offset + q_tile_size, :] = oi / li
+
+        tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
+
+
 class PTOASTestCaseMixin:
     """Mixin for test cases using PTO backend and Default optimization strategy."""
 
@@ -543,6 +764,23 @@ class PagedAttentionPTOASTestCase(PTOASTestCaseMixin, PagedAttentionTestCase):
 
     def get_name(self) -> str:
         return f"paged_attention_ptoas_{self.batch}bat_{self.num_heads}h_{self.head_dim}d_{self.block_size}bs"
+
+
+class SoftmaxPrepareUnalignedPTOASTestCase(PTOASTestCaseMixin, SoftmaxPrepareUnalignedTestCase):
+    """Test unaligned softmax prepare with PTO backend and PTOAS optimization strategy."""
+
+    def get_name(self) -> str:
+        return f"softmax_prepare_unaligned_ptoas_{self.num_heads}h_{self.block_size}b_{self.valid_len}v"
+
+
+class UnalignedPagedAttentionPTOASTestCase(PTOASTestCaseMixin, UnalignedPagedAttentionTestCase):
+    """Test full paged attention with unaligned context_len using PTOAS."""
+
+    def get_name(self) -> str:
+        return (
+            f"paged_attention_unaligned_ptoas_{self.batch}bat_{self.num_heads}h_"
+            f"{self.head_dim}d_{self.block_size}bs_{self.context_len}ctx"
+        )
 
 
 class TestPagedAttentionKernels:
@@ -676,6 +914,48 @@ class TestPagedAttentionKernels:
         )
         result = test_runner.run(test_case)
         assert result.passed, f"Paged attention PTOAS test failed: {result.error}"
+
+    # ── Unaligned variants ────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "num_heads,block_size,valid_len",
+        [
+            (16, 128, 100),  # unaligned
+            (16, 128, 128),  # full block (aligned)
+        ],
+    )
+    def test_softmax_prepare_unaligned_ptoas(self, test_runner, num_heads, block_size, valid_len):
+        """Test unaligned softmax prepare with PTO backend and PTOAS optimization."""
+        test_case = SoftmaxPrepareUnalignedPTOASTestCase(
+            num_heads=num_heads, block_size=block_size, valid_len=valid_len
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, (
+            f"Softmax prepare unaligned PTOAS test failed (valid_len={valid_len}): {result.error}"
+        )
+
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        [
+            (64, 16, 128, 128, 8100, 32768),  # context_len=8100 not a multiple of block_size=128
+        ],
+    )
+    def test_paged_attention_unaligned_ptoas(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test full paged attention with unaligned context_len using set_validshape."""
+        test_case = UnalignedPagedAttentionPTOASTestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, (
+            f"Paged attention unaligned PTOAS test failed (context_len={context_len}): {result.error}"
+        )
 
 
 if __name__ == "__main__":

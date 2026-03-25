@@ -743,15 +743,18 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     std::map<const ir::MemRef*, std::string>& memref_to_var_name;
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
     std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars;
+    std::set<const ir::Var*>& fillpad_input_vars;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
                     std::map<const ir::MemRef*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
-                    std::map<const ir::Var*, TpopResultInfo>& tpop_vars)
+                    std::map<const ir::Var*, TpopResultInfo>& tpop_vars,
+                    std::set<const ir::Var*>& fillpad_vars)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),
-          tpop_result_vars(tpop_vars) {}
+          tpop_result_vars(tpop_vars),
+          fillpad_input_vars(fillpad_vars) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -763,13 +766,20 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
 
-        // Track tpop result vars with their split value so codegen can:
-        // 1. Skip alloc_tile for them
-        // 2. Propagate split to tfree
         if (auto call = As<ir::Call>(op->value_)) {
+          // Track tpop result vars with their split value so codegen can:
+          // 1. Skip alloc_tile for them
+          // 2. Propagate split to tfree
           if (call->op_->name_ == "tile.tpop_from_aiv" || call->op_->name_ == "tile.tpop_from_aic") {
             int split = call->GetKwarg<int>("split", 0);
             tpop_result_vars[op->var_.get()] = TpopResultInfo{split, call->op_->name_};
+          }
+          // Track fillpad input variables so we know which tiles need
+          // physical dims on alloc_tile + set_validshape after tload.
+          if (call->op_->name_ == "tile.fillpad" && !call->args_.empty()) {
+            if (auto input_var = As<ir::Var>(call->args_[0])) {
+              fillpad_input_vars.insert(input_var.get());
+            }
           }
         }
       }
@@ -777,7 +787,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     }
   };
 
-  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_, tpop_result_vars_);
+  VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_, tpop_result_vars_,
+                         fillpad_input_vars_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }
@@ -879,13 +890,43 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
       << "Tile var " << tile_var->name_hint_ << " not found in var_to_mlir_";
   std::string tile_buf = mlir_it->second;
 
+  // Generate type string first — ExtractTileTypeInfo already decides v_row=?/v_col=?.
+  // For tiles consumed by fillpad, force ALL dynamic dims (pto.set_validshape requires both ?).
+  bool has_fillpad = HasFillpadConsumer(tile_var.get());
+  std::string type_str = GetTileBufTypeStringFromTileType(tile_type, has_fillpad);
+  bool type_is_dynamic =
+      (type_str.find("v_row=?") != std::string::npos || type_str.find("v_col=?") != std::string::npos);
+
   std::string valid_row_mlir;
   std::string valid_col_mlir;
-  auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
-  if (valid_row_var) valid_row_mlir = GetVarName(valid_row_var);
-  if (valid_col_var) valid_col_mlir = GetVarName(valid_col_var);
-
-  std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+  if (tile_type->tile_view_.has_value()) {
+    const auto& tv = tile_type->tile_view_.value();
+    bool has_pad = (tv.pad != ir::PadValue::null);
+    if (!has_pad && type_is_dynamic) {
+      // Check if this tile is consumed by fillpad.
+      // If yes: use physical dims so TLOAD DMA uses correct stride; set_validshape sets actual region.
+      // If no: use dynamic variable as operand (TLOAD respects valid_shape for DMA).
+      if (has_fillpad) {
+        if (tile_type->shape_.size() >= 1) {
+          if (auto c = As<ir::ConstInt>(tile_type->shape_[0])) {
+            valid_row_mlir = GetOrEmitIndexConstant(c->value_);
+          }
+        }
+        if (tile_type->shape_.size() >= 2) {
+          if (auto c = As<ir::ConstInt>(tile_type->shape_[1])) {
+            valid_col_mlir = GetOrEmitIndexConstant(c->value_);
+          }
+        }
+      } else {
+        // No fillpad: use dynamic variable as operand (old behavior).
+        auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
+        if (valid_row_var) valid_row_mlir = GetVarName(valid_row_var);
+        if (valid_col_var) valid_col_mlir = GetVarName(valid_col_var);
+      }
+    }
+    // Static v_row/v_col: type string already encodes the values (e.g. v_row=48).
+    // PTOAS requires valid_row/valid_col operands to be ABSENT when static.
+  }
   auto memref = ir::GetDefinedMemRef(tile_type);
   std::string addr_ssa;
   if (memref) {
@@ -1108,7 +1149,8 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // This ensures that even when multiple variables share a MemRef, each
       // variable's SSA value carries its correct typed annotation.
       if (result_tile_type && !current_result_buf_.empty()) {
-        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
+        bool fillpad_force = HasFillpadConsumer(op->var_.get());
+        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type, fillpad_force);
         if (!var_type_str.empty()) {
           ssa_to_tile_buf_type_[current_result_buf_] = var_type_str;
         }
@@ -1363,7 +1405,8 @@ static std::string FormatTileBufTypeString(const std::string& loc, const std::st
 static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& codegen, std::string& dtype_str,
                                 int64_t& rows, int64_t& cols, ir::TileLayout& blayout,
                                 ir::TileLayout& slayout, uint64_t& fractal, ir::PadValue& pad, int64_t& v_row,
-                                int64_t& v_col, bool& v_row_dynamic, bool& v_col_dynamic) {
+                                int64_t& v_col, bool& v_row_dynamic, bool& v_col_dynamic,
+                                bool force_all_dynamic = false) {
   dtype_str = codegen.GetTypeString(tile_type.dtype_);
   if (tile_type.shape_.size() >= 2) {
     if (auto c0 = As<ir::ConstInt>(tile_type.shape_[0])) rows = c0->value_;
@@ -1383,20 +1426,32 @@ static void ExtractTileTypeInfo(const TileType& tile_type, const PTOCodegen& cod
     slayout = tv.slayout;
     fractal = tv.fractal;
     pad = tv.pad;
-    // Extract valid_shape values
-    if (tv.valid_shape.size() >= 1) {
+    // Extract valid_shape values.
+    // When pad is set (fillpad result), the tile is fully valid — keep static
+    // v_row/v_col at physical dims. Only mark dynamic when there's no pad.
+    bool has_pad = (pad != ir::PadValue::null);
+    bool has_any_dynamic = false;
+    if (!has_pad && tv.valid_shape.size() >= 1) {
       if (auto c0 = As<ir::ConstInt>(tv.valid_shape[0])) {
         v_row = c0->value_;
       } else if (As<ir::Var>(tv.valid_shape[0])) {
         v_row_dynamic = true;
+        has_any_dynamic = true;
       }
     }
-    if (tv.valid_shape.size() >= 2) {
+    if (!has_pad && tv.valid_shape.size() >= 2) {
       if (auto c1 = As<ir::ConstInt>(tv.valid_shape[1])) {
         v_col = c1->value_;
       } else if (As<ir::Var>(tv.valid_shape[1])) {
         v_col_dynamic = true;
+        has_any_dynamic = true;
       }
+    }
+    // pto.set_validshape requires the source tile to have ALL dims dynamic (?, ?).
+    // Only force both dynamic when the caller signals a fillpad consumer exists.
+    if (force_all_dynamic && has_any_dynamic) {
+      v_row_dynamic = true;
+      v_col_dynamic = true;
     }
   } else if (cols == 1 && rows > 1) {
     // Infer blayout from shape: column vectors [N, 1] use col_major (DN format convention)
@@ -1431,8 +1486,8 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
                                  v_row_dynamic, v_col_dynamic);
 }
 
-std::string PTOCodegen::GetTileBufTypeStringFromTileType(
-    const std::shared_ptr<const ir::TileType>& tile_type) const {
+std::string PTOCodegen::GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type,
+                                                         bool force_all_dynamic) const {
   INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
   auto memory_space = tile_type->GetMemorySpace();
   INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
@@ -1451,7 +1506,7 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
   bool v_col_dynamic = false;
 
   ExtractTileTypeInfo(*tile_type, *this, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
-                      v_row_dynamic, v_col_dynamic);
+                      v_row_dynamic, v_col_dynamic, force_all_dynamic);
 
   return FormatTileBufTypeString(loc, dtype_str, rows, cols, blayout, slayout, fractal, pad, v_row, v_col,
                                  v_row_dynamic, v_col_dynamic);
@@ -1515,6 +1570,13 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
 }
 
 std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
+  // Prefer type registered by alloc_tile (may have force_all_dynamic for fillpad tiles)
+  if (!current_result_buf_.empty()) {
+    auto ssa_it = ssa_to_tile_buf_type_.find(current_result_buf_);
+    if (ssa_it != ssa_to_tile_buf_type_.end()) {
+      return ssa_it->second;
+    }
+  }
   if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
     return GetTileBufTypeString(current_result_tile_type_->memref_.value().get());
   }
@@ -1698,6 +1760,27 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   Emit(result + " = " + mlir_op + " " + src + " : " + src_type + " to " + dst_type);
   current_expr_value_ = result;
 }
+
+// Imperative counterpart of VisitExpr_(CastPtr) for the index-cast case.
+// VisitExpr_ requires an ir::Cast node in the IR; this helper directly casts
+// a known SSA value when no Cast node exists (e.g. valid_shape vars in
+// pto.set_validshape that need index type operands).
+std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string& mlir_name) {
+  if (auto scalar_type = As<ScalarType>(var->GetType())) {
+    CHECK(!scalar_type->dtype_.IsFloat())
+        << "EmitCastToIndex does not support floating-point types (got " << GetTypeString(scalar_type->dtype_)
+        << " for var '" << var->name_hint_ << "')";
+    if (scalar_type->dtype_ != DataType::INDEX) {
+      std::string idx_name = NewNamedTemp(var->name_hint_ + "_idx");
+      std::string src_type = GetTypeString(scalar_type->dtype_);
+      Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
+      return idx_name;
+    }
+  }
+  return mlir_name;
+}
+
+bool PTOCodegen::HasFillpadConsumer(const ir::Var* var) const { return fillpad_input_vars_.count(var) > 0; }
 
 // ========================================================================
 // Expression visitors - Logical & Bitwise

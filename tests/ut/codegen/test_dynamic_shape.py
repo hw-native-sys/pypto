@@ -134,11 +134,14 @@ def test_add_kernel_valid_shape_pto_codegen():
     assert "partition_tensor_view<128x128xf32>" in mlir_code
     # tload is generated for each load
     assert "pto.tload" in mlir_code
-    # alloc_tile carries valid_row/valid_col for dynamic valid_shapes
-    assert "pto.alloc_tile addr = %c0i valid_row = %arg3 valid_col = %arg4" in mlir_code
-    # v_row and v_col are wildcards (?) when valid_shape is dynamic
+    # alloc_tile has dynamic type (v_row=?, v_col=?) with dynamic operands
     assert "v_row=?" in mlir_code
     assert "v_col=?" in mlir_code
+    # No fillpad consumer → valid_row/valid_col use dynamic variable operands (%arg3, %arg4)
+    assert "valid_row = %arg3" in mlir_code
+    assert "valid_col = %arg4" in mlir_code
+    # No set_validshape without fillpad (TLOAD respects valid_shape directly)
+    assert "pto.set_validshape" not in mlir_code
 
 
 def test_add_kernel_loop_dynamic_pto_codegen():

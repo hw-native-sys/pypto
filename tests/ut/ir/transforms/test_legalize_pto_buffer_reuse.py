@@ -533,16 +533,12 @@ class TestLegalizeWithCodegen:
         addr_values = _get_alloc_addrs(alloc_lines)
         assert addr_values[0] == addr_values[1], f"Expected same addr for shared MemRef, got: {addr_values}"
 
-        dynamic_allocs = [line for line in alloc_lines if "valid_row = %" in line]
-        assert len(dynamic_allocs) == 1, f"Expected one alloc_tile with dynamic valid_row, got: {alloc_lines}"
-        assert "valid_col = %" not in dynamic_allocs[0], (
-            f"Did not expect dynamic valid_col in alloc_tile: {dynamic_allocs[0]}"
+        # Dynamic valid_shape: type has v_row=?, v_col=? (PTOAS requires both dynamic)
+        assert "v_row=?" in alloc_lines[0], (
+            f"Expected dynamic v_row=? in tile_buf type, got: {alloc_lines[0]}"
         )
-        assert "v_row=?" in dynamic_allocs[0], (
-            f"Expected dynamic v_row in tile_buf type, got: {dynamic_allocs[0]}"
-        )
-        assert "v_col=128" in dynamic_allocs[0], (
-            f"Expected static v_col=128 in tile_buf type, got: {dynamic_allocs[0]}"
+        assert "v_col=?" in alloc_lines[0], (
+            f"Expected dynamic v_col=? in tile_buf type, got: {alloc_lines[0]}"
         )
 
         padded_allocs = [line for line in alloc_lines if "pad=2>" in line]
