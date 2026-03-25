@@ -125,6 +125,7 @@ set(PYPTO_SOURCES
     src/ir/arith/canonical_simplify.cpp
     src/ir/arith/ir_mutator_with_analyzer.cpp
     src/ir/arith/transitive_comparison_analyzer.cpp
+    src/ir/arith/int_set.cpp
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp

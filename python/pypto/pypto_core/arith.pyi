@@ -229,6 +229,69 @@ class TransitiveComparisonAnalyzer:
         """Enter a constraint scope. Returns a recovery function that restores original state."""
         ...
 
+class IntSet:
+    """Symbolic integer interval [min_value, max_value] using ExprPtr bounds.
+
+    Pass None for unbounded ends (negative infinity for min, positive infinity for max).
+    """
+
+    def __init__(self, min_value: Expr | None, max_value: Expr | None) -> None:
+        """Create a symbolic interval. Pass None for unbounded ends."""
+        ...
+
+    min_value: Expr | None
+    max_value: Expr | None
+
+    def is_everything(self) -> bool:
+        """Check if both bounds are unbounded (no information)."""
+        ...
+
+    def is_single_point(self) -> bool:
+        """Check if min and max are the same pointer (single value)."""
+        ...
+
+    def is_nothing(self) -> bool:
+        """Check if this is the empty set (always False)."""
+        ...
+
+    @staticmethod
+    def everything() -> IntSet:
+        """Create an unbounded set [-inf, +inf]."""
+        ...
+
+    @staticmethod
+    def single_point(val: Expr) -> IntSet:
+        """Create a single-point set [val, val]."""
+        ...
+
+    @staticmethod
+    def interval(min_value: Expr, max_value: Expr) -> IntSet:
+        """Create an interval [min_value, max_value] (inclusive)."""
+        ...
+
+class IntSetAnalyzer:
+    """Propagates symbolic integer bounds through expression trees."""
+
+    def __init__(self) -> None:
+        """Create a standalone IntSetAnalyzer."""
+        ...
+
+    def __call__(self, expr: Expr) -> IntSet:
+        """Compute symbolic interval for an expression."""
+        ...
+
+    def update(self, var: Var, int_set: IntSet) -> None:
+        """Update a variable's symbolic interval."""
+        ...
+
+    def bind(self, var: Var, min_val: Expr, max_val_exclusive: Expr) -> None:
+        """Bind a variable to a half-open symbolic range [min_val, max_val_exclusive)."""
+        ...
+
+    def enter_constraint(self, constraint: Expr) -> Callable[[], None] | None:
+        """Enter a constraint scope. Returns a recovery function, or None."""
+        ...
+
 class Analyzer:
     """Coordinates all sub-analyzers for expression analysis and simplification."""
 
@@ -240,6 +303,7 @@ class Analyzer:
     modular_set: ModularSetAnalyzer
     rewrite_simplify: RewriteSimplifier
     transitive_cmp: TransitiveComparisonAnalyzer
+    int_set: IntSetAnalyzer
 
     @overload
     def bind(self, var: Var, expr: Expr, allow_override: bool = False) -> None: ...

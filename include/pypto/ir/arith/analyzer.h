@@ -117,6 +117,34 @@ class ConstIntBoundAnalyzer {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Symbolic integer interval [min_value, max_value] using ExprPtr bounds.
+///
+/// Unlike ConstIntBound which uses concrete int64_t, IntSet uses ExprPtr bounds,
+/// enabling symbolic proofs like "x < n" without knowing n's concrete value.
+/// nullptr means unbounded (negative infinity for min, positive infinity for max).
+struct IntSet {
+  ExprPtr min_value;  ///< Lower bound (nullptr = negative infinity).
+  ExprPtr max_value;  ///< Upper bound (nullptr = positive infinity).
+
+  /// Check if this represents "everything" (both bounds unbounded).
+  [[nodiscard]] bool is_everything() const { return !min_value && !max_value; }
+
+  /// Check if this is a single point (min and max are the same pointer).
+  [[nodiscard]] bool is_single_point() const;
+
+  /// Check if this is the empty set. Reserved for future use.
+  [[nodiscard]] bool is_nothing() const { return false; }
+
+  /// Create an unbounded set (negative infinity, positive infinity).
+  static IntSet Everything();
+
+  /// Create a single-point set [val, val].
+  static IntSet SinglePoint(const ExprPtr& val);
+
+  /// Create an interval [min, max] (inclusive on both ends).
+  static IntSet Interval(const ExprPtr& min, const ExprPtr& max);
+};
+
 /// Modular arithmetic properties: value = coeff * k + base for some integer k.
 ///
 /// When coeff == 0, the value is exactly `base` (known constant).
@@ -287,6 +315,43 @@ class TransitiveComparisonAnalyzer {
   std::unique_ptr<Impl> impl_;
 };
 
+/// Propagates symbolic integer bounds through expression trees.
+///
+/// Given variable ranges expressed as [ExprPtr, ExprPtr], computes symbolic
+/// interval bounds for any expression. Enables proofs like "x < n" without
+/// knowing n's concrete value.
+class IntSetAnalyzer {
+ public:
+  /// Construct a standalone analyzer (no parent Analyzer).
+  IntSetAnalyzer();
+
+  ~IntSetAnalyzer();
+
+  IntSetAnalyzer(const IntSetAnalyzer&) = delete;
+  IntSetAnalyzer& operator=(const IntSetAnalyzer&) = delete;
+  IntSetAnalyzer(IntSetAnalyzer&&) noexcept;
+  IntSetAnalyzer& operator=(IntSetAnalyzer&&) noexcept;
+
+  /// Compute symbolic interval for an expression.
+  IntSet operator()(const ExprPtr& expr) const;
+
+  /// Update a variable's symbolic interval.
+  void Update(const VarPtr& var, const IntSet& set);
+
+  /// Bind a variable to a half-open symbolic range [min_val, max_val_exclusive).
+  void Bind(const VarPtr& var, const ExprPtr& min_val, const ExprPtr& max_val_exclusive);
+
+  /// Enter a constraint scope. Returns a recovery function.
+  std::function<void()> EnterConstraint(const ExprPtr& constraint);
+
+ private:
+  friend class Analyzer;
+  explicit IntSetAnalyzer(Analyzer* parent);
+
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 /// Coordinates all sub-analyzers for arithmetic expression analysis and simplification.
 ///
 /// Provides a unified interface for binding variable ranges, simplifying expressions,
@@ -306,6 +371,7 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   ModularSetAnalyzer modular_set;
   RewriteSimplifier rewrite_simplify;
   TransitiveComparisonAnalyzer transitive_cmp;
+  IntSetAnalyzer int_set;
 
   /// Bind a variable to an expression: propagates information to all sub-analyzers.
   /// \note allow_override is reserved for future use and currently has no effect.
@@ -338,6 +404,11 @@ class Analyzer : public std::enable_shared_from_this<Analyzer> {
   /// Within the returned scope, the constraint is assumed true.
   /// \note Analyzer must be managed by shared_ptr (use std::make_shared<Analyzer>()).
   ConstraintContext GetConstraintContext(const ExprPtr& constraint);
+
+ private:
+  friend class IntSetAnalyzer;
+  /// Guards against CanProve -> int_set -> SymMin/SymMax -> CanProve recursion.
+  bool in_int_set_eval_{false};
 };
 
 using AnalyzerPtr = std::shared_ptr<Analyzer>;

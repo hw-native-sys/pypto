@@ -38,7 +38,11 @@ namespace arith {
 // ============================================================================
 
 Analyzer::Analyzer()
-    : const_int_bound(this), modular_set(this), rewrite_simplify(this), transitive_cmp(this) {}
+    : const_int_bound(this),
+      modular_set(this),
+      rewrite_simplify(this),
+      transitive_cmp(this),
+      int_set(this) {}
 
 Analyzer::~Analyzer() = default;
 
@@ -50,6 +54,7 @@ void Analyzer::Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override)
   modular_set.Update(var, modular_set(simplified));
   rewrite_simplify.Update(var, simplified);
   transitive_cmp.Bind(var, simplified, allow_override);
+  int_set.Update(var, IntSet::SinglePoint(simplified));
 }
 
 void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusive, bool allow_override) {
@@ -57,9 +62,11 @@ void Analyzer::Bind(const VarPtr& var, int64_t min_val, int64_t max_val_exclusiv
                                      << max_val_exclusive << ")";
   const_int_bound.Bind(var, min_val, max_val_exclusive);
   transitive_cmp.Bind(var, min_val, max_val_exclusive, allow_override);
+  // Propagate concrete range to int_set as well.
+  DataType dtype = GetScalarDtype(var);
+  int_set.Bind(var, MakeConstInt(min_val, dtype), MakeConstInt(max_val_exclusive, dtype));
   // If the range is a single value, propagate exact value to all sub-analyzers.
   if (max_val_exclusive - min_val == 1) {
-    DataType dtype = GetScalarDtype(var);
     ExprPtr bound_value = MakeConstInt(min_val, dtype);
     rewrite_simplify.Update(var, bound_value);
     modular_set.Update(var, modular_set(bound_value));
@@ -119,30 +126,82 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
     return CanProve(op->left_) && CanProve(op->right_);
   }
 
+  // Symbolic fallback strategy: when const_int_bound and transitive_cmp are
+  // inconclusive, use int_set to get symbolic bounds, then check those via
+  // const_int_bound. Uses the original operand (not int_set result) on the
+  // "other" side to preserve symbolic relationships. Guarded by
+  // in_int_set_eval_ to prevent CanProve -> int_set -> SymMin -> CanProve.
+
+  // Standalone CanonicalSimplifier (no parent) for algebraic cancellations like
+  // (n-1)-n -> -1. Intentionally parent-less to avoid recursion back into Analyzer.
+  // The heap allocation is acceptable since this fallback path is rare.
+  CanonicalSimplifier canon_simplify;
+  auto DeepSimplify = [&](const ExprPtr& expr) -> ExprPtr { return canon_simplify(Simplify(expr)); };
+
+  // RAII guard for in_int_set_eval_ flag to ensure exception safety.
+  struct IntSetEvalGuard {
+    bool& flag;
+    explicit IntSetEvalGuard(bool& f) : flag(f) { flag = true; }
+    ~IntSetEvalGuard() { flag = false; }
+  };
+
+  // Symbolic fallback helper: evaluates int_set on lhs/rhs, then checks if a
+  // symbolic bound satisfies the comparison threshold via const_int_bound.
+  //   check_upper=true:  prove max(lhs - rhs) </<= threshold (Lt/Le)
+  //   check_upper=false: prove min(lhs - rhs) >/>= threshold (Gt/Ge)
+  auto TrySymbolicFallback = [&](const ExprPtr& lhs, const ExprPtr& rhs, bool check_upper,
+                                 bool strict) -> bool {
+    if (in_int_set_eval_) return false;
+    IntSetEvalGuard guard(in_int_set_eval_);
+    auto lhs_set = int_set(lhs);
+    auto rhs_set = int_set(rhs);
+    if (check_upper) {
+      if (lhs_set.max_value) {
+        auto b = const_int_bound(DeepSimplify(MakeSub(lhs_set.max_value, rhs)));
+        if (strict ? b.max_value < 0 : b.max_value <= 0) return true;
+      }
+      if (rhs_set.min_value) {
+        auto b = const_int_bound(DeepSimplify(MakeSub(lhs, rhs_set.min_value)));
+        if (strict ? b.max_value < 0 : b.max_value <= 0) return true;
+      }
+    } else {
+      if (lhs_set.min_value) {
+        auto b = const_int_bound(DeepSimplify(MakeSub(lhs_set.min_value, rhs)));
+        if (strict ? b.min_value > 0 : b.min_value >= 0) return true;
+      }
+      if (rhs_set.max_value) {
+        auto b = const_int_bound(DeepSimplify(MakeSub(lhs, rhs_set.max_value)));
+        if (strict ? b.min_value > 0 : b.min_value >= 0) return true;
+      }
+    }
+    return false;
+  };
+
   // Decompose comparison expressions and check via bounds analysis.
-  // For a < b: prove max(a - b) < 0
+  // Fallback chain: const_int_bound -> transitive_cmp -> int_set symbolic.
   if (auto op = As<Lt>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
     if (const_int_bound(diff).max_value < 0) return true;
-    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLT);
+    if (ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLT)) return true;
+    return TrySymbolicFallback(op->left_, op->right_, /*check_upper=*/true, /*strict=*/true);
   }
-  // For a <= b: prove max(a - b) <= 0
   if (auto op = As<Le>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
     if (const_int_bound(diff).max_value <= 0) return true;
-    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLE);
+    if (ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kLE)) return true;
+    return TrySymbolicFallback(op->left_, op->right_, /*check_upper=*/true, /*strict=*/false);
   }
-  // For a > b: prove min(a - b) > 0
   if (auto op = As<Gt>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
     if (const_int_bound(diff).min_value > 0) return true;
-    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGT);
+    if (ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGT)) return true;
+    return TrySymbolicFallback(op->left_, op->right_, /*check_upper=*/false, /*strict=*/true);
   }
-  // For a >= b: prove min(a - b) >= 0
   if (auto op = As<Ge>(simplified)) {
     ExprPtr diff = Simplify(MakeSub(op->left_, op->right_));
     if (const_int_bound(diff).min_value >= 0) return true;
-    return ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGE);
+    if (ResultImplies(transitive_cmp.TryCompare(op->left_, op->right_), CompareResult::kGE)) return true;
+    return TrySymbolicFallback(op->left_, op->right_, /*check_upper=*/false, /*strict=*/false);
   }
   // For a == b: prove a - b == 0
   if (auto op = As<Eq>(simplified)) {
@@ -187,6 +246,9 @@ ConstraintContext::ConstraintContext(AnalyzerPtr analyzer, const ExprPtr& constr
     recovery_functions_.push_back(std::move(fn));
   }
   if (auto fn = analyzer_->transitive_cmp.EnterConstraint(normalized)) {
+    recovery_functions_.push_back(std::move(fn));
+  }
+  if (auto fn = analyzer_->int_set.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
 }

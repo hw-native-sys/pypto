@@ -198,6 +198,51 @@ void BindArith(nb::module_& m) {
            nb::arg("constraint"),
            "Enter a constraint scope. Returns a recovery function that restores original state.");
 
+  // IntSet
+  nb::class_<ir::arith::IntSet>(
+      arith, "IntSet",
+      "Symbolic integer interval [min_value, max_value] using ExprPtr bounds.\n\n"
+      "Pass None for unbounded ends (negative infinity for min, positive infinity for max).")
+      .def(nb::init<ir::ExprPtr, ir::ExprPtr>(), nb::arg("min_value").none(), nb::arg("max_value").none(),
+           "Create a symbolic interval. Pass None for unbounded ends.")
+      .def_rw("min_value", &ir::arith::IntSet::min_value, "Symbolic lower bound (None = -inf).")
+      .def_rw("max_value", &ir::arith::IntSet::max_value, "Symbolic upper bound (None = +inf).")
+      .def("is_everything", &ir::arith::IntSet::is_everything,
+           "Check if both bounds are unbounded (no information).")
+      .def("is_single_point", &ir::arith::IntSet::is_single_point,
+           "Check if min and max are the same pointer (single value).")
+      .def("is_nothing", &ir::arith::IntSet::is_nothing, "Check if this is the empty set (always False).")
+      .def_static("everything", &ir::arith::IntSet::Everything, "Create an unbounded set [-inf, +inf].")
+      .def_static("single_point", &ir::arith::IntSet::SinglePoint, nb::arg("val"),
+                  "Create a single-point set [val, val].")
+      .def_static("interval", &ir::arith::IntSet::Interval, nb::arg("min_value"), nb::arg("max_value"),
+                  "Create an interval [min_value, max_value] (inclusive).")
+      .def("__repr__", [](const ir::arith::IntSet& s) {
+        auto fmt = [](const ir::ExprPtr& e) -> std::string {
+          if (!e) return "None";
+          if (auto ci = ir::As<ir::ConstInt>(e)) return std::to_string(ci->value_);
+          if (auto var = ir::As<ir::Var>(e)) return var->name_hint_;
+          return "<Expr>";
+        };
+        return "IntSet[" + fmt(s.min_value) + ", " + fmt(s.max_value) + "]";
+      });
+
+  // IntSetAnalyzer
+  nb::class_<ir::arith::IntSetAnalyzer>(arith, "IntSetAnalyzer",
+                                        "Propagates symbolic integer bounds through expression trees.\n\n"
+                                        "Unlike ConstIntBoundAnalyzer which uses concrete int64 bounds,\n"
+                                        "IntSetAnalyzer uses ExprPtr bounds for symbolic analysis.")
+      .def(nb::init<>(), "Create a standalone IntSetAnalyzer.")
+      .def("__call__", &ir::arith::IntSetAnalyzer::operator(), nb::arg("expr"),
+           "Compute symbolic interval for an expression.")
+      .def("update", &ir::arith::IntSetAnalyzer::Update, nb::arg("var"), nb::arg("int_set"),
+           "Update a variable's symbolic interval.")
+      .def("bind", &ir::arith::IntSetAnalyzer::Bind, nb::arg("var"), nb::arg("min_val"),
+           nb::arg("max_val_exclusive"),
+           "Bind a variable to a half-open symbolic range [min_val, max_val_exclusive).")
+      .def("enter_constraint", &ir::arith::IntSetAnalyzer::EnterConstraint, nb::arg("constraint"),
+           "Enter a constraint scope. Returns a recovery function.");
+
   // Analyzer (coordinator)
   nb::class_<ir::arith::Analyzer>(
       arith, "Analyzer",
@@ -210,6 +255,7 @@ void BindArith(nb::module_& m) {
       .def_ro("rewrite_simplify", &ir::arith::Analyzer::rewrite_simplify, "RewriteSimplifier sub-analyzer.")
       .def_ro("transitive_cmp", &ir::arith::Analyzer::transitive_cmp,
               "TransitiveComparisonAnalyzer sub-analyzer.")
+      .def_ro("int_set", &ir::arith::Analyzer::int_set, "IntSetAnalyzer sub-analyzer.")
       .def("bind", nb::overload_cast<const ir::VarPtr&, const ir::ExprPtr&, bool>(&ir::arith::Analyzer::Bind),
            nb::arg("var"), nb::arg("expr"), nb::arg("allow_override") = false,
            "Bind a variable to an expression, propagating information to all sub-analyzers.")
