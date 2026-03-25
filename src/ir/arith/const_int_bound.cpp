@@ -457,6 +457,9 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
       TryParseConstraint(and_op->left_);
       TryParseConstraint(and_op->right_);
     }
+    // Note: Not(comparison) is handled by ConstraintContext, which normalizes
+    // constraints via rewrite_simplify before dispatching to sub-analyzers.
+    // E.g., Not(Lt(a,b)) is rewritten to Ge(a,b) before reaching this code.
   };
 
   TryParseConstraint(constraint);

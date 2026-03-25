@@ -343,6 +343,15 @@ Pass ExpandMixedKernel();
 Pass RunVerifier(const IRPropertySet& properties);
 
 /**
+ * @brief Simplify all scalar expressions in the program
+ *
+ * Uses algebraic rewrite rules and bound analysis to reduce expression complexity.
+ * Automatically binds ForStmt loop variables to their iteration ranges for
+ * range-aware simplification (e.g., i // 8 == 0 when i is in [0, 8)).
+ */
+Pass SimplifyExpr();
+
+/**
  * @brief Create a pass that flattens nested call expressions
  */
 Pass FlattenCallExpr();

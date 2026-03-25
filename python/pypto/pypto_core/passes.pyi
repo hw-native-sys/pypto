@@ -283,6 +283,9 @@ def resolve_backend_op_layouts() -> Pass:
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
+def simplify_expr() -> Pass:
+    """Create a pass that simplifies scalar expressions using algebraic rules and bound analysis."""
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
@@ -370,6 +373,7 @@ __all__ = [
     "flatten_tile_nd_to_2d",
     "infer_tile_memory_space",
     "expand_mixed_kernel",
+    "simplify_expr",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "NestedCallErrorType",

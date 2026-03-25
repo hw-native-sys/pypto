@@ -154,14 +154,19 @@ ConstraintContext Analyzer::GetConstraintContext(const ExprPtr& constraint) {
 
 ConstraintContext::ConstraintContext(AnalyzerPtr analyzer, const ExprPtr& constraint)
     : analyzer_(std::move(analyzer)) {
+  // Normalize the constraint via rewrite_simplify before dispatching.
+  // This decomposes Not(Lt(a,b)) → Ge(a,b), etc., so all sub-analyzers
+  // receive comparison expressions they can directly interpret.
+  ExprPtr normalized = analyzer_->rewrite_simplify(constraint);
+
   // Enter constraint on each sub-analyzer and collect recovery functions.
-  if (auto fn = analyzer_->const_int_bound.EnterConstraint(constraint)) {
+  if (auto fn = analyzer_->const_int_bound.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
-  if (auto fn = analyzer_->modular_set.EnterConstraint(constraint)) {
+  if (auto fn = analyzer_->modular_set.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
-  if (auto fn = analyzer_->rewrite_simplify.EnterConstraint(constraint)) {
+  if (auto fn = analyzer_->rewrite_simplify.EnterConstraint(normalized)) {
     recovery_functions_.push_back(std::move(fn));
   }
 }

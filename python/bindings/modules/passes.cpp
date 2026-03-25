@@ -271,6 +271,8 @@ void BindPass(nb::module_& m) {
              "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
+  passes.def("simplify_expr", &pass::SimplifyExpr,
+             "Create a pass that simplifies scalar expressions using algebraic rules and bound analysis");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
