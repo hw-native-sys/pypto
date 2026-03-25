@@ -302,6 +302,8 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       auto then_map = tensor_to_tile;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = TransformIncoreBody(then_stmts, then_map, conv_registry, op_registry, span);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then_stmts);
       auto new_then_body = SeqStmts::Flatten(std::move(new_then_stmts), if_stmt->then_body_->span_);
 
       // Recurse into else branch with a copy of the map
@@ -314,7 +316,6 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
-      auto yield_types = FindYieldTypes(new_then_stmts);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }
@@ -1463,6 +1464,8 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then_stmts = UpdateCallSitesBody(then_stmts, then_map, incore_added_outputs,
                                                 transformed_incore_funcs, op_registry, span, changed);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then_stmts);
       auto new_then_body = SeqStmts::Flatten(std::move(new_then_stmts), if_stmt->then_body_->span_);
 
       std::optional<StmtPtr> new_else_body;
@@ -1475,7 +1478,6 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       }
 
       // Update return_vars types based on yield types (check then branch, fall back to else)
-      auto yield_types = FindYieldTypes(new_then_stmts);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }

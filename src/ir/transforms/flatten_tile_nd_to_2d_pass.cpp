@@ -282,6 +282,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       auto then_ctx = ctx;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
       auto new_then = TransformBody(then_stmts, then_ctx, op_registry, span);
+      // Extract yield types before moving the vector
+      auto yield_types = FindYieldTypes(new_then);
       auto new_then_body = SeqStmts::Flatten(std::move(new_then), if_stmt->then_body_->span_);
 
       FlattenContext else_ctx = ctx;
@@ -293,7 +295,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       }
 
       // Update return_vars types based on yield types (positional matching)
-      auto yield_types = FindYieldTypes(new_then);
       if (yield_types.empty() && new_else_body.has_value()) {
         yield_types = FindYieldTypes(FlattenToStmts(*new_else_body));
       }
