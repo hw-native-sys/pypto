@@ -1462,5 +1462,106 @@ def test_tensor_concat_row_mismatch():
         tensor.concat(t0_var, t1_var)
 
 
+def test_tensor_scatter_update_2d():
+    """Test tensor.scatter_update with 2D input and src."""
+    span = ir.Span.unknown()
+
+    rows = ir.ConstInt(16, DataType.INT32, span)
+    d = ir.ConstInt(64, DataType.INT32, span)
+    b = ir.ConstInt(2, DataType.INT32, span)
+    s = ir.ConstInt(4, DataType.INT32, span)
+    bs = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([rows, d], DataType.FP16)
+    index_type = ir.TensorType([b, s], DataType.INT32)
+    src_type = ir.TensorType([bs, d], DataType.FP16)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    call = ir.op.tensor.scatter_update(input_var, -2, index_var, src_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter_update"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_scatter_update_4d():
+    """Test tensor.scatter_update with 4D input and src."""
+    span = ir.Span.unknown()
+
+    block_num = ir.ConstInt(4, DataType.INT32, span)
+    block_size = ir.ConstInt(4, DataType.INT32, span)
+    one = ir.ConstInt(1, DataType.INT32, span)
+    d = ir.ConstInt(64, DataType.INT32, span)
+    b = ir.ConstInt(2, DataType.INT32, span)
+    s = ir.ConstInt(4, DataType.INT32, span)
+
+    input_type = ir.TensorType([block_num, block_size, one, d], DataType.BF16)
+    index_type = ir.TensorType([b, s], DataType.INT32)
+    src_type = ir.TensorType([b, s, one, d], DataType.BF16)
+
+    input_var = ir.Var("kv_cache", input_type, span)
+    index_var = ir.Var("block_table", index_type, span)
+    src_var = ir.Var("new_kv", src_type, span)
+
+    call = ir.op.tensor.scatter_update(input_var, -2, index_var, src_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter_update"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.BF16
+    assert len(result_type.shape) == 4
+
+
+def test_tensor_scatter_update_dtype_mismatch():
+    """Test tensor.scatter_update rejects mismatched dtypes."""
+    span = ir.Span.unknown()
+
+    rows = ir.ConstInt(16, DataType.INT32, span)
+    d = ir.ConstInt(64, DataType.INT32, span)
+    b = ir.ConstInt(2, DataType.INT32, span)
+    s = ir.ConstInt(4, DataType.INT32, span)
+    bs = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([rows, d], DataType.FP16)
+    index_type = ir.TensorType([b, s], DataType.INT32)
+    src_type = ir.TensorType([bs, d], DataType.FP32)  # wrong dtype
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    with pytest.raises(ValueError, match="src dtype"):
+        ir.op.tensor.scatter_update(input_var, -2, index_var, src_var)
+
+
+def test_tensor_scatter_update_invalid_dim():
+    """Test tensor.scatter_update rejects dim values other than -2."""
+    span = ir.Span.unknown()
+
+    rows = ir.ConstInt(16, DataType.INT32, span)
+    d = ir.ConstInt(64, DataType.INT32, span)
+    b = ir.ConstInt(2, DataType.INT32, span)
+    s = ir.ConstInt(4, DataType.INT32, span)
+    bs = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([rows, d], DataType.FP16)
+    index_type = ir.TensorType([b, s], DataType.INT32)
+    src_type = ir.TensorType([bs, d], DataType.FP16)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    with pytest.raises(ValueError, match="dim=-2"):
+        ir.op.tensor.scatter_update(input_var, 0, index_var, src_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

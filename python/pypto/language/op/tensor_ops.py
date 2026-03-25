@@ -56,6 +56,7 @@ __all__ = [
     "concat",
     "reshape",
     "transpose",
+    "scatter_update",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -717,4 +718,29 @@ def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.transpose(tensor_expr, axis1, axis2)
+    return Tensor(expr=call_expr)
+
+
+def scatter_update(
+    input: Tensor,
+    dim: int,
+    index: Tensor,
+    src: Tensor,
+) -> Tensor:
+    """Update input tensor rows at positions specified by 2D index with values from src.
+
+    Supports two variants based on input/src rank:
+    - 2D: input [rows, d], src [b*s, d], index [b, s]
+    - 4D: input [blockNum, blockSize, 1, d], src [b, s, 1, d], index [b, s]
+
+    Args:
+        input: Destination tensor (2D or 4D)
+        dim: Dimension to scatter along (currently only -2 is supported)
+        index: 2D index tensor [b, s] of integer dtype
+        src: Source tensor (2D [b*s, d] or 4D [b, s, 1, d])
+
+    Returns:
+        Tensor wrapping the scatter_update operation
+    """
+    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
     return Tensor(expr=call_expr)

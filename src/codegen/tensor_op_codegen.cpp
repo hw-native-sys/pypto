@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <string>
 
@@ -264,6 +265,66 @@ REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
 
   std::ostringstream oss;
   oss << "int64_t " << result_var << " = " << dim_expr << ";";
+  return oss.str();
+}
+
+REGISTER_ORCHESTRATION_OP(tensor_scatter_update, ("tensor.scatter_update")) {
+  // tensor.scatter_update(input, index, src):
+  //   For each (i, j): input[index[i*s+j]] row = src[i*s+j] row
+  // Works for both 2D ([rows, d]) and 4D ([blockNum, blockSize, 1, d]) inputs,
+  // since their linear memory layouts are equivalent.
+  CHECK(op->args_.size() == 3) << "tensor.scatter_update requires 3 arguments";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.scatter_update: input must be a variable";
+  std::string index_name = codegen.TryGetVarName(op->args_[1]);
+  CHECK(!index_name.empty()) << "tensor.scatter_update: index must be a variable";
+  std::string src_name = codegen.TryGetVarName(op->args_[2]);
+  CHECK(!src_name.empty()) << "tensor.scatter_update: src must be a variable";
+
+  auto input_type = As<TensorType>(op->args_[0]->GetType());
+  auto index_type = As<TensorType>(op->args_[1]->GetType());
+  INTERNAL_CHECK(input_type && index_type) << "Internal error: invalid types for tensor.scatter_update";
+
+  std::string input_ptr = codegen.GetTensorDataPtr(input_name);
+  std::string index_ptr = codegen.GetTensorDataPtr(index_name);
+  std::string src_ptr = codegen.GetTensorDataPtr(src_name);
+
+  // b = index.shape[0], s = index.shape[1], d = last dimension of input
+  std::string b_expr = codegen.GenerateExprString(index_type->shape_[0]);
+  std::string s_expr = codegen.GenerateExprString(index_type->shape_[1]);
+  std::string d_expr = codegen.GenerateExprString(input_type->shape_.back());
+
+  size_t elem_bytes = (input_type->dtype_.GetBit() + 7) / 8;
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  // Use result_var as suffix to ensure unique local variable names
+  std::string s_var = "s_" + result_var;
+  std::string d_var = "d_" + result_var;
+  std::string i_var = "i_" + result_var;
+  std::string j_var = "j_" + result_var;
+  std::string idx_var = "idx_" + result_var;
+  std::string row_var = "row_" + result_var;
+
+  std::string index_cpp_type = index_type->dtype_.ToCTypeString();
+
+  std::ostringstream oss;
+  oss << "size_t " << s_var << " = (size_t)(" << s_expr << ");\n";
+  oss << "size_t " << d_var << " = (size_t)(" << d_expr << ");\n";
+  oss << "for (size_t " << i_var << " = 0; " << i_var << " < (size_t)(" << b_expr << "); ++" << i_var
+      << ") {\n";
+  oss << "  for (size_t " << j_var << " = 0; " << j_var << " < " << s_var << "; ++" << j_var << ") {\n";
+  oss << "    size_t " << idx_var << " = " << i_var << " * " << s_var << " + " << j_var << ";\n";
+  oss << "    " << index_cpp_type << " " << row_var << " = static_cast<const " << index_cpp_type << "*>("
+      << index_ptr << ")[" << idx_var << "];\n";
+  oss << "    always_assert(" << row_var << " >= 0);\n";
+  oss << "    memcpy(static_cast<char*>(" << input_ptr << ") + static_cast<size_t>(" << row_var << ") * "
+      << d_var << " * " << elem_bytes << "ULL,\n";
+  oss << "           static_cast<const char*>(" << src_ptr << ") + " << idx_var << " * " << d_var << " * "
+      << elem_bytes << "ULL,\n";
+  oss << "           " << d_var << " * " << elem_bytes << "ULL);\n";
+  oss << "  }\n}\n";
+  oss << "Tensor " << result_var << " = " << codegen.GetExternalTensorName(input_name) << ";";
   return oss.str();
 }
 

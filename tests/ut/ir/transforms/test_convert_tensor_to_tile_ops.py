@@ -2168,5 +2168,69 @@ class TestSliceMatmulConversion:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestScatterUpdateConversion:
+    """Tests for tensor.scatter_update → tile.scatter_update conversion."""
+
+    def test_scatter_update_local_tile_converts(self):
+        """tensor.scatter_update on a local tile buffer converts to tile.scatter_update."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                buf: pl.Tensor[[16, 64], pl.FP16] = pl.create_tensor([16, 64], dtype=pl.FP16)
+                result: pl.Tensor[[16, 64], pl.FP16] = pl.scatter_update(buf, -2, index, src)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                result: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(index, src)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_str = str(After)
+        assert "tile.scatter_update" in after_str
+        assert "tensor.scatter_update" not in after_str
+
+    def test_scatter_update_global_tensor_stays(self):
+        """tensor.scatter_update on a global tensor also converts to tile.scatter_update
+        because the pass first loads all function-parameter tensors into tiles."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                kv_cache: pl.Tensor[[16, 64], pl.FP16],
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                result: pl.Tensor[[16, 64], pl.FP16] = pl.scatter_update(kv_cache, -2, index, src)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                kv_cache: pl.Tensor[[16, 64], pl.FP16],
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 64], pl.FP16],
+            ) -> pl.Tensor[[16, 64], pl.FP16]:
+                result: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(kv_cache, index, src)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_str = str(After)
+        # The pass loads all tensor parameters to tiles, so scatter_update becomes tile.scatter_update
+        assert "tile.scatter_update" in after_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

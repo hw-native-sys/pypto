@@ -26,6 +26,7 @@ __all__ = [
     "load",
     "store",
     "assemble",
+    "scatter_update",
     "concat",
     "move",
     "full",
@@ -270,6 +271,27 @@ def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
         Tile wrapping the assemble operation
     """
     call_expr = _ir_ops.assemble(target.unwrap(), source.unwrap(), _normalize_intlike(offset))
+    return Tile(expr=call_expr)
+
+
+def scatter_update(
+    input: Tile,
+    dim: int,
+    index: Tile,
+    src: Tile,
+) -> Tile:
+    """Update tile rows at positions specified by 2D index tile with values from src.
+
+    Args:
+        input: Destination tile (2D or 4D)
+        dim: Dimension to scatter along (currently only -2 is supported)
+        index: 2D index tile [b, s] of integer dtype
+        src: Source tile (same rank as input)
+
+    Returns:
+        Tile wrapping the scatter_update operation
+    """
+    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
     return Tile(expr=call_expr)
 
 

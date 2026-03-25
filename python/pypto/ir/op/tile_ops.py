@@ -195,6 +195,36 @@ def assemble(
     return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], {}, actual_span)
 
 
+def scatter_update(
+    input: Expr,
+    dim: int,
+    index: Expr,
+    src: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Update tile rows at positions specified by 2D index tile with values from src.
+
+    Supports two variants based on input/src rank:
+    - 2D: input [rows, d], src [b*s, d], index [b, s]
+    - 4D: input [blockNum, blockSize, 1, d], src [b, s, 1, d], index [b, s]
+
+    Args:
+        input: Destination tile (TileType, 2D or 4D)
+        dim: Dimension to scatter along (currently only -2 is supported)
+        index: 2D index tile [b, s] of integer dtype
+        src: Source tile (same rank as input)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning a TileType with the same shape/dtype as input
+    """
+    actual_span = _get_span_or_capture(span)
+    # dim may arrive as a ConstInt when called from the DSL parser — extract the int value
+    dim_val = int(dim.value) if isinstance(dim, ConstInt) else int(dim)
+    kwargs: dict[str, Any] = {"dim": dim_val}
+    return _ir_core.create_op_call("tile.scatter_update", [input, index, src], kwargs, actual_span)
+
+
 def concat(
     src0: Expr,
     src1: Expr,

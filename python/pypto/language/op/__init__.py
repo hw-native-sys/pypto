@@ -27,7 +27,7 @@ from . import tensor_ops as tensor
 from . import tile_ops as tile
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, dim
+from .tensor_ops import assemble, dim, scatter_update
 from .tensor_ops import create as create_tensor
 
 # Promoted tile-only ops (accessible as pl.load, etc.)
@@ -190,4 +190,5 @@ __all__ = [
     "create_tensor",
     "assemble",
     "dim",
+    "scatter_update",
 ]

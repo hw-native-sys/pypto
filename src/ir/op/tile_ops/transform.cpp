@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -371,6 +372,65 @@ REGISTER_OP("tile.assemble")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileAssembleType(args, kwargs);
+    });
+
+TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tile.scatter_update(input, index, src) -> TileType same as input
+  // input: TileType 2D [rows, d] or 4D [blockNum, blockSize, 1, d]
+  // index: TileType 2D [b, s] of integer dtype
+  // src:   TileType 2D [b*s, d] or 4D [b, s, 1, d] (same rank as input)
+  CHECK(args.size() == 3) << "tile.scatter_update requires exactly 3 arguments (input, index, src), got "
+                          << args.size();
+
+  auto input_type = As<TileType>(args[0]->GetType());
+  CHECK(input_type) << "tile.scatter_update: input must be TileType, got " << args[0]->GetType()->TypeName();
+  CHECK(input_type->shape_.size() == 2 || input_type->shape_.size() == 4)
+      << "tile.scatter_update: input must be 2D or 4D, got rank " << input_type->shape_.size();
+
+  auto index_type = As<TileType>(args[1]->GetType());
+  CHECK(index_type) << "tile.scatter_update: index must be TileType, got " << args[1]->GetType()->TypeName();
+  CHECK(index_type->shape_.size() == 2)
+      << "tile.scatter_update: index must be 2D [b, s], got rank " << index_type->shape_.size();
+  CHECK(index_type->dtype_.IsInt()) << "tile.scatter_update: index dtype must be integer, got "
+                                    << index_type->dtype_.ToString();
+
+  auto src_type = As<TileType>(args[2]->GetType());
+  CHECK(src_type) << "tile.scatter_update: src must be TileType, got " << args[2]->GetType()->TypeName();
+  CHECK(src_type->shape_.size() == input_type->shape_.size())
+      << "tile.scatter_update: src rank (" << src_type->shape_.size() << ") must match input rank ("
+      << input_type->shape_.size() << ")";
+  CHECK(src_type->dtype_ == input_type->dtype_)
+      << "tile.scatter_update: src dtype (" << src_type->dtype_.ToString() << ") must match input dtype ("
+      << input_type->dtype_.ToString() << ")";
+
+  for (const auto& [key, val] : kwargs) {
+    if (key == "dim") {
+      int dim_val = AnyCast<int>(val, "kwarg key: dim");
+      CHECK(dim_val == -2) << "tile.scatter_update: only dim=-2 is currently supported, got " << dim_val;
+    }
+  }
+
+  return std::make_shared<TileType>(input_type->shape_, input_type->dtype_);
+}
+
+REGISTER_OP("tile.scatter_update")
+    .set_op_category("TileOp")
+    .set_description(
+        "Update input tile rows at positions given by 2D index tile with values from src. "
+        "Supports 2D input [rows, d] with 2D src [b*s, d], and 4D input [blockNum, blockSize, 1, d] "
+        "with 4D src [b, s, 1, d]. Index is always 2D [b, s] of integer dtype.")
+    .add_argument("input", "Destination tile (2D [rows, d] or 4D [blockNum, blockSize, 1, d])")
+    .add_argument("index", "2D index tile [b, s] of integer dtype")
+    .add_argument("src", "Source tile (2D [b*s, d] or 4D [b, s, 1, d])")
+    .set_attr<int>("dim")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileScatterUpdateType(args, kwargs);
     });
 
 TypePtr DeduceTileConcatType(const std::vector<ExprPtr>& args,

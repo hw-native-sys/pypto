@@ -430,6 +430,71 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
+  // tensor.scatter_update → tile.scatter_update
+  //
+  // When input is a TileType (local buffer created via tensor.create), load
+  // index and src if needed, then emit tile.scatter_update(input, index, src).
+  // When input is a TensorType (global memory, e.g. KV cache pool), keep the
+  // op unchanged — the orchestration codegen handles it via memcpy.
+  // ────────────────────────────────────────────────────────────────────────
+
+  RegisterCustom(
+      "tensor.scatter_update",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "tensor.scatter_update conversion expects 3 args (input, index, src)";
+        auto& op_reg = OpRegistry::GetInstance();
+
+        const auto& input = args[0];
+        const auto& index = args[1];
+        const auto& src = args[2];
+
+        auto input_tensor_type = As<TensorType>(input->GetType());
+
+        if (input_tensor_type) {
+          // Global tensor input — keep as tensor.scatter_update (handled by orchestration codegen)
+          if (kwargs.empty()) {
+            return ConversionResult{op_reg.Create("tensor.scatter_update", args, span)};
+          }
+          return ConversionResult{op_reg.Create("tensor.scatter_update", args, kwargs, span)};
+        }
+
+        CHECK(As<TileType>(input->GetType()))
+            << "tensor.scatter_update: unexpected input type: " << input->GetType()->TypeName();
+
+        std::vector<StmtPtr> prologue;
+
+        // Load index to Vec tile if it is still a global tensor
+        ExprPtr index_tile = index;
+        if (auto index_tensor_type = As<TensorType>(index->GetType())) {
+          auto offsets = MakeZeroOffsetsTuple(index_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapesTuple(index_tensor_type->shape_, span);
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
+                                                                   {"transpose", false}};
+          auto load = op_reg.Create("tile.load", {index, offsets, shapes, shapes}, load_kw, span);
+          auto idx_var = std::make_shared<Var>("scatter_idx", load->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(idx_var, load, span));
+          index_tile = idx_var;
+        }
+
+        // Load src to Vec tile if it is still a global tensor
+        ExprPtr src_tile = src;
+        if (auto src_tensor_type = As<TensorType>(src->GetType())) {
+          auto offsets = MakeZeroOffsetsTuple(src_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapesTuple(src_tensor_type->shape_, span);
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
+                                                                   {"transpose", false}};
+          auto load = op_reg.Create("tile.load", {src, offsets, shapes, shapes}, load_kw, span);
+          auto src_var = std::make_shared<Var>("scatter_src", load->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(src_var, load, span));
+          src_tile = src_var;
+        }
+
+        auto scatter_call = op_reg.Create("tile.scatter_update", {input, index_tile, src_tile}, kwargs, span);
+        return ConversionResult{std::move(prologue), scatter_call};
+      });
+
+  // ────────────────────────────────────────────────────────────────────────
   // tensor.create → tile.create
   //
   // tensor.create(shape, dtype=...) → tile.create(shape, dtype=..., target_memory=Vec)
