@@ -16,7 +16,7 @@ or ``pl.tile.add``.
 """
 
 from collections.abc import Sequence
-from typing import TypeVar, overload
+from typing import NoReturn, TypeVar, overload
 
 __all__ = [
     "add",
@@ -70,6 +70,21 @@ from . import tile_ops as _tile
 
 T = TypeVar("T", Tensor, Tile)
 
+
+def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
+    """Raise TypeError for mixed Tensor/Tile or unsupported argument types."""
+    has_tensor = any(isinstance(a, Tensor) for a in args)
+    has_tile = any(isinstance(a, Tile) for a in args)
+    types = ", ".join(type(a).__name__ for a in args)
+    if has_tensor and has_tile:
+        raise TypeError(
+            f"{op_name}: cannot mix Tensor and Tile arguments "
+            f"({types}). All operands must be the same type "
+            f"level — either all Tensor or all Tile"
+        )
+    raise TypeError(f"{op_name}: expected Tensor or Tile operands, got ({types})")
+
+
 # ---------------------------------------------------------------------------
 # Binary arithmetic with scalar auto-dispatch
 # ---------------------------------------------------------------------------
@@ -85,7 +100,7 @@ def add(lhs: T, rhs: T | int | float | Scalar) -> T:
         return _tile.add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _tile.adds(lhs, rhs)
-    raise TypeError(f"add: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("add", lhs, rhs)
 
 
 # --- sub ---
@@ -99,7 +114,7 @@ def sub(lhs: T, rhs: T | int | float | Scalar) -> T:
         return _tile.sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _tile.subs(lhs, rhs)
-    raise TypeError(f"sub: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("sub", lhs, rhs)
 
 
 # --- mul ---
@@ -113,7 +128,7 @@ def mul(lhs: T, rhs: T | int | float | Scalar) -> T:
         return _tile.mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _tile.muls(lhs, rhs)
-    raise TypeError(f"mul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("mul", lhs, rhs)
 
 
 # --- div ---
@@ -127,7 +142,7 @@ def div(lhs: T, rhs: T | int | float | Scalar) -> T:
         return _tile.div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
         return _tile.divs(lhs, rhs)
-    raise TypeError(f"div: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("div", lhs, rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +156,7 @@ def maximum(lhs: T, rhs: T) -> T:
         return _tensor.maximum(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.maximum(lhs, rhs)
-    raise TypeError(f"maximum: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("maximum", lhs, rhs)
 
 
 def exp(input: T) -> T:
@@ -195,10 +210,7 @@ def row_expand_mul(lhs: T, rhs: T) -> T:
         return _tensor.row_expand_mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_mul(lhs, rhs)
-    raise TypeError(
-        "row_expand_mul: expected both operands to be Tensor or both to be Tile, "
-        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
-    )
+    _raise_type_dispatch_error("row_expand_mul", lhs, rhs)
 
 
 def row_expand_div(lhs: T, rhs: T) -> T:
@@ -207,10 +219,7 @@ def row_expand_div(lhs: T, rhs: T) -> T:
         return _tensor.row_expand_div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_div(lhs, rhs)
-    raise TypeError(
-        "row_expand_div: expected both operands to be Tensor or both to be Tile, "
-        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
-    )
+    _raise_type_dispatch_error("row_expand_div", lhs, rhs)
 
 
 def col_expand_mul(lhs: T, rhs: T) -> T:
@@ -219,10 +228,7 @@ def col_expand_mul(lhs: T, rhs: T) -> T:
         return _tensor.col_expand_mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_mul(lhs, rhs)
-    raise TypeError(
-        "col_expand_mul: expected (Tensor, Tensor) or (Tile, Tile), "
-        f"got ({type(lhs).__name__}, {type(rhs).__name__})"
-    )
+    _raise_type_dispatch_error("col_expand_mul", lhs, rhs)
 
 
 def row_expand(input: T) -> T:
@@ -240,10 +246,7 @@ def row_expand_add(lhs: T, rhs: T) -> T:
         return _tensor.row_expand_add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_add(lhs, rhs)
-    raise TypeError(
-        "row_expand_add: expected both operands to be Tensor or both to be Tile, "
-        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
-    )
+    _raise_type_dispatch_error("row_expand_add", lhs, rhs)
 
 
 def row_expand_sub(lhs: T, rhs: T) -> T:
@@ -252,10 +255,7 @@ def row_expand_sub(lhs: T, rhs: T) -> T:
         return _tensor.row_expand_sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.row_expand_sub(lhs, rhs)
-    raise TypeError(
-        "row_expand_sub: expected both operands to be Tensor or both to be Tile, "
-        f"got lhs={type(lhs).__name__}, rhs={type(rhs).__name__}"
-    )
+    _raise_type_dispatch_error("row_expand_sub", lhs, rhs)
 
 
 def col_expand(lhs: T, rhs: T) -> T:
@@ -264,10 +264,7 @@ def col_expand(lhs: T, rhs: T) -> T:
         return _tensor.col_expand(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand(lhs, rhs)
-    raise TypeError(
-        "col_expand: expected (Tensor, Tensor) or (Tile, Tile), "
-        f"got ({type(lhs).__name__}, {type(rhs).__name__})"
-    )
+    _raise_type_dispatch_error("col_expand", lhs, rhs)
 
 
 def col_expand_div(lhs: T, rhs: T) -> T:
@@ -276,10 +273,7 @@ def col_expand_div(lhs: T, rhs: T) -> T:
         return _tensor.col_expand_div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_div(lhs, rhs)
-    raise TypeError(
-        "col_expand_div: expected (Tensor, Tensor) or (Tile, Tile), "
-        f"got ({type(lhs).__name__}, {type(rhs).__name__})"
-    )
+    _raise_type_dispatch_error("col_expand_div", lhs, rhs)
 
 
 def col_expand_sub(lhs: T, rhs: T) -> T:
@@ -288,10 +282,7 @@ def col_expand_sub(lhs: T, rhs: T) -> T:
         return _tensor.col_expand_sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_sub(lhs, rhs)
-    raise TypeError(
-        "col_expand_sub: expected (Tensor, Tensor) or (Tile, Tile), "
-        f"got ({type(lhs).__name__}, {type(rhs).__name__})"
-    )
+    _raise_type_dispatch_error("col_expand_sub", lhs, rhs)
 
 
 def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Tile:
@@ -327,10 +318,7 @@ def concat(src0: T, src1: T) -> T:
         return _tensor.concat(src0, src1)
     if isinstance(src0, Tile) and isinstance(src1, Tile):
         return _tile.concat(src0, src1)
-    raise TypeError(
-        f"concat: src0 and src1 must be the same type (both Tensor or both Tile),"
-        f" got {type(src0).__name__} and {type(src1).__name__}"
-    )
+    _raise_type_dispatch_error("concat", src0, src1)
 
 
 def slice(
@@ -391,7 +379,7 @@ def matmul(
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.matmul(lhs, rhs)
-    raise TypeError(f"matmul: expected Tensor or Tile for lhs, got {type(lhs).__name__}")
+    _raise_type_dispatch_error("matmul", lhs, rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +415,7 @@ def matmul_acc(
         return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans)
     if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.matmul_acc(acc, lhs, rhs)
-    raise TypeError(f"matmul_acc: expected all Tensor or all Tile, got {type(acc).__name__}")
+    _raise_type_dispatch_error("matmul_acc", acc, lhs, rhs)
 
 
 def row_max(input: T, tmp_tile: Tile | None = None) -> T:

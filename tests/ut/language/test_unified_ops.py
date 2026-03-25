@@ -16,8 +16,10 @@ they produce structurally equal IR.
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 from pypto.language.op import unified_ops
+from pypto.language.typing import Tensor, Tile
+from pypto.pypto_core import ir as _ir_core
 
 
 class TestUnifiedTensorDispatch:
@@ -813,11 +815,11 @@ class TestUnifiedOpsTypeErrors:
     """Passing invalid types to unified_ops raises TypeError."""
 
     def test_add_invalid_lhs(self):
-        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+        with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
             unified_ops.add("not_a_tensor", 1)  # type: ignore
 
     def test_mul_invalid_lhs(self):
-        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+        with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
             unified_ops.mul(42, 2)  # type: ignore
 
     def test_exp_invalid_input(self):
@@ -837,8 +839,18 @@ class TestUnifiedOpsTypeErrors:
             unified_ops.reshape(123, [4, 4])  # type: ignore
 
     def test_matmul_invalid_lhs(self):
-        with pytest.raises(TypeError, match="expected Tensor or Tile"):
+        with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
             unified_ops.matmul(1, 2)  # type: ignore
+
+    def test_add_mixed_tensor_tile(self):
+        """Mixing Tensor and Tile in add gives a clear mixed-type error."""
+        span = _ir_core.Span("<test>", 0, 0, 0, 0)
+        t = Tensor(expr=_ir_core.Var("x", _ir_core.TensorType([64], DataType.FP32), span))
+        ti = Tile(expr=_ir_core.Var("y", _ir_core.TileType([64], DataType.FP32), span))
+        with pytest.raises(TypeError, match="cannot mix Tensor and Tile"):
+            unified_ops.add(t, ti)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="cannot mix Tensor and Tile"):
+            unified_ops.add(ti, t)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
