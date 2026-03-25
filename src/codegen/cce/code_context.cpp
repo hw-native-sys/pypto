@@ -22,7 +22,7 @@ namespace pypto {
 
 namespace codegen {
 
-std::string CodeContext::GetVarName(const ir::VarPtr& var) {
+std::string CodeContext::GetVarName(const ir::VarPtr& var) const {
   CHECK(var != nullptr) << "Cannot get name for null variable";
   auto it = name_to_cpp_.find(var->name_hint_);
   CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_hint_ << " not found in context";

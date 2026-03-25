@@ -615,9 +615,9 @@ void CCECodegen::Emit(const std::string& line) { emitter_.EmitLine(line); }
 
 std::string CCECodegen::GetTypeString(const DataType& dtype) const { return dtype.ToCTypeString(); }
 
-int64_t CCECodegen::GetConstIntValue(const ir::ExprPtr& expr) { return ExtractConstInt(expr); }
+int64_t CCECodegen::GetConstIntValue(const ir::ExprPtr& expr) const { return ExtractConstInt(expr); }
 
-std::string CCECodegen::GetVarName(const ir::VarPtr& var) { return context_.GetVarName(var); }
+std::string CCECodegen::GetVarName(const ir::VarPtr& var) const { return context_.GetVarName(var); }
 
 std::string CCECodegen::GetPointer(const std::string& var_name) { return context_.GetPointer(var_name); }
 
@@ -759,7 +759,7 @@ void CCECodegen::VisitExpr_(const ir::CastPtr& op) {
 // End of Expression Visitor Methods
 // ========================================================================
 
-int64_t CCECodegen::ExtractConstInt(const ir::ExprPtr& expr) {
+int64_t CCECodegen::ExtractConstInt(const ir::ExprPtr& expr) const {
   auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr);
   CHECK(const_int != nullptr) << "Expected constant integer expression";
   return const_int->value_;

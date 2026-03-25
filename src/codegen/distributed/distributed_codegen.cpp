@@ -718,13 +718,15 @@ std::string DistributedCodegen::GetExprAsCode(const ir::ExprPtr& expr) {
 
 std::string DistributedCodegen::GetTypeString(const DataType& dtype) const { return dtype.ToCTypeString(); }
 
-int64_t DistributedCodegen::GetConstIntValue(const ir::ExprPtr& expr) {
+int64_t DistributedCodegen::GetConstIntValue(const ir::ExprPtr& expr) const {
   auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(expr);
   CHECK(const_int != nullptr) << "Expected constant integer expression";
   return const_int->value_;
 }
 
-std::string DistributedCodegen::GetVarName(const ir::VarPtr& var) { return SanitizeName(var->name_hint_); }
+std::string DistributedCodegen::GetVarName(const ir::VarPtr& var) const {
+  return SanitizeName(var->name_hint_);
+}
 
 }  // namespace codegen
 }  // namespace pypto

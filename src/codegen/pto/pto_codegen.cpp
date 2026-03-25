@@ -981,7 +981,7 @@ std::string PTOCodegen::GetOrEmitI32Constant(int32_t value) {
   return name;
 }
 
-std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
+std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) const {
   auto it = memref_to_mlir_.find(memref.get());
   INTERNAL_CHECK(it != memref_to_mlir_.end()) << "MemRef not found in mapping";
   return it->second;
@@ -1199,7 +1199,7 @@ void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::MemRef* memref) {
   var_to_memref_[GetVarKey(var)] = memref;
 }
 
-std::string PTOCodegen::GetVarName(const VarPtr& var) {
+std::string PTOCodegen::GetVarName(const VarPtr& var) const {
   auto key = GetVarKey(var);
   auto it = var_to_mlir_.find(key);
   if (it != var_to_mlir_.end()) {
@@ -1262,7 +1262,7 @@ void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor
   BindTensorView(var, tensor_view_name);
 }
 
-int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) {
+int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) const {
   if (auto const_int = As<ir::ConstInt>(expr)) {
     return const_int->value_;
   }

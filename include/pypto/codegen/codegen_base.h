@@ -80,7 +80,7 @@ class CodegenBase : public ir::IRVisitor {
    * @param expr Expression (must be ConstInt)
    * @return Integer value
    */
-  virtual int64_t GetConstIntValue(const ir::ExprPtr& expr) = 0;
+  [[nodiscard]] virtual int64_t GetConstIntValue(const ir::ExprPtr& expr) const = 0;
 
   /**
    * @brief Get platform name for a Var
@@ -88,7 +88,7 @@ class CodegenBase : public ir::IRVisitor {
    * @param var The IR Var
    * @return Platform variable name (C++ name or MLIR SSA name)
    */
-  virtual std::string GetVarName(const ir::VarPtr& var) = 0;
+  [[nodiscard]] virtual std::string GetVarName(const ir::VarPtr& var) const = 0;
 
   /**
    * @brief Get the data pointer expression for a tensor variable

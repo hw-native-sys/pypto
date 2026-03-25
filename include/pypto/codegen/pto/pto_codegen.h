@@ -68,8 +68,8 @@ class PTOCodegen : public CodegenBase {
   void Emit(const std::string& line) override;
   std::string GetExprAsCode(const ir::ExprPtr& expr) override;
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
-  int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
-  std::string GetVarName(const ir::VarPtr& var) override;
+  int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
+  std::string GetVarName(const ir::VarPtr& var) const override;
 
   // PTO-specific helper methods for operator codegen functions
 
@@ -366,7 +366,7 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Get tile_buf name for a MemRef
    */
-  std::string GetTileBufForMemRef(const ir::MemRefPtr& memref);
+  std::string GetTileBufForMemRef(const ir::MemRefPtr& memref) const;
 
   // Output streams
   std::ostringstream stream_;

@@ -60,8 +60,8 @@ class DistributedCodegen : public CodegenBase {
   void Emit(const std::string& line) override;
   std::string GetExprAsCode(const ir::ExprPtr& expr) override;
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
-  int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
-  std::string GetVarName(const ir::VarPtr& var) override;
+  int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
+  std::string GetVarName(const ir::VarPtr& var) const override;
 
  protected:
   // Statement visitors

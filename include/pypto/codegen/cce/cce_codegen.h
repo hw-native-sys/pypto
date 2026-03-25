@@ -68,8 +68,8 @@ class CCECodegen : public CodegenBase {
   void Emit(const std::string& line) override;
   std::string GetExprAsCode(const ir::ExprPtr& expr) override;
   [[nodiscard]] std::string GetTypeString(const DataType& dtype) const override;
-  int64_t GetConstIntValue(const ir::ExprPtr& expr) override;
-  std::string GetVarName(const ir::VarPtr& var) override;
+  int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
+  std::string GetVarName(const ir::VarPtr& var) const override;
 
   const TypeConverter& GetTypeConverter() const { return type_converter_; }
 
@@ -179,7 +179,7 @@ class CCECodegen : public CodegenBase {
   void GenerateBody(const ir::FunctionPtr& func);
 
   /** @brief Extract a compile-time constant integer from an expression */
-  int64_t ExtractConstInt(const ir::ExprPtr& expr);
+  int64_t ExtractConstInt(const ir::ExprPtr& expr) const;
 
   /** @brief Collect all tile variable declarations from a statement block */
   std::vector<std::pair<ir::VarPtr, ir::TileTypePtr>> CollectTileVariables(const ir::StmtPtr& stmt);

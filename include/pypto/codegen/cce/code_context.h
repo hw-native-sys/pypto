@@ -47,7 +47,7 @@ class CodeContext {
    * @param var The IR variable
    * @return The C++ variable name to use
    */
-  std::string GetVarName(const ir::VarPtr& var);
+  std::string GetVarName(const ir::VarPtr& var) const;
 
   /**
    * @brief Register a variable with a specific C++ name
