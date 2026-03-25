@@ -799,7 +799,7 @@ static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
                                << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK(tile) << "tfree_to_aic first argument must be a Var or IterArg";
-  int split = codegen.GetTpopSplit(tile.get());
+  int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aic", "system.tfree_to_aic");
 
   std::ostringstream oss;
   oss << "pto.tfree_from_aic {split = " << split << "}";
@@ -817,7 +817,7 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK(tile) << "tfree_to_aiv first argument must be a Var or IterArg";
 
-  int split = codegen.GetTpopSplit(tile.get());
+  int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aiv", "system.tfree_to_aiv");
 
   std::ostringstream oss;
   oss << "pto.tfree_from_aiv {split = " << split << "}";

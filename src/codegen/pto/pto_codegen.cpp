@@ -92,6 +92,53 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
   }
 }
 
+static std::vector<const ir::Var*> GetSortedVarRefs(const std::unordered_set<const ir::Var*>& refs) {
+  std::vector<const ir::Var*> sorted_refs(refs.begin(), refs.end());
+  std::sort(sorted_refs.begin(), sorted_refs.end(), [](const ir::Var* lhs, const ir::Var* rhs) {
+    if (lhs == rhs) return false;
+    if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
+    return lhs->UniqueId() < rhs->UniqueId();
+  });
+  return sorted_refs;
+}
+
+static std::unordered_set<const ir::Var*> CollectStmtDefinedVars(const ir::StmtPtr& stmt) {
+  std::unordered_set<const ir::Var*> defs;
+  if (auto assign = As<ir::AssignStmt>(stmt)) {
+    defs.insert(assign->var_.get());
+  } else if (auto for_stmt = As<ir::ForStmt>(stmt)) {
+    for (const auto& ret : for_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  } else if (auto if_stmt = As<ir::IfStmt>(stmt)) {
+    for (const auto& ret : if_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  } else if (auto while_stmt = As<ir::WhileStmt>(stmt)) {
+    for (const auto& ret : while_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  }
+  return defs;
+}
+
+static std::pair<VarPtr, VarPtr> GetTileValidShapeVars(const std::shared_ptr<const ir::TileType>& tile_type) {
+  VarPtr valid_row_var;
+  VarPtr valid_col_var;
+  if (!tile_type || !tile_type->tile_view_.has_value()) {
+    return {valid_row_var, valid_col_var};
+  }
+
+  const auto& tile_view = tile_type->tile_view_.value();
+  if (tile_view.valid_shape.size() >= 1) {
+    valid_row_var = As<ir::Var>(tile_view.valid_shape[0]);
+  }
+  if (tile_view.valid_shape.size() >= 2) {
+    valid_col_var = As<ir::Var>(tile_view.valid_shape[1]);
+  }
+  return {valid_row_var, valid_col_var};
+}
+
 // Helper function to convert MemorySpace to PTO address space string
 static std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   if (space == ir::MemorySpace::DDR) {
@@ -517,6 +564,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
   std::set<const ir::Var*> defined_since_first_tpop;
   bool seen_first_tpop = false;
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
+    const auto stmt_defined_vars = CollectStmtDefinedVars(normalized_inputs[i]);
     if (auto assign = As<ir::AssignStmt>(normalized_inputs[i])) {
       // Tpop assignment itself
       if (tpop_result_vars_.count(assign->var_.get()) > 0) {
@@ -524,7 +572,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
         chains[assign->var_.get()] = {i, {}, SIZE_MAX, i};
         tpop_order.push_back(assign->var_.get());
         in_chain[i] = true;
-        defined_since_first_tpop.insert(assign->var_.get());
+        defined_since_first_tpop.insert(stmt_defined_vars.begin(), stmt_defined_vars.end());
         continue;
       }
       if (!seen_first_tpop) {
@@ -549,12 +597,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
         collector.VisitStmt(assign);
         refs.insert(collector.var_refs.begin(), collector.var_refs.end());
       }
-      std::vector<const ir::Var*> sorted_refs(refs.begin(), refs.end());
-      std::sort(sorted_refs.begin(), sorted_refs.end(), [](const ir::Var* lhs, const ir::Var* rhs) {
-        if (lhs == rhs) return false;
-        if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
-        return lhs->UniqueId() < rhs->UniqueId();
-      });
+      const auto sorted_refs = GetSortedVarRefs(refs);
       const ir::Var* ref = nullptr;
       bool multi = false;
       bool has_unsafe_dep = false;
@@ -578,7 +621,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
         chains[ref].user_idxs.push_back(i);
         in_chain[i] = true;
       }
-      defined_since_first_tpop.insert(assign->var_.get());
+      defined_since_first_tpop.insert(stmt_defined_vars.begin(), stmt_defined_vars.end());
     } else if (auto eval = As<ir::EvalStmt>(normalized_inputs[i])) {
       if (!seen_first_tpop) {
         continue;
@@ -600,12 +643,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
       ir::outline_utils::VarRefCollector collector;
       collector.VisitStmt(eval);
       refs.insert(collector.var_refs.begin(), collector.var_refs.end());
-      std::vector<const ir::Var*> sorted_refs(refs.begin(), refs.end());
-      std::sort(sorted_refs.begin(), sorted_refs.end(), [](const ir::Var* lhs, const ir::Var* rhs) {
-        if (lhs == rhs) return false;
-        if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
-        return lhs->UniqueId() < rhs->UniqueId();
-      });
+      const auto sorted_refs = GetSortedVarRefs(refs);
       const ir::Var* ref = nullptr;
       bool multi = false;
       bool has_unsafe_dep = false;
@@ -627,6 +665,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
         chains[ref].user_idxs.push_back(i);
         in_chain[i] = true;
       }
+      defined_since_first_tpop.insert(stmt_defined_vars.begin(), stmt_defined_vars.end());
     } else {
       if (!seen_first_tpop) {
         continue;
@@ -635,12 +674,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
       ir::outline_utils::VarRefCollector collector;
       collector.VisitStmt(normalized_inputs[i]);
       refs.insert(collector.var_refs.begin(), collector.var_refs.end());
-      std::vector<const ir::Var*> sorted_refs(refs.begin(), refs.end());
-      std::sort(sorted_refs.begin(), sorted_refs.end(), [](const ir::Var* lhs, const ir::Var* rhs) {
-        if (lhs == rhs) return false;
-        if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
-        return lhs->UniqueId() < rhs->UniqueId();
-      });
+      const auto sorted_refs = GetSortedVarRefs(refs);
       const ir::Var* ref = nullptr;
       bool multi = false;
       bool has_unsafe_dep = false;
@@ -662,6 +696,7 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
         chains[ref].user_idxs.push_back(i);
         in_chain[i] = true;
       }
+      defined_since_first_tpop.insert(stmt_defined_vars.begin(), stmt_defined_vars.end());
     }
   }
 
@@ -707,12 +742,12 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     std::map<const ir::Var*, const ir::MemRef*>& var_to_memref;
     std::map<const ir::MemRef*, std::string>& memref_to_var_name;
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
-    std::map<const ir::Var*, int>& tpop_result_vars;
+    std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
                     std::map<const ir::MemRef*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
-                    std::map<const ir::Var*, int>& tpop_vars)
+                    std::map<const ir::Var*, TpopResultInfo>& tpop_vars)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),
@@ -734,7 +769,7 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         if (auto call = As<ir::Call>(op->value_)) {
           if (call->op_->name_ == "tile.tpop_from_aiv" || call->op_->name_ == "tile.tpop_from_aic") {
             int split = call->GetKwarg<int>("split", 0);
-            tpop_result_vars[op->var_.get()] = split;
+            tpop_result_vars[op->var_.get()] = TpopResultInfo{split, call->op_->name_};
           }
         }
       }
@@ -846,19 +881,9 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   std::string valid_row_mlir;
   std::string valid_col_mlir;
-  if (tile_type->tile_view_.has_value()) {
-    const auto& tv = tile_type->tile_view_.value();
-    if (tv.valid_shape.size() >= 1) {
-      if (auto var = As<ir::Var>(tv.valid_shape[0])) {
-        valid_row_mlir = GetVarName(var);
-      }
-    }
-    if (tv.valid_shape.size() >= 2) {
-      if (auto var = As<ir::Var>(tv.valid_shape[1])) {
-        valid_col_mlir = GetVarName(var);
-      }
-    }
-  }
+  auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
+  if (valid_row_var) valid_row_mlir = GetVarName(valid_row_var);
+  if (valid_col_var) valid_col_mlir = GetVarName(valid_col_var);
 
   std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
   auto memref = ir::GetDefinedMemRef(tile_type);
@@ -963,9 +988,11 @@ std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
 }
 
 std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint,
-                                        const std::string& addr_ssa) {
+                                        const std::string& addr_ssa, const std::string& valid_row_ssa,
+                                        const std::string& valid_col_ssa) {
   std::string name = NewNamedTemp(name_hint);
-  extra_alloc_tiles_.push_back(ExtraAllocTile{name, tile_buf_type_string, addr_ssa});
+  extra_alloc_tiles_.push_back(
+      ExtraAllocTile{name, tile_buf_type_string, addr_ssa, valid_row_ssa, valid_col_ssa});
   ssa_to_tile_buf_type_[name] = tile_buf_type_string;
   return name;
 }
@@ -999,11 +1026,15 @@ void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) {
 
 std::string PTOCodegen::GetImportBufferSSA() const { return import_buf_ssa_; }
 
-int PTOCodegen::GetTpopSplit(const ir::Var* var) const {
+int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
+                                      const std::string& tfree_op_name) const {
   auto it = tpop_result_vars_.find(var);
   INTERNAL_CHECK(it != tpop_result_vars_.end())
-      << "Internal error: GetTpopSplit called for var not in tpop_result_vars_";
-  return it->second;
+      << "Internal error: GetValidatedTpopSplit called for var not in tpop_result_vars_";
+  CHECK(it->second.op_name == expected_tpop_op_name)
+      << tfree_op_name << " requires its tile argument to come from " << expected_tpop_op_name << ", got "
+      << it->second.op_name;
+  return it->second.split;
 }
 
 bool PTOCodegen::IsAICFunction() const {
@@ -1019,6 +1050,12 @@ void PTOCodegen::EmitExtraAllocTiles() {
     stream_ << GetIndent() << alloc.name << " = pto.alloc_tile";
     if (!alloc.addr_ssa.empty()) {
       stream_ << " addr = " << alloc.addr_ssa;
+    }
+    if (!alloc.valid_row_ssa.empty()) {
+      stream_ << " valid_row = " << alloc.valid_row_ssa;
+    }
+    if (!alloc.valid_col_ssa.empty()) {
+      stream_ << " valid_col = " << alloc.valid_col_ssa;
     }
     stream_ << " : " << alloc.type_string << "\n";
   }
@@ -1177,6 +1214,11 @@ std::string PTOCodegen::GetVarName(const VarPtr& var) {
   }
   if (auto tile_type = ir::GetTileTypeWithMemRef(var->GetType())) {
     return GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+  }
+  for (const auto& [mapped_var, mlir_name] : var_to_mlir_) {
+    if (mapped_var && mapped_var->name_hint_ == var->name_hint_) {
+      return mlir_name;
+    }
   }
   LOG_ERROR << "Variable " << var->name_hint_ << " not found in MLIR mapping";
   return "";
@@ -1791,13 +1833,8 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 
 std::string PTOCodegen::GetScalarIterArgTypeString(
     const std::shared_ptr<const ScalarType>& scalar_type) const {
-  if (scalar_type && scalar_type->dtype_ == DataType::BOOL) {
-    return "i1";
-  }
-  if (scalar_type && scalar_type->dtype_.IsFloat()) {
-    return GetTypeString(scalar_type->dtype_);
-  }
-  return "index";
+  CHECK(scalar_type) << "PTOCodegen requires a valid ScalarType for iter_arg/result emission";
+  return GetTypeString(scalar_type->dtype_);
 }
 
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
@@ -1854,10 +1891,16 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
         std::string tile_type_string = GetTileBufTypeStringFromTileType(tile_type);
         std::string addr_ssa;
+        std::string valid_row_ssa;
+        std::string valid_col_ssa;
         if (auto const_addr = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
           addr_ssa = GetOrEmitI64Constant(const_addr->value_);
         }
-        std::string ret_name = AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa);
+        auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
+        if (valid_row_var) valid_row_ssa = GetVarName(valid_row_var);
+        if (valid_col_var) valid_col_ssa = GetVarName(valid_col_var);
+        std::string ret_name =
+            AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
         tile_return_targets[i] = ret_name;
         tile_return_types[i] = tile_type_string;

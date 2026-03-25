@@ -7,6 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -210,6 +212,22 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
     alloc_addrs = get_alloc_addresses(optimized_func)
     for _, addr in alloc_addrs:
         assert addr % 32 == 0, f"Address {addr} should remain 32-byte aligned after reserve_buffer"
+
+
+def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
+    """Explicit reserve_buffer bases must not overlap previously reserved ranges."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self):
+            _first_buf = pl.reserve_buffer(name="first_slot_buffer", size=4096)
+            _overlap_buf = pl.reserve_buffer(name="overlap_slot_buffer", size=1024, base=2048)
+
+    with pytest.raises(
+        Exception, match=re.escape("AllocateMemoryAddr found overlapping reserve_buffer ranges")
+    ):
+        _prepare_and_run_allocate_memory_addr(Before)
 
 
 def test_allocate_memory_addr_empty_function():

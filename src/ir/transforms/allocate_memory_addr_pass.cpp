@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -144,6 +145,7 @@ ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func) {
   const MemorySpace reserve_space = GetReserveBufferMemorySpace(func);
 
   std::unordered_map<MemorySpace, uint64_t> next_base_by_space;
+  std::unordered_map<MemorySpace, std::map<uint64_t, uint64_t>> reserved_ranges_by_space;
   for (const auto& reserve : collector.GetReserveBuffers()) {
     uint64_t resolved_base = 0;
     auto& next_base = next_base_by_space[reserve_space];
@@ -159,6 +161,23 @@ ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func) {
     resolution.resolved_bases[reserve.call] = static_cast<int64_t>(resolved_base);
 
     const uint64_t buffer_end = Align32(resolved_base + static_cast<uint64_t>(reserve.size));
+    auto& reserved_ranges = reserved_ranges_by_space[reserve_space];
+    auto next_it = reserved_ranges.lower_bound(resolved_base);
+    auto overlaps = [&](const std::pair<const uint64_t, uint64_t>& range) {
+      return resolved_base < range.second && range.first < buffer_end;
+    };
+    CHECK(next_it == reserved_ranges.end() || !overlaps(*next_it))
+        << "AllocateMemoryAddr found overlapping reserve_buffer ranges in function '" << func->name_ << "': ["
+        << resolved_base << ", " << buffer_end << ") overlaps with [" << next_it->first << ", "
+        << next_it->second << ")";
+    if (next_it != reserved_ranges.begin()) {
+      auto prev_it = std::prev(next_it);
+      CHECK(!overlaps(*prev_it)) << "AllocateMemoryAddr found overlapping reserve_buffer ranges in function '"
+                                 << func->name_ << "': [" << resolved_base << ", " << buffer_end
+                                 << ") overlaps with [" << prev_it->first << ", " << prev_it->second << ")";
+    }
+    reserved_ranges.emplace(resolved_base, buffer_end);
+
     next_base = std::max(next_base, buffer_end);
 
     auto& reserved_end = resolution.reserved_end_by_space[reserve_space];

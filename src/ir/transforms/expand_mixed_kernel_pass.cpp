@@ -408,6 +408,40 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
   }
 }
 
+CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts) {
+  CrossCorePipeMetadata metadata;
+  for (const auto& stmt : stmts) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+    CallPtr call;
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (eval) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    if (op) {
+      const std::string& op_name = op->name_;
+      if (op_name == "system.reserve_buffer") {
+        metadata.has_reserve_buffer = true;
+      } else if (op_name == "system.import_peer_buffer") {
+        metadata.has_import_peer_buffer = true;
+      } else if (op_name == "system.aic_initialize_pipe") {
+        metadata.has_aic_initialize_pipe = true;
+      } else if (op_name == "system.aiv_initialize_pipe") {
+        metadata.has_aiv_initialize_pipe = true;
+      }
+    }
+
+    CrossCorePipeMetadata stmt_metadata;
+    CollectCrossCorePipeMetadata({stmt}, stmt_metadata);
+    if (stmt_metadata.HasCrossCoreOps()) {
+      break;
+    }
+  }
+  return metadata;
+}
+
 struct AutomaticPipeSetup {
   std::vector<StmtPtr> aic_stmts;
   std::vector<StmtPtr> aiv_stmts;
@@ -1479,6 +1513,26 @@ std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt) {
   return refs.var_refs;
 }
 
+std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt) {
+  std::unordered_set<const Var*> defs;
+  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    defs.insert(assign->var_.get());
+  } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+    for (const auto& ret : for_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+    for (const auto& ret : if_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+    for (const auto& ret : while_stmt->return_vars_) {
+      defs.insert(ret.get());
+    }
+  }
+  return defs;
+}
+
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
   CallPtr call;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -1540,8 +1594,9 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, Core
 
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(normalized_inputs[i]);
-    if (assign) {
-      def_indices.try_emplace(assign->var_.get(), i);
+    const auto stmt_defs = CollectStmtDefinedVars(normalized_inputs[i]);
+    for (const auto* def : GetSortedVarRefs(stmt_defs)) {
+      def_indices.try_emplace(def, i);
     }
     VarPtr tpop_var;
     if (assign && IsTpopAssignStmt(normalized_inputs[i], &tpop_var)) {
@@ -2304,6 +2359,7 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   CrossCorePipeMetadata metadata;
   CollectCrossCorePipeMetadata(FlattenBody(func->body_), metadata);
   if (!metadata.HasCrossCoreOps()) return;
+  CrossCorePipeMetadata dominating_setup = CollectDominatingPipeSetupMetadata(FlattenBody(func->body_));
 
   auto report_slot_issue = [&](const std::string& issue, const PipeDirectionMetadata& direction,
                                const std::string& direction_name) {
@@ -2342,38 +2398,38 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   }
 
   if (func->func_type_ == FunctionType::AIC) {
-    if (!metadata.has_aic_initialize_pipe) {
+    if (!dominating_setup.has_aic_initialize_pipe) {
       diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                                "AIC function '" + func->name_ +
                                    "' uses cross-core tile ops but has no 'system.aic_initialize_pipe' call",
                                func->span_);
     }
-    if (metadata.v2c.has_ops && !metadata.has_reserve_buffer) {
+    if (metadata.v2c.has_ops && !dominating_setup.has_reserve_buffer) {
       diagnostics.emplace_back(
           DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
           "AIC function '" + func->name_ + "' uses V2C cross-core ops but has no 'system.reserve_buffer'",
           func->span_);
     }
-    if (metadata.c2v.has_ops && !metadata.has_import_peer_buffer) {
+    if (metadata.c2v.has_ops && !dominating_setup.has_import_peer_buffer) {
       diagnostics.emplace_back(
           DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
           "AIC function '" + func->name_ + "' uses C2V cross-core ops but has no 'system.import_peer_buffer'",
           func->span_);
     }
   } else if (func->func_type_ == FunctionType::AIV) {
-    if (!metadata.has_aiv_initialize_pipe) {
+    if (!dominating_setup.has_aiv_initialize_pipe) {
       diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                                "AIV function '" + func->name_ +
                                    "' uses cross-core tile ops but has no 'system.aiv_initialize_pipe' call",
                                func->span_);
     }
-    if (metadata.c2v.has_ops && !metadata.has_reserve_buffer) {
+    if (metadata.c2v.has_ops && !dominating_setup.has_reserve_buffer) {
       diagnostics.emplace_back(
           DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
           "AIV function '" + func->name_ + "' uses C2V cross-core ops but has no 'system.reserve_buffer'",
           func->span_);
     }
-    if (metadata.v2c.has_ops && !metadata.has_import_peer_buffer) {
+    if (metadata.v2c.has_ops && !dominating_setup.has_import_peer_buffer) {
       diagnostics.emplace_back(
           DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
           "AIV function '" + func->name_ + "' uses V2C cross-core ops but has no 'system.import_peer_buffer'",

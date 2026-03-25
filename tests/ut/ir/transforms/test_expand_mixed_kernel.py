@@ -1604,6 +1604,29 @@ class TestPropertyVerification:
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
 
+    def test_verifier_rejects_late_pipe_setup(self):
+        """Pipe setup must appear before the first cross-core op."""
+
+        @pl.program
+        class BadProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def bad_aiv(self):
+                popped: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                processed = pl.exp(popped)
+                pl.tfree_to_aic(popped)
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                _ = processed
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
+        with pytest.raises(
+            Exception,
+            match=re.escape("uses cross-core tile ops but has no 'system.aiv_initialize_pipe' call"),
+        ):
+            passes.verify_properties(prop_set, BadProgram, "test")
+
 
 class TestAutoPipeSetup:
     """Test auto-generated reserve/import/initialize_pipe setup."""
@@ -1648,15 +1671,34 @@ class TestAutoPipeSetup:
                 out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0
 
-        after = _expand_raw(Before)
-        aic_func = after.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        aic_str = aic_func.as_python()
+        After = _expand_raw(Before)
 
-        assert "tpop_from_aiv" in aic_str
-        assert "tfree_to_aiv(" in aic_str
-        assert aic_str.index("tpop_from_aiv") < aic_str.index("target_memory=pl.Mem.Left")
-        assert aic_str.index("target_memory=pl.Mem.Left") < aic_str.index("tfree_to_aiv(")
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                _v2c_slot_buffer = pl.reserve_buffer(name="main_incore_0_v2c_slot_buffer", size=16384)
+                _c2v_slot_buffer_import = pl.import_peer_buffer(
+                    name="main_incore_0_c2v_slot_buffer",
+                    peer_func="main_incore_0_aiv",
+                )
+                pl.aic_initialize_pipe(dir_mask=3, slot_size=4096)
+                x_left_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                    shape=[16, 128], dtype=pl.BF16
+                )
+                x_left = pl.move(x_left_mat, target_memory=pl.MemorySpace.Left)
+                pl.tfree_to_aiv(x_left_mat)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=0)
+
+        _assert_function_equal(After, Expected, "main_incore_0_aic")
 
     def test_auto_tfree_stays_after_last_use_with_intermediate_dependency(self):
         """Auto tfree should stay after the true last use of the popped tile."""
@@ -1681,14 +1723,67 @@ class TestAutoPipeSetup:
                 out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_sum, [0, 0], out_0)
                 return out_0
 
-        after = _expand_raw(Before)
-        aiv_func = after.get_function("main_incore_0_aiv")
+        After = _expand_raw(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 16], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                _c2v_slot_buffer = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=8192)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=1024)
+                z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                    shape=[16, 16], dtype=pl.FP32
+                )
+                z_exp = pl.exp(z_vec)
+                z_sum = pl.add(z_vec, z_exp)
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_sum, [0, 0], out_0)
+                return out_0_store
+
+        _assert_function_equal(After, Expected, "main_incore_0_aiv")
+
+    def test_auto_tfree_does_not_hoist_user_before_if_defined_tile(self):
+        """A later tpop user must stay after an if-defined tile result."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                flag: pl.Scalar[pl.INDEX],
+                x: pl.Tensor[[4, 32], pl.BF16],
+                y: pl.Tensor[[32, 32], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+            ) -> pl.Tensor[[4, 32], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [4, 32], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                if flag == 0:
+                    branch_tile = pl.exp(z_vec)
+                else:
+                    branch_tile = z_vec
+                mixed = pl.add(z_vec, branch_tile)
+                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(mixed, [0, 0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+        aiv_func = After.get_function("main_incore_0_aiv")
         assert aiv_func is not None
         aiv_str = aiv_func.as_python()
 
-        assert aiv_str.index("tpop_from_aic") < aiv_str.index("exp(")
-        assert aiv_str.index("exp(") < aiv_str.index("add(")
-        assert aiv_str.index("add(") < aiv_str.index("tfree_to_aic(")
+        # Keep this as an order assertion: the PL DSL cannot express this Expected
+        # function without triggering a TileView mismatch between the if branches
+        # before structural_equal runs.
+        assert aiv_str.index("tpop_from_aic") < aiv_str.index("if flag__ssa_v0 == 0:")
+        assert aiv_str.index("if flag__ssa_v0 == 0:") < aiv_str.index("add(")
 
 
 # ---------------------------------------------------------------------------
@@ -2030,9 +2125,11 @@ class TestDCERegression:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(x_fp32, [0, 0], out_0)
                 return out_0
 
-        After = _expand(Before)
+        After = _expand_raw(Before)
 
-        # Regression check: the transformed program must verify successfully.
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+        passes.verify_properties(prop_set, After, "test")
         passes.run_verifier()(After)
 
         aiv_func = After.get_function("main_incore_0_aiv")

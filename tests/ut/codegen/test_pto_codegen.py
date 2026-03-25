@@ -1127,7 +1127,7 @@ def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     mlir_code = _generate_default_mlir(IfTilePhiProgram)
     lines = _get_mlir_lines(mlir_code)
 
-    if_line = _single_line(lines, "scf.if", startswith=True)
+    if_line = _single_line(lines, "scf.if")
     assert "tile_buf" not in if_line, f"IfStmt should not return tile_buf values: {if_line}"
     assert "-> (" not in if_line, f"IfStmt should not expose non-scalar results: {if_line}"
 
@@ -1147,6 +1147,77 @@ def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     phi_target = match.group(1)
     phi_alloc_line = _single_line(lines, f"{phi_target} = pto.alloc_tile", startswith=True)
     assert "addr =" in phi_alloc_line, f"Expected IfStmt tile phi alloc to carry addr: {phi_alloc_line}"
+
+
+def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():
+    """IfStmt tile phi alloc should preserve dynamic valid_shape operands."""
+
+    @pl.program
+    class IfDynamicTilePhiProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            flag: pl.Scalar[pl.INDEX],
+            input: pl.Tensor[[1, 120], pl.FP32],
+            ctx_len: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[1, 120], pl.FP32]],
+        ) -> pl.Tensor[[1, 120], pl.FP32]:
+            valid_len: pl.Scalar[pl.INDEX] = ctx_len + 0
+            seed: pl.Tile[[1, 120], pl.FP32] = pl.tile.load(
+                input,
+                [0, 0],
+                [1, 120],
+                [1, valid_len],
+                target_memory=pl.MemorySpace.Vec,
+                transpose=False,
+            )
+            updated: pl.Tile[[1, 120], pl.FP32] = pl.tile.muls(seed, 1.0)
+            if flag == 0:
+                result = seed
+            else:
+                result = updated
+            final: pl.Tensor[[1, 120], pl.FP32] = pl.tile.store(result, [0, 0], out)
+            return final
+
+    mlir_code = _generate_default_mlir(IfDynamicTilePhiProgram)
+    lines = _get_mlir_lines(mlir_code)
+    phi_tmov_line = next(line for line in _find_lines(lines, "pto.tmov") if "rows=1, cols=120" in line)
+    match = re.search(r"outs\((%[\w\d_]+) :", phi_tmov_line)
+    assert match is not None, f"Expected tmov outs target in line: {phi_tmov_line}"
+    phi_target = match.group(1)
+    phi_alloc_line = _single_line(lines, f"{phi_target} = pto.alloc_tile", startswith=True)
+    assert "valid_col = %" in phi_alloc_line, (
+        f"Expected IfStmt tile phi alloc to carry dynamic valid_col, got: {phi_alloc_line}"
+    )
+    assert "v_col=?" in phi_alloc_line, f"Expected dynamic v_col in tile phi alloc, got: {phi_alloc_line}"
+
+
+def test_pto_codegen_if_stmt_scalar_result_preserves_integer_dtype():
+    """IfStmt scalar results should use their real scalar dtype in scf.if results."""
+
+    @pl.program
+    class IfScalarIntProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            flag: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.INT32],
+            delta_one: pl.Scalar[pl.INT32],
+            delta_two: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1], pl.INT32]],
+        ) -> pl.Tensor[[1], pl.INT32]:
+            if flag == 0:
+                result = value + delta_one
+            else:
+                result = value + delta_two
+            combined: pl.Scalar[pl.INT32] = result + value
+            final: pl.Tensor[[1], pl.INT32] = pl.tensor.write(out, [0], combined)
+            return final
+
+    lines = _get_mlir_lines(_generate_default_mlir(IfScalarIntProgram))
+    if_line = _single_line(lines, "scf.if")
+    assert "-> (i32)" in if_line, f"Expected INT32 if-result type, got: {if_line}"
+    assert "-> (index)" not in if_line, f"Did not expect index-typed if-result: {if_line}"
 
 
 def test_pto_codegen_mixed_scalar_and_tile_iter_args():

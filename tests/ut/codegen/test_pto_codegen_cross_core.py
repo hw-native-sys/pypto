@@ -22,6 +22,8 @@ Bidirectional:
   2. Cube → Vector (C2V): Cube does matmul, pushes result back to Vector for post-processing
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir, passes
@@ -357,6 +359,61 @@ class TestCrossCoreTpushTpopCodegen:
         )
         assert aic_body.index("scf.if") < aic_body.index("pto.tfree_from_aiv"), (
             "tfree must remain after nested control-flow uses of the popped tile"
+        )
+
+    def test_tfree_rejects_mismatched_tpop_direction(self):
+        """tfree must validate that its tile came from the matching tpop direction."""
+
+        @pl.program
+        class MismatchedTfreeProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_consumer(self):
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                pl.tfree_to_aiv(received)
+
+        with pytest.raises(
+            Exception,
+            match=re.escape(
+                "system.tfree_to_aiv requires its tile argument to come from tile.tpop_from_aiv, "
+                "got tile.tpop_from_aic"
+            ),
+        ):
+            self._compile_and_generate(MismatchedTfreeProgram)
+
+    def test_tpop_user_stays_after_if_defined_scalar_dependency(self):
+        """A tpop user that depends on an if-defined scalar must not be hoisted before the if."""
+
+        @pl.program
+        class IfDefinedScalarProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_consumer(
+                self,
+                flag: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+
+                received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                if flag == 0:
+                    scale = 1.0
+                else:
+                    scale = 2.0
+                scaled = pl.tile.muls(received, scale)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(scaled, [0, 0], output)
+                pl.tfree_to_aic(received)
+                return updated
+
+        codes = self._compile_and_generate(IfDefinedScalarProgram)
+        aiv_body = _extract_func_section(codes["vector_consumer"], "vector_consumer")
+
+        assert aiv_body.index("pto.tpop_from_aic") < aiv_body.index("scf.if"), (
+            "The scalar-defining if should remain after the tpop"
+        )
+        assert aiv_body.index("scf.if") < aiv_body.index("pto.tmuls"), (
+            "The tpop user must remain after the if-defined scalar dependency"
         )
 
     @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
