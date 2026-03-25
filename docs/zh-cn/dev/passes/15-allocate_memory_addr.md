@@ -4,11 +4,12 @@
 
 ## 概述
 
-该 Pass 为非 DDR 的内存引用 (MemRef) 分配具体内存地址，并原地更新已有的 `tile.alloc` 语句 (Statement)。与创建新的 alloc 操作不同，该 Pass 仅修改由 InitMemRef 创建的 alloc 语句中的地址字段（原值为 `addr=-1`）。
+该 Pass 为非 DDR 的内存引用 (MemRef) 分配具体内存地址，并原地更新已有的 `tile.alloc` 语句 (Statement)。它还会在 PTO codegen 之前把 `system.reserve_buffer(base=AUTO)` 解析成显式地址。与创建新的 alloc 操作不同，该 Pass 仅修改由 InitMemRef 创建的 alloc 语句中的地址字段（原值为 `addr=-1`）。
 
 **核心职责**：
 
 - 从 TileType 变量中收集唯一的 MemRef 对象
+- 在每个函数中把 `system.reserve_buffer` 的 base 解析成显式地址
 - 在每个内存空间内分配顺序的、32 字节对齐的地址
 - 更新所有变量类型 (Type) 中的 MemRef 地址
 - 使用分配的地址更新 `tile.alloc` 语句参数
@@ -40,14 +41,16 @@ program_with_addrs = alloc_pass(program)
 
 1. **收集 MemRef**：遍历函数体，从 TileType 变量中找到所有唯一的 MemRef 对象
 2. **按内存空间分组**：按内存空间（Vec、Mat、Left、Right、Acc）组织 MemRef
-3. **分配地址**：对于每个内存空间，按 ID 排序 MemRef 并从 0 开始分配顺序的 32 字节对齐地址
-4. **原地更新**：使用 `MemRefUpdateMutator` 完成以下操作：
+3. **解析 reserve_buffer**：在每个函数中扫描 `system.reserve_buffer`，为 AUTO buffer 分配显式 base，并计算每个内存空间的保留区末尾地址
+4. **分配地址**：对于每个内存空间，按 ID 排序 MemRef，并从该空间保留区末尾开始分配顺序的 32 字节对齐地址；如果没有 reserve_buffer，则仍从 `0` 开始
+5. **原地更新**：使用 `MemRefUpdateMutator` 完成以下操作：
    - 将变量类型（TileType/TensorType）中的旧 MemRef 引用替换为包含实际地址的新 MemRef
    - 更新已有的 `tile.alloc` `AssignStmt`：替换左值 MemRef 并更新 Call 表达式 (Expression) 中的 addr 参数
+   - 把 `system.reserve_buffer` 的 kwargs 改写为显式 `base`
 
 **地址分配**：
 
-- 每个内存空间有独立的地址空间，从 0 开始
+- 每个内存空间有独立的地址空间；如果该空间前面已有 `system.reserve_buffer` 保留窗口，则 tile 会从该窗口之后开始分配
 - 地址 32 字节对齐：`next_addr = align32(current_addr + size)`
 - MemRef 按 ID 排序以确保确定性的分配顺序
 - DDR MemRef 被跳过（地址由外部管理）

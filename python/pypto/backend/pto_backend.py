@@ -43,22 +43,57 @@ class PartialCodegenError(RuntimeError):
         self.files = files
 
 
-def _get_error_summary(exc: Exception, func_name: str) -> str:
-    """Extract the first meaningful line from an exception, without the function name.
+_ERROR_LINE_RE = re.compile(r"(?:^Error:|\berror:)", re.IGNORECASE)
 
-    Strips the C++ Traceback tail, takes only the first line, and removes
-    occurrences of *func_name* so the summary column focuses on the error
-    itself instead of repeating the function name.
+
+def _strip_function_name_prefix(summary: str, func_name: str) -> str:
+    """Remove a leading function-name prefix without corrupting file paths."""
+    prefixes = (
+        f"Failed to compile function '{func_name}':",
+        f'Failed to compile function "{func_name}":',
+        f"{func_name}:",
+        func_name,
+    )
+    for prefix in prefixes:
+        if summary.startswith(prefix):
+            stripped = summary[len(prefix) :].strip()
+            if stripped:
+                return stripped
+    return summary
+
+
+def _get_error_summary(exc: Exception, func_name: str) -> str:
+    """Extract the most useful error line from an exception.
+
+    Strips the C++ Traceback tail, prefers the first line that contains an
+    actual error marker, and removes only a leading *func_name* prefix so file
+    paths remain intact.
     """
     msg = str(exc)
     traceback_marker = msg.find("\n\nC++ Traceback")
     if traceback_marker != -1:
         msg = msg[:traceback_marker]
-    first_line = msg.split("\n", 1)[0].strip()
-    if not first_line:
+    lines = [line.strip() for line in msg.splitlines() if line.strip()]
+    if not lines:
         return type(exc).__name__
-    summary = first_line.replace(func_name, "").replace("  ", " ").strip()
-    return summary or first_line
+
+    first_line = lines[0]
+    ptoas_prefix = "ptoas compilation failed:"
+    if first_line.startswith(ptoas_prefix):
+        first_detail = first_line[len(ptoas_prefix) :].strip()
+        detail_lines = []
+        if first_detail:
+            detail_lines.append(first_detail)
+        detail_lines.extend(lines[1:])
+        for line in detail_lines:
+            if _ERROR_LINE_RE.search(line):
+                return f"{ptoas_prefix} {line}"
+
+    for line in lines:
+        if _ERROR_LINE_RE.search(line):
+            return _strip_function_name_prefix(line, func_name)
+
+    return _strip_function_name_prefix(first_line, func_name)
 
 
 def _format_error_report(

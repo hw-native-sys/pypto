@@ -196,9 +196,12 @@ class PTOCodegen : public CodegenBase {
    * input and output would otherwise share the same buffer).
    *
    * @param tile_buf_type_string The tile_buf type string for the alloc_tile instruction
+   * @param name_hint Preferred SSA name seed
+   * @param addr_ssa Optional SSA value for the alloc_tile addr operand
    * @return New SSA variable name for the allocated buffer
    */
-  std::string AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint = "");
+  std::string AllocNewTileBuf(const std::string& tile_buf_type_string, const std::string& name_hint = "",
+                              const std::string& addr_ssa = "");
 
   /**
    * @brief Override the current result buffer name
@@ -378,8 +381,14 @@ class PTOCodegen : public CodegenBase {
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
 
-  /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
-  std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
+  struct ExtraAllocTile {
+    std::string name;
+    std::string type_string;
+    std::string addr_ssa;
+  };
+
+  /// Dynamically allocated tile buffers emitted at function scope
+  std::vector<ExtraAllocTile> extra_alloc_tiles_;
   /// Unified SSA → tile_buf type mapping.  Every typed tile SSA value
   /// (root alloc, reshape result, fillpad result, etc.) has an entry here.
   /// GetExprTypeAnnotation uses this as the primary lookup.

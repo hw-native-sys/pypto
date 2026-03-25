@@ -28,6 +28,18 @@ from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import _build_group_mapping
 
+
+def _extract_func_section(mlir_code: str, func_name: str) -> str:
+    """Return the MLIR slice for a single func.func body."""
+    start_token = f"func.func @{func_name}"
+    start = mlir_code.find(start_token)
+    assert start != -1, f"Expected function {func_name!r} in MLIR:\n{mlir_code}"
+    next_start = mlir_code.find("\n  func.func @", start + len(start_token))
+    if next_start == -1:
+        return mlir_code[start:]
+    return mlir_code[start:next_start]
+
+
 # ============================================================================
 # Test Program: Vector Producer + Cube Consumer (V2C unidirectional)
 # ============================================================================
@@ -280,8 +292,9 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.tpop_from_aiv" in cube_code, "Should contain pto.tpop_from_aiv"
         assert "= pto.tpop_from_aiv" in cube_code, "tpop should produce SSA result"
         assert "-> !pto.tile_buf<" in cube_code, "tpop should use -> result type syntax"
-        assert "pto.tfree" in cube_code, "Should contain pto.tfree"
-        assert "{split = " in cube_code, "tfree should have split attribute"
+        assert "pto.tfree_from_aiv" in cube_code, "Should contain pto.tfree_from_aiv"
+        tfree_line = next(line for line in cube_code.splitlines() if "pto.tfree_from_aiv" in line)
+        assert "{split = " in tfree_line, f"tfree should have split attribute: {tfree_line}"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
 
     def test_tpop_chain_ordering(self):
@@ -291,7 +304,7 @@ class TestCrossCoreTpushTpopCodegen:
         lines = cube_code.split("\n")
 
         tpop_lines = [i for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
-        tfree_lines = [i for i, line in enumerate(lines) if "pto.tfree" in line]
+        tfree_lines = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
         tmov_lines = [i for i, line in enumerate(lines) if "pto.tmov" in line]
 
         assert len(tpop_lines) == 2, f"Expected 2 tpop lines, got {len(tpop_lines)}"
@@ -307,6 +320,43 @@ class TestCrossCoreTpushTpopCodegen:
         )
         assert tpop_lines[1] < tmov_lines[1] < tfree_lines[1], (
             f"Second chain out of order: tpop={tpop_lines[1]}, tmov={tmov_lines[1]}, tfree={tfree_lines[1]}"
+        )
+
+    def test_tfree_stays_after_nested_control_flow_use(self):
+        """Nested control-flow users of a tpop result must stay before tfree."""
+
+        @pl.program
+        class ConditionalTpopProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_consumer(
+                self,
+                flag: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
+
+                received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
+                if flag == 0:
+                    received_left = pl.move(received, target_memory=pl.MemorySpace.Left)
+                    received_mat = pl.move(received_left, target_memory=pl.MemorySpace.Mat)
+                    _: pl.Tensor[[16, 16], pl.FP16] = pl.store(received_mat, [0, 0], output)
+                else:
+                    received_right = pl.move(received, target_memory=pl.MemorySpace.Right)
+                    received_mat_else = pl.move(received_right, target_memory=pl.MemorySpace.Mat)
+                    _: pl.Tensor[[16, 16], pl.FP16] = pl.store(received_mat_else, [0, 0], output)
+
+                pl.tfree_to_aiv(received)
+                return output
+
+        codes = self._compile_and_generate(ConditionalTpopProgram)
+        aic_body = _extract_func_section(codes["cube_consumer"], "cube_consumer")
+
+        assert aic_body.index("pto.tpop_from_aiv") < aic_body.index("scf.if"), (
+            "The nested control-flow user should remain after the tpop"
+        )
+        assert aic_body.index("scf.if") < aic_body.index("pto.tfree_from_aiv"), (
+            "tfree must remain after nested control-flow uses of the popped tile"
         )
 
     @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
@@ -335,7 +385,7 @@ class TestCrossCoreTpushTpopCodegen:
         # C2V consumer side: receive matmul result + post-process
         assert "pto.tpop_from_aic" in vector_code, "Should pop from AIC"
         assert "pto.texp" in vector_code, "Should do exp post-processing (Vector op)"
-        assert "pto.tfree(" in vector_code, "Should free C2V slot"
+        assert "pto.tfree_from_aic" in vector_code, "Should free C2V slot"
 
     @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_cube(self):
@@ -359,7 +409,7 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C consumer side: receive preprocessed data
         assert "pto.tpop_from_aiv" in cube_code, "Should pop from AIV"
-        assert "pto.tfree(" in cube_code, "Should free V2C slot"
+        assert "pto.tfree_from_aiv" in cube_code, "Should free V2C slot"
         # C2V producer side: matmul + push back
         assert "pto.tpush_to_aiv" in cube_code, "Should push to AIV"
         assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
@@ -376,7 +426,8 @@ class TestCrossCoreTpushTpopCodegen:
             "pto.tpush_to_aic",
             "pto.tpop_from_aic",
             "pto.tpop_from_aiv",
-            "pto.tfree(",
+            "pto.tfree_from_aic",
+            "pto.tfree_from_aiv",
             "pto.aic_initialize_pipe",
             "pto.aiv_initialize_pipe",
             "pto.reserve_buffer",
@@ -386,7 +437,6 @@ class TestCrossCoreTpushTpopCodegen:
             assert op in all_code, f"Expected PTO op '{op}' not found in generated MLIR"
 
 
-@pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
 class TestExpandMixedKernelCodegen:
     """Tests that PTO codegen works on AIC/AIV functions produced by expand_mixed_kernel."""
 
@@ -458,7 +508,9 @@ class TestExpandMixedKernelCodegen:
                 x_sub: pl.Tile[[16, 128], pl.BF16] = pl.sub(x_tile, x_tile)
                 x_sub_l1: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sub, target_memory=pl.MemorySpace.Mat)
                 s_sub_l0a: pl.Tile[[16, 128], pl.BF16] = pl.move(x_sub_l1, target_memory=pl.MemorySpace.Left)
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
+                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
                 z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(s_sub_l0a, y_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
                 return out_0
@@ -478,16 +530,32 @@ class TestExpandMixedKernelCodegen:
         # AIV function should contain pto.tsub (vector op)
         assert "main_incore_0_aiv" in codes, "AIV function should be generated"
         aiv_code = codes["main_incore_0_aiv"]
-        print(aiv_code)
         assert "pto.tsub" in aiv_code, "AIV should contain pto.tsub for tile.sub"
+        assert "pto.import_reserved_buffer" in aiv_code, "AIV should import the peer V2C buffer"
+        assert "pto.aiv_initialize_pipe" in aiv_code, "AIV should initialize cross-core pipe"
 
         # AIC function should contain pto.tmatmul (cube op)
         assert "main_incore_0_aic" in codes, "AIC function should be generated"
         aic_code = codes["main_incore_0_aic"]
+        aic_body = _extract_func_section(aic_code, "main_incore_0_aic")
         assert "pto.tmatmul" in aic_code, "AIC should contain pto.tmatmul for tile.matmul"
+        assert "pto.reserve_buffer" in aic_code, "AIC should reserve the V2C consumer buffer"
+        assert "auto = false" in aic_code, "Auto reserve_buffer should be resolved before PTO emission"
+        assert "base = 0" in aic_code, "The first auto reserve_buffer should start from base 0"
+        assert "pto.aic_initialize_pipe" in aic_code, "AIC should initialize cross-core pipe"
+        assert aic_body.index("pto.aic_initialize_pipe") < aic_body.index("pto.tpop_from_aiv"), (
+            "AIC initialize_pipe should be emitted before the first V2C tpop"
+        )
+        assert "pto.tfree_from_aiv" in aic_body, "AIC consumer should free the V2C slot"
+        assert aic_body.index("pto.tpop_from_aiv") < aic_body.index("pto.tmov"), (
+            "AIC should move the popped tile before freeing it"
+        )
+        assert aic_body.index("pto.tmov") < aic_body.index("pto.tfree_from_aiv"), (
+            "AIC should free the popped tile after its direct use"
+        )
 
         # tile.sub should NOT be in AIC
-        assert "pto.tsub" not in aic_code, "AIC should not contain pto.tsub"
+        assert "pto.tsub" not in aic_body, "AIC should not contain pto.tsub"
 
 
 if __name__ == "__main__":

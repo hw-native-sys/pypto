@@ -791,24 +791,18 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
   return "";
 }
 
-/// tfree codegen for system.tfree_to_aic: emits pto.tfree(%tile : type) {split = N}
+/// tfree codegen for system.tfree_to_aic: emits pto.tfree_from_aic {split = N}
 static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 1) << "tfree requires 1 argument (tile from tpop), got " << op->args_.size();
+  CHECK(op->args_.size() == 1) << "tfree_to_aic requires 1 argument (tile from tpop), got "
+                               << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tfree first argument must be a Var or IterArg";
-
-  std::string tile_buf = codegen.GetVarName(tile);
-  std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  INTERNAL_CHECK(tile) << "tfree_to_aic first argument must be a Var or IterArg";
   int split = codegen.GetTpopSplit(tile.get());
 
   std::ostringstream oss;
-  oss << "pto.tfree(" << tile_buf;
-  if (!tile_type.empty()) {
-    oss << " : " << tile_type;
-  }
-  oss << ") {split = " << split << "}";
+  oss << "pto.tfree_from_aic {split = " << split << "}";
   codegen.Emit(oss.str());
 
   return "";
@@ -1146,9 +1140,11 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     const auto name = op->GetKwarg<std::string>("name");
     const int size = op->GetKwarg<int>("size", -1);
-    const int base = op->GetKwarg<int>("base", -1);  // -1 = AUTO
+    const int base = op->GetKwarg<int>("base", -1);
     CHECK(!name.empty()) << "reserve_buffer requires 'name' attribute";
     CHECK(size > 0) << "reserve_buffer requires positive 'size' attribute, got " << size;
+    CHECK(base >= 0)
+        << "reserve_buffer requires AllocateMemoryAddr to resolve 'base' before PTO emission, got " << base;
     CheckSafeIdentifier(name, "reserve_buffer 'name'");
 
     std::string ssa_name = codegen.GetCurrentResultTarget();
@@ -1168,12 +1164,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     std::ostringstream oss;
     oss << ssa_name << " = pto.reserve_buffer {name = \"" << name << "\", size = " << size
-        << ", location = #pto.address_space<" << location << ">";
-    if (base >= 0) {
-      oss << ", auto = false, base = " << base;
-    } else {
-      oss << ", auto = true";
-    }
+        << ", location = #pto.address_space<" << location << ">, auto = false, base = " << base;
     oss << "} -> i32";
     codegen.Emit(oss.str());
     codegen.RecordReserveBufferSSA(ssa_name);

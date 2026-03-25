@@ -68,6 +68,20 @@ def get_memref_addresses_from_tiles(func):
     return memref_addrs
 
 
+def get_reserve_buffer_bases(func):
+    """Get resolved base values from reserve_buffer calls in a function."""
+    bases = {}
+    for stmt in _iter_all_stmts(func):
+        call = None
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            call = stmt.value
+        elif isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+            call = stmt.expr
+        if call is not None and call.op.name == "system.reserve_buffer":
+            bases[call.kwargs["name"]] = call.kwargs["base"]
+    return bases
+
+
 def _prepare_and_run_allocate_memory_addr(program):
     """Prepare IR with memrefs and alloc ops, then run the address allocation pass.
 
@@ -164,6 +178,38 @@ def test_allocate_memory_addr_multiple_tiles():
         assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
         actual_addr = memref_addrs[var_name]
         assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
+
+
+def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
+    """AUTO reserve_buffer should consume the low address range before tile allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            _ = pl.reserve_buffer(name="c2v_slot_buffer", size=4096)
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
+            return result
+
+    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
+    optimized_func = list(optimized_program.functions.values())[0]
+
+    reserve_bases = get_reserve_buffer_bases(optimized_func)
+    assert reserve_bases == {"c2v_slot_buffer": 0}
+
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    assert memref_addrs["tile_a"] == 4096
+    assert memref_addrs["tile_b"] == 20480
+
+    alloc_addrs = get_alloc_addresses(optimized_func)
+    for _, addr in alloc_addrs:
+        assert addr % 32 == 0, f"Address {addr} should remain 32-byte aligned after reserve_buffer"
 
 
 def test_allocate_memory_addr_empty_function():

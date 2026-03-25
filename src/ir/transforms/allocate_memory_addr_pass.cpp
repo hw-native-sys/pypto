@@ -10,7 +10,9 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -21,6 +23,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -50,6 +53,8 @@ namespace {
 inline uint64_t Align32(uint64_t addr) { return (addr + 31) & ~31ULL; }
 
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
+using ReserveBufferBaseMap = std::unordered_map<const Call*, int64_t>;
+using ReservedEndBySpace = std::unordered_map<MemorySpace, uint64_t>;
 
 // Visitor to collect all MemRef objects from TileType variables
 class MemRefCollectorVisitor : public IRVisitor {
@@ -82,10 +87,93 @@ class MemRefCollectorVisitor : public IRVisitor {
   }
 };
 
+MemorySpace GetReserveBufferMemorySpace(const FunctionPtr& func) {
+  CHECK(func) << "AllocateMemoryAddr requires a valid function when resolving reserve_buffer space";
+  switch (func->func_type_) {
+    case FunctionType::AIC:
+      return MemorySpace::Mat;
+    case FunctionType::AIV:
+    case FunctionType::InCore:
+      return MemorySpace::Vec;
+    default:
+      CHECK(false) << "AllocateMemoryAddr cannot resolve reserve_buffer memory space for function '"
+                   << func->name_ << "' with type " << FunctionTypeToString(func->func_type_);
+  }
+  return MemorySpace::DDR;
+}
+
+struct ReserveBufferInfo {
+  const Call* call = nullptr;
+  int64_t size = 0;
+  int64_t base = -1;
+};
+
+class ReserveBufferCollector : public IRVisitor {
+ public:
+  [[nodiscard]] const std::vector<ReserveBufferInfo>& GetReserveBuffers() const { return reserve_buffers_; }
+
+  void VisitExpr_(const CallPtr& op) override {
+    auto ir_op = std::dynamic_pointer_cast<const Op>(op->op_);
+    if (ir_op && ir_op->name_ == "system.reserve_buffer") {
+      const int size = op->GetKwarg<int>("size", -1);
+      const int base = op->GetKwarg<int>("base", -1);
+      CHECK(size > 0) << "AllocateMemoryAddr requires reserve_buffer size > 0, got " << size;
+      reserve_buffers_.push_back(
+          ReserveBufferInfo{op.get(), static_cast<int64_t>(size), static_cast<int64_t>(base)});
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  std::vector<ReserveBufferInfo> reserve_buffers_;
+};
+
+struct ReserveBufferResolution {
+  ReserveBufferBaseMap resolved_bases;
+  ReservedEndBySpace reserved_end_by_space;
+};
+
+ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func) {
+  ReserveBufferResolution resolution;
+  if (!func || !func->body_) return resolution;
+
+  ReserveBufferCollector collector;
+  collector.VisitStmt(func->body_);
+  if (collector.GetReserveBuffers().empty()) return resolution;
+
+  const MemorySpace reserve_space = GetReserveBufferMemorySpace(func);
+
+  std::unordered_map<MemorySpace, uint64_t> next_base_by_space;
+  for (const auto& reserve : collector.GetReserveBuffers()) {
+    uint64_t resolved_base = 0;
+    auto& next_base = next_base_by_space[reserve_space];
+    if (reserve.base >= 0) {
+      resolved_base = static_cast<uint64_t>(reserve.base);
+    } else {
+      resolved_base = next_base;
+    }
+
+    CHECK(resolved_base <= static_cast<uint64_t>(std::numeric_limits<int>::max()))
+        << "AllocateMemoryAddr resolved reserve_buffer base out of int range in function '" << func->name_
+        << "': " << resolved_base;
+    resolution.resolved_bases[reserve.call] = static_cast<int64_t>(resolved_base);
+
+    const uint64_t buffer_end = Align32(resolved_base + static_cast<uint64_t>(reserve.size));
+    next_base = std::max(next_base, buffer_end);
+
+    auto& reserved_end = resolution.reserved_end_by_space[reserve_space];
+    reserved_end = std::max(reserved_end, buffer_end);
+  }
+
+  return resolution;
+}
+
 // Mutator to update MemRef addresses in IR (both variable types and alloc statements)
 class MemRefUpdateMutator : public IRMutator {
  public:
-  explicit MemRefUpdateMutator(const std::vector<std::pair<const MemRef*, MemRefPtr>>& memref_pairs) {
+  explicit MemRefUpdateMutator(const std::vector<std::pair<const MemRef*, MemRefPtr>>& memref_pairs,
+                               ReserveBufferBaseMap reserve_buffer_bases)
+      : reserve_buffer_bases_(std::move(reserve_buffer_bases)) {
     for (const auto& [old_ptr, new_memref] : memref_pairs) {
       memref_map_[old_ptr] = new_memref;
     }
@@ -148,6 +236,48 @@ class MemRefUpdateMutator : public IRMutator {
  private:
   std::unordered_map<const MemRef*, MemRefPtr> memref_map_;
   std::unordered_map<const Expr*, ExprPtr> var_remap_;
+  ReserveBufferBaseMap reserve_buffer_bases_;
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    std::vector<ExprPtr> new_args;
+    bool args_changed = false;
+    new_args.reserve(op->args_.size());
+
+    for (const auto& arg : op->args_) {
+      INTERNAL_CHECK(arg) << "Call has null argument during AllocateMemoryAddr mutation";
+      auto new_arg = IRMutator::VisitExpr(arg);
+      INTERNAL_CHECK(new_arg) << "Call argument mutated to null during AllocateMemoryAddr";
+      args_changed = args_changed || new_arg.get() != arg.get();
+      new_args.push_back(new_arg);
+    }
+
+    std::vector<std::pair<std::string, std::any>> new_kwargs = op->kwargs_;
+    bool kwargs_changed = false;
+    auto base_it = reserve_buffer_bases_.find(op.get());
+    if (base_it != reserve_buffer_bases_.end()) {
+      const int resolved_base = static_cast<int>(base_it->second);
+      bool found_base = false;
+      for (auto& [key, value] : new_kwargs) {
+        if (key != "base") continue;
+        found_base = true;
+        if (AnyCast<int>(value, "kwarg key: base") != resolved_base) {
+          value = resolved_base;
+          kwargs_changed = true;
+        }
+        break;
+      }
+      if (!found_base) {
+        new_kwargs.emplace_back("base", resolved_base);
+        kwargs_changed = true;
+      }
+    }
+
+    if (args_changed || kwargs_changed) {
+      return std::make_shared<Call>(op->op_, std::move(new_args), std::move(new_kwargs), op->GetType(),
+                                    op->span_);
+    }
+    return op;
+  }
 
   TypePtr UpdateTypeMemRef(const TypePtr& type) {
     auto memref = GetTypeMemRef(type);
@@ -190,7 +320,7 @@ void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefWithSpac
  * @brief Allocate memory addresses for non-DDR memory spaces
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
-    const std::vector<MemRefWithSpace>& memrefs) {
+    const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space) {
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
   for (const auto& [memref, memory_space] : memrefs) {
@@ -212,6 +342,10 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 
     // Allocate sequential aligned addresses
     uint64_t current_addr = 0;
+    auto reserved_it = reserved_end_by_space.find(space);
+    if (reserved_it != reserved_end_by_space.end()) {
+      current_addr = reserved_it->second;
+    }
     for (const auto& old_memref : refs) {
       CHECK(old_memref->size_ > 0)
           << "AllocateMemoryAddr encountered zero-sized MemRef '" << old_memref->name_hint_
@@ -252,19 +386,22 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
  * and the alloc statement arguments in place.
  */
 FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
-  // Step 1: Collect all unique MemRef objects from TileType variables
+  // Step 1: Resolve reserve_buffer bases before assigning tile addresses.
+  auto reserve_resolution = ResolveReserveBufferBases(func);
+
+  // Step 2: Collect all unique MemRef objects from TileType variables
   std::vector<MemRefWithSpace> memrefs;
   CollectMemRefsFromStatement(func->body_, memrefs);
 
-  // Step 2: Allocate memory addresses for non-DDR spaces
-  auto memref_pairs = AllocateMemoryAddresses(memrefs);
+  // Step 3: Allocate memory addresses for non-DDR spaces
+  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space);
 
-  if (memref_pairs.empty()) {
+  if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
   }
 
-  // Step 3: Update all MemRef references AND alloc statements in the IR
-  MemRefUpdateMutator mutator(memref_pairs);
+  // Step 4: Update all MemRef references, alloc statements, and reserve_buffer bases in the IR.
+  MemRefUpdateMutator mutator(memref_pairs, std::move(reserve_resolution.resolved_bases));
 
   std::vector<VarPtr> new_params;
   for (const auto& param : func->params_) {

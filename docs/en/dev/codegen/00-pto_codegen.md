@@ -130,18 +130,20 @@ print(pto_code)
 | `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube push |
 | `tile.tpop_from_aic(split=N)` | `pto.tpop_from_aic outs(%buf : type) {split = N}` | Pop from Cube pipe |
 | `tile.tpop_from_aiv(split=N)` | `pto.tpop_from_aiv outs(%buf : type) {split = N}` | Pop from Vector pipe |
-| `system.tfree_to_aic(aiv_idx=N)` | `pto.tfree_to_aic {aiv_idx = N}` | Release slot to Cube |
-| `system.tfree_to_aiv(aiv_idx=N)` | `pto.tfree_to_aiv {aiv_idx = N}` | Release slot to Vector |
+| `system.tfree_to_aic(tile_from_tpop)` | `pto.tfree_from_aic {split = N}` | Release a consumer slot back to Cube |
+| `system.tfree_to_aiv(tile_from_tpop)` | `pto.tfree_from_aiv {split = N}` | Release a consumer slot back to Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init |
 | `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init |
-| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = A} -> i32` | Reserve buffer |
+| `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 
 **Notes:**
 
 - Push ops use `ins()` clause with typed tile buffer; pop ops use `outs()` clause
+- `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
+- `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands
-- `reserve_buffer` emits `auto = true` when base is AUTO, or `auto = false, base = <value>` for explicit addresses
+- `AllocateMemoryAddr` resolves `reserve_buffer(base=AUTO)` before PTO emission, so PTO always emits `auto = false, base = <value>`
 - `reserve_buffer` location is `mat` for AIC functions, `vec` for AIV/InCore functions
 - `import_reserved_buffer` uses MLIR symbol syntax (`@func_name`) for `peer_func`
 - Buffer name and peer_func strings are validated by `CheckSafeIdentifier` (alphanumeric + underscore only)

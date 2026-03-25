@@ -4,11 +4,12 @@ Assigns real memory addresses to existing alloc operations.
 
 ## Overview
 
-This pass allocates concrete memory addresses for non-DDR MemRefs and updates the existing `tile.alloc` statements in place. Unlike creating new alloc operations, this pass only modifies the address field of alloc statements that were created by InitMemRef (with `addr=-1`).
+This pass allocates concrete memory addresses for non-DDR MemRefs and updates the existing `tile.alloc` statements in place. It also resolves `system.reserve_buffer(base=AUTO)` to explicit base addresses before PTO code generation. Unlike creating new alloc operations, this pass only modifies the address field of alloc statements that were created by InitMemRef (with `addr=-1`).
 
 **Key responsibilities**:
 
 - Collect unique MemRef objects from TileType variables
+- Resolve `system.reserve_buffer` bases to explicit addresses per function
 - Allocate sequential, 32-byte aligned addresses within each memory space
 - Update MemRef addresses in all variable types
 - Update `tile.alloc` statement arguments with the allocated addresses
@@ -40,14 +41,16 @@ program_with_addrs = alloc_pass(program)
 
 1. **Collect MemRefs**: Traverse function body to find all unique MemRef objects from TileType variables
 2. **Group by memory space**: Organize MemRefs by memory space (Vec, Mat, Left, Right, Acc)
-3. **Allocate addresses**: For each memory space, sort MemRefs by ID and assign sequential 32-byte aligned addresses starting from 0
-4. **Update in place**: Use `MemRefUpdateMutator` to:
+3. **Resolve reserve buffers**: For each function, scan `system.reserve_buffer` calls, assign explicit bases to AUTO buffers, and compute the reserved end address per memory space
+4. **Allocate addresses**: For each memory space, sort MemRefs by ID and assign sequential 32-byte aligned addresses starting from that space's reserved end (or `0` when no reserve buffer exists)
+5. **Update in place**: Use `MemRefUpdateMutator` to:
    - Replace old MemRef references in variable types (TileType/TensorType) with new MemRefs containing real addresses
    - Update existing `tile.alloc` `AssignStmt`s: replace LHS MemRef and update addr argument in the Call expression
+   - Rewrite `system.reserve_buffer` kwargs with the resolved explicit `base`
 
 **Address allocation**:
 
-- Each memory space has its own address space starting from 0
+- Each memory space has its own address space starting from 0 unless `system.reserve_buffer` already reserved a leading window in that space
 - Addresses are 32-byte aligned: `next_addr = align32(current_addr + size)`
 - MemRefs are sorted by ID for deterministic allocation order
 - DDR MemRefs are skipped (addresses managed externally)

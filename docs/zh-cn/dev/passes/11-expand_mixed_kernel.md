@@ -26,6 +26,31 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 | Cube→Vector（如 Acc→Vec） | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
 | Vector→Cube（如 Vec→Mat） | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
 
+当拆分后的内核包含跨核 `tpush`/`tpop` 时，该 Pass 还会自动在函数前缀补齐前端 pipe setup：
+
+- 消费侧插入 `system.reserve_buffer(...)`
+- 生产侧插入 `system.import_peer_buffer(...)`
+- 两侧分别插入 `system.aic_initialize_pipe(...)` / `system.aiv_initialize_pipe(...)`
+
+此外，Pass 还会在每条消费侧 `tpop` 链后插入
+`system.tfree_to_aic(...)` / `system.tfree_to_aiv(...)`。
+
+这些 setup 参数由拆分后的函数体自动推导：
+
+- `dir_mask`：`C2V=1`、`V2C=2`、双向=`3`
+- `slot_size`：tile 字节大小（`shape * dtype bits / 8`）
+- `slot_num`：单向为 `8`，双向时每个方向为 `4`
+- `buffer_size`：`slot_num * slot_size`
+- buffer 名称：`<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
+- reserve-buffer 的 `base`：插入时统一使用 `AUTO`，随后由 `AllocateMemoryAddr` 解析成显式地址
+
+当前限制：同一个 mixed kernel 中所有活跃的跨核方向必须共享同一个 `slot_size`。如果大小不一致，`MixedKernelExpanded` 会在 Pass 结束后立刻校验失败。
+
+对于消费侧跨核 tile，该 Pass 还会主动归一化语句顺序，满足 PTO 的
+`tpop -> direct users -> tfree -> next tpop` 要求。若 AIC 侧的 `tile.tpop_from_aiv`
+结果还需要做同侧 `tile.move`（例如 Mat -> Left/Right/Bias），则该 `move` 会被视为最后一个 direct user，
+自动生成的 `system.tfree_to_aiv(...)` 会落在它之后。
+
 **前置条件**：
 
 - 输入 IR 必须具有 tile 操作（需先运行 `ConvertTensorToTileOps`）
@@ -78,8 +103,12 @@ program_expanded = expand_pass(program)
   8. 再次归一化循环携带状态，因为 DCE 可能移除仅用于过渡的 SHARED 后续引用，
      使某些 iter_arg 到这一步才变成可删除
   9. 再次运行死代码消除，清理第二次裁剪后暴露出的 init-value 链
- 10. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
- 11. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
+ 10. 归一化消费侧 `tpop` 链为 `tpop -> direct users -> tfree`
+      并补齐缺失的 `system.tfree_to_aic` / `system.tfree_to_aiv`
+ 11. 如果拆分后的函数体包含跨核 tile 操作，且尚未带有 setup，
+      则推导并 prepend reserve/import/initialize_pipe 前缀
+ 12. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
+ 13. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
 
 阶段 3 — 改写 Group 调用者：
   对于每个调用了已拆分 InCore 的 Group 函数，将 InCore 调用替换为
@@ -134,7 +163,7 @@ class Before:
         return self.compute_incore_0(x, y, out_0)
 ```
 
-**之后**（概念性 — 实际 IR 包含所有变量的类型注解）：
+**之后**（概念性 — 实际 IR 包含所有变量的类型注解；为简洁起见，这里省略自动生成的 pipe setup 前缀）：
 
 ```python
 @pl.program
@@ -146,12 +175,13 @@ class After:
         x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE：Mat→Left（同侧）
         y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE：Mat→Right（同侧）
         z_tile = pl.matmul(x_left, y_right)              # CUBE 操作
-        pl.tile.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY：推送 Acc tile 到 AIV
+        pl.tile.tpush_to_aiv(z_tile, split=0)        # BOUNDARY：推送 Acc tile 到 AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(aiv_idx=0)  # BOUNDARY：从 AIC 弹出
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(split=0)  # BOUNDARY：从 AIC 弹出
         out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR 操作
+        pl.system.tfree_to_aic(z_vec)                    # 释放已消费的跨核槽位
         return out_0
 
     @pl.function(type=pl.FunctionType.Group)
@@ -235,7 +265,17 @@ class After:
 
 ## 属性验证器
 
-`MixedKernelExpandedPropertyVerifier` 检查剩余的 `FunctionType::InCore` 函数不同时包含 Cube 和 Vector tile 操作。AIC/AIV/Group 函数不做检查（它们已按定义完成拆分）。
+`MixedKernelExpandedPropertyVerifier` 会检查：
+
+- 剩余的 `FunctionType::InCore` 函数不再同时包含 Cube 和 Vector tile 操作
+- AIC 中的 `tile.tpop_from_aiv` 必须落到 `MemorySpace::Mat`
+- AIV 中的 `tile.tpop_from_aic` 必须落到 `MemorySpace::Vec`
+- 带跨核 `tpush`/`tpop` 的 AIC/AIV 函数必须同时具备所需的 pipe setup
+- 每个 AIC/AIV `tile.tpop_*` 都必须有匹配的 `system.tfree_*`
+- 顶层跨核消费链必须满足 `tpop -> direct users -> tfree -> next tpop`
+- 同一函数中的所有活跃跨核方向必须能推导出单一、受支持的 `slot_size`
+
+这样，常见错误（缺少 `initialize_pipe`、缺少 `reserve_buffer` / `import_peer_buffer`、缺少 `tfree`、slot size 不一致、`tpop` 顺序不合法）会在 `ExpandMixedKernel` 之后立即报出，而不是拖到 PTO codegen / `ptoas` 阶段。
 
 ## 设计决策
 
@@ -249,3 +289,6 @@ class After:
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |
 | 两阶段拆分后循环状态修复 | 先保证 loop-carried state 合法，再在 DCE 移除死共享别名后重新裁剪 iter_arg，最后再跑一次 DCE 清理暴露出的 init-value 链 |
+| 自动生成 pipe setup | tensor 级 mixed kernel 无需手写 `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`；Pass 会根据跨核 tile 操作自动推导 |
+| 自动生成 tfree 链 | 消费侧拆分内核会在 IR 层释放每个 `tpop` 得到的槽位，使 PTO codegen 直接看到所需的 `tpop -> use -> tfree -> next tpop` 顺序 |
+| 单一 slot size 策略 | 对齐当前后端“每函数单 reserve/import buffer + 单 `initialize_pipe.slot_size`”的实现假设 |

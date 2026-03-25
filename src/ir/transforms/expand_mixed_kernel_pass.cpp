@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -23,13 +25,16 @@
 #include <vector>
 
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -51,6 +56,13 @@ namespace {
 // ============================================================================
 
 enum class CoreAffinity { CUBE, VECTOR, SHARED, MIXED, BOUNDARY };
+
+enum class PipeDirection { C2V = 1, V2C = 2 };
+enum class CoreSide { AIC, AIV };
+
+constexpr int kDirMaskC2V = static_cast<int>(PipeDirection::C2V);
+constexpr int kDirMaskV2C = static_cast<int>(PipeDirection::V2C);
+constexpr int kAutoBufferBase = -1;
 
 CoreAffinity CombineAffinity(CoreAffinity a, CoreAffinity b) {
   if (a == b) return a;
@@ -195,6 +207,273 @@ StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
   if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
   if (stmts.size() == 1) return stmts[0];
   return std::make_shared<SeqStmts>(stmts, span);
+}
+
+struct PipeDirectionMetadata {
+  bool has_ops = false;
+  bool has_inconsistent_slot_size = false;
+  std::optional<int64_t> slot_size_bytes;
+  std::vector<int64_t> observed_slot_sizes;
+};
+
+struct CrossCorePipeMetadata {
+  PipeDirectionMetadata c2v;
+  PipeDirectionMetadata v2c;
+  bool has_reserve_buffer = false;
+  bool has_import_peer_buffer = false;
+  bool has_aic_initialize_pipe = false;
+  bool has_aiv_initialize_pipe = false;
+
+  [[nodiscard]] bool HasCrossCoreOps() const { return c2v.has_ops || v2c.has_ops; }
+  [[nodiscard]] bool HasAnySetup() const {
+    return has_reserve_buffer || has_import_peer_buffer || has_aic_initialize_pipe || has_aiv_initialize_pipe;
+  }
+};
+
+std::optional<int64_t> TryGetConstIntValue(const ExprPtr& expr) {
+  auto const_int = std::dynamic_pointer_cast<const ConstInt>(expr);
+  if (!const_int || const_int->value_ < 0) return std::nullopt;
+  return const_int->value_;
+}
+
+std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type) {
+  auto tile_type = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tile_type) return std::nullopt;
+
+  int64_t element_count = 1;
+  for (const auto& dim : tile_type->shape_) {
+    auto dim_value = TryGetConstIntValue(dim);
+    if (!dim_value.has_value()) return std::nullopt;
+    CHECK(*dim_value == 0 || element_count <= std::numeric_limits<int64_t>::max() / *dim_value)
+        << "Tile element count overflow while inferring cross-core slot size";
+    element_count *= *dim_value;
+  }
+
+  const int64_t bit_width = static_cast<int64_t>(tile_type->dtype_.GetBit());
+  CHECK(bit_width > 0) << "Unsupported dtype for cross-core slot size inference: "
+                       << tile_type->dtype_.ToString();
+  CHECK(element_count <= (std::numeric_limits<int64_t>::max() - 7) / bit_width)
+      << "Tile byte size overflow while inferring cross-core slot size";
+  return (element_count * bit_width + 7) / 8;
+}
+
+void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size) {
+  metadata.has_ops = true;
+  if (std::find(metadata.observed_slot_sizes.begin(), metadata.observed_slot_sizes.end(), slot_size) ==
+      metadata.observed_slot_sizes.end()) {
+    metadata.observed_slot_sizes.push_back(slot_size);
+  }
+  if (!metadata.slot_size_bytes.has_value()) {
+    metadata.slot_size_bytes = slot_size;
+    return;
+  }
+  if (metadata.slot_size_bytes.value() != slot_size) {
+    metadata.has_inconsistent_slot_size = true;
+  }
+}
+
+void RecordTileSlotSize(PipeDirectionMetadata& metadata, const TypePtr& type) {
+  metadata.has_ops = true;
+  auto slot_size = TryGetTileSlotSizeBytes(type);
+  if (slot_size.has_value()) {
+    RecordObservedSlotSize(metadata, slot_size.value());
+  }
+}
+
+void MergeDirectionMetadata(PipeDirectionMetadata& dst, const PipeDirectionMetadata& src) {
+  dst.has_ops = dst.has_ops || src.has_ops;
+  dst.has_inconsistent_slot_size = dst.has_inconsistent_slot_size || src.has_inconsistent_slot_size;
+  for (int64_t slot_size : src.observed_slot_sizes) {
+    RecordObservedSlotSize(dst, slot_size);
+  }
+}
+
+CrossCorePipeMetadata MergeCrossCorePipeMetadata(const CrossCorePipeMetadata& lhs,
+                                                 const CrossCorePipeMetadata& rhs) {
+  CrossCorePipeMetadata merged;
+  MergeDirectionMetadata(merged.c2v, lhs.c2v);
+  MergeDirectionMetadata(merged.c2v, rhs.c2v);
+  MergeDirectionMetadata(merged.v2c, lhs.v2c);
+  MergeDirectionMetadata(merged.v2c, rhs.v2c);
+  merged.has_reserve_buffer = lhs.has_reserve_buffer || rhs.has_reserve_buffer;
+  merged.has_import_peer_buffer = lhs.has_import_peer_buffer || rhs.has_import_peer_buffer;
+  merged.has_aic_initialize_pipe = lhs.has_aic_initialize_pipe || rhs.has_aic_initialize_pipe;
+  merged.has_aiv_initialize_pipe = lhs.has_aiv_initialize_pipe || rhs.has_aiv_initialize_pipe;
+  return merged;
+}
+
+int BuildDirMask(const CrossCorePipeMetadata& metadata) {
+  int dir_mask = 0;
+  if (metadata.c2v.has_ops) dir_mask |= kDirMaskC2V;
+  if (metadata.v2c.has_ops) dir_mask |= kDirMaskV2C;
+  return dir_mask;
+}
+
+int GetSlotNumForDirMask(int dir_mask) { return dir_mask == (kDirMaskC2V | kDirMaskV2C) ? 4 : 8; }
+
+std::optional<int64_t> GetCommonSlotSizeBytes(const CrossCorePipeMetadata& metadata) {
+  std::optional<int64_t> common_slot_size;
+  for (const auto* direction : {&metadata.c2v, &metadata.v2c}) {
+    if (!direction->has_ops) continue;
+    if (direction->has_inconsistent_slot_size || !direction->slot_size_bytes.has_value()) {
+      return std::nullopt;
+    }
+    if (!common_slot_size.has_value()) {
+      common_slot_size = direction->slot_size_bytes;
+      continue;
+    }
+    if (common_slot_size.value() != direction->slot_size_bytes.value()) {
+      return std::nullopt;
+    }
+  }
+  return common_slot_size;
+}
+
+std::string BuildPipeBufferName(const std::string& func_name, PipeDirection direction) {
+  return func_name + ((direction == PipeDirection::C2V) ? "_c2v_slot_buffer" : "_v2c_slot_buffer");
+}
+
+CallPtr CreateSystemOpCall(const std::string& op_name,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
+  return OpRegistry::GetInstance().Create(op_name, {}, kwargs, span);
+}
+
+CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span) {
+  CHECK(size_bytes >= 0 && size_bytes <= std::numeric_limits<int>::max())
+      << "Cross-core reserve_buffer size out of range: " << size_bytes;
+  return CreateSystemOpCall("system.reserve_buffer",
+                            {{"name", std::any(buffer_name)},
+                             {"size", std::any(static_cast<int>(size_bytes))},
+                             {"base", std::any(kAutoBufferBase)}},
+                            span);
+}
+
+CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string& peer_func,
+                               const Span& span) {
+  return CreateSystemOpCall("system.import_peer_buffer",
+                            {{"name", std::any(buffer_name)}, {"peer_func", std::any(peer_func)}}, span);
+}
+
+CallPtr CreateInitializePipe(CoreSide side, int dir_mask, int slot_size_bytes, const Span& span) {
+  CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
+      << "Cross-core slot_size out of range: " << slot_size_bytes;
+  const std::string op_name =
+      (side == CoreSide::AIC) ? "system.aic_initialize_pipe" : "system.aiv_initialize_pipe";
+  return CreateSystemOpCall(
+      op_name, {{"dir_mask", std::any(dir_mask)}, {"slot_size", std::any(slot_size_bytes)}}, span);
+}
+
+void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata) {
+  for (const auto& stmt : stmts) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+    CallPtr call;
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (eval) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    if (op) {
+      const std::string& op_name = op->name_;
+      if (op_name == "system.reserve_buffer") {
+        metadata.has_reserve_buffer = true;
+      } else if (op_name == "system.import_peer_buffer") {
+        metadata.has_import_peer_buffer = true;
+      } else if (op_name == "system.aic_initialize_pipe") {
+        metadata.has_aic_initialize_pipe = true;
+      } else if (op_name == "system.aiv_initialize_pipe") {
+        metadata.has_aiv_initialize_pipe = true;
+      } else if (op_name == "tile.tpush_to_aiv" && call->args_.size() == 1) {
+        RecordTileSlotSize(metadata.c2v, call->args_[0]->GetType());
+      } else if (op_name == "tile.tpush_to_aic" && call->args_.size() == 1) {
+        RecordTileSlotSize(metadata.v2c, call->args_[0]->GetType());
+      } else if (op_name == "tile.tpop_from_aiv" && assign) {
+        RecordTileSlotSize(metadata.v2c, assign->var_->GetType());
+      } else if (op_name == "tile.tpop_from_aic" && assign) {
+        RecordTileSlotSize(metadata.c2v, assign->var_->GetType());
+      }
+    }
+
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      CollectCrossCorePipeMetadata(FlattenBody(for_stmt->body_), metadata);
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      CollectCrossCorePipeMetadata(FlattenBody(if_stmt->then_body_), metadata);
+      if (if_stmt->else_body_.has_value()) {
+        CollectCrossCorePipeMetadata(FlattenBody(if_stmt->else_body_.value()), metadata);
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      CollectCrossCorePipeMetadata(FlattenBody(while_stmt->body_), metadata);
+    }
+  }
+}
+
+struct AutomaticPipeSetup {
+  std::vector<StmtPtr> aic_stmts;
+  std::vector<StmtPtr> aiv_stmts;
+};
+
+AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
+                                           const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
+                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span) {
+  CrossCorePipeMetadata aic_metadata;
+  CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
+  CrossCorePipeMetadata aiv_metadata;
+  CollectCrossCorePipeMetadata(aiv_stmts, aiv_metadata);
+  CrossCorePipeMetadata combined = MergeCrossCorePipeMetadata(aic_metadata, aiv_metadata);
+
+  if (!combined.HasCrossCoreOps() || aic_metadata.HasAnySetup() || aiv_metadata.HasAnySetup()) {
+    return {};
+  }
+
+  const int dir_mask = BuildDirMask(combined);
+  auto common_slot_size = GetCommonSlotSizeBytes(combined);
+  if (dir_mask == 0 || !common_slot_size.has_value()) {
+    return {};
+  }
+
+  const int64_t buffer_size = common_slot_size.value() * GetSlotNumForDirMask(dir_mask);
+  CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
+      << "Cross-core slot_size out of range: " << common_slot_size.value();
+  const int slot_size_bytes = static_cast<int>(common_slot_size.value());
+  AutomaticPipeSetup setup;
+
+  if (dir_mask & kDirMaskV2C) {
+    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
+        std::make_shared<Var>(BuildPipeBufferName(func_name, PipeDirection::V2C), GetUnknownType(), span),
+        CreateReserveBuffer(BuildPipeBufferName(func_name, PipeDirection::V2C), buffer_size, span), span));
+    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
+        std::make_shared<Var>(BuildPipeBufferName(func_name, PipeDirection::V2C) + "_import",
+                              GetUnknownType(), span),
+        CreateImportPeerBuffer(BuildPipeBufferName(func_name, PipeDirection::V2C), aic_name, span), span));
+  }
+
+  if (dir_mask & kDirMaskC2V) {
+    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
+        std::make_shared<Var>(BuildPipeBufferName(func_name, PipeDirection::C2V), GetUnknownType(), span),
+        CreateReserveBuffer(BuildPipeBufferName(func_name, PipeDirection::C2V), buffer_size, span), span));
+    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
+        std::make_shared<Var>(BuildPipeBufferName(func_name, PipeDirection::C2V) + "_import",
+                              GetUnknownType(), span),
+        CreateImportPeerBuffer(BuildPipeBufferName(func_name, PipeDirection::C2V), aiv_name, span), span));
+  }
+
+  setup.aic_stmts.push_back(
+      std::make_shared<EvalStmt>(CreateInitializePipe(CoreSide::AIC, dir_mask, slot_size_bytes, span), span));
+  setup.aiv_stmts.push_back(
+      std::make_shared<EvalStmt>(CreateInitializePipe(CoreSide::AIV, dir_mask, slot_size_bytes, span), span));
+
+  return setup;
+}
+
+std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue,
+                                      const std::vector<StmtPtr>& body) {
+  if (prologue.empty()) return body;
+  std::vector<StmtPtr> result;
+  result.reserve(prologue.size() + body.size());
+  result.insert(result.end(), prologue.begin(), prologue.end());
+  result.insert(result.end(), body.begin(), body.end());
+  return result;
 }
 
 // ============================================================================
@@ -380,6 +659,14 @@ CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const S
                                 CleanTileType(tile_type), span);
 }
 
+std::string GetTfreeOpName(CoreSide side) {
+  return (side == CoreSide::AIC) ? "system.tfree_to_aiv" : "system.tfree_to_aic";
+}
+
+CallPtr CreateTfree(CoreSide side, const ExprPtr& tile, const Span& span) {
+  return OpRegistry::GetInstance().Create(GetTfreeOpName(side), {tile}, {}, span);
+}
+
 CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr& result_type,
                    const Span& span) {
   auto op = OpRegistry::GetInstance().GetOp("tile.move");
@@ -409,9 +696,18 @@ std::string GetStmtOpName(const StmtPtr& stmt) {
 }
 
 bool IsSideEffectOp(const StmtPtr& stmt) {
-  static const std::unordered_set<std::string> side_effect_ops = {"tile.tpush_to_aiv",  "tile.tpush_to_aic",
-                                                                  "tile.tpop_from_aic", "tile.tpop_from_aiv",
-                                                                  "tile.store",         "tile.assemble"};
+  static const std::unordered_set<std::string> side_effect_ops = {"tile.tpush_to_aiv",
+                                                                  "tile.tpush_to_aic",
+                                                                  "tile.tpop_from_aic",
+                                                                  "tile.tpop_from_aiv",
+                                                                  "tile.store",
+                                                                  "tile.assemble",
+                                                                  "system.tfree_to_aic",
+                                                                  "system.tfree_to_aiv",
+                                                                  "system.reserve_buffer",
+                                                                  "system.import_peer_buffer",
+                                                                  "system.aic_initialize_pipe",
+                                                                  "system.aiv_initialize_pipe"};
   return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
 }
 
@@ -995,8 +1291,6 @@ std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
 // Parameterized Core Body Builder (shared by AIC and AIV)
 // ============================================================================
 
-enum class CoreSide { AIC, AIV };
-
 MemorySpace GetBoundaryTpopMemory(CoreSide side) {
   return (side == CoreSide::AIC) ? MemorySpace::Mat : MemorySpace::Vec;
 }
@@ -1138,6 +1432,285 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
   return result;
 }
 
+bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var = nullptr) {
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+  if (!assign) return false;
+  auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+  if (!op || (op->name_ != "tile.tpop_from_aiv" && op->name_ != "tile.tpop_from_aic")) {
+    return false;
+  }
+  if (result_var) *result_var = assign->var_;
+  return true;
+}
+
+bool IsExpectedTpopOp(const std::string& op_name, FunctionType func_type) {
+  if (func_type == FunctionType::AIC) return op_name == "tile.tpop_from_aiv";
+  if (func_type == FunctionType::AIV) return op_name == "tile.tpop_from_aic";
+  return false;
+}
+
+bool IsExpectedTpopAssignStmt(const StmtPtr& stmt, FunctionType func_type, VarPtr* result_var = nullptr) {
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+  if (!assign) return false;
+  auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+  if (!op || !IsExpectedTpopOp(op->name_, func_type)) return false;
+  if (result_var) *result_var = assign->var_;
+  return true;
+}
+
+bool IsTfreeStmt(const StmtPtr& stmt, VarPtr* tile_var = nullptr, std::string* op_name = nullptr) {
+  auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+  if (!eval) return false;
+  auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+  auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+  if (!op || (op->name_ != "system.tfree_to_aiv" && op->name_ != "system.tfree_to_aic")) {
+    return false;
+  }
+  if (op_name) *op_name = op->name_;
+  if (tile_var) *tile_var = call && !call->args_.empty() ? AsVarLike(call->args_[0]) : nullptr;
+  return true;
+}
+
+std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt) {
+  outline_utils::VarRefCollector refs;
+  refs.VisitStmt(stmt);
+  return refs.var_refs;
+}
+
+std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
+  CallPtr call;
+  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+  }
+  if (!call) return CollectStmtVarRefs(stmt);
+
+  std::unordered_set<const Var*> refs_set;
+  for (const auto& arg : call->args_) {
+    outline_utils::VarRefCollector refs;
+    refs.VisitExpr(arg);
+    refs_set.insert(refs.var_refs.begin(), refs.var_refs.end());
+  }
+  return refs_set;
+}
+
+std::vector<const Var*> GetSortedVarRefs(const std::unordered_set<const Var*>& refs) {
+  std::vector<const Var*> sorted_refs(refs.begin(), refs.end());
+  std::sort(sorted_refs.begin(), sorted_refs.end(), [](const Var* lhs, const Var* rhs) {
+    if (lhs == rhs) return false;
+    if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
+    return lhs->UniqueId() < rhs->UniqueId();
+  });
+  return sorted_refs;
+}
+
+struct TpopChain {
+  size_t tpop_idx;
+  std::vector<size_t> user_idxs;
+  size_t tfree_idx = std::numeric_limits<size_t>::max();
+  VarPtr tpop_var;
+  size_t last_use_idx;
+};
+
+const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+  if (!var) return nullptr;
+  auto it = tpop_var_remap.find(var);
+  return (it != tpop_var_remap.end() && it->second) ? it->second.get() : var;
+}
+
+StmtPtr NormalizeNestedTpopChains(const StmtPtr& stmt, CoreSide side,
+                                  const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
+
+std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, CoreSide side,
+                                         const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+  std::vector<StmtPtr> normalized_inputs;
+  normalized_inputs.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    normalized_inputs.push_back(NormalizeNestedTpopChains(stmt, side, tpop_var_remap));
+  }
+
+  std::map<const Var*, TpopChain> chains;
+  std::vector<const Var*> tpop_order;
+  std::vector<bool> in_chain(normalized_inputs.size(), false);
+  std::unordered_map<const Var*, size_t> def_indices;
+  bool seen_first_tpop = false;
+
+  for (size_t i = 0; i < normalized_inputs.size(); ++i) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(normalized_inputs[i]);
+    if (assign) {
+      def_indices.try_emplace(assign->var_.get(), i);
+    }
+    VarPtr tpop_var;
+    if (assign && IsTpopAssignStmt(normalized_inputs[i], &tpop_var)) {
+      seen_first_tpop = true;
+      chains.emplace(tpop_var.get(), TpopChain{i, {}, std::numeric_limits<size_t>::max(), tpop_var, i});
+      tpop_order.push_back(tpop_var.get());
+      in_chain[i] = true;
+      continue;
+    }
+
+    if (!seen_first_tpop) continue;
+
+    VarPtr tfree_var;
+    std::string tfree_op_name;
+    const Var* tfree_key = nullptr;
+    if (IsTfreeStmt(normalized_inputs[i], &tfree_var, &tfree_op_name) && tfree_var &&
+        tfree_op_name == GetTfreeOpName(side)) {
+      tfree_key = CanonicalizeTpopRef(tfree_var.get(), tpop_var_remap);
+    }
+    if (tfree_key && chains.count(tfree_key) > 0) {
+      normalized_inputs[i] = std::make_shared<EvalStmt>(
+          CreateTfree(side, chains.find(tfree_key)->second.tpop_var, normalized_inputs[i]->span_),
+          normalized_inputs[i]->span_);
+      chains.find(tfree_key)->second.tfree_idx = i;
+      in_chain[i] = true;
+      continue;
+    }
+
+    std::unordered_set<const Var*> refs;
+    CallPtr call;
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(normalized_inputs[i])) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    if (call) {
+      auto CollectExprRefs = [&](const ExprPtr& expr) {
+        if (auto var_like = AsVarLike(expr)) {
+          refs.insert(var_like.get());
+          return;
+        }
+        outline_utils::VarRefCollector collector;
+        collector.VisitExpr(expr);
+        refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+      };
+      for (const auto& arg : call->args_) {
+        CollectExprRefs(arg);
+      }
+    } else {
+      refs = CollectStmtVarRefs(normalized_inputs[i]);
+    }
+    const auto sorted_refs = GetSortedVarRefs(refs);
+    for (const auto* ref : sorted_refs) {
+      const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
+      if (canonical_ref && chains.count(canonical_ref) > 0) {
+        chains.find(canonical_ref)->second.last_use_idx =
+            std::max(chains.find(canonical_ref)->second.last_use_idx, i);
+      }
+    }
+    const Var* referenced_tpop = nullptr;
+    bool has_multi_tpop_refs = false;
+    for (const auto* ref : sorted_refs) {
+      const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
+      if (canonical_ref && chains.count(canonical_ref) > 0) {
+        if (referenced_tpop && referenced_tpop != canonical_ref) {
+          has_multi_tpop_refs = true;
+          break;
+        }
+        referenced_tpop = canonical_ref;
+      }
+    }
+    bool has_unsafe_dep = false;
+    if (referenced_tpop && !has_multi_tpop_refs) {
+      size_t tpop_idx = chains.find(referenced_tpop)->second.tpop_idx;
+      for (const auto* ref : sorted_refs) {
+        const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
+        if (canonical_ref == referenced_tpop) continue;
+        auto def_it = def_indices.find(ref);
+        if (def_it != def_indices.end() && def_it->second > tpop_idx && def_it->second < i) {
+          has_unsafe_dep = true;
+          break;
+        }
+      }
+    }
+    if (referenced_tpop && !has_multi_tpop_refs && !has_unsafe_dep) {
+      chains.find(referenced_tpop)->second.user_idxs.push_back(i);
+      in_chain[i] = true;
+    }
+  }
+
+  if (tpop_order.empty()) return normalized_inputs;
+
+  size_t first_tpop = chains[tpop_order[0]].tpop_idx;
+  std::vector<StmtPtr> result;
+  result.reserve(normalized_inputs.size() + tpop_order.size());
+  std::unordered_map<size_t, std::vector<StmtPtr>> deferred_tfrees;
+  for (size_t i = 0; i < first_tpop; ++i) {
+    result.push_back(normalized_inputs[i]);
+  }
+
+  for (const auto* var : tpop_order) {
+    auto& chain = chains[var];
+    result.push_back(normalized_inputs[chain.tpop_idx]);
+    for (size_t user_idx : chain.user_idxs) {
+      result.push_back(normalized_inputs[user_idx]);
+    }
+    size_t last_grouped_idx = chain.user_idxs.empty() ? chain.tpop_idx : chain.user_idxs.back();
+    if (chain.last_use_idx <= last_grouped_idx) {
+      if (chain.tfree_idx != std::numeric_limits<size_t>::max()) {
+        result.push_back(normalized_inputs[chain.tfree_idx]);
+        in_chain[chain.tfree_idx] = true;
+      } else {
+        result.push_back(std::make_shared<EvalStmt>(
+            CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+            normalized_inputs[chain.tpop_idx]->span_));
+      }
+    } else if (chain.tfree_idx == std::numeric_limits<size_t>::max() ||
+               chain.tfree_idx < chain.last_use_idx) {
+      if (chain.tfree_idx != std::numeric_limits<size_t>::max()) {
+        in_chain[chain.tfree_idx] = true;
+      }
+      deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
+          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+          normalized_inputs[chain.tpop_idx]->span_));
+    } else if (chain.tfree_idx > chain.last_use_idx) {
+      // Keep an existing tfree in its original position when it already follows
+      // the true last use and moving it earlier would be unsafe.
+      continue;
+    } else {
+      deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
+          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+          normalized_inputs[chain.tpop_idx]->span_));
+      in_chain[chain.tfree_idx] = true;
+    }
+  }
+
+  for (size_t i = first_tpop; i < normalized_inputs.size(); ++i) {
+    if (!in_chain[i]) {
+      result.push_back(normalized_inputs[i]);
+    }
+    auto deferred_it = deferred_tfrees.find(i);
+    if (deferred_it != deferred_tfrees.end()) {
+      result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
+    }
+  }
+  return result;
+}
+
+StmtPtr NormalizeNestedTpopChains(const StmtPtr& stmt, CoreSide side,
+                                  const std::unordered_map<const Var*, VarPtr>& tpop_var_remap) {
+  if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+    auto new_body = NormalizeTpopChains(FlattenBody(for_stmt->body_), side, tpop_var_remap);
+    return RebuildForStmt(for_stmt, MakeBody(new_body, for_stmt->span_));
+  }
+  if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+    auto new_then = NormalizeTpopChains(FlattenBody(if_stmt->then_body_), side, tpop_var_remap);
+    std::optional<std::vector<StmtPtr>> new_else;
+    if (if_stmt->else_body_.has_value()) {
+      new_else = NormalizeTpopChains(FlattenBody(if_stmt->else_body_.value()), side, tpop_var_remap);
+    }
+    return RebuildIfStmt(if_stmt, new_then, new_else);
+  }
+  if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+    auto new_body = NormalizeTpopChains(FlattenBody(while_stmt->body_), side, tpop_var_remap);
+    return RebuildWhileStmt(while_stmt, MakeBody(new_body, while_stmt->span_));
+  }
+  return stmt;
+}
+
 // ============================================================================
 // Main Expansion Logic
 // ============================================================================
@@ -1221,13 +1794,22 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       aic_stmts_no_return.push_back(s);
     }
   }
-  auto aic_final = FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map);
+  auto aic_final = NormalizeTpopChains(FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map),
+                                       CoreSide::AIC, aic_tpop_remap);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts =
       BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars);
-  auto aiv_final = FinalizeSplitCoreBody(aiv_stmts, original_def_map);
+  auto aiv_final =
+      NormalizeTpopChains(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
+
+  const std::string aic_name = func->name_ + "_aic";
+  const std::string aiv_name = func->name_ + "_aiv";
+  auto automatic_pipe_setup =
+      BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, func->span_);
+  aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
+  aiv_final = PrependPipeSetup(automatic_pipe_setup.aiv_stmts, aiv_final);
 
   // Helper to create fresh params and build a DeepClone var_map
   auto make_param_map = [&]() {
@@ -1255,7 +1837,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   };
 
   // Create AIC function with deep clone (fresh Vars for all params and locals)
-  std::string aic_name = func->name_ + "_aic";
   auto [aic_params, aic_map] = make_param_map();
   seed_tpop_remap(aic_map, aic_tpop_remap);
   auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(MakeBody(aic_final, func->span_), aic_map);
@@ -1266,7 +1847,6 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
-  std::string aiv_name = func->name_ + "_aiv";
   auto [aiv_params, aiv_map] = make_param_map();
   seed_tpop_remap(aiv_map, aiv_tpop_remap);
 
@@ -1711,6 +2291,188 @@ class TpopMemoryVerifier : public IRVisitor {
   FunctionType func_type_;
 };
 
+std::string FormatObservedSlotSizes(const std::vector<int64_t>& slot_sizes) {
+  std::string result;
+  for (size_t i = 0; i < slot_sizes.size(); ++i) {
+    if (i > 0) result += ", ";
+    result += std::to_string(slot_sizes[i]);
+  }
+  return result;
+}
+
+void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
+  CrossCorePipeMetadata metadata;
+  CollectCrossCorePipeMetadata(FlattenBody(func->body_), metadata);
+  if (!metadata.HasCrossCoreOps()) return;
+
+  auto report_slot_issue = [&](const std::string& issue, const PipeDirectionMetadata& direction,
+                               const std::string& direction_name) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ + "' uses " + direction_name + " cross-core tiles " +
+                                 issue + ": " + FormatObservedSlotSizes(direction.observed_slot_sizes),
+                             func->span_);
+  };
+
+  if (metadata.c2v.has_inconsistent_slot_size) {
+    report_slot_issue("with inconsistent slot sizes", metadata.c2v, "C2V");
+  }
+  if (metadata.v2c.has_inconsistent_slot_size) {
+    report_slot_issue("with inconsistent slot sizes", metadata.v2c, "V2C");
+  }
+  if ((metadata.c2v.has_ops && !metadata.c2v.slot_size_bytes.has_value()) ||
+      (metadata.v2c.has_ops && !metadata.v2c.slot_size_bytes.has_value())) {
+    diagnostics.emplace_back(
+        DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+        "Function '" + func->name_ +
+            "' uses cross-core tile ops with non-static tile size; auto pipe setup requires "
+            "statically known tile shapes",
+        func->span_);
+  }
+  if (metadata.c2v.has_ops && metadata.v2c.has_ops && metadata.c2v.slot_size_bytes.has_value() &&
+      metadata.v2c.slot_size_bytes.has_value() &&
+      metadata.c2v.slot_size_bytes.value() != metadata.v2c.slot_size_bytes.value()) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ +
+                                 "' uses bidirectional cross-core tiles with different "
+                                 "slot sizes (C2V=" +
+                                 std::to_string(metadata.c2v.slot_size_bytes.value()) +
+                                 ", V2C=" + std::to_string(metadata.v2c.slot_size_bytes.value()) +
+                                 "); single initialize_pipe slot_size is unsupported",
+                             func->span_);
+  }
+
+  if (func->func_type_ == FunctionType::AIC) {
+    if (!metadata.has_aic_initialize_pipe) {
+      diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                               "AIC function '" + func->name_ +
+                                   "' uses cross-core tile ops but has no 'system.aic_initialize_pipe' call",
+                               func->span_);
+    }
+    if (metadata.v2c.has_ops && !metadata.has_reserve_buffer) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "AIC function '" + func->name_ + "' uses V2C cross-core ops but has no 'system.reserve_buffer'",
+          func->span_);
+    }
+    if (metadata.c2v.has_ops && !metadata.has_import_peer_buffer) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "AIC function '" + func->name_ + "' uses C2V cross-core ops but has no 'system.import_peer_buffer'",
+          func->span_);
+    }
+  } else if (func->func_type_ == FunctionType::AIV) {
+    if (!metadata.has_aiv_initialize_pipe) {
+      diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                               "AIV function '" + func->name_ +
+                                   "' uses cross-core tile ops but has no 'system.aiv_initialize_pipe' call",
+                               func->span_);
+    }
+    if (metadata.c2v.has_ops && !metadata.has_reserve_buffer) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "AIV function '" + func->name_ + "' uses C2V cross-core ops but has no 'system.reserve_buffer'",
+          func->span_);
+    }
+    if (metadata.v2c.has_ops && !metadata.has_import_peer_buffer) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "AIV function '" + func->name_ + "' uses V2C cross-core ops but has no 'system.import_peer_buffer'",
+          func->span_);
+    }
+  }
+}
+
+bool StmtReferencesVar(const StmtPtr& stmt, const Var* var) {
+  if (!stmt || !var) return false;
+  auto refs = CollectStmtVarRefs(stmt);
+  return refs.count(var) > 0;
+}
+
+void VerifyTpopTfreeOrderInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
+                                 std::vector<Diagnostic>& diagnostics);
+
+void VerifyNestedTpopTfreeOrder(const StmtPtr& stmt, const FunctionPtr& func,
+                                std::vector<Diagnostic>& diagnostics) {
+  if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+    VerifyTpopTfreeOrderInBlock(FlattenBody(for_stmt->body_), func, diagnostics);
+  } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+    VerifyTpopTfreeOrderInBlock(FlattenBody(if_stmt->then_body_), func, diagnostics);
+    if (if_stmt->else_body_.has_value()) {
+      VerifyTpopTfreeOrderInBlock(FlattenBody(if_stmt->else_body_.value()), func, diagnostics);
+    }
+  } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+    VerifyTpopTfreeOrderInBlock(FlattenBody(while_stmt->body_), func, diagnostics);
+  }
+}
+
+void VerifyTpopTfreeOrderInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
+                                 std::vector<Diagnostic>& diagnostics) {
+  const std::string expected_tfree =
+      (func->func_type_ == FunctionType::AIC) ? "system.tfree_to_aiv" : "system.tfree_to_aic";
+  VarPtr open_tpop_var;
+  std::string open_tpop_op_name;
+  const Span* open_tpop_span = &func->span_;
+
+  for (const auto& stmt : stmts) {
+    VerifyNestedTpopTfreeOrder(stmt, func, diagnostics);
+
+    VarPtr tpop_var;
+    if (IsExpectedTpopAssignStmt(stmt, func->func_type_, &tpop_var)) {
+      if (open_tpop_var) {
+        diagnostics.emplace_back(
+            DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+            "Function '" + func->name_ +
+                "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
+            stmt->span_);
+      }
+      open_tpop_var = tpop_var;
+      open_tpop_span = &stmt->span_;
+      open_tpop_op_name = GetStmtOpName(stmt);
+      continue;
+    }
+
+    VarPtr tfree_var;
+    std::string tfree_op_name;
+    if (IsTfreeStmt(stmt, &tfree_var, &tfree_op_name)) {
+      if (!open_tpop_var) {
+        continue;
+      }
+      if (tfree_op_name != expected_tfree || !tfree_var || tfree_var.get() != open_tpop_var.get()) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                                 ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
+                                     std::string(" function '") + func->name_ + "' must match " +
+                                     open_tpop_op_name + " with '" + expected_tfree +
+                                     "' on the same tile value",
+                                 stmt->span_);
+      } else {
+        open_tpop_var.reset();
+      }
+      continue;
+    }
+
+    if (open_tpop_var && !StmtReferencesVar(stmt, open_tpop_var.get())) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "Function '" + func->name_ +
+              "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
+          stmt->span_);
+      open_tpop_var.reset();
+    }
+  }
+
+  if (open_tpop_var) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
+                                 std::string(" function '") + func->name_ + "' uses " + open_tpop_op_name +
+                                 " but has no matching '" + expected_tfree + "' call",
+                             *open_tpop_span);
+  }
+}
+
+void VerifyTpopTfreeOrder(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
+  VerifyTpopTfreeOrderInBlock(FlattenBody(func->body_), func, diagnostics);
+}
+
 }  // namespace
 
 class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
@@ -1730,6 +2492,8 @@ class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
       if (func->func_type_ == FunctionType::AIC || func->func_type_ == FunctionType::AIV) {
         TpopMemoryVerifier verifier(diagnostics, func->name_, func->func_type_);
         verifier.VisitStmt(func->body_);
+        VerifyCrossCorePipeSetup(func, diagnostics);
+        VerifyTpopTfreeOrder(func, diagnostics);
       }
     }
   }

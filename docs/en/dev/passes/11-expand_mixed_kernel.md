@@ -26,6 +26,31 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 | Cube→Vector (e.g. Acc→Vec) | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
 | Vector→Cube (e.g. Vec→Mat) | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
 
+When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
+
+- `system.reserve_buffer(...)` on the consumer side
+- `system.import_peer_buffer(...)` on the producer side
+- `system.aic_initialize_pipe(...)` / `system.aiv_initialize_pipe(...)` on both sides
+
+In addition, the pass inserts `system.tfree_to_aic(...)` / `system.tfree_to_aiv(...)`
+after every consumer-side `tpop` chain.
+
+Setup is derived from the split bodies:
+
+- `dir_mask`: `C2V=1`, `V2C=2`, bidirectional=`3`
+- `slot_size`: tile byte size (`shape * dtype bits / 8`)
+- `slot_num`: `8` for unidirectional, `4` per direction for bidirectional
+- `buffer_size`: `slot_num * slot_size`
+- buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
+- reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`
+
+Current limitation: all active cross-core directions in one mixed kernel must share a single `slot_size`. If sizes differ, `MixedKernelExpanded` verification fails immediately after the pass.
+
+For consumer-side cross-core tiles, the pass also normalizes statement order to satisfy the PTO requirement
+`tpop -> direct users -> tfree -> next tpop`. When AIC must post-process a `tile.tpop_from_aiv` result with a same-side
+`tile.move` (for example Mat -> Left/Right/Bias), that move is treated as the last direct user and the auto-generated
+`system.tfree_to_aiv(...)` is emitted after it.
+
 **Requirements**:
 
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
@@ -79,8 +104,12 @@ Phase 2 — Expand each InCore function F:
      post-loop use that temporarily kept an iter_arg alive
   9. Run dead code elimination again to clean up init-value chains exposed
      by the second strip
- 10. Create AIC function (no return) and AIV function (original return)
- 11. If no existing Group caller: also create a Group function (calls AIC then AIV)
+ 10. Normalize consumer-side `tpop` chains to `tpop -> direct users -> tfree`
+     and insert missing `system.tfree_to_aic` / `system.tfree_to_aiv`
+ 11. If the split bodies use cross-core tile ops and do not already contain setup,
+      derive reserve/import/initialize_pipe prologues and prepend them
+ 12. Create AIC function (no return) and AIV function (original return)
+ 13. If no existing Group caller: also create a Group function (calls AIC then AIV)
 
 Phase 3 — Rewrite Group callers:
   For each Group function that calls a split InCore, replace the InCore call
@@ -135,7 +164,7 @@ class Before:
         return self.compute_incore_0(x, y, out_0)
 ```
 
-**After** (conceptual — actual IR includes type annotations on all variables):
+**After** (conceptual — actual IR includes type annotations on all variables; auto-generated pipe setup is omitted here for brevity):
 
 ```python
 @pl.program
@@ -147,12 +176,13 @@ class After:
         x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE: Mat→Left (same-side)
         y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE: Mat→Right (same-side)
         z_tile = pl.matmul(x_left, y_right)              # CUBE op
-        pl.tile.tpush_to_aiv(z_tile, aiv_idx=0)        # BOUNDARY: push Acc tile to AIV
+        pl.tile.tpush_to_aiv(z_tile, split=0)        # BOUNDARY: push Acc tile to AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(aiv_idx=0)  # BOUNDARY: pop from AIC
+        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(split=0)  # BOUNDARY: pop from AIC
         out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR op
+        pl.system.tfree_to_aic(z_vec)                    # release the consumed cross-core slot
         return out_0
 
     @pl.function(type=pl.FunctionType.Group)
@@ -236,7 +266,17 @@ class After:
 
 ## Property Verifier
 
-`MixedKernelExpandedPropertyVerifier` checks that no remaining `FunctionType::InCore` function contains both Cube and Vector tile ops. AIC/AIV/Group functions are not checked (they are already split by definition).
+`MixedKernelExpandedPropertyVerifier` checks:
+
+- no remaining `FunctionType::InCore` function contains both Cube and Vector tile ops
+- `tile.tpop_from_aiv` in AIC lands in `MemorySpace::Mat`
+- `tile.tpop_from_aic` in AIV lands in `MemorySpace::Vec`
+- AIC/AIV functions with cross-core `tpush`/`tpop` also contain the required pipe setup
+- every AIC/AIV `tile.tpop_*` has a matching `system.tfree_*`
+- top-level cross-core consumer chains follow `tpop -> direct users -> tfree -> next tpop`
+- all active cross-core directions in one function resolve to a single supported `slot_size`
+
+This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` / `import_peer_buffer`, missing `tfree`, inconsistent slot sizes, invalid `tpop` ordering) from PTO codegen / `ptoas` time to immediately after `ExpandMixedKernel`.
 
 ## Design Decisions
 
@@ -250,3 +290,6 @@ class After:
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
 | Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |
+| Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
+| Auto-generated tfree chains | Consumer-side split kernels release each popped slot in IR, so PTO codegen sees the required `tpop -> use -> tfree -> next tpop` order directly |
+| Single-slot-size policy | Matches the current backend assumption of one reserve/import buffer per function and a single `initialize_pipe.slot_size` |
