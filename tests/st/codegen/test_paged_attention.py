@@ -151,10 +151,12 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 sij: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[1], pl.FP32],
                 pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
             ) -> tuple[
-                pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+                pl.Tensor[[16, 128], pl.BF16],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
@@ -234,10 +236,12 @@ class SoftmaxPrepareUnalignedTestCase(PTOTestCase):
                 config: pl.Tensor[[1], pl.FP32],
                 valid_len_cfg: pl.Tensor[[1], pl.INT64],
                 pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
-                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
             ) -> tuple[
-                pl.Tensor[[16, 128], pl.BF16], pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 1], pl.FP32]
+                pl.Tensor[[16, 128], pl.BF16],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32, pl.DN],
             ]:
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
                 valid_len: pl.Scalar[pl.INT64] = pl.tensor.read(valid_len_cfg, [0])

@@ -1169,7 +1169,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     INTERNAL_CHECK(it->second.offset_tuple != nullptr)
         << "Internal error: tensor.assemble offset must be MakeTuple";
-    oss << "uint64_t " << emit_var << "_offsets[" << array_len << "] = {";
+    oss << "uint32_t " << emit_var << "_offsets[" << array_len << "] = {";
     if (ndim == 0) {
       oss << "0";
     } else {

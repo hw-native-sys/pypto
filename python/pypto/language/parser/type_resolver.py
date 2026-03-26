@@ -635,10 +635,14 @@ class TypeResolver:
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
-                name = elem.name
-                if name not in self._dyn_var_cache:
-                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-                dims.append(self._dyn_var_cache[name])
+                if elem._ir_var is None:
+                    name = elem.name
+                    if name not in self._dyn_var_cache:
+                        self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+                    elem._ir_var = self._dyn_var_cache[name]
+                elif elem.name not in self._dyn_var_cache:
+                    self._dyn_var_cache[elem.name] = elem._ir_var
+                dims.append(elem._ir_var)
             else:
                 raise ParserTypeError(
                     f"Shape '{source_name}' element {i} must be int or pl.dynamic(), "
@@ -661,10 +665,14 @@ class TypeResolver:
         if isinstance(value, int):
             return value
         if isinstance(value, DynVar):
-            name = value.name
-            if name not in self._dyn_var_cache:
-                self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
-            return self._dyn_var_cache[name]
+            if value._ir_var is None:
+                name = value.name
+                if name not in self._dyn_var_cache:
+                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+                value._ir_var = self._dyn_var_cache[name]
+            elif value.name not in self._dyn_var_cache:
+                self._dyn_var_cache[value.name] = value._ir_var
+            return value._ir_var
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
@@ -1121,11 +1129,15 @@ class TypeResolver:
             if name in self.expr_evaluator.closure_vars:
                 value = self.expr_evaluator.closure_vars[name]
                 if isinstance(value, DynVar):
-                    if value.name not in self._dyn_var_cache:
-                        self._dyn_var_cache[value.name] = ir.Var(
-                            value.name, ir.ScalarType(DataType.INDEX), self._get_span(node)
-                        )
-                    return self._dyn_var_cache[value.name]
+                    if value._ir_var is None:
+                        if value.name not in self._dyn_var_cache:
+                            self._dyn_var_cache[value.name] = ir.Var(
+                                value.name, ir.ScalarType(DataType.INDEX), self._get_span(node)
+                            )
+                        value._ir_var = self._dyn_var_cache[value.name]
+                    elif value.name not in self._dyn_var_cache:
+                        self._dyn_var_cache[value.name] = value._ir_var
+                    return value._ir_var
                 if isinstance(value, int):
                     return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
                 raise ParserTypeError(

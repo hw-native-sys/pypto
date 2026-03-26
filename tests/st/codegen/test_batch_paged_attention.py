@@ -123,7 +123,7 @@ class BatchQKMatmulTestCase(PTOTestCase):
             def KernelQkMatmul(
                 self,
                 query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-                key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
+                key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
                 sij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.FP32]],
                 block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
                 batch_count: pl.Scalar[pl.INDEX],
@@ -160,7 +160,7 @@ class BatchQKMatmulTestCase(PTOTestCase):
             def Orchestrator(
                 self,
                 query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-                key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
+                key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
                 block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
                 config: pl.Tensor[[5], pl.INT64],
                 sij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.FP32]],
@@ -282,14 +282,14 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 self,
                 sij_batch: pl.Tensor[[batch_q_tile, block_size], pl.FP32],
                 pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
-                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
-                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
+                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
                 scale_value: pl.Scalar[pl.FP32],
                 context_lens: pl.Tensor[[batch], pl.INT32],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, block_size], pl.BF16],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
             ]:
                 for b in pl.range(batch):
                     cur_seq = pl.tensor.read(context_lens, [b])
@@ -332,12 +332,12 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 scale_config: pl.Tensor[[1], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
                 pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
-                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
-                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
+                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, block_size], pl.BF16],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
             ]:
                 scale_value: pl.Scalar[pl.FP32] = pl.tensor.read(scale_config, [0])
 
