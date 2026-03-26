@@ -1708,7 +1708,8 @@ std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
 
 std::string PTOCodegen::GetCurrentResultTileBufTypeStringFromTileType() const {
   if (current_result_tile_type_ && current_result_tile_type_->memref_.has_value()) {
-    return GetTileBufTypeStringFromTileType(current_result_tile_type_);
+    bool fillpad_force = current_result_var_ ? HasFillpadConsumer(current_result_var_.get()) : false;
+    return GetTileBufTypeStringFromTileType(current_result_tile_type_, fillpad_force);
   }
   return "";
 }
