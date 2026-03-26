@@ -1266,95 +1266,6 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
     assert "index" in yield_line, f"Expected index type in scf.yield: {yield_line}"
 
 
-def test_pto_codegen_shared_memref_dedup_respects_if_else_scope():
-    """Variables sharing the same MemRef+type in sibling if-else branches must each
-    get their own alloc_tile; variables in parent-child scopes may be deduplicated."""
-    span = ir.Span.unknown()
-    zero = ir.ConstInt(0, DataType.INDEX, span)
-    size16 = ir.ConstInt(16, DataType.INDEX, span)
-    size128 = ir.ConstInt(128, DataType.INDEX, span)
-
-    flag = ir.Var("flag", ir.ScalarType(DataType.BOOL), span)
-    input_tensor = ir.Var("inp", ir.TensorType([16, 128], DataType.FP32), span)
-    out_tensor = ir.Var("out", ir.TensorType([16, 128], DataType.FP32), span)
-
-    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 16 * 128 * 4, 0)
-    tile_view = ir.TileView()
-    tile_view.valid_shape = [size16, size128]
-    tile_type = ir.TileType([16, 128], DataType.FP32, shared_memref, tile_view, ir.MemorySpace.Vec)
-
-    # Both if and else branches load into a tile sharing the same MemRef+type
-    then_tile = ir.Var("tile_then", tile_type, span)
-    else_tile = ir.Var("tile_else", tile_type, span)
-
-    offsets = ir.MakeTuple([zero, zero], span)
-    shapes = ir.MakeTuple([size16, size128], span)
-    then_load = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, tile_type, span)
-    else_load = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, tile_type, span)
-
-    result_type = ir.TensorType([16, 128], DataType.FP32)
-
-    then_store_var = ir.Var("then_out", result_type, span)
-    then_store = ir.Call(ir.Op("tile.store"), [then_tile, offsets, out_tensor], result_type, span)
-    else_store_var = ir.Var("else_out", result_type, span)
-    else_store = ir.Call(ir.Op("tile.store"), [else_tile, offsets, out_tensor], result_type, span)
-
-    result_var = ir.Var("result", result_type, span)
-
-    then_body = ir.SeqStmts(
-        [
-            ir.AssignStmt(then_tile, then_load, span),
-            ir.AssignStmt(then_store_var, then_store, span),
-            ir.YieldStmt([then_store_var], span),
-        ],
-        span,
-    )
-    else_body = ir.SeqStmts(
-        [
-            ir.AssignStmt(else_tile, else_load, span),
-            ir.AssignStmt(else_store_var, else_store, span),
-            ir.YieldStmt([else_store_var], span),
-        ],
-        span,
-    )
-    if_stmt = ir.IfStmt(flag, then_body, else_body, [result_var], span)
-
-    body = ir.SeqStmts(
-        [if_stmt, ir.ReturnStmt([result_var], span)],
-        span,
-    )
-    func = ir.Function(
-        "shared_memref_if_else",
-        [
-            (flag, ir.ParamDirection.In),
-            (input_tensor, ir.ParamDirection.In),
-            (out_tensor, ir.ParamDirection.Out),
-        ],
-        [result_type],
-        body,
-        span,
-        ir.FunctionType.InCore,
-    )
-    program = ir.Program([func], "test_program", span)
-    mlir_code = _generate_mlir(program)
-
-    # Both branches must have their own alloc_tile (sibling scopes, no dominance)
-    alloc_lines = _get_alloc_tile_lines(mlir_code)
-    vec_allocs = [line for line in alloc_lines if "loc=vec" in line and "rows=16, cols=128" in line]
-    assert len(vec_allocs) >= 2, (
-        f"Expected at least 2 alloc_tiles for if-else sibling branches "
-        f"sharing the same MemRef+type, got {len(vec_allocs)}: {vec_allocs}"
-    )
-
-    # Each branch's alloc_tile should use a distinct SSA name
-    ssa_names = set()
-    for line in vec_allocs:
-        match = re.match(r"(%[\w\d_]+)\s*=\s*pto\.alloc_tile", line)
-        if match:
-            ssa_names.add(match.group(1))
-    assert len(ssa_names) >= 2, f"Expected distinct SSA names in sibling if-else branches, got: {ssa_names}"
-
-
 def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     """Slice with partially dynamic valid_shape followed by fillpad must not create spurious slice_buf."""
 
@@ -1393,6 +1304,7 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     assert len(fillpad_lines) == 1, f"Expected one tfillpad, got: {fillpad_lines}"
     assert "v_row=?" in fillpad_lines[0], f"fillpad input should have v_row=?: {fillpad_lines[0]}"
     assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
+
 
 
 if __name__ == "__main__":

@@ -310,7 +310,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   extra_alloc_tiles_.clear();
   ssa_to_tile_buf_type_.clear();
   tile_var_allocs_.clear();
-  tile_var_scope_paths_.clear();
   emitted_tile_alloc_vars_.clear();
   tpop_result_vars_.clear();
   reserve_buf_ssa_.clear();
@@ -354,58 +353,21 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Still collect memref_to_tile_type_ for GetTileBufTypeString fallback paths
   memref_to_tile_type_ = collector.GetMemRefTileTypes();
 
-  // Per-var SSA binding: reuse existing SSA name when a variable shares the
-  // same MemRef with an identical tile_buf type AND the existing definition
-  // dominates the new variable (i.e., the existing scope path is a prefix of
-  // the new one).  Variables in sibling if-else branches or separate loop bodies
-  // cannot share SSA names because alloc_tile is only visible within its
-  // enclosing region.
-  //
-  // Track scope path per MemRef for the first (canonical) variable.
-  std::map<const ir::MemRef*, std::vector<int>> memref_scope_paths;
-
+  // Per-var SSA binding: each tile variable gets its own SSA name
   for (const auto& [tile_var, tile_type] : tile_var_allocs_) {
-    const bool force_all_dynamic = HasFillpadConsumer(tile_var.get());
-    std::string type_str = GetTileBufTypeStringFromTileType(tile_type, force_all_dynamic);
-    auto memref = ir::GetDefinedMemRef(tile_type);
-
-    auto memref_it = memref_to_mlir_.find(memref.get());
-    if (memref_it != memref_to_mlir_.end()) {
-      // MemRef already has an SSA binding — check types and dominance.
-      const std::string& existing_ssa = memref_it->second;
-      auto type_it = ssa_to_tile_buf_type_.find(existing_ssa);
-      if (type_it != ssa_to_tile_buf_type_.end() && type_it->second == type_str) {
-        // Types match. Now check scope dominance: the existing variable's scope
-        // path must be a prefix of the new variable's scope path.
-        const auto& existing_scope = memref_scope_paths[memref.get()];
-        auto new_scope_it = tile_var_scope_paths_.find(tile_var.get());
-        static const std::vector<int> kFunctionScope;
-        const auto& new_scope =
-            (new_scope_it != tile_var_scope_paths_.end()) ? new_scope_it->second : kFunctionScope;
-        bool dominates = existing_scope.size() <= new_scope.size() &&
-                         std::equal(existing_scope.begin(), existing_scope.end(), new_scope.begin());
-        if (dominates) {
-          BindVarToMlir(tile_var, existing_ssa);
-          emitted_tile_alloc_vars_.insert(tile_var.get());
-          continue;
-        }
-      }
-    }
-
     std::string ssa_name = NewNamedTemp(tile_var->name_hint_);
     BindVarToMlir(tile_var, ssa_name);
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
     ssa_to_tile_buf_type_[ssa_name] = type_str;
 
-    // Maintain memref_to_mlir_ for compatibility (first var per MemRef)
+    auto memref = ir::GetDefinedMemRef(tile_type);
+
+    // Also maintain memref_to_mlir_ for compatibility (first var per MemRef)
     if (memref_to_mlir_.find(memref.get()) == memref_to_mlir_.end()) {
       memref_to_mlir_[memref.get()] = ssa_name;
-      auto scope_it = tile_var_scope_paths_.find(tile_var.get());
-      if (scope_it != tile_var_scope_paths_.end()) {
-        memref_scope_paths[memref.get()] = scope_it->second;
-      }
     }
   }
 
@@ -810,26 +772,17 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
     std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars;
     std::set<const ir::Var*>& fillpad_input_vars;
-    std::map<const ir::Var*, std::vector<int>>& tile_var_scope_paths;
-
-    // Scope tracking: each region-creating construct (if-else branch, loop body)
-    // gets a unique ID. A variable's scope_path is the sequence of region IDs
-    // from root to its location.
-    std::vector<int> current_scope_path_;
-    int next_branch_id_ = 0;
 
     VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
                     std::map<const ir::MemRef*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
                     std::map<const ir::Var*, TpopResultInfo>& tpop_vars,
-                    std::set<const ir::Var*>& fillpad_vars,
-                    std::map<const ir::Var*, std::vector<int>>& scope_paths)
+                    std::set<const ir::Var*>& fillpad_vars)
         : var_to_memref(mapping),
           memref_to_var_name(reverse_mapping),
           tile_var_allocs(allocs),
           tpop_result_vars(tpop_vars),
-          fillpad_input_vars(fillpad_vars),
-          tile_var_scope_paths(scope_paths) {}
+          fillpad_input_vars(fillpad_vars) {}
 
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -840,7 +793,6 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
           memref_to_var_name[ptr] = op->var_->name_hint_;
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
-        tile_var_scope_paths[op->var_.get()] = current_scope_path_;
 
         if (auto call = As<ir::Call>(op->value_)) {
           // Track tpop result vars with their split value so codegen can:
@@ -861,58 +813,10 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
       }
       ir::IRVisitor::VisitStmt_(op);
     }
-
-    void VisitStmt_(const ir::IfStmtPtr& op) override {
-      VisitExpr(op->condition_);
-      int then_id = next_branch_id_++;
-      current_scope_path_.push_back(then_id);
-      VisitStmt(op->then_body_);
-      current_scope_path_.pop_back();
-      if (op->else_body_.has_value()) {
-        int else_id = next_branch_id_++;
-        current_scope_path_.push_back(else_id);
-        VisitStmt(op->else_body_.value());
-        current_scope_path_.pop_back();
-      }
-      for (const auto& rv : op->return_vars_) {
-        VisitExpr(rv);
-      }
-    }
-
-    void VisitStmt_(const ir::ForStmtPtr& op) override {
-      VisitExpr(op->loop_var_);
-      VisitExpr(op->start_);
-      VisitExpr(op->stop_);
-      VisitExpr(op->step_);
-      for (const auto& iter_arg : op->iter_args_) {
-        VisitExpr(iter_arg);
-      }
-      int loop_id = next_branch_id_++;
-      current_scope_path_.push_back(loop_id);
-      VisitStmt(op->body_);
-      current_scope_path_.pop_back();
-      for (const auto& rv : op->return_vars_) {
-        VisitExpr(rv);
-      }
-    }
-
-    void VisitStmt_(const ir::WhileStmtPtr& op) override {
-      VisitExpr(op->condition_);
-      for (const auto& iter_arg : op->iter_args_) {
-        VisitExpr(iter_arg);
-      }
-      int loop_id = next_branch_id_++;
-      current_scope_path_.push_back(loop_id);
-      VisitStmt(op->body_);
-      current_scope_path_.pop_back();
-      for (const auto& rv : op->return_vars_) {
-        VisitExpr(rv);
-      }
-    }
   };
 
   VarMemRefMapper mapper(var_to_memref_, memref_to_var_name_, tile_var_allocs_, tpop_result_vars_,
-                         fillpad_input_vars_, tile_var_scope_paths_);
+                         fillpad_input_vars_);
   if (func->body_) {
     mapper.VisitStmt(func->body_);
   }

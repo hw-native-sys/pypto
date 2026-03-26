@@ -428,12 +428,6 @@ class PTOCodegen : public CodegenBase {
   /// This is the single source of truth for per-variable alloc_tile emission.
   std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs_;
   std::set<const ir::Var*> emitted_tile_alloc_vars_;
-
-  /// Scope path for each tile variable, tracking the path through region-creating
-  /// constructs (if-else branches, for-loops, while-loops). Two variables may share
-  /// an SSA name only when the existing variable's scope path is a prefix of the new
-  /// variable's scope path (i.e., the existing def dominates).
-  std::map<const ir::Var*, std::vector<int>> tile_var_scope_paths_;
   struct TpopResultInfo {
     int split = 0;
     std::string op_name;
