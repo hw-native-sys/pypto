@@ -15,7 +15,9 @@
 #include <unordered_map>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
@@ -33,6 +35,10 @@ namespace ir {
 class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
  public:
   ~IRMutator() override = default;
+
+  /// Top-level entry points for mutating a full program or function.
+  virtual ProgramPtr VisitProgram(const ProgramPtr& program);
+  virtual FunctionPtr VisitFunction(const FunctionPtr& func);
 
   // Override base class methods
   ExprPtr VisitExpr(const ExprPtr& expr) override;
@@ -95,6 +101,14 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const BreakStmtPtr& op) override;
   StmtPtr VisitStmt_(const ContinueStmtPtr& op) override;
   StmtPtr VisitStmt_(const StmtPtr& op) override;
+
+  /// Override to handle ALL binary expressions (Add, Sub, Mul, ...) in one method.
+  /// Default: visits children, reconstructs if changed (copy-on-write).
+  virtual ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op);
+
+  /// Override to handle ALL unary expressions (Abs, Neg, Not, ...) in one method.
+  /// Default: visits operand, reconstructs if changed (copy-on-write).
+  virtual ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op);
 
   /// Pointer remapping for variables whose definitions changed during mutation.
   /// Used to keep body references consistent with new definition pointers

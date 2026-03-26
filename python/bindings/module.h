@@ -124,6 +124,16 @@ void BindBackend(nanobind::module_& m);
  */
 void BindArith(nanobind::module_& m);
 
+/**
+ * @brief Register IR functors (IRVisitor and IRMutator) for Python subclassing
+ *
+ * Registers trampoline-enabled IRVisitor and IRMutator classes that allow
+ * Python subclasses to override visit methods while inheriting C++ defaults.
+ *
+ * @param m The nanobind module object
+ */
+void BindFunctor(nanobind::module_& m);
+
 }  // namespace python
 }  // namespace pypto
 

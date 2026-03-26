@@ -22,6 +22,7 @@ set(PYPTO_BINDING_SOURCES
     modules/codegen.cpp
     modules/backend.cpp
     modules/arith.cpp
+    modules/functor.cpp
 )
 
 # Make paths absolute

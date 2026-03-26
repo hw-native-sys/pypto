@@ -231,8 +231,8 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const StmtPtr& op) override;
 
   // Function and program visitors
-  void VisitFunction(const FunctionPtr& func);
-  void VisitProgram(const ProgramPtr& program);
+  void VisitFunction(const FunctionPtr& func) override;
+  void VisitProgram(const ProgramPtr& program) override;
 
  private:
   std::ostringstream stream_;

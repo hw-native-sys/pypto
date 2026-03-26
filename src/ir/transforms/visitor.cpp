@@ -15,7 +15,9 @@
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
@@ -24,13 +26,25 @@
 namespace pypto {
 namespace ir {
 
+// Top-level entry points
+void IRVisitor::VisitProgram(const ProgramPtr& program) {
+  for (auto& [gv, func] : program->functions_) {
+    VisitFunction(func);
+  }
+}
+
+void IRVisitor::VisitFunction(const FunctionPtr& func) {
+  for (auto& param : func->params_) {
+    VisitExpr(param);
+  }
+  VisitStmt(func->body_);
+}
+
 void IRVisitor::VisitExpr(const ExprPtr& expr) { ExprFunctor<void>::VisitExpr(expr); }
 
 void IRVisitor::VisitStmt(const StmtPtr& stmt) { StmtFunctor<void>::VisitStmt(stmt); }
 
-// Shared Var/IterArg logic — override VisitVarLike_ to handle both in one method
 void IRVisitor::VisitVarLike_(const VarPtr& op) {
-  // Visit type if it's a TensorType (to visit shape expressions)
   if (auto tensor_type = As<TensorType>(op->GetType())) {
     for (const auto& dim : tensor_type->shape_) {
       VisitExpr(dim);
@@ -42,30 +56,19 @@ void IRVisitor::VisitExpr_(const VarPtr& op) { VisitVarLike_(op); }
 
 void IRVisitor::VisitExpr_(const IterArgPtr& op) {
   VisitVarLike_(op);
-  // Visit initValue as Expr (IterArg-specific)
   INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
   VisitExpr(op->initValue_);
 }
 
-void IRVisitor::VisitExpr_(const MemRefPtr& op) {
-  // MemRef is a Var with MemRefType, no additional children to visit
-  // The type is MemRefType which has no sub-expressions
-}
+void IRVisitor::VisitExpr_(const MemRefPtr& op) {}
 
-void IRVisitor::VisitExpr_(const ConstIntPtr& op) {
-  // Leaf node, no children to visit
-}
+void IRVisitor::VisitExpr_(const ConstIntPtr& op) {}
 
-void IRVisitor::VisitExpr_(const ConstFloatPtr& op) {
-  // Leaf node, no children to visit
-}
+void IRVisitor::VisitExpr_(const ConstFloatPtr& op) {}
 
-void IRVisitor::VisitExpr_(const ConstBoolPtr& op) {
-  // Leaf node, no children to visit
-}
+void IRVisitor::VisitExpr_(const ConstBoolPtr& op) {}
 
 void IRVisitor::VisitExpr_(const CallPtr& op) {
-  // Visit all arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
     VisitExpr(op->args_[i]);
@@ -73,7 +76,6 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
 }
 
 void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
-  // Visit all element expressions
   for (size_t i = 0; i < op->elements_.size(); ++i) {
     INTERNAL_CHECK(op->elements_[i]) << "MakeTuple has null element at index " << i;
     VisitExpr(op->elements_[i]);
@@ -81,21 +83,25 @@ void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
 }
 
 void IRVisitor::VisitExpr_(const TupleGetItemExprPtr& op) {
-  // Visit the tuple expression
   INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";
   VisitExpr(op->tuple_);
 }
 
-// Macro to generate binary visitor with null checks
-#define DEFINE_BINARY_VISITOR(OpType)                                \
-  void IRVisitor::VisitExpr_(const OpType##Ptr& op) {                \
-    INTERNAL_CHECK(op->left_) << #OpType " has null left operand";   \
-    INTERNAL_CHECK(op->right_) << #OpType " has null right operand"; \
-    VisitExpr(op->left_);                                            \
-    VisitExpr(op->right_);                                           \
-  }
+void IRVisitor::VisitBinaryExpr_(const BinaryExprPtr& op) {
+  INTERNAL_CHECK(op->left_) << "BinaryExpr has null left operand";
+  INTERNAL_CHECK(op->right_) << "BinaryExpr has null right operand";
+  VisitExpr(op->left_);
+  VisitExpr(op->right_);
+}
 
-// Binary operations
+void IRVisitor::VisitUnaryExpr_(const UnaryExprPtr& op) {
+  INTERNAL_CHECK(op->operand_) << "UnaryExpr has null operand";
+  VisitExpr(op->operand_);
+}
+
+#define DEFINE_BINARY_VISITOR(OpType) \
+  void IRVisitor::VisitExpr_(const OpType##Ptr& op) { VisitBinaryExpr_(op); }
+
 DEFINE_BINARY_VISITOR(Add)
 DEFINE_BINARY_VISITOR(Sub)
 DEFINE_BINARY_VISITOR(Mul)
@@ -122,14 +128,9 @@ DEFINE_BINARY_VISITOR(BitShiftRight)
 
 #undef DEFINE_BINARY_VISITOR
 
-// Macro to generate unary visitor with null checks
-#define DEFINE_UNARY_VISITOR(OpType)                             \
-  void IRVisitor::VisitExpr_(const OpType##Ptr& op) {            \
-    INTERNAL_CHECK(op->operand_) << #OpType " has null operand"; \
-    VisitExpr(op->operand_);                                     \
-  }
+#define DEFINE_UNARY_VISITOR(OpType) \
+  void IRVisitor::VisitExpr_(const OpType##Ptr& op) { VisitUnaryExpr_(op); }
 
-// Unary operations
 DEFINE_UNARY_VISITOR(Abs)
 DEFINE_UNARY_VISITOR(Neg)
 DEFINE_UNARY_VISITOR(Not)
@@ -138,7 +139,6 @@ DEFINE_UNARY_VISITOR(Cast)
 
 #undef DEFINE_UNARY_VISITOR
 
-// Statement types
 void IRVisitor::VisitStmt_(const AssignStmtPtr& op) {
   INTERNAL_CHECK(op->var_) << "AssignStmt has null var";
   INTERNAL_CHECK(op->value_) << "AssignStmt has null value";
@@ -228,17 +228,11 @@ void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
   VisitExpr(op->expr_);
 }
 
-void IRVisitor::VisitStmt_(const BreakStmtPtr& op) {
-  // Leaf node, no children to visit
-}
+void IRVisitor::VisitStmt_(const BreakStmtPtr& op) {}
 
-void IRVisitor::VisitStmt_(const ContinueStmtPtr& op) {
-  // Leaf node, no children to visit
-}
+void IRVisitor::VisitStmt_(const ContinueStmtPtr& op) {}
 
-void IRVisitor::VisitStmt_(const StmtPtr& op) {
-  // Base Stmt has no children to visit
-}
+void IRVisitor::VisitStmt_(const StmtPtr& op) {}
 
 }  // namespace ir
 }  // namespace pypto

@@ -66,6 +66,9 @@ NB_MODULE(pypto_core, m) {
   // Register arithmetic simplification utilities
   pypto::python::BindArith(m);
 
+  // Register IR functors (IRVisitor/IRMutator) for Python subclassing
+  pypto::python::BindFunctor(m);
+
   // Validate that all tile.* ops have memory specs — fails at import time if any are missing
   pypto::ir::OpRegistry::GetInstance().ValidateTileOps();
 }

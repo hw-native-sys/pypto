@@ -320,6 +320,27 @@ void BindPass(nb::module_& m) {
       },
       nb::arg("properties").none() = nb::none(),
       "Create a verifier pass. Defaults to get_default_verify_properties() if None.");
+
+  // PassProperties struct for Python-defined passes
+  nb::class_<PassProperties>(passes, "PassProperties", "Property declarations for a pass")
+      .def(nb::init<>(), "Create empty pass properties")
+      .def(nb::init<IRPropertySet, IRPropertySet, IRPropertySet>(), nb::arg("required"), nb::arg("produced"),
+           nb::arg("invalidated"), "Create pass properties with required/produced/invalidated sets")
+      .def_rw("required", &PassProperties::required, "Required properties")
+      .def_rw("produced", &PassProperties::produced, "Produced properties")
+      .def_rw("invalidated", &PassProperties::invalidated, "Invalidated properties");
+
+  // Pass factory functions for Python-defined transforms
+  passes.def("create_function_pass", &pass::CreateFunctionPass, nb::arg("transform"), nb::arg("name") = "",
+             nb::arg("properties") = PassProperties{},
+             "Create a pass from a Python function-level transform.\n\n"
+             "The transform receives a Function and returns a (possibly new) Function.\n"
+             "The pass applies this transform to each function in the program.");
+
+  passes.def("create_program_pass", &pass::CreateProgramPass, nb::arg("transform"), nb::arg("name") = "",
+             nb::arg("properties") = PassProperties{},
+             "Create a pass from a Python program-level transform.\n\n"
+             "The transform receives a Program and returns a (possibly new) Program.");
 }
 
 }  // namespace python

@@ -13,7 +13,9 @@
 #define PYPTO_IR_TRANSFORMS_BASE_VISITOR_H_
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
@@ -31,6 +33,10 @@ namespace ir {
 class IRVisitor : public IRFunctor<void> {
  public:
   ~IRVisitor() override = default;
+
+  /// Top-level entry points for visiting a full program or function.
+  virtual void VisitProgram(const ProgramPtr& program);
+  virtual void VisitFunction(const FunctionPtr& func);
 
   void VisitExpr(const ExprPtr& expr) override;
   void VisitStmt(const StmtPtr& stmt) override;
@@ -99,16 +105,13 @@ class IRVisitor : public IRFunctor<void> {
   void VisitStmt_(const ContinueStmtPtr& op) override;
   void VisitStmt_(const StmtPtr& op) override;
 
- private:
-  /**
-   * @brief Helper to visit both children of a binary expression
-   */
-  void VisitBinaryOp_(const BinaryExprPtr& op);
+  /// Override to handle ALL binary expressions (Add, Sub, Mul, ...) in one method.
+  /// Default: visits left and right children.
+  virtual void VisitBinaryExpr_(const BinaryExprPtr& op);
 
-  /**
-   * @brief Helper to visit the operand of a unary expression
-   */
-  void VisitUnaryOp_(const UnaryExprPtr& op);
+  /// Override to handle ALL unary expressions (Abs, Neg, Not, ...) in one method.
+  /// Default: visits operand.
+  virtual void VisitUnaryExpr_(const UnaryExprPtr& op);
 };
 
 }  // namespace ir

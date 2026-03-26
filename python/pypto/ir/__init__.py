@@ -21,6 +21,7 @@ This module provides:
 # Re-export all core IR types and functions from native module
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
+from pypto.pypto_core.ir import IRMutator, IRVisitor
 from pypto.pypto_core.passes import PassContext, VerificationLevel, VerificationMode
 
 # Import operation modules
@@ -71,6 +72,8 @@ INDEX = DataType.INDEX
 __all__ = [
     "op",
     "IRBuilder",
+    "IRMutator",
+    "IRVisitor",
     "TensorType",
     "TileType",
     "python_print",

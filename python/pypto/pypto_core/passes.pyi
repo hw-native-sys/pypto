@@ -11,8 +11,9 @@
 from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
+from typing import overload
 
-from pypto.pypto_core.ir import Program, Span
+from pypto.pypto_core.ir import Function, Program, Span
 
 class IRProperty(Enum):
     """Verifiable IR properties."""
@@ -382,4 +383,47 @@ __all__ = [
     "Diagnostic",
     "PropertyVerifierRegistry",
     "run_verifier",
+    "PassProperties",
+    "create_function_pass",
+    "create_program_pass",
 ]
+
+class PassProperties:
+    """Property declarations for a pass."""
+
+    required: IRPropertySet
+    produced: IRPropertySet
+    invalidated: IRPropertySet
+
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        required: IRPropertySet,
+        produced: IRPropertySet,
+        invalidated: IRPropertySet,
+    ) -> None: ...
+    def __init__(self, *args, **kwargs) -> None:
+        """Create pass properties, optionally with required/produced/invalidated sets."""
+
+def create_function_pass(
+    transform: Callable[[Function], Function],
+    name: str = "",
+    properties: PassProperties = ...,
+) -> Pass:
+    """Create a pass from a Python function-level transform.
+
+    The transform receives a Function and returns a (possibly new) Function.
+    The pass applies this transform to each function in the program.
+    """
+
+def create_program_pass(
+    transform: Callable[[Program], Program],
+    name: str = "",
+    properties: PassProperties = ...,
+) -> Pass:
+    """Create a pass from a Python program-level transform.
+
+    The transform receives a Program and returns a (possibly new) Program.
+    """
