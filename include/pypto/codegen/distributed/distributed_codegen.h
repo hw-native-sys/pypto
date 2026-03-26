@@ -97,7 +97,7 @@ class DistributedCodegen : public CodegenBase {
   // Helpers
   [[nodiscard]] std::string RuntimeVarForLevel(ir::Level level) const;
   [[nodiscard]] std::string CppTypeForIRType(const ir::TypePtr& type) const;
-  [[nodiscard]] std::vector<ir::FunctionPtr> TopoSortFunctions() const;
+  [[nodiscard]] std::vector<ir::FunctionPtr> SortFunctionsByRoleAndLevel() const;
   void ClassifyFunctions();
   void CollectNeededRuntimes(const ir::FunctionPtr& func, std::set<int>& needed) const;
   [[nodiscard]] std::string SanitizeName(const std::string& name) const;

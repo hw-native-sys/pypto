@@ -23,6 +23,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/pto/tpop_chain_reorder.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -384,77 +385,104 @@ class PTOCodegen : public CodegenBase {
    */
   std::string GetTileBufForMemRef(const ir::MemRefPtr& memref) const;
 
-  // Output streams
+  /// Per-function mutable state that is reset at the start of each GenerateFunction call.
+  struct FunctionState {
+    std::ostringstream constants_section;
+    std::ostringstream body_section;
+
+    std::map<const ir::Var*, std::string> var_to_mlir;
+    std::map<const ir::Var*, std::string> tensor_to_view;
+    std::map<const ir::MemRef*, std::string> memref_to_mlir;
+    std::map<const ir::Var*, const ir::MemRef*> var_to_memref;
+    std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type;
+
+    std::map<int64_t, std::string> emitted_constants;
+    std::map<int64_t, std::string> emitted_i64_constants;
+    std::map<int32_t, std::string> emitted_i32_constants;
+    std::set<double> emitted_float_constants;
+    std::map<double, std::string> float_const_names;
+
+    struct ExtraAllocTile {
+      std::string name;
+      std::string type_string;
+      std::string addr_ssa;
+      std::string valid_row_ssa;
+      std::string valid_col_ssa;
+    };
+    std::vector<ExtraAllocTile> extra_alloc_tiles;
+    std::map<std::string, std::string> ssa_to_tile_buf_type;
+
+    int temp_counter = 0;
+    std::set<std::string> used_ssa_names;
+
+    std::map<const ir::MemRef*, std::string> memref_to_var_name;
+    std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
+    std::set<const ir::Var*> emitted_tile_alloc_vars;
+    std::map<const ir::Var*, TpopResultInfo> tpop_result_vars;
+    std::set<const ir::Var*> fillpad_input_vars;
+
+    ir::FunctionPtr current_function;
+    ir::VarPtr current_result_var;
+    std::string current_result_buf;
+    std::shared_ptr<const ir::TileType> current_result_tile_type;
+
+    std::string reserve_buf_ssa;
+    std::string import_buf_ssa;
+
+    std::string current_expr_value;
+    std::vector<std::string> yield_buffer;
+
+    void Reset() {
+      constants_section.str("");
+      constants_section.clear();
+      body_section.str("");
+      body_section.clear();
+
+      var_to_mlir.clear();
+      tensor_to_view.clear();
+      memref_to_mlir.clear();
+      var_to_memref.clear();
+      memref_to_tile_type.clear();
+
+      emitted_constants.clear();
+      emitted_i64_constants.clear();
+      emitted_i32_constants.clear();
+      emitted_float_constants.clear();
+      float_const_names.clear();
+
+      extra_alloc_tiles.clear();
+      ssa_to_tile_buf_type.clear();
+
+      temp_counter = 0;
+      used_ssa_names.clear();
+
+      memref_to_var_name.clear();
+      tile_var_allocs.clear();
+      emitted_tile_alloc_vars.clear();
+      tpop_result_vars.clear();
+      fillpad_input_vars.clear();
+
+      current_function.reset();
+      current_result_var.reset();
+      current_result_buf.clear();
+      current_result_tile_type = nullptr;
+
+      reserve_buf_ssa.clear();
+      import_buf_ssa.clear();
+
+      current_expr_value.clear();
+      yield_buffer.clear();
+    }
+  };
+
+  /// Function-level mutable state, reset per GenerateFunction call.
+  FunctionState fs_;
+
+  // Module-level output stream (persists across functions)
   std::ostringstream stream_;
-  std::ostringstream constants_section_;
-  std::ostringstream body_section_;
   int indent_level_ = 0;
 
-  // Variable mappings keyed by Var identity in the final IR snapshot.
-  std::map<const ir::Var*, std::string> var_to_mlir_;
-  std::map<const ir::Var*, std::string> tensor_to_view_;
-  std::map<const ir::MemRef*, std::string> memref_to_mlir_;
-  std::map<const ir::Var*, const ir::MemRef*> var_to_memref_;
-  /// Root alloc TileType per MemRef (first writer's type, used for pto.alloc_tile)
-  std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
-  std::map<int64_t, std::string> emitted_constants_;
-  std::map<int64_t, std::string> emitted_i64_constants_;
-  std::map<int32_t, std::string> emitted_i32_constants_;
-  std::set<double> emitted_float_constants_;
-  std::map<double, std::string> float_const_names_;
-
-  struct ExtraAllocTile {
-    std::string name;
-    std::string type_string;
-    std::string addr_ssa;
-    std::string valid_row_ssa;
-    std::string valid_col_ssa;
-  };
-
-  /// Dynamically allocated tile buffers emitted at function scope
-  std::vector<ExtraAllocTile> extra_alloc_tiles_;
-  /// Unified SSA → tile_buf type mapping.  Every typed tile SSA value
-  /// (root alloc, reshape result, fillpad result, etc.) has an entry here.
-  /// GetExprTypeAnnotation uses this as the primary lookup.
-  std::map<std::string, std::string> ssa_to_tile_buf_type_;
-
-  int temp_counter_ = 0;
-  std::set<std::string> used_ssa_names_;
-
-  /// Maps each unique MemRef to the first IR variable name assigned to it (program order)
-  std::map<const ir::MemRef*, std::string> memref_to_var_name_;
-
-  /// Ordered tile variable allocations: (VarPtr, TileType) pairs in program order.
-  /// This is the single source of truth for per-variable alloc_tile emission.
-  std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs_;
-  std::set<const ir::Var*> emitted_tile_alloc_vars_;
-  struct TpopResultInfo {
-    int split = 0;
-    std::string op_name;
-  };
-  std::map<const ir::Var*, TpopResultInfo>
-      tpop_result_vars_;                         ///< Tile vars from tpop: var -> split + op name
-  std::set<const ir::Var*> fillpad_input_vars_;  ///< Tile vars consumed by tile.fillpad
-
-  // Current function context
-  ir::FunctionPtr current_function_;
-  ir::VarPtr current_result_var_;
-  std::string current_result_buf_;
-  std::shared_ptr<const ir::TileType> current_result_tile_type_;
-
   const backend::Backend* backend_;  ///< Backend instance for querying op info
-
-  // Cross-core buffer SSA tracking (per function)
-  // NOTE: These are singletons because the cross-core protocol guarantees at most
-  // one reserve_buffer and one import_peer_buffer per function.  If the protocol
-  // evolves to support multiple buffers per direction, these should be replaced
-  // with a map keyed by buffer name or direction.
-  std::string reserve_buf_ssa_;  ///< SSA name from reserve_buffer
-  std::string import_buf_ssa_;   ///< SSA name from import_reserved_buffer
-
-  // Control flow expression result communication
-  std::string current_expr_value_;         ///< SSA name from expression visitors
-  std::vector<std::string> yield_buffer_;  ///< Temporary storage for yielded values
 
   /// Emit an arith binary op, return SSA result name
   std::string EmitArithBinaryOp(const std::string& mlir_op, const std::string& lhs, const std::string& rhs,

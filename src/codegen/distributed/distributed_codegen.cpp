@@ -61,8 +61,8 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   EmitTopologyConstants();
   EmitTraceHelpers();
 
-  // Emit functions in topological order (callees before callers)
-  auto sorted = TopoSortFunctions();
+  // Emit functions sorted by role and level (workers before orchestrators)
+  auto sorted = SortFunctionsByRoleAndLevel();
   for (const auto& func : sorted) {
     EmitFunction(func);
   }
@@ -106,7 +106,7 @@ void DistributedCodegen::ClassifyFunctions() {
 // Topological sort: callees before callers
 // ========================================================================
 
-std::vector<ir::FunctionPtr> DistributedCodegen::TopoSortFunctions() const {
+std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() const {
   // Collect non-entry functions
   std::vector<ir::FunctionPtr> funcs;
   for (const auto& [name, func] : all_funcs_) {

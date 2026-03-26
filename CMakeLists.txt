@@ -200,6 +200,10 @@ set(PYPTO_SOURCES
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
     src/codegen/pto/pto_codegen.cpp
+    src/codegen/pto/pto_control_flow_codegen.cpp
+    src/codegen/pto/pto_scalar_expr_codegen.cpp
+    src/codegen/pto/pto_type_utils.cpp
+    src/codegen/pto/tpop_chain_reorder.cpp
     src/codegen/distributed/distributed_codegen.cpp
     src/codegen/tensor_op_codegen.cpp
 
