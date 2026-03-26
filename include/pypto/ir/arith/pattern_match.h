@@ -121,6 +121,15 @@ class PEqualChecker {
   bool operator()(const T& lhs, const T& rhs) const { return lhs == rhs; }
 };
 
+/// ConstIntPtr equality: value-based (same value and dtype).
+template <>
+class PEqualChecker<ConstIntPtr> {
+ public:
+  bool operator()(const ConstIntPtr& lhs, const ConstIntPtr& rhs) const {
+    return lhs->value_ == rhs->value_ && lhs->dtype() == rhs->dtype();
+  }
+};
+
 /// ExprPtr equality: pointer identity first, then value comparison for constants.
 /// This ensures that two distinct ConstInt(8) nodes match as equal in patterns
 /// like `floordiv(x, y) * y + floormod(x, y)`, which is critical for div-mod
@@ -133,7 +142,7 @@ class PEqualChecker<ExprPtr> {
     // Value-based fallback for constant leaf nodes.
     if (auto lhs_ci = As<ConstInt>(lhs)) {
       auto rhs_ci = As<ConstInt>(rhs);
-      return rhs_ci && lhs_ci->value_ == rhs_ci->value_ && lhs_ci->dtype() == rhs_ci->dtype();
+      return rhs_ci && PEqualChecker<ConstIntPtr>()(lhs_ci, rhs_ci);
     }
     if (auto lhs_cb = As<ConstBool>(lhs)) {
       auto rhs_cb = As<ConstBool>(rhs);
@@ -141,13 +150,6 @@ class PEqualChecker<ExprPtr> {
     }
     return false;
   }
-};
-
-/// ConstIntPtr equality: value-based.
-template <>
-class PEqualChecker<ConstIntPtr> {
- public:
-  bool operator()(const ConstIntPtr& lhs, const ConstIntPtr& rhs) const { return lhs->value_ == rhs->value_; }
 };
 
 /// VarPtr equality: pointer identity (same Var object).
