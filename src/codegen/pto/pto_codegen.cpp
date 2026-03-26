@@ -360,7 +360,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
-    std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type, HasFillpadConsumer(tile_var.get()));
     ssa_to_tile_buf_type_[ssa_name] = type_str;
 
     auto memref = ir::GetDefinedMemRef(tile_type);
