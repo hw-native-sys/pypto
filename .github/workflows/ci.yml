@@ -111,8 +111,8 @@ jobs:
 
       - name: Install ptoas
         run: |
-          PTOAS_VERSION=v0.12
-          PTOAS_SHA256=4039660c33ae8def90099e665f85cb06713f7b912a05b91144556313b79ea280
+          PTOAS_VERSION=v0.16
+          PTOAS_SHA256=276e9a81dacffe269bf528eff0bbdf6b3acfe7bf93a26b16a4356135482e61e4
           curl --fail --location --retry 3 --retry-all-errors \
             https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
              -o /tmp/ptoas-bin-aarch64.tar.gz

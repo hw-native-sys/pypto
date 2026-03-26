@@ -1306,6 +1306,5 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
 
 
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
