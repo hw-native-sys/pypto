@@ -1355,5 +1355,45 @@ def test_pto_codegen_shared_memref_dedup_respects_if_else_scope():
     assert len(ssa_names) >= 2, f"Expected distinct SSA names in sibling if-else branches, got: {ssa_names}"
 
 
+def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
+    """Slice with partially dynamic valid_shape followed by fillpad must not create spurious slice_buf."""
+
+    @pl.program
+    class SliceFillpadProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            scores_in: pl.Tensor[[16, 64], pl.FP32],
+            valid_len: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            scores: pl.Tile[[16, 64], pl.FP32] = pl.load(scores_in, [0, 0], [16, 64])
+            sliced: pl.Tile[[16, 64], pl.FP32] = pl.tile.slice(
+                scores, [16, 64], [0, 0], valid_shape=[16, valid_len]
+            )
+            padded: pl.Tile[[16, 64], pl.FP32] = pl.fillpad(sliced, pad_value=pl.PadValue.min)
+            return pl.store(padded, [0, 0], out)
+
+    mlir_code = _generate_default_mlir(SliceFillpadProgram)
+
+    # No spurious slice_buf should be allocated — slice reuses its pre-allocated buffer
+    assert "slice_buf" not in mlir_code, (
+        f"Unexpected slice_buf allocation — tile.slice should reuse the pre-allocated buffer.\n{mlir_code}"
+    )
+
+    # The textract should reference the sliced tile's SSA (not a separate slice_buf)
+    textract_lines = [line.strip() for line in mlir_code.splitlines() if "pto.textract" in line]
+    assert len(textract_lines) == 1, f"Expected one textract, got: {textract_lines}"
+    assert "slice_buf" not in textract_lines[0], (
+        f"textract should not reference slice_buf: {textract_lines[0]}"
+    )
+
+    # The tfillpad input type should have v_row=? and v_col=? (force_all_dynamic)
+    fillpad_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tfillpad" in line]
+    assert len(fillpad_lines) == 1, f"Expected one tfillpad, got: {fillpad_lines}"
+    assert "v_row=?" in fillpad_lines[0], f"fillpad input should have v_row=?: {fillpad_lines[0]}"
+    assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
