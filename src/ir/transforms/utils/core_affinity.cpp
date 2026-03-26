@@ -12,11 +12,15 @@
 #include "pypto/ir/transforms/utils/core_affinity.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
 #include "pypto/core/any_cast.h"
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

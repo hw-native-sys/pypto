@@ -12,10 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_DEAD_CODE_ELIMINATION_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_DEAD_CODE_ELIMINATION_H_
 
-#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/stmt.h"

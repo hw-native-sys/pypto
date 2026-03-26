@@ -12,8 +12,8 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_TPOP_CHAIN_NORMALIZER_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_TPOP_CHAIN_NORMALIZER_H_
 
+#include <cstddef>
 #include <limits>
-#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,6 +21,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 

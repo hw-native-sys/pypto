@@ -12,13 +12,12 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_LOOP_STATE_REPAIR_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_LOOP_STATE_REPAIR_H_
 
-#include <algorithm>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -55,12 +54,12 @@ StmtPtr RebuildLoop(const std::shared_ptr<const ForStmt>& for_stmt,
 
 template <typename Fn>
 std::optional<std::vector<StmtPtr>> ProcessElseBranch(const std::shared_ptr<const IfStmt>& if_stmt,
-                                                      Fn&& transform);
+                                                      Fn&& transform_fn);
 
 // --- Tail-statement transformation template ---
 
 template <typename Fn>
-StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform);
+StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform_fn);
 
 // --- Loop state repair functions ---
 
@@ -82,16 +81,16 @@ std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
 
 template <typename Fn>
 std::optional<std::vector<StmtPtr>> ProcessElseBranch(const std::shared_ptr<const IfStmt>& if_stmt,
-                                                      Fn&& transform) {
+                                                      Fn&& transform_fn) {
   if (!if_stmt->else_body_.has_value()) return std::nullopt;
-  return transform(transform_utils::FlattenToStmts(if_stmt->else_body_.value()));
+  return transform_fn(transform_utils::FlattenToStmts(if_stmt->else_body_.value()));
 }
 
 template <typename Fn>
-StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform) {
+StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform_fn) {
   auto apply_to_back = [&](std::vector<StmtPtr>& stmts) {
     if (stmts.empty()) return;
-    auto result = TransformLastStmt(stmts.back(), transform);
+    auto result = TransformLastStmt(stmts.back(), transform_fn);
     if (result) {
       stmts.back() = result;
     } else {
@@ -115,7 +114,7 @@ StmtPtr TransformLastStmt(const StmtPtr& stmt, Fn&& transform) {
     return MakeBody(seq_stmts, seq->span_);
   }
 
-  return transform(stmt);
+  return transform_fn(stmt);
 }
 
 }  // namespace loop_repair

@@ -12,17 +12,23 @@
 #include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"

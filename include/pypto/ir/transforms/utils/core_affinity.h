@@ -12,16 +12,11 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_CORE_AFFINITY_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_CORE_AFFINITY_H_
 
-#include <map>
 #include <optional>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

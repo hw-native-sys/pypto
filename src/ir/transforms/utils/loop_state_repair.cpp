@@ -14,12 +14,15 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include "pypto/core/error.h"
-#include "pypto/ir/kind_traits.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"

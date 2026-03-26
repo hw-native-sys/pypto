@@ -11,7 +11,6 @@
 
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 
-#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,8 +18,8 @@
 #include <vector>
 
 #include "pypto/ir/expr.h"
-#include "pypto/ir/kind_traits.h"
-#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
@@ -82,11 +81,7 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
 
 namespace {
 
-StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
-  if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
-  if (stmts.size() == 1) return stmts[0];
-  return std::make_shared<SeqStmts>(stmts, span);
-}
+using loop_repair::MakeBody;
 
 void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& live) {
   for (const auto& stmt : stmts) {

@@ -13,16 +13,23 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -33,12 +40,6 @@ namespace cross_core_pipe {
 namespace {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
-
-[[maybe_unused]] StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
-  if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
-  if (stmts.size() == 1) return stmts[0];
-  return std::make_shared<SeqStmts>(stmts, span);
-}
 
 }  // namespace
 
