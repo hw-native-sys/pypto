@@ -494,6 +494,17 @@ std::string GenerateHelperFunctions() {
   return oss.str();
 }
 
+// Generate scalar variable declaration from OrchArg scalar slot.
+// Uses value_as<T>() for type-safe reinterpretation (memcpy-based type punning).
+std::string GenerateScalarUnpack(const std::string& var_name, int orch_index,
+                                 const ScalarTypePtr& scalar_type) {
+  std::ostringstream oss;
+  std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+  oss << "    " << cpp_type << " " << var_name << " = orch[" << orch_index << "].value_as<" << cpp_type
+      << ">();\n";
+  return oss.str();
+}
+
 const char TENSOR_HELPER_FUNCTION[] = R"(
 static inline Tensor make_tensor_external_2d_dn(void* addr,
     const uint32_t shapes[],
@@ -1285,6 +1296,12 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   std::set<std::string> param_name_set;
   std::map<std::string, int> param_name_to_orch_index;
   int tensor_param_count = 0;
+  // Collect scalar params in declaration order for OrchArg assignment after tensors
+  struct ScalarParamInfo {
+    std::string emit_name;
+    ScalarTypePtr scalar_type;
+  };
+  std::vector<ScalarParamInfo> scalar_params;
   for (const auto& var : func->params_) {
     std::string emit_name = GetSSABaseName(var->name_hint_);
     emit_name_map[var.get()] = emit_name;
@@ -1292,10 +1309,15 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     if (As<TensorType>(var->GetType())) {
       param_name_to_orch_index[emit_name] = tensor_param_count;
       tensor_param_count++;
+    } else if (auto stype = As<ScalarType>(var->GetType())) {
+      scalar_params.push_back({emit_name, stype});
     }
-    // Non-tensor (scalar) params are registered in emit_name_map for IR name
-    // resolution but do not occupy an OrchArg slot. They are used as compile-time
-    // shape hints and are not emitted in the entry-point setup.
+  }
+
+  // Scalar params occupy OrchArg slots after all tensor params
+  int scalar_param_start = tensor_param_count;
+  for (size_t i = 0; i < scalar_params.size(); ++i) {
+    param_name_to_orch_index[scalar_params[i].emit_name] = scalar_param_start + static_cast<int>(i);
   }
 
   // Step 4c: Lineage alias — map iter_args/return_vars to their param's emit name
@@ -1309,7 +1331,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   }
 
   // All external tensors come from params (including Out/InOut) — no return inference
-  int expected_arg_count = tensor_param_count;
+  int expected_arg_count = tensor_param_count + static_cast<int>(scalar_params.size());
 
   std::ostringstream oss;
 
@@ -1354,6 +1376,15 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
       std::string name = auto_name::GetCompatibleBaseName(var->name_hint_);
       oss << GenerateMakeTensorExternal(name, orch_idx, tensor_type, stmt_codegen);
       orch_idx++;
+    }
+  }
+
+  // 7. Scalar params (from OrchArg — slots after tensors)
+  if (!scalar_params.empty()) {
+    oss << "\n    // Scalar params\n";
+    for (size_t i = 0; i < scalar_params.size(); ++i) {
+      int scalar_orch_idx = scalar_param_start + static_cast<int>(i);
+      oss << GenerateScalarUnpack(scalar_params[i].emit_name, scalar_orch_idx, scalar_params[i].scalar_type);
     }
   }
 

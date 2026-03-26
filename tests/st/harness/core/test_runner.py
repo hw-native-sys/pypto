@@ -109,6 +109,7 @@ def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> No
         test_case.config.rtol,
         test_case.config.atol,
         compute_golden_src=compute_golden_src,
+        scalar_specs=test_case.scalar_specs or None,
     )
     output_path.write_text(write_golden_src, encoding="utf-8")
 

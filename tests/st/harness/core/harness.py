@@ -24,6 +24,7 @@ import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
+from pypto.runtime.tensor_spec import ScalarSpec
 
 
 class DataType(Enum):
@@ -130,6 +131,7 @@ class PTOTestCase(ABC):
         """
         self.config = config or RunConfig()
         self._tensor_specs: list[TensorSpec] | None = None
+        self._scalar_specs: list[ScalarSpec] | None = None
 
     @abstractmethod
     def get_name(self) -> str:
@@ -176,6 +178,17 @@ class PTOTestCase(ABC):
         """
         return BackendType.Ascend910B_CCE
 
+    def define_scalars(self) -> list[ScalarSpec]:
+        """Define scalar OrchArg parameters for this test.
+
+        Override to provide scalar values that are passed to the orchestration
+        function via OrchArg scalar slots (after all tensor slots).
+
+        Returns:
+            List of ScalarSpec objects.  Empty by default.
+        """
+        return []
+
     @abstractmethod
     def compute_expected(
         self, tensors: dict[str, torch.Tensor], params: dict[str, Any] | None = None
@@ -210,3 +223,10 @@ class PTOTestCase(ABC):
         if self._tensor_specs is None:
             self._tensor_specs = self.define_tensors()
         return self._tensor_specs
+
+    @property
+    def scalar_specs(self) -> list[ScalarSpec]:
+        """Get cached scalar specifications."""
+        if self._scalar_specs is None:
+            self._scalar_specs = self.define_scalars()
+        return self._scalar_specs

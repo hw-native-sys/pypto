@@ -41,7 +41,6 @@ All tests use OptimizationStrategy.Default and BackendType.Ascend910B_PTO.
 # from type-checking annotations that reference module-level DynVar names.
 # pyright: reportUndefinedVariable=false
 
-import struct
 from typing import Any
 
 import pypto.language as pl
@@ -383,9 +382,9 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
     """Paged attention where the orchestration uses fully dynamic dims (QR, KCR, HD, BT, B).
 
     Exercises OrchArg::to_tensor() for all external tensors in the paged attention
-    pipeline.  The orchestration body is identical to build_paged_attention_program
-    (reads all runtime values from config_t); only the parameter type annotations
-    use pl.dynamic() dims instead of static integers.
+    pipeline.  All runtime configuration values (batch, num_heads, head_dim,
+    block_size, max_blocks) are derived from tensor shapes via pl.tensor.dim()
+    and scalar arithmetic — no config_t tensor is needed.
     Expected result: standard online-softmax paged attention output.
     """
 
@@ -425,11 +424,6 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
         max_blocks = self._max_num_blocks
         total_pool_rows = batch * max_blocks * block_size
 
-        scale_bits = struct.unpack("I", struct.pack("f", self._scale))[0]
-        config_data = torch.tensor(
-            [batch, num_heads, 1, head_dim, block_size, max_blocks, scale_bits],
-            dtype=torch.int64,
-        )
         block_table = torch.randint(
             0, max(batch * max_blocks, 1), size=(batch, max_blocks), dtype=torch.int32
         ).flatten()
@@ -442,7 +436,6 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
             TensorSpec("block_table", [batch * max_blocks], DataType.INT32, init_value=block_table),
             TensorSpec("context_lens", [batch], DataType.INT32, init_value=context_lens),
             TensorSpec("out", [batch * num_heads, head_dim], DataType.FP32, is_output=True),
-            TensorSpec("config_t", [7], DataType.INT64, init_value=config_data),
         ]
 
     def get_program(self) -> Any:
@@ -459,15 +452,17 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
                 block_table: pl.Tensor[[BT], pl.INT32],
                 context_lens: pl.Tensor[[B], pl.INT32],
                 out: pl.Out[pl.Tensor[[QR, HD], pl.FP32]],
-                config_t: pl.Tensor[[7], pl.INT64],
             ) -> pl.Tensor[[QR, HD], pl.FP32]:
-                """Paged attention orchestration with fully dynamic external tensor dims."""
-                # Read runtime config
-                batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config_t, [0])
-                num_heads_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config_t, [1])
-                head_dim_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config_t, [3])
-                block_size_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config_t, [4])
-                block_num_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config_t, [5])
+                """Paged attention orchestration with tensor.dim-derived runtime values."""
+                # Derive all runtime config from tensor shapes
+                batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.dim(context_lens, 0)
+                query_rows: pl.Scalar[pl.INT64] = pl.tensor.dim(query, 0)
+                head_dim_cfg: pl.Scalar[pl.INT64] = pl.tensor.dim(query, 1)
+                value_cache_rows: pl.Scalar[pl.INT64] = pl.tensor.dim(value_cache, 0)
+                block_table_size: pl.Scalar[pl.INT64] = pl.tensor.dim(block_table, 0)
+                num_heads_cfg = query_rows // batch_cfg
+                block_num_cfg = block_table_size // batch_cfg
+                block_size_cfg = value_cache_rows // block_table_size
 
                 q_head_num = num_heads_cfg
                 q_loop_cfg = (q_head_num + q_tile - 1) // q_tile
@@ -557,14 +552,16 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
         return BackendType.Ascend910B_PTO
 
     def compute_expected(self, tensors, params=None):
-        cfg = tensors["config_t"]
-        batch = int(cfg[0].item())
-        num_heads = int(cfg[1].item())
-        head_dim = int(cfg[3].item())
-        block_size = int(cfg[4].item())
-        max_num_blocks_per_req = int(cfg[5].item())
-        scale_bits = int(cfg[6].item())
-        scale_value = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
+        # Derive all config from tensor shapes (mirrors orchestration logic)
+        batch = tensors["context_lens"].shape[0]
+        query_rows = tensors["query"].shape[0]
+        head_dim = tensors["query"].shape[1]
+        num_heads = query_rows // batch
+        block_table_size = tensors["block_table"].shape[0]
+        max_num_blocks_per_req = block_table_size // batch
+        value_cache_rows = tensors["value_cache"].shape[0]
+        block_size = value_cache_rows // block_table_size
+        scale_value = self._scale
 
         query = tensors["query"].float().reshape(batch, num_heads, head_dim)
         total_pool_blocks = batch * max_num_blocks_per_req

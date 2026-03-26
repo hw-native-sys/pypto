@@ -77,3 +77,41 @@ class TensorSpec:
             result: Any = fn()
             return torch.as_tensor(result, dtype=self.dtype)
         raise TypeError(f"Unsupported init_value type {type(self.init_value)!r} for tensor {self.name!r}")
+
+
+# ctypes type name → ctypes constructor name used in generated golden.py
+SCALAR_CTYPE_MAP: dict[str, str] = {
+    "int64": "ctypes.c_int64",
+    "int32": "ctypes.c_int32",
+    "uint64": "ctypes.c_uint64",
+    "uint32": "ctypes.c_uint32",
+    "float": "ctypes.c_float",
+    "double": "ctypes.c_double",
+}
+
+
+@dataclass
+class ScalarSpec:
+    """Specification for a scalar OrchArg parameter.
+
+    Scalar parameters occupy OrchArg slots after all tensor parameters.
+    The generated golden.py emits ``ctypes`` scalar values so that
+    Simpler's CodeRunner populates ``orch[i].scalar`` correctly.
+
+    Attributes:
+        name: Parameter name matching the orchestration function signature.
+        value: The scalar value to pass at runtime.
+        ctype: ctypes type name — one of ``"int64"``, ``"int32"``,
+            ``"uint64"``, ``"uint32"``, ``"float"``, ``"double"``.
+    """
+
+    name: str
+    value: int | float
+    ctype: str = "int64"
+
+    def __post_init__(self) -> None:
+        if self.ctype not in SCALAR_CTYPE_MAP:
+            raise ValueError(
+                f"Unsupported ctype {self.ctype!r} for scalar {self.name!r}. "
+                f"Supported: {list(SCALAR_CTYPE_MAP)}"
+            )

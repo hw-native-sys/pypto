@@ -1522,6 +1522,50 @@ class TestOrchestration:
         assert "Tensor& second = ret0__out_1;" in code
         assert "add_output(ret0)" not in code
 
+    def test_scalar_orcharg(self):
+        """Scalar params (INT64, INT32, FP32) get OrchArg slots after tensors and use value_as<T>()."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B_CCE)
+
+        @pl.program
+        class MultiScalarProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                factor: pl.Scalar[pl.INT64],
+                count: pl.Scalar[pl.INT32],
+                scale: pl.Scalar[pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 16])
+                r = pl.store(t, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_multi(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                factor: pl.Scalar[pl.INT64],
+                count: pl.Scalar[pl.INT32],
+                scale: pl.Scalar[pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out = self.kernel(a, out, factor, count, scale)
+                return out
+
+        generator = codegen.CCECodegen()
+        files = generator.generate(MultiScalarProgram)
+        code = files["orchestration/orch_multi.cpp"]
+
+        # Tensors at orch[0..1], scalars at orch[2..4]
+        assert "orch[0].to_tensor()" in code
+        assert "orch[1].to_tensor()" in code
+        assert "int64_t factor = orch[2].value_as<int64_t>();" in code
+        assert "int32_t count = orch[3].value_as<int32_t>();" in code
+        assert "float scale = orch[4].value_as<float>();" in code
+        assert ".expected_arg_count = 5," in code
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

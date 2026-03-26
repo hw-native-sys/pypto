@@ -12,12 +12,13 @@
 from pypto.runtime.runner import RunConfig, RunResult
 
 from harness.core.environment import ensure_simpler_available
-from harness.core.harness import PTOTestCase, TensorSpec
+from harness.core.harness import PTOTestCase, ScalarSpec, TensorSpec
 from harness.core.test_runner import TestRunner
 
 __all__ = [
     "PTOTestCase",
     "TensorSpec",
+    "ScalarSpec",
     "RunConfig",
     "RunResult",
     "TestRunner",
