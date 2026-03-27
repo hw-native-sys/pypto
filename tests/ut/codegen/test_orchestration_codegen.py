@@ -140,8 +140,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(OrchArg* orch, int arg_count, int orch_thread_num, int orch_thread_index) {
-                (void)arg_count;
+            void aicpu_orchestration_entry(OrchArg* orch, int32_t orch_thread_num, int32_t orch_thread_index) {
                 (void)orch_thread_num;
                 (void)orch_thread_index;
 
@@ -441,8 +440,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(OrchArg* orch, int arg_count, int orch_thread_num, int orch_thread_index) {
-                (void)arg_count;
+            void aicpu_orchestration_entry(OrchArg* orch, int32_t orch_thread_num, int32_t orch_thread_index) {
                 (void)orch_thread_num;
                 (void)orch_thread_index;
 
@@ -873,8 +871,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(OrchArg* orch, int arg_count, int orch_thread_num, int orch_thread_index) {
-                (void)arg_count;
+            void aicpu_orchestration_entry(OrchArg* orch, int32_t orch_thread_num, int32_t orch_thread_index) {
                 (void)orch_thread_num;
                 (void)orch_thread_index;
 
@@ -1702,6 +1699,110 @@ class TestTensorReadWriteOffsetCodegen:
 
         assert "params_t0.add_input(ext_x)" in code
         assert "params_t0.add_inout(ext_acc)" in code
+
+
+class TestOrchestrationA5:
+    """Test orchestration codegen for Ascend950 (A5) backend with explicit PTO2Runtime* rt."""
+
+    def test_a5_entry_signature_and_scope(self):
+        """A5 entry function includes PTO2Runtime* rt; PTO2_SCOPE passes rt."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class BasicProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_basic(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                c = self.kernel_add(a, b, c)
+                d = self.kernel_add(c, b, d)
+                return d
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        program = pm.run_passes(BasicProgram)
+        orch_func = program.get_function("orch_basic")
+        assert orch_func is not None
+        from pypto.pypto_core import codegen as _codegen_core
+
+        result = _codegen_core.generate_orchestration(program, orch_func)
+        code = result.code
+
+        # A5 entry function has PTO2Runtime* rt as first parameter
+        assert "aicpu_orchestration_entry(PTO2Runtime* rt, OrchArg* orch" in code
+
+        # PTO2_SCOPE passes rt
+        assert "PTO2_SCOPE(rt)" in code
+        assert "PTO2_SCOPE()" not in code
+
+        # Submit functions pass rt as first argument
+        assert "pto2_rt_submit_aiv_task(rt, " in code
+        assert code.count("pto2_rt_submit_aiv_task(rt, ") == 2
+
+    def test_a5_for_loop_scope_passes_rt(self):
+        """A5 for-loop body is wrapped in PTO2_SCOPE(rt)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class ForProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                data: pl.Tensor[[64, 16], pl.FP32],
+                bias: pl.Tensor[[16, 16], pl.FP32],
+                config: pl.Tensor[[4], pl.INT64],
+            ) -> pl.Tensor[[64, 16], pl.FP32]:
+                n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                out: pl.Tensor[[64, 16], pl.FP32] = data
+                for i in pl.range(n_blocks):
+                    chunk: pl.Tensor[[16, 16], pl.FP32] = pl.slice(data, [16, 16], [i * 16, 0])
+                    result: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                    result = self.kernel_add(chunk, bias, result)  # noqa: F841
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        program = pm.run_passes(ForProgram)
+        orch_func = program.get_function("orch")
+        assert orch_func is not None
+        from pypto.pypto_core import codegen as _codegen_core
+
+        result = _codegen_core.generate_orchestration(program, orch_func)
+        code = result.code
+
+        # All PTO2_SCOPE calls pass rt
+        assert "PTO2_SCOPE()" not in code
+        assert code.count("PTO2_SCOPE(rt)") >= 2  # top-level + for-loop body
 
 
 if __name__ == "__main__":

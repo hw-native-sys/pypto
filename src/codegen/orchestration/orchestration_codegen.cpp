@@ -544,20 +544,18 @@ std::string GenerateConfigFunction(int expected_arg_count) {
 }
 
 // Returns the submit-task call prefix for the given core type and backend.
-// A2/A3: pto2_rt_submit_aiv_task(id, params, n)
-//         pto2_rt_submit_aic_task(id, params, n)
-// A5:    pto2_rt_submit_task(id, PTO2_WORKER_VECTOR, params, n)
-//         pto2_rt_submit_task(id, PTO2_WORKER_CUBE,   params, n)
-// Returns {func_call_with_rt_and_id_prefix, extra_worker_arg_or_empty}.
-// Caller emits: prefix << func_id << extra << ", " << task_var << ", " << n << ");\n"
-std::pair<std::string, std::string> CoreTypeToSubmitParts(CoreType core_type) {
-  bool is_a5 = pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend950;
-  if (is_a5) {
-    std::string worker = core_type == CoreType::CUBE ? "PTO2_WORKER_CUBE" : "PTO2_WORKER_VECTOR";
-    return {"pto2_rt_submit_task(", ", " + worker};
-  }
+// A2/A3 (TLS-based runtime): pto2_rt_submit_aic_task(id, params)
+//                             pto2_rt_submit_aiv_task(id, params)
+// A5 (explicit rt pointer):   pto2_rt_submit_aic_task(rt, id, params)
+//                             pto2_rt_submit_aiv_task(rt, id, params)
+// Returns {func_call_prefix, extra_arg_or_empty}.
+// Caller emits: prefix << func_id << extra << ", " << task_var << ");\n"
+std::pair<std::string, std::string> CoreTypeToSubmitParts(CoreType core_type,
+                                                          pypto::backend::BackendType backend_type) {
+  bool is_a5 = backend_type == pypto::backend::BackendType::Ascend950;
+  std::string rt_prefix = is_a5 ? "rt, " : "";
   std::string func = core_type == CoreType::CUBE ? "pto2_rt_submit_aic_task" : "pto2_rt_submit_aiv_task";
-  return {func + "(", ""};
+  return {func + "(" + rt_prefix, ""};
 }
 
 // Removed DataTypeToPTO2Enum — now uses DataTypeToString from dtype.h
@@ -599,7 +597,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::unordered_map<const Var*, const Var*> var_to_param,
                                     std::set<std::string> param_name_set,
-                                    std::map<std::string, int> param_name_to_orch_index)
+                                    std::map<std::string, int> param_name_to_orch_index,
+                                    pypto::backend::BackendType backend_type)
       : program_(prog),
         func_name_to_id_(func_ids),
         func_name_to_core_type_(core_types),
@@ -607,7 +606,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         emit_name_map_(std::move(param_to_emit_name)),
         var_to_param_(std::move(var_to_param)),
         param_name_set_(std::move(param_name_set)),
-        param_name_to_orch_index_(std::move(param_name_to_orch_index)) {
+        param_name_to_orch_index_(std::move(param_name_to_orch_index)),
+        is_a5_(backend_type == pypto::backend::BackendType::Ascend950),
+        backend_type_(backend_type) {
     declared_var_names_ = param_name_set_;
   }
 
@@ -709,7 +710,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE() {\n";
+    code_ << Indent() << "PTO2_SCOPE(" << ScopeArg() << ") {\n";
     indent_ += 4;
 
     auto saved = current_return_vars_;
@@ -818,6 +819,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
  private:
   std::string Indent() const { return std::string(indent_, ' '); }
+  std::string ScopeArg() const { return is_a5_ ? "rt" : ""; }
+  std::string RtPrefix() const { return is_a5_ ? "rt, " : ""; }
 
   std::string GetCppType(const TypePtr& type) {
     if (auto scalar_type = As<ScalarType>(type)) {
@@ -1005,7 +1008,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
-    auto [submit_prefix, worker_arg] = CoreTypeToSubmitParts(core_type);
+    auto [submit_prefix, worker_arg] = CoreTypeToSubmitParts(core_type, backend_type_);
     code_ << ind << submit_prefix << func_id << worker_arg << ", " << task_var << ");\n";
 
     task_counter_++;
@@ -1052,7 +1055,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id
           << ", INVALID_KERNEL_ID};\n";
-    code_ << ind << "pto2_rt_submit_task(mixed_" << task_counter_ << ", " << task_var << ");\n";
+    code_ << ind << "pto2_rt_submit_task(" << RtPrefix() << "mixed_" << task_counter_ << ", " << task_var
+          << ");\n";
 
     task_counter_++;
   }
@@ -1116,7 +1120,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // Visit a branch body (then/else) inside a PTO2_SCOPE, with return vars scoped.
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE() {\n";
+    code_ << Indent() << "PTO2_SCOPE(" << ScopeArg() << ") {\n";
     indent_ += 4;
 
     auto saved = current_return_vars_;
@@ -1239,6 +1243,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_map<const Var*, const Var*> var_to_param_;
   std::set<std::string> param_name_set_;                 // For string-only contexts (op codegen callbacks)
   std::map<std::string, int> param_name_to_orch_index_;  // emit_name → orch[] index
+  bool is_a5_;  // A5 backend requires explicit PTO2Runtime* rt parameter
+  pypto::backend::BackendType backend_type_;
   std::unordered_map<const Var*, const Var*> buffer_root_map_;
   std::unordered_map<const Var*, AssembleViewInfo> assemble_view_infos_;
   std::unordered_set<const Var*> non_optimizable_assemble_roots_;
@@ -1326,17 +1332,24 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << GenerateConfigFunction(expected_arg_count);
 
   // 5. Entry function
+  auto backend_type = pypto::backend::GetBackendType();
+  bool is_a5 = backend_type == pypto::backend::BackendType::Ascend950;
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(OrchArg* orch, int arg_count, "
-         "int orch_thread_num, int orch_thread_index) {\n";
-  oss << "    (void)arg_count;\n";
+  if (is_a5) {
+    oss << "void aicpu_orchestration_entry(PTO2Runtime* rt, OrchArg* orch, "
+           "int32_t orch_thread_num, int32_t orch_thread_index) {\n";
+  } else {
+    oss << "void aicpu_orchestration_entry(OrchArg* orch, "
+           "int32_t orch_thread_num, int32_t orch_thread_index) {\n";
+  }
   oss << "    (void)orch_thread_num;\n";
   oss << "    (void)orch_thread_index;\n\n";
 
   // Create statement codegen (used for both external tensor generation and task submission)
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
                                         std::move(emit_name_map), std::move(lineage.var_to_param),
-                                        std::move(param_name_set), std::move(param_name_to_orch_index));
+                                        std::move(param_name_set), std::move(param_name_to_orch_index),
+                                        backend_type);
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
@@ -1360,7 +1373,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.VisitStmt(func->body_);
 
   // 10. Emit generated code inside PTO2_SCOPE (required by runtime: scope_stack_top must be >= 0)
-  oss << "\n    PTO2_SCOPE() {\n";
+  std::string scope_arg = is_a5 ? "rt" : "";
+  oss << "\n    PTO2_SCOPE(" << scope_arg << ") {\n";
   oss << stmt_codegen.GetGeneratedCode();
   oss << "    }\n";
 
