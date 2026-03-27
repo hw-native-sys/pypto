@@ -35,6 +35,7 @@ enum class Role : uint8_t;
 #include "pypto/ir/expr.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -263,7 +264,9 @@ class AssignStmt : public Stmt {
    * @param span Source location
    */
   AssignStmt(VarPtr var, ExprPtr value, Span span)
-      : Stmt(std::move(span)), var_(std::move(var)), value_(std::move(value)) {}
+      : Stmt(std::move(span)), var_(std::move(var)), value_(std::move(value)) {
+    CanonicalizeBindingType();
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AssignStmt; }
   [[nodiscard]] std::string TypeName() const override { return "AssignStmt"; }
@@ -277,6 +280,64 @@ class AssignStmt : public Stmt {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::DefField(&AssignStmt::var_, "var"),
                                           reflection::UsualField(&AssignStmt::value_, "value")));
+  }
+
+ private:
+  static TypePtr MergeBindingType(const TypePtr& declared_type, const TypePtr& value_type) {
+    if (!declared_type || !value_type) return declared_type;
+
+    auto declared_tensor = std::dynamic_pointer_cast<const TensorType>(declared_type);
+    auto value_tensor = std::dynamic_pointer_cast<const TensorType>(value_type);
+    if (declared_tensor && value_tensor) {
+      bool needs_memref = !declared_tensor->memref_.has_value() && value_tensor->memref_.has_value();
+      bool needs_tensor_view =
+          !declared_tensor->tensor_view_.has_value() && value_tensor->tensor_view_.has_value();
+      if (!needs_memref && !needs_tensor_view) {
+        return declared_type;
+      }
+      std::optional<MemRefPtr> memref =
+          declared_tensor->memref_.has_value() ? declared_tensor->memref_ : value_tensor->memref_;
+      std::optional<TensorView> tensor_view = declared_tensor->tensor_view_.has_value()
+                                                  ? declared_tensor->tensor_view_
+                                                  : value_tensor->tensor_view_;
+      return std::make_shared<TensorType>(declared_tensor->shape_, declared_tensor->dtype_, memref,
+                                          tensor_view);
+    }
+
+    auto declared_tile = std::dynamic_pointer_cast<const TileType>(declared_type);
+    auto value_tile = std::dynamic_pointer_cast<const TileType>(value_type);
+    if (declared_tile && value_tile) {
+      bool needs_memref = !declared_tile->memref_.has_value() && value_tile->memref_.has_value();
+      bool needs_tile_view = !declared_tile->tile_view_.has_value() && value_tile->tile_view_.has_value();
+      bool needs_memory_space =
+          !declared_tile->memory_space_.has_value() && value_tile->memory_space_.has_value();
+      if (!needs_memref && !needs_tile_view && !needs_memory_space) {
+        return declared_type;
+      }
+      std::optional<MemRefPtr> memref =
+          declared_tile->memref_.has_value() ? declared_tile->memref_ : value_tile->memref_;
+      std::optional<TileView> tile_view =
+          declared_tile->tile_view_.has_value() ? declared_tile->tile_view_ : value_tile->tile_view_;
+      std::optional<MemorySpace> memory_space =
+          declared_tile->memory_space_.has_value() ? declared_tile->memory_space_ : value_tile->memory_space_;
+      return std::make_shared<TileType>(declared_tile->shape_, declared_tile->dtype_, memref, tile_view,
+                                        memory_space);
+    }
+
+    return declared_type;
+  }
+
+  void CanonicalizeBindingType() {
+    if (!var_ || !value_) return;
+
+    TypePtr merged_type = MergeBindingType(var_->GetType(), value_->GetType());
+    if (merged_type.get() == var_->GetType().get()) return;
+
+    std::const_pointer_cast<Var>(var_)->ReplaceTypeForConstruction(merged_type);
+
+    if (auto call = std::dynamic_pointer_cast<const Call>(value_)) {
+      value_ = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, merged_type, call->span_);
+    }
   }
 };
 

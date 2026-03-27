@@ -53,16 +53,18 @@ class ExprEvaluator:
         self,
         closure_vars: dict[str, Any],
         span_tracker: "SpanTracker | None" = None,
+        dyn_var_cache: dict[object, ir.Var] | None = None,
     ):
         """Initialize expression evaluator.
 
         Args:
             closure_vars: Variables from the enclosing scope
             span_tracker: Optional span tracker for source locations in errors
+            dyn_var_cache: Optional shared cache for DynVar→ir.Var mapping.
         """
         self.closure_vars = closure_vars
         self.span_tracker = span_tracker
-        self.dynvar_cache: dict[str, ir.Var] = {}
+        self.dynvar_cache: dict[object, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
 
     def eval_expr(self, node: ast.expr) -> Any:
         """Evaluate an AST expression node against closure variables.
@@ -149,13 +151,13 @@ class ExprEvaluator:
         """Return a cached ir.Var for the given DynVar, creating one if needed.
 
         This ensures the same DynVar always maps to the same ir.Var instance,
-        so pointer-based shape compatibility checks succeed.
+        while distinct DynVar objects with the same display name remain distinct.
         """
-        cached = self.dynvar_cache.get(dv.name)
+        cached = self.dynvar_cache.get(dv)
         if cached is not None:
             return cached
         var = ir.Var(dv.name, ir.ScalarType(DataType.INDEX), span)
-        self.dynvar_cache[dv.name] = var
+        self.dynvar_cache[dv] = var
         return var
 
     def try_eval_as_ir(self, node: ast.expr) -> ir.Expr | None:

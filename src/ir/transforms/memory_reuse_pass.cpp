@@ -699,6 +699,8 @@ class YieldFixupMutator : public IRMutator {
       auto moved_type = CloneTypeWithMemRefAndRemapExprs(
           yield_var->GetType(), init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
           target_memory);
+      move_call = std::make_shared<Call>(move_call->op_, move_call->args_, move_call->kwargs_, moved_type,
+                                         move_call->span_);
       auto moved_var = std::make_shared<Var>(yield_var->name_hint_ + "_mv", moved_type, yield_var->span_);
 
       move_stmts.emplace_back(std::make_shared<AssignStmt>(moved_var, move_call, yield_var->span_));

@@ -94,8 +94,10 @@ def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
 
 def add(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise addition, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.add(lhs, rhs)
+    if isinstance(lhs, Tensor) and isinstance(rhs, (int, float, Scalar)):
+        return _tensor.adds(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
@@ -108,8 +110,10 @@ def add(lhs: T, rhs: T | int | float | Scalar) -> T:
 
 def sub(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise subtraction, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.sub(lhs, rhs)
+    if isinstance(lhs, Tensor) and isinstance(rhs, (int, float, Scalar)):
+        return _tensor.subs(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
@@ -122,8 +126,10 @@ def sub(lhs: T, rhs: T | int | float | Scalar) -> T:
 
 def mul(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise multiplication, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.mul(lhs, rhs)
+    if isinstance(lhs, Tensor) and isinstance(rhs, (int, float, Scalar)):
+        return _tensor.muls(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
@@ -136,8 +142,10 @@ def mul(lhs: T, rhs: T | int | float | Scalar) -> T:
 
 def div(lhs: T, rhs: T | int | float | Scalar) -> T:
     """Element-wise division, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.div(lhs, rhs)
+    if isinstance(lhs, Tensor) and isinstance(rhs, (int, float, Scalar)):
+        return _tensor.divs(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):

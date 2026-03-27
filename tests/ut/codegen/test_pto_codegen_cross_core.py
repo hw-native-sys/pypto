@@ -416,7 +416,6 @@ class TestCrossCoreTpushTpopCodegen:
             "The tpop user must remain after the if-defined scalar dependency"
         )
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_vector(self):
         """Test Vector kernel with bidirectional communication."""
         codes = self._compile_and_generate(BidirectionalCrossCorProgram)
@@ -444,7 +443,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.texp" in vector_code, "Should do exp post-processing (Vector op)"
         assert "pto.tfree_from_aic" in vector_code, "Should free C2V slot"
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_cube(self):
         """Test Cube kernel with bidirectional communication."""
         codes = self._compile_and_generate(BidirectionalCrossCorProgram)
@@ -471,7 +469,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.tpush_to_aiv" in cube_code, "Should push to AIV"
         assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_all_cross_core_pto_ops_covered(self):
         """Verify all 10 cross-core PTO operations are exercised across both test programs."""
         unidir_codes = self._compile_and_generate(CrossCoreTpushTpopProgram)

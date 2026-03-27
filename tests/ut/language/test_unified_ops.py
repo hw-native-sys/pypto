@@ -136,10 +136,62 @@ class TestUnifiedTensorDispatch:
 
         @pl.function
         def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            c: pl.Tensor[[64], pl.FP32] = pl.tensor.add(a, 5)
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(a, 5)
             return c
 
         ir.assert_structural_equal(unified, explicit)
+
+    def test_explicit_add_scalar_sugars_to_adds(self):
+        @pl.function
+        def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.add(a, 5)
+            return c
+
+        @pl.function
+        def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(a, 5)
+            return c
+
+        ir.assert_structural_equal(sugared, canonical)
+
+    def test_explicit_mul_scalar_sugars_to_muls(self):
+        @pl.function
+        def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.mul(a, 2.0)
+            return c
+
+        @pl.function
+        def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(a, 2.0)
+            return c
+
+        ir.assert_structural_equal(sugared, canonical)
+
+    def test_explicit_sub_scalar_sugars_to_subs(self):
+        @pl.function
+        def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.sub(a, 3)
+            return c
+
+        @pl.function
+        def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.subs(a, 3)
+            return c
+
+        ir.assert_structural_equal(sugared, canonical)
+
+    def test_explicit_div_scalar_sugars_to_divs(self):
+        @pl.function
+        def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.div(a, 4.0)
+            return c
+
+        @pl.function
+        def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.divs(a, 4.0)
+            return c
+
+        ir.assert_structural_equal(sugared, canonical)
 
     def test_matmul(self):
         @pl.function
@@ -696,6 +748,48 @@ class TestScalarAutoDispatch:
             return result
 
         ir.assert_structural_equal(unified, explicit)
+
+    def test_explicit_add_tile_scalar_sugars_to_adds(self):
+        @pl.function
+        def sugared(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, 5)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def canonical(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.adds(a, 5)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(sugared, canonical)
+
+    def test_explicit_mul_tile_scalar_sugars_to_muls(self):
+        @pl.function
+        def sugared(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.mul(a, 3.14)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def canonical(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(a, 3.14)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(sugared, canonical)
 
     def test_mul_tile_scalar(self):
         @pl.function

@@ -19,17 +19,20 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -192,6 +195,34 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   }
 
   if (changed) {
+    if (std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+      // GlobalVar calls carry function-signature-based types that are not
+      // re-inferred through OpRegistry.
+    } else if (auto opnode = std::dynamic_pointer_cast<const Op>(op->op_)) {
+      const auto& op_name = opnode->name_;
+      if (op_name != "tile.tpush_to_aic" && op_name != "tile.tpush_to_aiv" &&
+          op_name != "tile.tpop_from_aic" && op_name != "tile.tpop_from_aiv") {
+        bool can_rededuce = true;
+        bool has_explicit_type = false;
+        try {
+          auto deduced_original =
+              OpRegistry::GetInstance().Create(op_name, op->args_, op->kwargs_, op->span_);
+          has_explicit_type =
+              !structural_equal(op->GetType(), deduced_original->GetType(), /*enable_auto_mapping=*/true);
+        } catch (const Error&) {
+          // Preserve legacy/non-canonical handwritten forms that the text parser
+          // canonicalizes (e.g. old tile.load/store signatures).
+          can_rededuce = false;
+        }
+
+        if (can_rededuce && !has_explicit_type) {
+          return OpRegistry::GetInstance().Create(op_name, new_args, op->kwargs_, op->span_);
+        }
+      }
+    }
+
+    // Preserve original type and kwargs when reconstructing calls whose type
+    // cannot be re-inferred generically (e.g. non-Op callees, explicit tpop types).
     return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
   }
   return op;

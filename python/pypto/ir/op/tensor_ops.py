@@ -19,6 +19,35 @@ from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PadValue, Scal
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
 
+def _normalize_tensor_binary_rhs(rhs: int | float | Expr, span: Span) -> Expr:
+    """Normalize a tensor binary-op rhs into an IR expression."""
+    return (
+        _normalize_expr(rhs, span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+
+def _create_tensor_binary_call(
+    tensor_op_name: str,
+    scalar_op_name: str,
+    lhs: Expr,
+    rhs: int | float | Expr,
+    span: Span,
+) -> Call:
+    """Create a tensor binary call with scalar auto-dispatch.
+
+    Explicit ``tensor.add/sub/mul/div`` accept either a tensor rhs or a scalar
+    rhs. Scalar operands are canonicalized to ``tensor.adds/subs/muls/divs`` so
+    printer output remains stable in official DSL form.
+    """
+    rhs_expr = _normalize_tensor_binary_rhs(rhs, span)
+
+    if isinstance(rhs_expr.type, ScalarType):
+        return _ir_core.create_op_call(scalar_op_name, [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call(tensor_op_name, [lhs, rhs_expr], {}, span)
+
+
 def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
@@ -258,31 +287,9 @@ def matmul_acc(
 
 
 def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise multiplication of tensor and tensor or scalar.
-
-    Automatically selects between tensor.mul (tensor x tensor) and
-    tensor.muls (tensor x scalar) based on the rhs type.
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Expr)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for element-wise multiplication
-    """
+    """Element-wise multiplication of tensor and tensor or scalar."""
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-
-    rhs_type = rhs_expr.type
-    if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.muls", [lhs, rhs_expr], {}, actual_span)
-    else:
-        return _ir_core.create_op_call("tensor.mul", [lhs, rhs_expr], {}, actual_span)
+    return _create_tensor_binary_call("tensor.mul", "tensor.muls", lhs, rhs, actual_span)
 
 
 def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -297,40 +304,14 @@ def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise multiplication with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tensor_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tensor.muls", [lhs, rhs_expr], {}, actual_span)
 
 
 def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise addition of tensor and tensor or scalar.
-
-    Automatically selects between tensor.add (tensor + tensor) and
-    tensor.adds (tensor + scalar) based on the rhs type.
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Expr)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for element-wise addition
-    """
+    """Element-wise addition of tensor and tensor or scalar."""
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-
-    rhs_type = rhs_expr.type
-    if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.adds", [lhs, rhs_expr], {}, actual_span)
-    else:
-        return _ir_core.create_op_call("tensor.add", [lhs, rhs_expr], {}, actual_span)
+    return _create_tensor_binary_call("tensor.add", "tensor.adds", lhs, rhs, actual_span)
 
 
 def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -345,40 +326,14 @@ def adds(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise addition with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tensor_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tensor.adds", [lhs, rhs_expr], {}, actual_span)
 
 
 def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise subtraction of tensor and tensor or scalar.
-
-    Automatically selects between tensor.sub (tensor - tensor) and
-    tensor.subs (tensor - scalar) based on the rhs type.
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Expr)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for element-wise subtraction
-    """
+    """Element-wise subtraction of tensor and tensor or scalar."""
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-
-    rhs_type = rhs_expr.type
-    if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.subs", [lhs, rhs_expr], {}, actual_span)
-    else:
-        return _ir_core.create_op_call("tensor.sub", [lhs, rhs_expr], {}, actual_span)
+    return _create_tensor_binary_call("tensor.sub", "tensor.subs", lhs, rhs, actual_span)
 
 
 def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -393,40 +348,14 @@ def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise subtraction with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tensor_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tensor.subs", [lhs, rhs_expr], {}, actual_span)
 
 
 def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
-    """Element-wise division of tensor and tensor or scalar.
-
-    Automatically selects between tensor.div (tensor / tensor) and
-    tensor.divs (tensor / scalar) based on the rhs type.
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor or scalar (int/float/Expr)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for element-wise division
-    """
+    """Element-wise division of tensor and tensor or scalar."""
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-
-    rhs_type = rhs_expr.type
-    if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
-    else:
-        return _ir_core.create_op_call("tensor.div", [lhs, rhs_expr], {}, actual_span)
+    return _create_tensor_binary_call("tensor.div", "tensor.divs", lhs, rhs, actual_span)
 
 
 def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
@@ -441,11 +370,7 @@ def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise division with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tensor_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
 
 

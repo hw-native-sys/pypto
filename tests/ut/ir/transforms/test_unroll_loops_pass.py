@@ -189,18 +189,21 @@ class TestZeroTripLoop:
 class TestParserValidation:
     """Tests for parser-level validation of pl.unroll()."""
 
-    def test_unroll_with_init_values_rejected(self):
-        """pl.unroll() cannot be combined with init_values."""
-        with pytest.raises(Exception, match="cannot be combined with init_values"):
+    def test_unroll_with_init_values_round_trip(self):
+        """pl.unroll(..., init_values=...) should remain parseable for roundtrip IR."""
 
-            @pl.program
-            class _:
-                @pl.function
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i, (acc,) in pl.unroll(3, init_values=(x,)):
-                        acc = pl.add(acc, 1.0)
-                        acc = pl.yield_(acc)
-                    return x
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.unroll(3, init_values=(x,)):
+                    acc = pl.add(acc, 1.0)
+                    acc = pl.yield_(acc)
+                return acc
+
+        printed = python_print(Prog)
+        assert "pl.unroll(3, init_values=(x,))" in printed
+        ir.verify_roundtrip(Prog)
 
 
 class TestPrinterRoundTrip:

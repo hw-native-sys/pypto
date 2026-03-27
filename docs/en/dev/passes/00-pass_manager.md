@@ -158,6 +158,21 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
     pipeline.run(program)
 ```
 
+The Python IR layer also provides a print-parse roundtrip checker built on top
+of `CallbackInstrument`:
+
+```python
+from pypto import ir, passes
+
+ir.verify_roundtrip(program)
+
+with passes.PassContext([ir.RoundtripInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    pipeline.run(program)
+```
+
+`verify_roundtrip()` prints the IR, parses it back with `pl.parse()`, and then
+calls `ir.assert_structural_equal(..., enable_auto_mapping=True)`.
+
 `run_passes(dump_ir=True)` uses `CallbackInstrument` internally to dump IR after each pass, delegating verification to the C++ pipeline. When invoked inside an existing `PassContext`, dump mode preserves the outer context's instruments (e.g., user-provided `VerificationInstrument`) and verification level, appending the dump instrument to the combined list.
 
 ### ReportInstrument
@@ -220,12 +235,16 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### Test Fixture
 
-All unit tests automatically run with BEFORE_AND_AFTER verification via `tests/ut/conftest.py`:
+All unit tests automatically run with BEFORE_AND_AFTER property verification and
+roundtrip verification via `tests/ut/conftest.py`:
 
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    with passes.PassContext([
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+        ir.RoundtripInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+    ]):
         yield
 ```
 

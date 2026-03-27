@@ -44,6 +44,216 @@
 namespace pypto {
 namespace ir {
 
+namespace {
+
+TileLayout InferCanonicalTileLayoutFromShape(const std::vector<ExprPtr>& shape) {
+  if (shape.size() != 2) {
+    return TileLayout::row_major;
+  }
+
+  auto rows_const = As<ConstInt>(shape[0]);
+  auto cols_const = As<ConstInt>(shape[1]);
+  if (!rows_const || !cols_const) {
+    return TileLayout::row_major;
+  }
+  return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
+}
+
+TensorView NormalizeTensorViewForCompare(const std::optional<TensorView>& tensor_view,
+                                         const std::vector<ExprPtr>& shape) {
+  TensorView normalized = tensor_view.value_or(TensorView{});
+  if (normalized.valid_shape.empty()) {
+    normalized.valid_shape = shape;
+  }
+  return normalized;
+}
+
+bool IsDefaultPrintedTileView(const TileView& tile_view, const std::vector<ExprPtr>& shape) {
+  if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null) {
+    return false;
+  }
+
+  std::vector<ExprPtr> normalized_valid_shape = tile_view.valid_shape.empty() ? shape : tile_view.valid_shape;
+  if (normalized_valid_shape.size() != shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (normalized_valid_shape[i] == shape[i]) {
+      continue;
+    }
+    auto lhs_const = As<ConstInt>(normalized_valid_shape[i]);
+    auto rhs_const = As<ConstInt>(shape[i]);
+    if (!lhs_const || !rhs_const || lhs_const->value_ != rhs_const->value_) {
+      return false;
+    }
+  }
+  return tile_view.blayout == TileView{}.blayout && tile_view.slayout == TileView{}.slayout &&
+         tile_view.fractal == TileView{}.fractal;
+}
+
+TileView NormalizeTileViewForCompare(const std::optional<TileView>& tile_view,
+                                     const std::vector<ExprPtr>& shape,
+                                     const std::optional<MemorySpace>& memory_space = std::nullopt) {
+  TileView normalized = tile_view.value_or(TileView{});
+  if (normalized.valid_shape.empty()) {
+    normalized.valid_shape = shape;
+  }
+  if (!tile_view.has_value() || IsDefaultPrintedTileView(normalized, shape)) {
+    normalized.blayout = InferCanonicalTileLayoutFromShape(shape);
+    if (memory_space.has_value()) {
+      switch (*memory_space) {
+        case MemorySpace::Mat:
+        case MemorySpace::Left:
+          normalized.blayout = TileLayout::col_major;
+          normalized.slayout = TileLayout::row_major;
+          break;
+        case MemorySpace::Right:
+          normalized.slayout = TileLayout::col_major;
+          break;
+        case MemorySpace::Acc:
+          normalized.blayout = TileLayout::col_major;
+          normalized.slayout = TileLayout::row_major;
+          normalized.fractal = 1024;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  if (!normalized.start_offset) {
+    normalized.start_offset = std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+  }
+  return normalized;
+}
+
+std::vector<ExprPtr> GetCanonicalTileLoadValidShape(const CallPtr& call,
+                                                    const TypePtr& binding_type = nullptr) {
+  if (auto binding_tile = As<TileType>(binding_type)) {
+    if (binding_tile->tile_view_.has_value() && !binding_tile->tile_view_->valid_shape.empty()) {
+      return binding_tile->tile_view_->valid_shape;
+    }
+    return binding_tile->shape_;
+  }
+  if (call->args_.size() >= 4) {
+    if (auto valid_shape = As<MakeTuple>(call->args_[3])) {
+      return valid_shape->elements_;
+    }
+  }
+  if (auto tile_type = As<TileType>(call->GetType())) {
+    if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
+      return tile_type->tile_view_->valid_shape;
+    }
+    return tile_type->shape_;
+  }
+  if (call->args_.size() >= 3) {
+    if (auto shape = As<MakeTuple>(call->args_[2])) {
+      return shape->elements_;
+    }
+  }
+  return {};
+}
+
+MemorySpace GetCanonicalTileLoadTargetMemory(const CallPtr& call, const TypePtr& binding_type = nullptr) {
+  if (auto binding_tile = As<TileType>(binding_type)) {
+    if (binding_tile->memory_space_.has_value()) {
+      return binding_tile->memory_space_.value();
+    }
+  }
+  if (auto tile_type = As<TileType>(call->GetType())) {
+    if (tile_type->memory_space_.has_value()) {
+      return tile_type->memory_space_.value();
+    }
+  }
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key == "target_memory" && value.type() == typeid(MemorySpace)) {
+      return AnyCast<MemorySpace>(value, "tile.load target_memory");
+    }
+  }
+  return MemorySpace::Vec;
+}
+
+bool GetCanonicalTileLoadTranspose(const CallPtr& call, MemorySpace target_memory,
+                                   const TypePtr& binding_type = nullptr) {
+  for (const auto& [key, value] : call->kwargs_) {
+    if (key == "transpose" && value.type() == typeid(bool)) {
+      return AnyCast<bool>(value, "tile.load transpose");
+    }
+  }
+  if (target_memory != MemorySpace::Mat) {
+    return false;
+  }
+  if (auto binding_tile = As<TileType>(binding_type)) {
+    TileView tile_view = binding_tile->tile_view_.value_or(TileView{});
+    return tile_view.blayout == TileLayout::row_major && tile_view.slayout == TileLayout::col_major;
+  }
+  if (auto tile_type = As<TileType>(call->GetType())) {
+    TileView tile_view = tile_type->tile_view_.value_or(TileView{});
+    return tile_view.blayout == TileLayout::row_major && tile_view.slayout == TileLayout::col_major;
+  }
+  return false;
+}
+
+std::vector<ExprPtr> GetCanonicalTileLoadArgs(const CallPtr& call, const TypePtr& binding_type = nullptr) {
+  if (call->args_.size() < 3) {
+    return call->args_;
+  }
+  if (call->args_.size() >= 4) {
+    return call->args_;
+  }
+  return {
+      call->args_[0],
+      call->args_[1],
+      call->args_[2],
+      std::make_shared<MakeTuple>(GetCanonicalTileLoadValidShape(call, binding_type), Span::unknown()),
+  };
+}
+
+bool AreShapeConstIntsCompatible(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto lhs_const = As<ConstInt>(lhs);
+  auto rhs_const = As<ConstInt>(rhs);
+  if (!lhs_const || !rhs_const) {
+    return false;
+  }
+  if (lhs_const->value_ != rhs_const->value_) {
+    return false;
+  }
+  if (lhs_const->dtype() == rhs_const->dtype()) {
+    return true;
+  }
+  return (lhs_const->dtype() == DataType::INDEX && rhs_const->dtype().IsInt()) ||
+         (rhs_const->dtype() == DataType::INDEX && lhs_const->dtype().IsInt());
+}
+
+bool AreIndexCompatibleIntegerTypes(const DataType& lhs, const DataType& rhs) {
+  if (lhs == rhs) {
+    return true;
+  }
+  return (lhs == DataType::INDEX && rhs.IsInt()) || (rhs == DataType::INDEX && lhs.IsInt());
+}
+
+template <bool AssertMode>
+class TransparentDepthResetGuard {
+ public:
+  explicit TransparentDepthResetGuard(int& transparent_depth)
+      : transparent_depth_(transparent_depth), saved_depth_(transparent_depth) {
+    if constexpr (AssertMode) {
+      transparent_depth_ = 0;
+    }
+  }
+
+  ~TransparentDepthResetGuard() {
+    if constexpr (AssertMode) {
+      transparent_depth_ = saved_depth_;
+    }
+  }
+
+ private:
+  int& transparent_depth_;
+  int saved_depth_;
+};
+
+}  // namespace
+
 /**
  * @brief Unified structural equality checker for IR nodes
  *
@@ -279,7 +489,7 @@ class StructuralEqualImpl {
   }
 
   result_type VisitLeafField(const DataType& lhs, const DataType& rhs) {
-    if (lhs != rhs) {
+    if (!AreIndexCompatibleIntegerTypes(lhs, rhs)) {
       if constexpr (AssertMode) {
         std::ostringstream msg;
         msg << "DataType mismatch (" << lhs.ToString() << " != " << rhs.ToString() << ")";
@@ -582,6 +792,13 @@ class StructuralEqualImpl {
 
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
+  bool EqualCall(const CallPtr& lhs, const CallPtr& rhs);
+  bool EqualTileLoadCall(const CallPtr& lhs, const CallPtr& rhs, const TypePtr& lhs_binding_type = nullptr,
+                         const TypePtr& rhs_binding_type = nullptr);
+  bool EqualAssignStmt(const AssignStmtPtr& lhs, const AssignStmtPtr& rhs);
+  bool EqualBinaryExpr(const BinaryExprPtr& lhs, const BinaryExprPtr& rhs);
+  bool EqualUnaryExpr(const UnaryExprPtr& lhs, const UnaryExprPtr& rhs);
+  bool EqualForStmt(const ForStmtPtr& lhs, const ForStmtPtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
   bool EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs);
   bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
@@ -741,19 +958,34 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ConstInt)
   EQUAL_DISPATCH(ConstFloat)
   EQUAL_DISPATCH(ConstBool)
-  EQUAL_DISPATCH(Call)
+  if (auto lhs_call = As<Call>(lhs)) {
+    bool result = EqualCall(lhs_call, std::static_pointer_cast<const Call>(rhs));
+    return result;
+  }
   EQUAL_DISPATCH(MakeTuple)
   EQUAL_DISPATCH(TupleGetItemExpr)
 
   // BinaryExpr and UnaryExpr are abstract base classes matching multiple kinds
-  EQUAL_DISPATCH(BinaryExpr)
-  EQUAL_DISPATCH(UnaryExpr)
+  if (auto lhs_binary = As<BinaryExpr>(lhs)) {
+    bool result = EqualBinaryExpr(lhs_binary, std::static_pointer_cast<const BinaryExpr>(rhs));
+    return result;
+  }
+  if (auto lhs_unary = As<UnaryExpr>(lhs)) {
+    bool result = EqualUnaryExpr(lhs_unary, std::static_pointer_cast<const UnaryExpr>(rhs));
+    return result;
+  }
 
-  EQUAL_DISPATCH(AssignStmt)
+  if (auto lhs_assign = As<AssignStmt>(lhs)) {
+    bool result = EqualAssignStmt(lhs_assign, std::static_pointer_cast<const AssignStmt>(rhs));
+    return result;
+  }
   EQUAL_DISPATCH(IfStmt)
   EQUAL_DISPATCH(YieldStmt)
   EQUAL_DISPATCH(ReturnStmt)
-  EQUAL_DISPATCH(ForStmt)
+  if (auto lhs_for = As<ForStmt>(lhs)) {
+    bool result = EqualForStmt(lhs_for, std::static_pointer_cast<const ForStmt>(rhs));
+    return result;
+  }
   EQUAL_DISPATCH(WhileStmt)
   EQUAL_DISPATCH(ScopeStmt)
   EQUAL_DISPATCH_TRANSPARENT(SeqStmts)
@@ -768,6 +1000,275 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
 
 #undef EQUAL_DISPATCH
 #undef EQUAL_DISPATCH_TRANSPARENT
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualAssignStmt(const AssignStmtPtr& lhs, const AssignStmtPtr& rhs) {
+  TransparentDepthResetGuard<AssertMode> depth_guard(transparent_depth_);
+  if (!rhs) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("Type cast failed for AssignStmt", IRNodePtr(), IRNodePtr(), "", "");
+    }
+    return false;
+  }
+
+  PushFieldName("var");
+  bool var_equal = false;
+  VisitDefField([&]() { var_equal = Equal(lhs->var_, rhs->var_); });
+  PopFieldName();
+  if (!var_equal) {
+    return false;
+  }
+
+  PushFieldName("value");
+  bool value_equal = [&]() {
+    auto lhs_call = As<Call>(lhs->value_);
+    auto rhs_call = As<Call>(rhs->value_);
+    if (lhs_call && rhs_call && lhs_call->op_->name_ == "tile.load" && rhs_call->op_->name_ == "tile.load") {
+      return EqualTileLoadCall(lhs_call, rhs_call, lhs->var_->GetType(), rhs->var_->GetType());
+    }
+    return Equal(lhs->value_, rhs->value_);
+  }();
+  PopFieldName();
+  return value_equal;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualCall(const CallPtr& lhs, const CallPtr& rhs) {
+  TransparentDepthResetGuard<AssertMode> depth_guard(transparent_depth_);
+  if (!rhs) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("Type cast failed for Call", IRNodePtr(), IRNodePtr(), "", "");
+    }
+    return false;
+  }
+
+  PushFieldName("op");
+  bool op_equal = VisitLeafField(lhs->op_, rhs->op_);
+  PopFieldName();
+  if (!op_equal) {
+    return false;
+  }
+
+  if (lhs->op_->name_ == "tile.load") {
+    return EqualTileLoadCall(lhs, rhs);
+  }
+
+  PushFieldName("args");
+  bool args_equal = VisitIRNodeVectorField(lhs->args_, rhs->args_);
+  PopFieldName();
+  if (!args_equal) {
+    return false;
+  }
+
+  PushFieldName("kwargs");
+  bool kwargs_equal = VisitLeafField(lhs->kwargs_, rhs->kwargs_);
+  PopFieldName();
+  if (!kwargs_equal) {
+    return false;
+  }
+
+  PushFieldName("type");
+  bool type_equal = IsA<UnknownType>(lhs->GetType()) || IsA<UnknownType>(rhs->GetType())
+                        ? true
+                        : EqualType(lhs->GetType(), rhs->GetType());
+  PopFieldName();
+  return type_equal;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualTileLoadCall(const CallPtr& lhs, const CallPtr& rhs,
+                                                        const TypePtr& lhs_binding_type,
+                                                        const TypePtr& rhs_binding_type) {
+  PushFieldName("args");
+  bool args_equal = VisitIRNodeVectorField(GetCanonicalTileLoadArgs(lhs, lhs_binding_type),
+                                           GetCanonicalTileLoadArgs(rhs, rhs_binding_type));
+  PopFieldName();
+  if (!args_equal) {
+    return false;
+  }
+
+  MemorySpace lhs_target_memory = GetCanonicalTileLoadTargetMemory(lhs, lhs_binding_type);
+  MemorySpace rhs_target_memory = GetCanonicalTileLoadTargetMemory(rhs, rhs_binding_type);
+  bool lhs_transpose = GetCanonicalTileLoadTranspose(lhs, lhs_target_memory, lhs_binding_type);
+  bool rhs_transpose = GetCanonicalTileLoadTranspose(rhs, rhs_target_memory, rhs_binding_type);
+
+  PushFieldName("kwargs");
+  bool kwargs_equal = lhs_target_memory == rhs_target_memory && lhs_transpose == rhs_transpose;
+  if constexpr (AssertMode) {
+    if (!kwargs_equal) {
+      ThrowMismatch("tile.load canonical kwargs mismatch", IRNodePtr(), IRNodePtr(), "", "");
+    }
+  }
+  PopFieldName();
+  if (!kwargs_equal) {
+    return false;
+  }
+
+  PushFieldName("type");
+  const TypePtr& lhs_type = lhs_binding_type ? lhs_binding_type : lhs->GetType();
+  const TypePtr& rhs_type = rhs_binding_type ? rhs_binding_type : rhs->GetType();
+  bool type_equal =
+      IsA<UnknownType>(lhs_type) || IsA<UnknownType>(rhs_type) ? true : EqualType(lhs_type, rhs_type);
+  PopFieldName();
+  return type_equal;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualBinaryExpr(const BinaryExprPtr& lhs, const BinaryExprPtr& rhs) {
+  TransparentDepthResetGuard<AssertMode> depth_guard(transparent_depth_);
+  if (!rhs) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("Type cast failed for BinaryExpr", IRNodePtr(), IRNodePtr(), "", "");
+    }
+    return false;
+  }
+
+  PushFieldName("type");
+  bool type_equal = EqualType(lhs->GetType(), rhs->GetType());
+  if constexpr (AssertMode) {
+    if (!type_equal) {
+      std::ostringstream msg;
+      msg << "BinaryExpr type mismatch";
+      ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+    }
+  }
+  PopFieldName();
+  if (!type_equal) {
+    return false;
+  }
+
+  PushFieldName("left");
+  bool left_equal = Equal(lhs->left_, rhs->left_);
+  PopFieldName();
+  if (!left_equal) {
+    return false;
+  }
+
+  PushFieldName("right");
+  bool right_equal = Equal(lhs->right_, rhs->right_);
+  PopFieldName();
+  return right_equal;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualUnaryExpr(const UnaryExprPtr& lhs, const UnaryExprPtr& rhs) {
+  TransparentDepthResetGuard<AssertMode> depth_guard(transparent_depth_);
+  if (!rhs) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("Type cast failed for UnaryExpr", IRNodePtr(), IRNodePtr(), "", "");
+    }
+    return false;
+  }
+
+  PushFieldName("type");
+  bool type_equal = EqualType(lhs->GetType(), rhs->GetType());
+  if constexpr (AssertMode) {
+    if (!type_equal) {
+      std::ostringstream msg;
+      msg << "UnaryExpr type mismatch";
+      ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+    }
+  }
+  PopFieldName();
+  if (!type_equal) {
+    return false;
+  }
+
+  PushFieldName("operand");
+  bool operand_equal = Equal(lhs->operand_, rhs->operand_);
+  PopFieldName();
+  return operand_equal;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualForStmt(const ForStmtPtr& lhs, const ForStmtPtr& rhs) {
+  TransparentDepthResetGuard<AssertMode> depth_guard(transparent_depth_);
+  if (!rhs) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("Type cast failed for ForStmt", IRNodePtr(), IRNodePtr(), "", "");
+    }
+    return false;
+  }
+
+  PushFieldName("loop_var");
+  bool loop_var_equal = false;
+  VisitDefField([&]() { loop_var_equal = Equal(lhs->loop_var_, rhs->loop_var_); });
+  PopFieldName();
+  if (!loop_var_equal) {
+    return false;
+  }
+
+  PushFieldName("start");
+  bool start_equal = Equal(lhs->start_, rhs->start_);
+  PopFieldName();
+  if (!start_equal) {
+    return false;
+  }
+
+  PushFieldName("stop");
+  bool stop_equal = Equal(lhs->stop_, rhs->stop_);
+  PopFieldName();
+  if (!stop_equal) {
+    return false;
+  }
+
+  PushFieldName("step");
+  bool step_equal = Equal(lhs->step_, rhs->step_);
+  PopFieldName();
+  if (!step_equal) {
+    return false;
+  }
+
+  PushFieldName("iter_args");
+  bool iter_args_equal = false;
+  VisitDefField([&]() { iter_args_equal = VisitIRNodeVectorField(lhs->iter_args_, rhs->iter_args_); });
+  PopFieldName();
+  if (!iter_args_equal) {
+    return false;
+  }
+
+  PushFieldName("body");
+  bool body_equal = Equal(lhs->body_, rhs->body_);
+  PopFieldName();
+  if (!body_equal) {
+    return false;
+  }
+
+  PushFieldName("return_vars");
+  bool return_vars_equal = false;
+  VisitDefField([&]() { return_vars_equal = VisitIRNodeVectorField(lhs->return_vars_, rhs->return_vars_); });
+  PopFieldName();
+  if (!return_vars_equal) {
+    return false;
+  }
+
+  PushFieldName("kind");
+  bool kind_equal = lhs->kind_ == rhs->kind_;
+  if constexpr (AssertMode) {
+    if (!kind_equal) {
+      std::ostringstream msg;
+      msg << "ForKind mismatch (" << ForKindToString(lhs->kind_) << " != " << ForKindToString(rhs->kind_)
+          << ")";
+      ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+    }
+  }
+  PopFieldName();
+  if (!kind_equal) {
+    return false;
+  }
+
+  PushFieldName("chunk_size");
+  bool chunk_size_equal = VisitIRNodeField(lhs->chunk_size_, rhs->chunk_size_);
+  PopFieldName();
+  if (!chunk_size_equal) {
+    return false;
+  }
+
+  PushFieldName("chunk_policy");
+  bool chunk_policy_equal = VisitLeafField(lhs->chunk_policy_, rhs->chunk_policy_);
+  PopFieldName();
+  return chunk_policy_equal;
+}
 
 template <bool AssertMode>
 bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePtr& rhs) {
@@ -788,7 +1289,7 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       }
       return false;
     }
-    if (lhs_scalar->dtype_ != rhs_scalar->dtype_) {
+    if (!AreIndexCompatibleIntegerTypes(lhs_scalar->dtype_, rhs_scalar->dtype_)) {
       if constexpr (AssertMode) {
         std::ostringstream msg;
         msg << "ScalarType dtype mismatch (" << lhs_scalar->dtype_.ToString()
@@ -825,51 +1326,46 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     for (size_t i = 0; i < lhs_tensor->shape_.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) continue;
       if (!Equal(lhs_tensor->shape_[i], rhs_tensor->shape_[i])) return false;
     }
-    // Compare tensor_view
-    if (lhs_tensor->tensor_view_.has_value() != rhs_tensor->tensor_view_.has_value()) {
+    // Compare tensor_view. Missing TensorView is semantically equivalent to an
+    // explicit default TensorView() with valid_shape = shape.
+    const TensorView lhs_tv = NormalizeTensorViewForCompare(lhs_tensor->tensor_view_, lhs_tensor->shape_);
+    const TensorView rhs_tv = NormalizeTensorViewForCompare(rhs_tensor->tensor_view_, rhs_tensor->shape_);
+    if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
       if constexpr (AssertMode) {
-        ThrowMismatch("TensorType tensor_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        std::ostringstream msg;
+        msg << "TensorView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
+            << " != " << rhs_tv.valid_shape.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }
-    if (lhs_tensor->tensor_view_.has_value()) {
-      const auto& lhs_tv = lhs_tensor->tensor_view_.value();
-      const auto& rhs_tv = rhs_tensor->tensor_view_.value();
-      // Compare valid_shape
-      if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
-        if constexpr (AssertMode) {
-          std::ostringstream msg;
-          msg << "TensorView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
-              << " != " << rhs_tv.valid_shape.size() << ")";
-          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
+    for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) continue;
+      if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+    }
+    // Compare stride
+    if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "TensorView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
+            << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
-      for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
-        if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+      return false;
+    }
+    for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tv.stride[i], rhs_tv.stride[i])) continue;
+      if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
+    }
+    // Compare layout
+    if (lhs_tv.layout != rhs_tv.layout) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TensorView layout mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
-      // Compare stride
-      if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
-        if constexpr (AssertMode) {
-          std::ostringstream msg;
-          msg << "TensorView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
-              << ")";
-          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
-      }
-      for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
-        if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
-      }
-      // Compare layout
-      if (lhs_tv.layout != rhs_tv.layout) {
-        if constexpr (AssertMode) {
-          ThrowMismatch("TensorView layout mismatch", IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
-      }
+      return false;
     }
     return true;
   } else if (auto lhs_tile = As<TileType>(lhs)) {
@@ -901,74 +1397,75 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     for (size_t i = 0; i < lhs_tile->shape_.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tile->shape_[i], rhs_tile->shape_[i])) continue;
       if (!Equal(lhs_tile->shape_[i], rhs_tile->shape_[i])) return false;
     }
-    // Compare tile_view
-    if (lhs_tile->tile_view_.has_value() != rhs_tile->tile_view_.has_value()) {
+    // Compare tile_view. Missing TileView is semantically equivalent to an
+    // explicit default TileView() with valid_shape = shape.
+    const TileView lhs_tv =
+        NormalizeTileViewForCompare(lhs_tile->tile_view_, lhs_tile->shape_, lhs_tile->memory_space_);
+    const TileView rhs_tv =
+        NormalizeTileViewForCompare(rhs_tile->tile_view_, rhs_tile->shape_, rhs_tile->memory_space_);
+    if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
       if constexpr (AssertMode) {
-        ThrowMismatch("TileType tile_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        std::ostringstream msg;
+        msg << "TileView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
+            << " != " << rhs_tv.valid_shape.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }
-    if (lhs_tile->tile_view_.has_value()) {
-      const auto& lhs_tv = lhs_tile->tile_view_.value();
-      const auto& rhs_tv = rhs_tile->tile_view_.value();
-      // Compare valid_shape
-      if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
-        if constexpr (AssertMode) {
-          std::ostringstream msg;
-          msg << "TileView valid_shape size mismatch (" << lhs_tv.valid_shape.size()
-              << " != " << rhs_tv.valid_shape.size() << ")";
-          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
+    for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) continue;
+      if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+    }
+    // Compare stride
+    if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "TileView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
+            << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
-      for (size_t i = 0; i < lhs_tv.valid_shape.size(); ++i) {
-        if (!Equal(lhs_tv.valid_shape[i], rhs_tv.valid_shape[i])) return false;
+      return false;
+    }
+    for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
+      if (AreShapeConstIntsCompatible(lhs_tv.stride[i], rhs_tv.stride[i])) continue;
+      if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
+    }
+    // Compare start_offset
+    if (AreShapeConstIntsCompatible(lhs_tv.start_offset, rhs_tv.start_offset)) {
+      // no-op
+    } else if (!Equal(lhs_tv.start_offset, rhs_tv.start_offset)) {
+      return false;
+    }
+    // Compare blayout
+    if (lhs_tv.blayout != rhs_tv.blayout) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileView blayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
-      // Compare stride
-      if (lhs_tv.stride.size() != rhs_tv.stride.size()) {
-        if constexpr (AssertMode) {
-          std::ostringstream msg;
-          msg << "TileView stride size mismatch (" << lhs_tv.stride.size() << " != " << rhs_tv.stride.size()
-              << ")";
-          ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
+      return false;
+    }
+    // Compare slayout
+    if (lhs_tv.slayout != rhs_tv.slayout) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileView slayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
-      for (size_t i = 0; i < lhs_tv.stride.size(); ++i) {
-        if (!Equal(lhs_tv.stride[i], rhs_tv.stride[i])) return false;
+      return false;
+    }
+    // Compare fractal
+    if (lhs_tv.fractal != rhs_tv.fractal) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileView fractal mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
-      // Compare start_offset
-      if (!Equal(lhs_tv.start_offset, rhs_tv.start_offset)) return false;
-      // Compare blayout
-      if (lhs_tv.blayout != rhs_tv.blayout) {
-        if constexpr (AssertMode) {
-          ThrowMismatch("TileView blayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
+      return false;
+    }
+    // Compare pad
+    if (lhs_tv.pad != rhs_tv.pad) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("TileView pad mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
-      // Compare slayout
-      if (lhs_tv.slayout != rhs_tv.slayout) {
-        if constexpr (AssertMode) {
-          ThrowMismatch("TileView slayout mismatch", IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
-      }
-      // Compare fractal
-      if (lhs_tv.fractal != rhs_tv.fractal) {
-        if constexpr (AssertMode) {
-          ThrowMismatch("TileView fractal mismatch", IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
-      }
-      // Compare pad
-      if (lhs_tv.pad != rhs_tv.pad) {
-        if constexpr (AssertMode) {
-          ThrowMismatch("TileView pad mismatch", IRNodePtr(), IRNodePtr(), "", "");
-        }
-        return false;
-      }
+      return false;
     }
     // Compare memory_space
     if (lhs_tile->memory_space_.has_value() != rhs_tile->memory_space_.has_value()) {

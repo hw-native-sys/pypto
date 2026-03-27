@@ -10,12 +10,13 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
+from pypto.ir.builder import _loop_carried_types_match
 from pypto.ir.printer import python_print
 from pypto.pypto_core import DataType, ir
 
@@ -68,6 +69,118 @@ def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     return upper_value - lower_value
 
 
+def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
+    """Return whether two shape-like expression lists are statically identical."""
+    if len(lhs) != len(rhs):
+        return False
+    for lhs_dim, rhs_dim in zip(lhs, rhs):
+        if lhs_dim is rhs_dim:
+            continue
+        lhs_value = _const_int_value(lhs_dim)
+        rhs_value = _const_int_value(rhs_dim)
+        if lhs_value is None or rhs_value is None or lhs_value != rhs_value:
+            return False
+    return True
+
+
+def _prefer_loop_carried_type(
+    annotated_type: ir.Type | None,
+    iter_type: ir.Type | None,
+) -> ir.Type | None:
+    """Prefer the loop-carried type when a printed yield annotation is more specific."""
+    if annotated_type is None:
+        return iter_type
+    if iter_type is None:
+        return annotated_type
+    return annotated_type if _loop_carried_types_match(annotated_type, iter_type) else iter_type
+
+
+def _has_printable_tile_view(
+    tile_view: ir.TileView | None,
+    shape: Sequence[ir.Expr],
+    memory_space: ir.MemorySpace | None = None,
+) -> bool:
+    """Return whether a TileView carries non-default metadata in Python text form."""
+    if tile_view is None:
+        return False
+    if tile_view.valid_shape and not _shape_exprs_match(tile_view.valid_shape, shape):
+        return True
+    if tile_view.stride:
+        return True
+    if tile_view.start_offset is not None:
+        return True
+    default_blayout = ir.TileLayout.row_major
+    default_slayout = ir.TileLayout.none_box
+    default_fractal = ir.TileView().fractal
+    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+    elif memory_space == ir.MemorySpace.Right:
+        default_slayout = ir.TileLayout.col_major
+    elif memory_space == ir.MemorySpace.Acc:
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+        default_fractal = 1024
+    if tile_view.blayout != default_blayout:
+        return True
+    if tile_view.slayout != default_slayout:
+        return True
+    if tile_view.fractal != default_fractal:
+        return True
+    if tile_view.pad != ir.PadValue.null:
+        return True
+    return False
+
+
+def _has_printable_tensor_view(tensor_view: ir.TensorView | None, shape: list[ir.Expr]) -> bool:
+    """Return whether a TensorView carries non-default metadata in Python text form."""
+    if tensor_view is None:
+        return False
+    if tensor_view.valid_shape and not _shape_exprs_match(tensor_view.valid_shape, shape):
+        return True
+    if tensor_view.stride:
+        return True
+    if tensor_view.layout != ir.TensorLayout.ND:
+        return True
+    return False
+
+
+def _normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
+    """Normalize omitted default shaped-view metadata before syntax-level type comparison."""
+    if isinstance(type_, ir.TensorType):
+        tensor_view = type_.tensor_view
+        if tensor_view is not None and not _has_printable_tensor_view(tensor_view, list(type_.shape)):
+            tensor_view = None
+        if tensor_view is type_.tensor_view:
+            return type_
+        return ir.TensorType(type_.shape, type_.dtype, type_.memref, tensor_view)
+
+    if isinstance(type_, ir.TileType):
+        tile_view = type_.tile_view
+        if tile_view is not None and not _has_printable_tile_view(tile_view, type_.shape, type_.memory_space):
+            tile_view = None
+        if tile_view is type_.tile_view:
+            return type_
+        return ir.TileType(type_.shape, type_.dtype, type_.memref, tile_view, type_.memory_space)
+
+    return type_
+
+
+def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether two IR types are equivalent in parser-visible syntax."""
+    if lhs is rhs:
+        return True
+    if lhs is None or rhs is None:
+        return lhs is rhs
+    lhs = _normalize_type_for_syntax_match(lhs)
+    rhs = _normalize_type_for_syntax_match(rhs)
+    assert lhs is not None
+    assert rhs is not None
+    if type(lhs) is not type(rhs):
+        return False
+    return ir.python_print_type(lhs) == ir.python_print_type(rhs)
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -82,7 +195,7 @@ class ASTParser:
         strict_ssa: bool = False,
         closure_vars: dict[str, Any] | None = None,
         buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
-        dyn_var_cache: dict[str, ir.Var] | None = None,
+        dyn_var_cache: dict[object, ir.Var] | None = None,
     ):
         """Initialize AST parser.
 
@@ -98,21 +211,25 @@ class ASTParser:
             buffer_name_meta: Optional shared (func_name, buffer_name) → metadata registry for cross-function
                 import_peer_buffer resolution. When multiple functions in a @pl.program share this
                 dict, import_peer_buffer can resolve .base from a peer function's reserve_buffer.
-            dyn_var_cache: Optional shared cache mapping dynamic var names to ir.Var objects.
-                When multiple functions in a @pl.program share this dict, the same DynVar
-                produces the same ir.Var across functions.
+            dyn_var_cache: Optional shared cache mapping DynVar object identity
+                (or synthetic fallback keys) to ir.Var objects. When multiple
+                functions in a @pl.program share this dict, the same DynVar
+                produces the same ir.Var across functions while distinct DynVar
+                objects with the same display name stay separate.
         """
+        shared_dyn_var_cache = dyn_var_cache if dyn_var_cache is not None else {}
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
         self.expr_evaluator = ExprEvaluator(
             closure_vars=closure_vars or {},
             span_tracker=self.span_tracker,
+            dyn_var_cache=shared_dyn_var_cache,
         )
         self.type_resolver = TypeResolver(
             expr_evaluator=self.expr_evaluator,
             scope_lookup=self.scope_manager.lookup_var,
             span_tracker=self.span_tracker,
-            dyn_var_cache=dyn_var_cache,
+            dyn_var_cache=shared_dyn_var_cache,
         )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls
@@ -351,6 +468,22 @@ class ASTParser:
                 hint="Provide a value for the assignment",
             )
         value_expr = self.parse_expression(stmt.value)
+        is_memref_type_annotation = (
+            isinstance(stmt.annotation, ast.Attribute)
+            and isinstance(stmt.annotation.value, ast.Name)
+            and stmt.annotation.value.id == "pl"
+            and stmt.annotation.attr == "MemRefType"
+        ) or (isinstance(stmt.annotation, ast.Name) and stmt.annotation.id == "MemRefType")
+
+        if (
+            is_memref_type_annotation
+            and isinstance(value_expr, ir.Call)
+            and value_expr.op.name == "tile.alloc"
+        ):
+            memref_var = self._build_memref_from_alloc_call(var_name, value_expr, span)
+            self.builder.emit(ir.AssignStmt(memref_var, value_expr, span))
+            self.scope_manager.define_var(var_name, memref_var, span=span)
+            return
 
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
@@ -370,6 +503,14 @@ class ASTParser:
             else:
                 resolved = self.type_resolver.resolve_type(ann)
             if resolved is not None and not isinstance(resolved, list):
+                if (
+                    isinstance(value_expr, ir.Call)
+                    and isinstance(value_expr.type, ir.UnknownType)
+                    and value_expr.op.name in ("tile.tpop_from_aic", "tile.tpop_from_aiv")
+                ):
+                    value_expr = ir.Call(
+                        value_expr.op, value_expr.args, value_expr.kwargs, resolved, value_expr.span
+                    )
                 self.type_resolver.validate_annotation_consistency(resolved, value_expr.type, var_name, span)
                 if isinstance(value_expr.type, ir.UnknownType):
                     # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
@@ -381,12 +522,31 @@ class ASTParser:
                     ann_ms = resolved.memory_space
                     ann_tv = resolved.tile_view
                     inf_ms = value_expr.type.memory_space
+                    # Keep inferred TileView metadata even when it is omitted by the
+                    # Python surface syntax. valid_shape/layout are semantically part of
+                    # the IR type and downstream passes/codegen rely on them being
+                    # preserved on the bound Var, not only on the Call result.
                     inf_tv = value_expr.type.tile_view
                     merged_ms = ann_ms if ann_ms is not None else inf_ms
-                    merged_tv = ann_tv if ann_tv is not None else inf_tv
+                    merged_tv = ann_tv
+                    if merged_tv is None and _has_printable_tile_view(inf_tv, resolved.shape, merged_ms):
+                        merged_tv = inf_tv
                     if resolved.memref is not None or merged_ms is not None or merged_tv is not None:
                         override_type = ir.TileType(
                             resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
+                        )
+                elif isinstance(resolved, ir.TensorType) and isinstance(value_expr.type, ir.TensorType):
+                    ann_tv = resolved.tensor_view
+                    # Same rationale as TileView above: preserve inferred TensorView on
+                    # the bound Var even when the annotation omits default view metadata.
+                    inf_tv = value_expr.type.tensor_view
+                    merged_tv = ann_tv if ann_tv is not None else inf_tv
+                    if resolved.memref is not None or merged_tv is not None:
+                        override_type = ir.TensorType(
+                            resolved.shape,
+                            resolved.dtype,
+                            resolved.memref,
+                            merged_tv,
                         )
                 elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
                     override_type = resolved
@@ -399,20 +559,14 @@ class ASTParser:
                     and value_expr.type.dtype == DataType.INDEX
                 ):
                     override_type = resolved
-        # If the annotation resolved to a TileType and the value is a tpop call
-        # with UnknownType, reconstruct the Call carrying the resolved TileType
-        # so that codegen can emit SSA-result tpop without a separate alloc_tile.
         if (
             override_type is not None
-            and isinstance(override_type, ir.TileType)
             and isinstance(value_expr, ir.Call)
-            and isinstance(value_expr.type, ir.UnknownType)
-            and value_expr.op.name in ("tile.tpop_from_aiv", "tile.tpop_from_aic")
+            and not _types_match(value_expr.type, override_type)
         ):
             value_expr = ir.Call(
                 value_expr.op, value_expr.args, value_expr.kwargs, override_type, value_expr.span
             )
-
         # Reuse existing Var on reassignment (override_type is intentionally
         # discarded — the Var's type was fixed at first definition; the SSA
         # pass will create properly typed versioned copies later).
@@ -424,6 +578,35 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
+
+    def _build_memref_from_alloc_call(self, var_name: str, alloc_call: ir.Call, span: ir.Span) -> ir.MemRef:
+        """Build a MemRef variable from a tile.alloc call."""
+        if len(alloc_call.args) != 4:
+            raise ParserTypeError(
+                f"tile.alloc for '{var_name}' must have 4 positional arguments",
+                span=span,
+                hint="Use tile.alloc(memory_space, addr, size, id)",
+            )
+
+        memory_space_expr, addr_expr, size_expr, id_expr = alloc_call.args
+        if not isinstance(size_expr, ir.ConstInt) or not isinstance(id_expr, ir.ConstInt):
+            raise ParserTypeError(
+                f"tile.alloc for '{var_name}' requires constant size/id in printed IR",
+                span=span,
+                hint="Use constant integer size/id for tile.alloc",
+            )
+
+        if isinstance(memory_space_expr, ir.ConstInt):
+            try:
+                memory_space = ir.MemorySpace(memory_space_expr.value)
+            except Exception as exc:  # pragma: no cover - defensive enum fallback
+                raise ParserTypeError(
+                    f"Invalid memory space value in tile.alloc for '{var_name}': {memory_space_expr.value}",
+                    span=span,
+                ) from exc
+            return ir.MemRef(memory_space, addr_expr, size_expr.value, id_expr.value, span)
+
+        return ir.MemRef(addr_expr, size_expr.value, id_expr.value, span)
 
     def _assign_or_let(
         self,
@@ -441,7 +624,7 @@ class ASTParser:
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
-                and existing_var.type != value_type
+                and not _types_match(existing_var.type, value_type)
             ):
                 raise ParserTypeError(
                     f"Cannot reassign '{var_name}' with a different type: "
@@ -630,7 +813,13 @@ class ASTParser:
             hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=(...,))",
         )
 
-    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list) -> None:
+    def _setup_iter_args(
+        self,
+        loop: Any,
+        iter_args_node: ast.AST,
+        init_values: list,
+        iter_types: list[ir.Type | None] | None = None,
+    ) -> None:
         """Set up iter_args and return_vars for Pattern A loops."""
         if not isinstance(iter_args_node, ast.Tuple):
             raise ParserSyntaxError(
@@ -653,7 +842,10 @@ class ASTParser:
                     span=self.span_tracker.get_span(iter_arg_node),
                     hint="Use simple variable names for iteration variables",
                 )
-            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i])
+            iter_type = iter_types[i] if iter_types is not None and i < len(iter_types) else None
+            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i], type=iter_type)
+            if iter_types is not None and i < len(iter_types):
+                iter_types[i] = iter_arg_var.type
             self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
 
     def parse_for_loop(self, stmt: ast.For) -> None:  # noqa: PLR0912
@@ -687,13 +879,6 @@ class ASTParser:
                 "For loop target must be a tuple when init_values is provided",
                 span=self.span_tracker.get_span(stmt.target),
                 hint="Use: for i, (var1,) in pl.range(n, init_values=(val1,)) to include iter_args",
-            )
-
-        if iterator_type == "unroll" and range_args["init_values"]:
-            raise ParserSyntaxError(
-                "pl.unroll() cannot be combined with init_values",
-                span=self.span_tracker.get_span(iter_call),
-                hint="Unrolled loops do not support loop-carried values (init_values)",
             )
 
         # For pl.unroll(), require compile-time constant integer bounds
@@ -735,6 +920,17 @@ class ASTParser:
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(_loop_var_dtype))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
+        scanned_yield_vars = (
+            self._scan_for_yields(stmt.body) if not is_simple_for and range_args["init_values"] else []
+        )
+        scanned_yield_type_map = {
+            name: self._resolve_yield_var_type(annotation)
+            for name, annotation in scanned_yield_vars
+            if annotation is not None
+        }
+        iter_arg_types: list[ir.Type | None] | None = None
+        if not is_simple_for and range_args["init_values"]:
+            iter_arg_types = [None] * len(range_args["init_values"])
 
         with self.builder.for_loop(
             loop_var,
@@ -745,6 +941,7 @@ class ASTParser:
             kind,
             chunk_size=chunk_expr,
             chunk_policy=chunk_policy_str,
+            loop_origin=range_args["loop_origin"],
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
@@ -754,7 +951,7 @@ class ASTParser:
 
             if not is_simple_for:
                 assert iter_args_node is not None  # Guaranteed by _parse_for_loop_target
-                self._setup_iter_args(loop, iter_args_node, range_args["init_values"])
+                self._setup_iter_args(loop, iter_args_node, range_args["init_values"], iter_arg_types)
 
             with self._yield_tracking_scope():
                 for body_stmt in stmt.body:
@@ -765,15 +962,28 @@ class ASTParser:
             # Create return_vars using yield LHS names (or fallback to _out names)
             if not is_simple_for and range_args["init_values"]:
                 if loop_output_vars:
-                    for rv_name in loop_output_vars:
-                        loop.return_var(rv_name)
+                    for i, rv_name in enumerate(loop_output_vars):
+                        iter_type = (
+                            iter_arg_types[i]
+                            if iter_arg_types is not None and i < len(iter_arg_types)
+                            else None
+                        )
+                        loop.return_var(
+                            rv_name,
+                            _prefer_loop_carried_type(scanned_yield_type_map.get(rv_name), iter_type),
+                        )
                 else:
                     # Fallback: no yield vars found, use auto-generated names
                     assert iter_args_node is not None
                     assert isinstance(iter_args_node, ast.Tuple)
-                    for iter_arg_node in iter_args_node.elts:
+                    for i, iter_arg_node in enumerate(iter_args_node.elts):
                         assert isinstance(iter_arg_node, ast.Name)
-                        loop.return_var(f"{iter_arg_node.id}_out")
+                        iter_type = (
+                            iter_arg_types[i]
+                            if iter_arg_types is not None and i < len(iter_arg_types)
+                            else None
+                        )
+                        loop.return_var(f"{iter_arg_node.id}_out", iter_type)
 
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
@@ -810,6 +1020,82 @@ class ASTParser:
                 hint="Use a positive integer for chunk: chunk=5",
             )
 
+    def _parse_range_keyword_values(self, call: ast.Call) -> dict[str, Any]:
+        """Parse keyword arguments shared by pl.range()/parallel()/unroll()."""
+        init_values: list[Any] = []
+        chunk = None
+        chunk_policy = "leading_full"
+        loop_origin = ir.LoopOrigin.Original
+
+        valid_loop_origins = {
+            "original": ir.LoopOrigin.Original,
+            "chunk_outer": ir.LoopOrigin.ChunkOuter,
+            "chunk_inner": ir.LoopOrigin.ChunkInner,
+            "chunk_remainder": ir.LoopOrigin.ChunkRemainder,
+        }
+
+        for keyword in call.keywords:
+            arg_name = keyword.arg
+            if arg_name == "init_values":
+                if not isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    raise ParserSyntaxError(
+                        "init_values must be a list or tuple",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint="Use a tuple for init_values: init_values=(var1, var2)",
+                    )
+                for elt in keyword.value.elts:
+                    init_values.append(self.parse_expression(elt))
+                continue
+
+            if arg_name == "chunk":
+                chunk = self.parse_expression(keyword.value)
+                continue
+
+            if arg_name == "chunk_policy":
+                if not (isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str)):
+                    raise ParserSyntaxError(
+                        "chunk_policy must be a string literal",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint='Use a string like chunk_policy="leading_full"',
+                    )
+                if keyword.value.value != "leading_full":
+                    raise ParserSyntaxError(
+                        f"Unsupported chunk_policy: {keyword.value.value!r}",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint="Supported values: leading_full",
+                    )
+                chunk_policy = keyword.value.value
+                continue
+
+            if arg_name == "loop_origin":
+                if not (isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str)):
+                    raise ParserSyntaxError(
+                        "loop_origin must be a string literal",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint='Use a string like loop_origin="chunk_inner"',
+                    )
+                if keyword.value.value not in valid_loop_origins:
+                    raise ParserSyntaxError(
+                        f"Unsupported loop_origin: {keyword.value.value!r}",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint=f"Supported values: {', '.join(sorted(valid_loop_origins))}",
+                    )
+                loop_origin = valid_loop_origins[keyword.value.value]
+                continue
+
+            raise ParserSyntaxError(
+                f"Unknown keyword argument '{arg_name}' in range()",
+                span=self.span_tracker.get_span(keyword),
+                hint="Supported keywords: init_values, chunk, chunk_policy, loop_origin",
+            )
+
+        return {
+            "init_values": init_values,
+            "chunk": chunk,
+            "chunk_policy": chunk_policy,
+            "loop_origin": loop_origin,
+        }
+
     def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
         """Parse pl.range() call arguments.
 
@@ -843,55 +1129,11 @@ class ASTParser:
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
             step = self.parse_expression(call.args[2])
-
-        # Parse keyword arguments
-        init_values = []
-        chunk = None
-        chunk_policy = "leading_full"
-        for keyword in call.keywords:
-            if keyword.arg == "init_values":
-                # Parse list of init values
-                if isinstance(keyword.value, (ast.List, ast.Tuple)):
-                    for elt in keyword.value.elts:
-                        init_values.append(self.parse_expression(elt))
-                else:
-                    raise ParserSyntaxError(
-                        "init_values must be a list or tuple",
-                        span=self.span_tracker.get_span(keyword.value),
-                        hint="Use a tuple for init_values: init_values=(var1, var2)",
-                    )
-            elif keyword.arg == "chunk":
-                chunk = self.parse_expression(keyword.value)
-            elif keyword.arg == "chunk_policy":
-                if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                    _VALID_CHUNK_POLICIES = {"leading_full"}
-                    if keyword.value.value not in _VALID_CHUNK_POLICIES:
-                        raise ParserSyntaxError(
-                            f"Unsupported chunk_policy: {keyword.value.value!r}",
-                            span=self.span_tracker.get_span(keyword.value),
-                            hint=f"Supported values: {', '.join(sorted(_VALID_CHUNK_POLICIES))}",
-                        )
-                    chunk_policy = keyword.value.value
-                else:
-                    raise ParserSyntaxError(
-                        "chunk_policy must be a string literal",
-                        span=self.span_tracker.get_span(keyword.value),
-                        hint='Use a string like chunk_policy="leading_full"',
-                    )
-            else:
-                raise ParserSyntaxError(
-                    f"Unknown keyword argument '{keyword.arg}' in range()",
-                    span=self.span_tracker.get_span(keyword),
-                    hint="Supported keywords: init_values, chunk, chunk_policy",
-                )
-
         return {
             "start": start,
             "stop": stop,
             "step": step,
-            "init_values": init_values,
-            "chunk": chunk,
-            "chunk_policy": chunk_policy,
+            **self._parse_range_keyword_values(call),
         }
 
     def _is_cond_call(self, stmt: ast.stmt) -> bool:
@@ -1141,7 +1383,11 @@ class ASTParser:
         return iter_args_node
 
     def _setup_while_iter_args(
-        self, loop: Any, iter_args_node: ast.Tuple, init_values: list[ir.Expr]
+        self,
+        loop: Any,
+        iter_args_node: ast.Tuple,
+        init_values: list[ir.Expr],
+        iter_types: list[ir.Type | None] | None = None,
     ) -> None:
         """Set up iter_args for pl.while_() loop."""
         for i, iter_arg_node in enumerate(iter_args_node.elts):
@@ -1151,7 +1397,10 @@ class ASTParser:
                     span=self.span_tracker.get_span(iter_arg_node),
                     hint="Use simple variable names for iteration variables",
                 )
-            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i])
+            iter_type = iter_types[i] if iter_types is not None and i < len(iter_types) else None
+            iter_arg_var = loop.iter_arg(iter_arg_node.id, init_values[i], type=iter_type)
+            if iter_types is not None and i < len(iter_types):
+                iter_types[i] = iter_arg_var.type
             self.scope_manager.define_var(iter_arg_node.id, iter_arg_var, allow_redef=True)
 
     def _parse_while_body_statements(self, stmt: ast.For) -> list[str]:
@@ -1195,6 +1444,13 @@ class ASTParser:
         init_values = self._parse_while_init_values(while_call)
         self._validate_while_body(stmt)
         iter_args_node = self._validate_while_target(stmt, init_values)
+        scanned_yield_vars = self._scan_for_yields(stmt.body[1:])
+        scanned_yield_type_map = {
+            name: self._resolve_yield_var_type(annotation)
+            for name, annotation in scanned_yield_vars
+            if annotation is not None
+        }
+        iter_arg_types: list[ir.Type | None] = [None] * len(init_values)
 
         span = self.span_tracker.get_span(stmt)
         placeholder_condition = ir.ConstBool(True, span)
@@ -1206,7 +1462,7 @@ class ASTParser:
             self.scope_manager.enter_scope("while")
 
             # Set up iter_args
-            self._setup_while_iter_args(loop, iter_args_node, init_values)
+            self._setup_while_iter_args(loop, iter_args_node, init_values, iter_arg_types)
 
             # Parse and set the condition (now that iter_args are in scope)
             condition = self._extract_cond_call(stmt.body[0])
@@ -1221,15 +1477,23 @@ class ASTParser:
             # Parse body statements first to get actual output variable names
             loop_output_vars = self._parse_while_body_statements(stmt)
 
-            # Add return_vars using actual output variable names from body
+            # Add return_vars using actual output variable names from body.
+            # If the printed form uses a bare pl.yield_(...) statement, fall back
+            # to the iter_arg names so print-parse roundtrip remains stable.
             if not loop_output_vars:
-                raise ParserSyntaxError(
-                    "pl.while_() with init_values requires a pl.yield_(...) in the body",
-                    span=self.span_tracker.get_span(stmt),
-                    hint="Yield the updated loop-carried values before the end of the body",
+                loop_output_vars = [elt.id for elt in iter_args_node.elts if isinstance(elt, ast.Name)]
+                if not loop_output_vars:
+                    raise ParserSyntaxError(
+                        "pl.while_() with init_values requires a pl.yield_(...) in the body",
+                        span=self.span_tracker.get_span(stmt),
+                        hint="Yield the updated loop-carried values before the end of the body",
+                    )
+            for i, var_name in enumerate(loop_output_vars):
+                iter_type = iter_arg_types[i] if i < len(iter_arg_types) else None
+                loop.return_var(
+                    var_name,
+                    _prefer_loop_carried_type(scanned_yield_type_map.get(var_name), iter_type),
                 )
-            for var_name in loop_output_vars:
-                loop.return_var(var_name)
 
             self.scope_manager.exit_scope(leak_vars=False)
             self.in_while_loop = False
@@ -1534,7 +1798,7 @@ class ASTParser:
             self._handle_static_assert(stmt)
             return
 
-        # Special case: bare pl.yield_() emits a YieldStmt via parse_yield_call.
+        # Special case: bare pl.yield_() emits a YieldStmt directly.
         # Do not create an additional EvalStmt for the returned expression.
         if (
             isinstance(stmt.value, ast.Call)
@@ -1543,7 +1807,7 @@ class ASTParser:
             and isinstance(stmt.value.func.value, ast.Name)
             and stmt.value.func.value.id == "pl"
         ):
-            self.parse_yield_call(stmt.value)
+            self._emit_yield_statement(stmt.value)
             return
 
         expr = self.parse_expression(stmt.value)
@@ -1946,6 +2210,18 @@ class ASTParser:
             "or call an external @pl.function / @pl.inline by name",
         )
 
+    def _emit_yield_statement(self, call: ast.Call) -> list[ir.Expr]:
+        """Emit a YieldStmt for a pl.yield_() call and return its values."""
+        span = self.span_tracker.get_span(call)
+        yield_exprs = []
+
+        for arg in call.args:
+            expr = self.parse_expression(arg)
+            yield_exprs.append(expr)
+
+        self.builder.emit(ir.YieldStmt(yield_exprs, span))
+        return yield_exprs
+
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
         """Parse pl.yield_() call.
 
@@ -1955,15 +2231,7 @@ class ASTParser:
         Returns:
             IR expression (first yielded value for single yield)
         """
-        span = self.span_tracker.get_span(call)
-        yield_exprs = []
-
-        for arg in call.args:
-            expr = self.parse_expression(arg)
-            yield_exprs.append(expr)
-
-        # Emit yield statement
-        self.builder.emit(ir.YieldStmt(yield_exprs, span))
+        yield_exprs = self._emit_yield_statement(call)
 
         # Track yielded variables for if statement processing
         # This is for single assignment like: var = pl.yield_(expr)
@@ -2224,25 +2492,29 @@ class ASTParser:
         """
         kwargs = {}
         for keyword in call.keywords:
-            key = keyword.arg
-            value = keyword.value
-
-            # Handle dtype specially
-            if key == "dtype":
-                kwargs[key] = self.type_resolver.resolve_dtype(value)
-            elif isinstance(value, ast.Constant):
-                kwargs[key] = value.value
-            elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
-                kwargs[key] = self._resolve_unary_kwarg(value)
-            elif isinstance(value, ast.Name):
-                kwargs[key] = self._resolve_name_kwarg(value)
-            elif isinstance(value, ast.Attribute):
-                kwargs[key] = self._resolve_attribute_kwarg(value)
-            elif isinstance(value, ast.List):
-                kwargs[key] = self._resolve_list_kwarg(value)
-            else:
-                kwargs[key] = self.parse_expression(value)
+            if keyword.arg is None:
+                raise ParserTypeError(
+                    "Operation calls do not support **kwargs expansion",
+                    span=self.span_tracker.get_span(call),
+                )
+            kwargs[keyword.arg] = self._parse_single_kwarg(keyword.arg, keyword.value)
         return kwargs
+
+    def _parse_single_kwarg(self, key: str, value: ast.expr) -> Any:
+        """Parse a single op kwarg value."""
+        if key == "dtype":
+            return self.type_resolver.resolve_dtype(value)
+        if isinstance(value, ast.Constant):
+            return value.value
+        if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+            return self._resolve_unary_kwarg(value)
+        if isinstance(value, ast.Name):
+            return self._resolve_name_kwarg(value)
+        if isinstance(value, ast.Attribute):
+            return self._resolve_attribute_kwarg(value)
+        if isinstance(value, ast.List):
+            return self._resolve_list_kwarg(value)
+        return self.parse_expression(value)
 
     def _resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
         """Resolve a unary op kwarg value (e.g., -1)."""
@@ -2471,6 +2743,16 @@ class ASTParser:
         first_type = first_arg.type
 
         if isinstance(first_type, ir.TensorType):
+            scalar_op = {
+                "add": "adds",
+                "sub": "subs",
+                "mul": "muls",
+                "div": "divs",
+            }.get(op_name)
+            if scalar_op and len(call.args) >= 2:
+                rhs_arg = self.parse_expression(call.args[1])
+                if isinstance(rhs_arg.type, ir.ScalarType):
+                    return self._parse_tensor_op(scalar_op, call)
             return self._parse_tensor_op(op_name, call)
 
         if isinstance(first_type, ir.TileType):

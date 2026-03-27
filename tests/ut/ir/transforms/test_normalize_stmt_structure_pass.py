@@ -31,7 +31,7 @@ def test_normalize_simple_function():
     assign_before = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -58,7 +58,7 @@ def test_normalize_simple_function():
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -95,7 +95,7 @@ def test_normalize_seqstmts_with_bare_assigns():
     assign1_before = ir.AssignStmt(
         a_before,
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -105,7 +105,7 @@ def test_normalize_seqstmts_with_bare_assigns():
     assign2_before = ir.AssignStmt(
         b_before,
         ir.Call(
-            ir.get_op("tensor.mul"),
+            ir.get_op("tensor.muls"),
             [a_before, ir.ConstFloat(2.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -134,7 +134,7 @@ def test_normalize_seqstmts_with_bare_assigns():
     assign1_expected = ir.AssignStmt(
         a_expected,
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -144,7 +144,7 @@ def test_normalize_seqstmts_with_bare_assigns():
     assign2_expected = ir.AssignStmt(
         b_expected,
         ir.Call(
-            ir.get_op("tensor.mul"),
+            ir.get_op("tensor.muls"),
             [a_expected, ir.ConstFloat(2.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -179,7 +179,7 @@ def test_idempotence():
     assign_before = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_before, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,
@@ -206,7 +206,7 @@ def test_idempotence():
     assign_expected = ir.AssignStmt(
         ir.Var("result", ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32), span),
         ir.Call(
-            ir.get_op("tensor.add"),
+            ir.get_op("tensor.adds"),
             [x_expected, ir.ConstFloat(1.0, DataType.FP32, span)],
             ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
             span,

@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -276,7 +277,63 @@ class TileMemorySpaceMutator : public IRMutator {
     }
 
     if (!changed) return op;
+
+    if (std::dynamic_pointer_cast<const GlobalVar>(op->op_)) {
+      // GlobalVar calls carry function-signature-based types that are not
+      // re-inferred through OpRegistry.
+    } else if (auto opnode = std::dynamic_pointer_cast<const Op>(op->op_)) {
+      const auto& op_name = opnode->name_;
+      if (op_name != "tile.tpush_to_aic" && op_name != "tile.tpush_to_aiv" &&
+          op_name != "tile.tpop_from_aic" && op_name != "tile.tpop_from_aiv") {
+        bool can_rededuce = true;
+        bool has_explicit_type = false;
+        try {
+          auto deduced_original =
+              OpRegistry::GetInstance().Create(op_name, op->args_, op->kwargs_, op->span_);
+          has_explicit_type =
+              !structural_equal(op->GetType(), deduced_original->GetType(), /*enable_auto_mapping=*/true);
+        } catch (const Error&) {
+          // Preserve legacy/non-canonical handwritten forms that the text parser
+          // canonicalizes (e.g. old tile.load/store signatures).
+          can_rededuce = false;
+        }
+
+        if (can_rededuce && !has_explicit_type) {
+          return OpRegistry::GetInstance().Create(op_name, new_args, op->kwargs_, op->span_);
+        }
+      }
+    }
+
     return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    INTERNAL_CHECK(op->var_) << "AssignStmt has null var";
+    INTERNAL_CHECK(op->value_) << "AssignStmt has null value";
+
+    auto new_var_expr = VisitExpr(op->var_);
+    auto new_var = As<Var>(new_var_expr);
+    INTERNAL_CHECK(new_var) << "AssignStmt var mutated to non-Var";
+
+    auto new_value = VisitExpr(op->value_);
+    if (auto call = As<Call>(new_value)) {
+      auto var_tile = As<TileType>(new_var->GetType());
+      auto call_tile = As<TileType>(call->GetType());
+      if (var_tile && call_tile) {
+        if (!call_tile->memory_space_.has_value() || call_tile->memory_space_ != var_tile->memory_space_) {
+          new_value =
+              std::make_shared<Call>(call->op_, call->args_, call->kwargs_, new_var->GetType(), call->span_);
+        } else if (!structural_equal(call->GetType(), new_var->GetType(), /*enable_auto_mapping=*/true)) {
+          new_var = std::make_shared<Var>(new_var->name_hint_, call->GetType(), new_var->span_);
+          var_cache_[op->var_] = new_var;
+        }
+      }
+    }
+
+    if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
+      return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+    }
+    return op;
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {

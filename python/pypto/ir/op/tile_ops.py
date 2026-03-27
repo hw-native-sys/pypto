@@ -15,11 +15,21 @@ unary operations, and reduction operations.
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeGuard
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, PadValue, Span, TileLayout
+from pypto.pypto_core.ir import (
+    Call,
+    ConstFloat,
+    ConstInt,
+    Expr,
+    MemorySpace,
+    PadValue,
+    ScalarType,
+    Span,
+    TileLayout,
+)
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -43,9 +53,78 @@ def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _i
         raise ValueError("offsets and shapes must have at least one dimension")
 
 
+def _is_scalar_like(value: object) -> TypeGuard[int | _ir_core.Expr]:
+    """Return whether a value is a scalar int/IR expression rather than a sequence."""
+    return isinstance(value, (int, _ir_core.Expr)) and not isinstance(value, _ir_core.MakeTuple)
+
+
+def _require_tuple_like(
+    value: object,
+    arg_name: str,
+) -> Sequence[int | float | _ir_core.Expr] | _ir_core.MakeTuple:
+    """Validate that a value can be normalized into a MakeTuple."""
+    if isinstance(value, _ir_core.MakeTuple):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return value
+    raise TypeError(f"{arg_name} must be a sequence or MakeTuple, got {type(value).__name__}")
+
+
+def _normalize_tile_binary_rhs(rhs: int | float | Expr, span: Span) -> Expr:
+    """Normalize a tile binary-op rhs into an IR expression."""
+    return (
+        _normalize_expr(rhs, span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+
+def _create_tile_binary_call(
+    tile_op_name: str,
+    scalar_op_name: str,
+    lhs: Expr,
+    rhs: int | float | Expr,
+    span: Span,
+) -> Call:
+    """Create a tile binary call with scalar auto-dispatch."""
+    rhs_expr = _normalize_tile_binary_rhs(rhs, span)
+    if isinstance(rhs_expr.type, ScalarType):
+        return _ir_core.create_op_call(scalar_op_name, [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call(tile_op_name, [lhs, rhs_expr], {}, span)
+
+
 # ============================================================================
 # Memory Operations
 # ============================================================================
+
+
+def alloc(
+    memory_space: MemorySpace | int | Expr,
+    addr: int | Expr,
+    size: int | Expr,
+    id: int | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Create a MemRef allocation call.
+
+    This low-level op is primarily used by printed pass output such as
+    InitMemRef/AllocateMemoryAddr roundtrip verification.
+    """
+    actual_span = _get_span_or_capture(span)
+    if isinstance(memory_space, MemorySpace):
+        memory_space_expr = ConstInt(memory_space.value, DataType.INDEX, actual_span)
+    elif isinstance(memory_space, int):
+        memory_space_expr = ConstInt(memory_space, DataType.INDEX, actual_span)
+    else:
+        memory_space_expr = _normalize_expr(memory_space, actual_span)
+
+    args = [
+        memory_space_expr,
+        _normalize_expr(addr, actual_span),
+        _normalize_expr(size, actual_span),
+        _normalize_expr(id, actual_span),
+    ]
+    return _ir_core.create_op_call("tile.alloc", args, {}, actual_span)
 
 
 def create(
@@ -76,10 +155,10 @@ create_tile = create
 
 def load(
     tensor: Expr,
-    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
-    valid_shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    target_memory: MemorySpace = MemorySpace.Vec,
+    offsets: int | Expr | Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: int | Expr | Sequence[int | Expr] | _ir_core.MakeTuple,
+    valid_shapes: int | Expr | Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    target_memory: MemorySpace | int | Expr = MemorySpace.Vec,
     transpose: bool = False,
     span: Span | None = None,
 ) -> Call:
@@ -108,11 +187,36 @@ def load(
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32],
         ...             target_memory=MemorySpace.Mat, transpose=True)
     """
-    # Validate target_memory: only Vec and Mat are allowed for load
-    if target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
-        raise ValueError(
-            f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
-        )
+    actual_span = _get_span_or_capture(span)
+
+    # Legacy printed/hand-built 1D form:
+    #   tile.load(tensor, off0, shape0)
+    if (
+        _is_scalar_like(offsets)
+        and _is_scalar_like(shapes)
+        and valid_shapes is None
+        and target_memory == MemorySpace.Vec
+        and transpose is False
+    ):
+        args = [tensor, _normalize_expr(offsets, actual_span), _normalize_expr(shapes, actual_span)]
+        return _ir_core.Call(_ir_core.get_op("tile.load"), args, actual_span)
+
+    # Legacy printed/hand-built 2D form:
+    #   tile.load(tensor, off0, off1, shape0, shape1)
+    if (
+        _is_scalar_like(offsets)
+        and _is_scalar_like(shapes)
+        and _is_scalar_like(valid_shapes)
+        and _is_scalar_like(target_memory)
+    ):
+        args = [
+            tensor,
+            _normalize_expr(offsets, actual_span),
+            _normalize_expr(shapes, actual_span),
+            _normalize_expr(valid_shapes, actual_span),
+            _normalize_expr(target_memory, actual_span),
+        ]
+        return _ir_core.Call(_ir_core.get_op("tile.load"), args, actual_span)
 
     if transpose and target_memory != MemorySpace.Mat:
         raise ValueError(
@@ -120,17 +224,15 @@ def load(
             f"got target_memory={target_memory}"
         )
 
-    actual_span = _get_span_or_capture(span)
-
-    offsets_tuple = _to_make_tuple(offsets, actual_span)
-    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    offsets_tuple = _to_make_tuple(_require_tuple_like(offsets, "offsets"), actual_span)
+    shapes_tuple = _to_make_tuple(_require_tuple_like(shapes, "shapes"), actual_span)
     _validate_offsets_shapes(offsets_tuple, shapes_tuple)
 
     kwargs: dict[str, Any] = {"target_memory": target_memory, "transpose": transpose}
 
-    valid_shapes_tuple = shapes_tuple
+    valid_shapes_tuple = _ir_core.MakeTuple(list(shapes_tuple.elements), actual_span)
     if valid_shapes is not None:
-        valid_shapes_tuple = _to_make_tuple(valid_shapes, actual_span)
+        valid_shapes_tuple = _to_make_tuple(_require_tuple_like(valid_shapes, "valid_shapes"), actual_span)
         if len(valid_shapes_tuple.elements) != len(shapes_tuple.elements):
             raise ValueError(
                 f"valid_shapes and shapes must have same number of dimensions, "
@@ -144,9 +246,9 @@ def load(
 
 def store(
     tile: Expr,
-    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
-    output_tensor: Expr,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    offsets: int | Expr | Sequence[int | Expr] | _ir_core.MakeTuple,
+    output_tensor: int | Expr,
+    shapes: Expr | Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
@@ -163,9 +265,32 @@ def store(
         Call expression that returns the output tensor
     """
     actual_span = _get_span_or_capture(span)
-    offsets_tuple = _to_make_tuple(offsets, actual_span)
+
+    # Legacy printed/hand-built 1D form:
+    #   tile.store(tile, off0, output_tensor)
+    if _is_scalar_like(offsets) and isinstance(output_tensor, _ir_core.Expr) and shapes is None:
+        args = [tile, _normalize_expr(offsets, actual_span), output_tensor]
+        return _ir_core.Call(_ir_core.get_op("tile.store"), args, actual_span)
+
+    # Legacy printed/hand-built 2D form:
+    #   tile.store(tile, off0, off1, output_tensor)
+    if _is_scalar_like(offsets) and _is_scalar_like(output_tensor) and isinstance(shapes, _ir_core.Expr):
+        args = [
+            tile,
+            _normalize_expr(offsets, actual_span),
+            _normalize_expr(output_tensor, actual_span),
+            shapes,
+        ]
+        return _ir_core.Call(_ir_core.get_op("tile.store"), args, actual_span)
+
+    offsets_tuple = _to_make_tuple(_require_tuple_like(offsets, "offsets"), actual_span)
     if shapes is not None:
-        args: list[Expr] = [tile, offsets_tuple, output_tensor, _to_make_tuple(shapes, actual_span)]
+        args: list[Expr] = [
+            tile,
+            offsets_tuple,
+            output_tensor,
+            _to_make_tuple(_require_tuple_like(shapes, "shapes"), actual_span),
+        ]
     else:
         args = [tile, offsets_tuple, output_tensor]
 
@@ -346,72 +471,72 @@ def fillpad(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None =
 # ============================================================================
 
 
-def mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise multiplication of two tiles.
+def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise multiplication of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.muls.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.mul", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.mul", "tile.muls", lhs, rhs, actual_span)
 
 
-def add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise addition of two tiles.
+def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise addition of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.adds.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise addition
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.add", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.add", "tile.adds", lhs, rhs, actual_span)
 
 
-def div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise division of two tiles.
+def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise division of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.divs.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise division
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.div", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.div", "tile.divs", lhs, rhs, actual_span)
 
 
-def sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise subtraction of two tiles.
+def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise subtraction of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.subs.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.sub", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.sub", "tile.subs", lhs, rhs, actual_span)
 
 
 def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
@@ -445,11 +570,7 @@ def rems(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise remainder with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tile_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tile.rems", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -717,11 +838,7 @@ def addsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         Call expression for element-wise tile-scalar-tile addition
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tile_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tile.addsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
@@ -740,11 +857,7 @@ def subsc(lhs: Expr, rhs: int | float | Expr, rhs2: Expr, span: Span | None = No
         Call expression for element-wise tile-scalar-tile subtraction
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tile_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tile.subsc", [lhs, rhs_expr, rhs2], {}, actual_span)
 
 
@@ -825,11 +938,7 @@ def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         Call expression for element-wise multiplication with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
+    rhs_expr = _normalize_tile_binary_rhs(rhs, actual_span)
     return _ir_core.create_op_call("tile.muls", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1759,7 +1868,9 @@ def _resolve_tpop_type(
     if result_type is not None:
         return result_type
     if shape is not None and dtype is not None:
-        return _ir_core.TileType(shape, dtype, None, None, memory_space)
+        tile_view = _ir_core.TileView()
+        tile_view.valid_shape = [ConstInt(dim, DataType.INDEX, Span.unknown()) for dim in shape]
+        return _ir_core.TileType(shape, dtype, None, tile_view, memory_space)
     return None
 
 

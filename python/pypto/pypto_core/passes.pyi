@@ -67,12 +67,13 @@ class VerificationLevel(Enum):
 
     NONE = ...
     BASIC = ...
+    ROUNDTRIP = ...
 
 def get_verified_properties() -> IRPropertySet:
     """Get the set of properties automatically verified during compilation."""
 
 def get_default_verification_level() -> VerificationLevel:
-    """Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)."""
+    """Get the default verification level (from PYPTO_VERIFY_LEVEL env var: none/basic/roundtrip)."""
 
 def verify_properties(
     properties: IRPropertySet,

@@ -43,13 +43,12 @@ class TestTensorOperationSpanCapture:
         assert result.span.is_valid()
         assert result.span.begin_line == line_before + 1
 
-    def test_tensor_mul_captures_span(self):
-        """Test mul operation span capture."""
+    def test_tensor_muls_captures_span(self):
+        """Test muls operation span capture."""
         x = ir.Var("x", ir.TensorType([64], DataType.FP32), ir.Span.unknown())
 
-        # Test with scalar
         line_before = get_current_line()
-        result = tensor_ops.mul(x, 2.0)
+        result = tensor_ops.muls(x, 2.0)
 
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
@@ -95,7 +94,7 @@ class TestTensorOperationSpanCapture:
         line_before_add = get_current_line()
         add_result = tensor_ops.add(x, y)
         line_before_mul = get_current_line()
-        mul_result = tensor_ops.mul(add_result, 2.0)
+        mul_result = tensor_ops.muls(add_result, 2.0)
 
         # Each should have different line numbers
         assert add_result.span.begin_line == line_before_add + 1

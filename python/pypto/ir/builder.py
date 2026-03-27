@@ -25,6 +25,39 @@ from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 from .utils import _normalize_expr
 
 
+def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether two IR types are equivalent in builder-visible syntax."""
+    if lhs is rhs:
+        return True
+    if lhs is None or rhs is None:
+        return lhs is rhs
+    if type(lhs) is not type(rhs):
+        return False
+    return ir.python_print_type(lhs) == ir.python_print_type(rhs)
+
+
+def _loop_carried_types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether loop-carried types match, ignoring shaped MemRef identity."""
+    if _types_match(lhs, rhs):
+        return True
+    if lhs is None or rhs is None:
+        return lhs is rhs
+    if type(lhs) is not type(rhs):
+        return False
+
+    if isinstance(lhs, ir.TensorType) and isinstance(rhs, ir.TensorType):
+        lhs_no_memref = ir.TensorType(lhs.shape, lhs.dtype, None, lhs.tensor_view)
+        rhs_no_memref = ir.TensorType(rhs.shape, rhs.dtype, None, rhs.tensor_view)
+        return _types_match(lhs_no_memref, rhs_no_memref)
+
+    if isinstance(lhs, ir.TileType) and isinstance(rhs, ir.TileType):
+        lhs_no_memref = ir.TileType(lhs.shape, lhs.dtype, None, lhs.tile_view, lhs.memory_space)
+        rhs_no_memref = ir.TileType(rhs.shape, rhs.dtype, None, rhs.tile_view, rhs.memory_space)
+        return _types_match(lhs_no_memref, rhs_no_memref)
+
+    return False
+
+
 class IRBuilder:
     """IR Builder with context management and automatic span tracking.
 
@@ -886,7 +919,7 @@ class ForLoopBuilder:
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and not _loop_carried_types_match(type, inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -939,7 +972,7 @@ class ForLoopBuilder:
             final_type = inferred_type
         else:
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and not _loop_carried_types_match(type, inferred_type):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"
@@ -1071,7 +1104,7 @@ class WhileLoopBuilder:
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and not _loop_carried_types_match(type, inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -1142,7 +1175,7 @@ class WhileLoopBuilder:
             final_type = inferred_type
         else:
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and not _loop_carried_types_match(type, inferred_type):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"

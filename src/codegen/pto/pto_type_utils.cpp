@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 
+#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -125,20 +126,21 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
     c.slayout = tv.slayout;
     c.fractal = tv.fractal;
     c.pad = tv.pad;
+    auto flat_valid_shape = GetTileBufferValidShape(tile_type);
     bool has_pad = (c.pad != ir::PadValue::null);
     bool has_any_dynamic = false;
-    if (!has_pad && tv.valid_shape.size() >= 1) {
-      if (auto c0 = As<ir::ConstInt>(tv.valid_shape[0])) {
+    if (!has_pad && flat_valid_shape.size() >= 1) {
+      if (auto c0 = As<ir::ConstInt>(flat_valid_shape[0])) {
         c.v_row = c0->value_;
-      } else if (As<ir::Var>(tv.valid_shape[0])) {
+      } else {
         c.v_row_dynamic = true;
         has_any_dynamic = true;
       }
     }
-    if (!has_pad && tv.valid_shape.size() >= 2) {
-      if (auto c1 = As<ir::ConstInt>(tv.valid_shape[1])) {
+    if (!has_pad && flat_valid_shape.size() >= 2) {
+      if (auto c1 = As<ir::ConstInt>(flat_valid_shape[1])) {
         c.v_col = c1->value_;
-      } else if (As<ir::Var>(tv.valid_shape[1])) {
+      } else {
         c.v_col_dynamic = true;
         has_any_dynamic = true;
       }

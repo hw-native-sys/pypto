@@ -456,6 +456,61 @@ def test_pto_codegen_tile_store_lowering():
     assert "outs(" in mlir_code
 
 
+def test_pto_codegen_tile_store_flattens_nd_valid_shape():
+    """ND tile.store should flatten tile valid_shape to 2D while keeping ND partition sizes."""
+
+    @pl.program
+    class StoreNdProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def store_nd_test(
+            self,
+            a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
+            b: pl.Tensor[[2, 2, 8, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
+        ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
+            tile_a = pl.load(a, offsets=[0, 0, 0, 0], shapes=[1, 2, 8, 16])
+            tile_b = pl.load(b, offsets=[0, 0, 0, 0], shapes=[1, 2, 8, 16])
+            tile_c = pl.mul(tile_a, tile_b)
+            out = pl.store(tile_c, offsets=[1, 0, 0, 0], output_tensor=out)
+            return out
+
+    mlir_code = _generate_default_mlir(StoreNdProgram)
+
+    assert "pto.tstore" in mlir_code
+    assert "offsets = [%c1, %c0, %c0, %c0]" in mlir_code
+    assert "sizes = [%c1, %c2, %c8, %c16]" in mlir_code
+    assert "!pto.partition_tensor_view<1x2x8x16xf32>" in mlir_code
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+    assert any("rows=16, cols=16, v_row=16, v_col=16" in line for line in alloc_lines), (
+        f"Expected flattened ND tile valid_shape metadata in alloc_tile, got: {alloc_lines}"
+    )
+
+
+def test_pto_codegen_alloc_tile_flattens_high_rank_valid_shape_metadata():
+    """Flattened ND tiles should use flattened valid_shape metadata in tile_buf types."""
+
+    @pl.program
+    class StoreLargeNdProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def store_large_nd_test(
+            self,
+            a: pl.Tensor[[4, 3, 8, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
+        ) -> pl.Tensor[[4, 3, 8, 64], pl.FP32]:
+            tile_a = pl.load(a, offsets=[0, 0, 0, 0], shapes=[2, 3, 8, 64])
+            tile_b = pl.mul(tile_a, tile_a)
+            out = pl.store(tile_b, offsets=[2, 0, 0, 0], output_tensor=out)
+            return out
+
+    mlir_code = _generate_default_mlir(StoreLargeNdProgram)
+
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+    assert any("rows=48, cols=64, v_row=48, v_col=64" in line for line in alloc_lines), (
+        f"Expected 4D tile valid_shape metadata to flatten to 48x64, got: {alloc_lines}"
+    )
+    assert "sizes = [%c2, %c3, %c8, %c64]" in mlir_code
+
+
 def test_pto_codegen_tile_mul():
     """Test that tile.mul generates pto.tmul."""
 

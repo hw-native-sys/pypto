@@ -35,6 +35,8 @@
 namespace pypto {
 namespace ir {
 
+class AssignStmt;
+
 /**
  * @brief Base class for all expressions in the IR
  *
@@ -45,6 +47,11 @@ namespace ir {
 class Expr : public IRNode {
  protected:
   TypePtr type_;  // Type of the expression result
+  friend class AssignStmt;
+
+  // Internal-only helper for construction-time canonicalization of binding
+  // types. IR nodes are otherwise treated as immutable after construction.
+  void ReplaceTypeForConstruction(TypePtr type) { type_ = std::move(type); }
 
  public:
   /**

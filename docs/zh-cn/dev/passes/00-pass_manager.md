@@ -158,6 +158,20 @@ with passes.PassContext([passes.CallbackInstrument(after_pass=after_pass)]):
     pipeline.run(program)
 ```
 
+Python IR 层还提供了一个基于 `CallbackInstrument` 的 print-parse roundtrip 校验器：
+
+```python
+from pypto import ir, passes
+
+ir.verify_roundtrip(program)
+
+with passes.PassContext([ir.RoundtripInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    pipeline.run(program)
+```
+
+`verify_roundtrip()` 会先打印 IR，再通过 `pl.parse()` 重新解析，并调用
+`ir.assert_structural_equal(..., enable_auto_mapping=True)`。
+
 `run_passes(dump_ir=True)` 内部使用 `CallbackInstrument` 在每个 Pass 后转储 IR，将验证委托给 C++ 流水线。在已有 `PassContext` 内调用时，转储模式会保留外层上下文的插桩（如用户提供的 `VerificationInstrument`）和验证级别，将转储插桩追加到组合列表中。
 
 ### ReportInstrument
@@ -220,12 +234,16 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### 测试Fixture
 
-所有单元测试通过 `tests/ut/conftest.py` 自动在 BEFORE_AND_AFTER 验证模式下运行：
+所有单元测试通过 `tests/ut/conftest.py` 自动启用 BEFORE_AND_AFTER 属性校验和
+roundtrip 校验：
 
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    with passes.PassContext([
+        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+        ir.RoundtripInstrument(passes.VerificationMode.BEFORE_AND_AFTER),
+    ]):
         yield
 ```
 
