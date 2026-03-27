@@ -142,6 +142,7 @@ struct TileBufSignature {
    *  - pad only (fillpad)
    *  - valid_shape only (load with padding / dynamic valid shape)
    *  - shape only (reshape) — memory_space & dtype must match
+   *  - [1, N] RowMajor ↔ [N, 1] ColMajor — physically identical byte layout
    */
   [[nodiscard]] bool IsPTOMaterializable(const TileBufSignature& other) const {
     if (memory_space != other.memory_space || dtype != other.dtype) return false;
@@ -155,6 +156,19 @@ struct TileBufSignature {
       const __int128 lhs_elems = static_cast<__int128>(rows) * static_cast<__int128>(cols);
       const __int128 rhs_elems = static_cast<__int128>(other.rows) * static_cast<__int128>(other.cols);
       return lhs_elems == rhs_elems;
+    }
+
+    // [1, N] RowMajor and [N, 1] ColMajor are physically identical in memory
+    // (same N elements, same byte sequence); tile.reshape converts between them at zero cost.
+    if (slayout == other.slayout && fractal == other.fractal) {
+      const bool is_1d_transpose =
+          (rows == 1 && cols > 1 && blayout == ir::TileLayout::row_major && other.rows > 1 &&
+           other.cols == 1 && other.blayout == ir::TileLayout::col_major &&
+           rows * cols == other.rows * other.cols) ||
+          (rows > 1 && cols == 1 && blayout == ir::TileLayout::col_major && other.rows == 1 &&
+           other.cols > 1 && other.blayout == ir::TileLayout::row_major &&
+           rows * cols == other.rows * other.cols);
+      if (is_1d_transpose) return true;
     }
 
     return false;

@@ -136,11 +136,12 @@ class MemRefUsageCollector : public IRVisitor {
 // Phase 2 — Decide which MemRefs must be split
 // -------------------------------------------------------------------------
 
-/// For each MemRef that has multiple writers with incompatible root
-/// signatures, collect the set of Var* that need a fresh MemRef.
+/// For each MemRef that has multiple writers with incompatible signatures,
+/// collect the set of Var* that need a fresh MemRef.
 ///
 /// Strategy: the first writer keeps the original MemRef.  Every subsequent
-/// writer whose root signature differs gets a new MemRef.
+/// writer that is not PTO-materializable from the first writer's signature
+/// gets a new MemRef.
 void PropagateSplitToViewUsers(const MemRefUsageInfo& info, const std::vector<const Var*>& split_roots,
                                const MemRefPtr& new_memref, std::map<const Var*, MemRefPtr>& splits) {
   std::vector<const Var*> worklist = split_roots;
@@ -169,32 +170,32 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const MemRef*, M
   for (const auto& [memref_ptr, info] : usages) {
     if (info.writers.size() <= 1) continue;
 
-    const auto& root_sig = info.writers[0].second.RootSignature();
+    const auto& ref_sig = info.writers[0].second;
     bool needs_split = false;
     for (size_t i = 1; i < info.writers.size(); ++i) {
-      if (info.writers[i].second.RootSignature() != root_sig) {
+      if (!ref_sig.IsPTOMaterializable(info.writers[i].second)) {
         needs_split = true;
         break;
       }
     }
     if (!needs_split) continue;
 
-    // Group writers by root signature; first group keeps original MemRef
+    // Group writers by materializable-compatibility; first group keeps original MemRef
     std::map<int, std::vector<size_t>> sig_groups;
-    std::vector<TileBufSignature> distinct_roots;
+    std::vector<TileBufSignature> group_reps;
 
     for (size_t i = 0; i < info.writers.size(); ++i) {
-      auto root = info.writers[i].second.RootSignature();
+      const auto& sig = info.writers[i].second;
       int group_id = -1;
-      for (size_t g = 0; g < distinct_roots.size(); ++g) {
-        if (distinct_roots[g] == root) {
+      for (size_t g = 0; g < group_reps.size(); ++g) {
+        if (group_reps[g].IsPTOMaterializable(sig)) {
           group_id = static_cast<int>(g);
           break;
         }
       }
       if (group_id < 0) {
-        group_id = static_cast<int>(distinct_roots.size());
-        distinct_roots.push_back(root);
+        group_id = static_cast<int>(group_reps.size());
+        group_reps.push_back(sig);
       }
       sig_groups[group_id].push_back(i);
     }
