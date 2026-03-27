@@ -230,7 +230,7 @@ def make_kernel_qk_matmul(
             qi_l1 = pl.load(qi, [0, 0], [q_tile, head_dim], target_memory=pl.MemorySpace.Mat)
             kj_l1 = pl.load(
                 key_cache,
-                [0, kj_row],
+                [kj_row, 0],
                 [head_dim, block_size],
                 target_memory=pl.MemorySpace.Mat,
                 transpose=True,

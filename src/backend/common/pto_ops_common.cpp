@@ -21,6 +21,7 @@
 
 #include "pypto/backend/common/pto_ops_common.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -377,11 +378,22 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string partition_view = codegen.NewNamedTemp(tensor->name_hint_ + "_pview");
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
-  // Use all offsets/sizes elements to match the tensor_view rank (handles ND tensors)
+
+  // For DN layout, swap the last two offset elements so that the partition
+  // base address is in the transposed coordinate system used by make_tensor_view.
+  // With the "original coordinates" DSL convention, offsets are always written in
+  // the tensor's declared coordinate system, so a swap is always needed for DN.
+  bool is_dn =
+      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::DN;
+  auto offset_elems = offsets_tuple->elements_;
+  if (is_dn && offset_elems.size() >= 2) {
+    std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
+  }
+
   partition_line << ", offsets = [";
-  for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+  for (size_t i = 0; i < offset_elems.size(); ++i) {
     if (i > 0) partition_line << ", ";
-    partition_line << codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+    partition_line << codegen.GetExprAsCode(offset_elems[i]);
   }
   partition_line << "]";
   partition_line << ", sizes = [";

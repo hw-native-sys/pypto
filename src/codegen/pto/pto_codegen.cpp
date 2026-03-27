@@ -500,24 +500,39 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << GetVarName(param);
 
       stream_ << ", shape = [";
-      for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
-        if (j > 0) stream_ << ", ";
-        if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
-          stream_ << GetVarName(var);
-        } else {
-          stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+      if (layout_DN && tensor_type->shape_.size() == 2) {
+        // DN 2D: emit transposed shape [shape[1], shape[0]] so that PTOAS
+        // sees the column-major convention while the IR keeps original shape.
+        for (int j = 1; j >= 0; j--) {
+          if (j < 1) stream_ << ", ";
+          if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
+            stream_ << GetVarName(var);
+          } else {
+            stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+          }
+        }
+      } else {
+        for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
+          if (j > 0) stream_ << ", ";
+          if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
+            stream_ << GetVarName(var);
+          } else {
+            stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+          }
         }
       }
       stream_ << "],";
 
       stream_ << " strides = [";
       if (tensor_type->shape_.size() == 2) {
+        // Row stride is always shape[1] (the physical innermost dim).
+        // ND [R,C]: strides = [C, 1]   → idx=1 picks shape[1]=C
+        // DN [R,C]: strides = [1, C]   → idx=1 picks shape[1]=C
         std::string row_stride;
-        int idx = layout_DN ? 0 : 1;
-        if (auto var = As<ir::Var>(tensor_type->shape_[idx])) {
+        if (auto var = As<ir::Var>(tensor_type->shape_[1])) {
           row_stride = GetVarName(var);
         } else {
-          row_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[idx]));
+          row_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
         }
         if (layout_DN) {
           stream_ << GetOrEmitIndexConstant(1) << ", " << row_stride;

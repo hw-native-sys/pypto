@@ -18,8 +18,8 @@ class TestResolveTransposeLayoutBTranspose:
     """Test B transpose cases: C = A @ B^T."""
 
     def test_btranspose_basic(self):
-        """B stored as [N, K], loaded with transpose=True -> param becomes [K, N] + DN."""
-        M, K, N = 64, 64, 64
+        """B stored as [N, K], loaded with transpose=True -> param keeps shape [N, K] + DN."""
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -52,7 +52,7 @@ class TestResolveTransposeLayoutBTranspose:
             def matmul_incore(
                 self,
                 a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
@@ -65,7 +65,7 @@ class TestResolveTransposeLayoutBTranspose:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -109,7 +109,7 @@ class TestResolveTransposeLayoutBTranspose:
             def matmul_incore(
                 self,
                 a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
@@ -122,7 +122,7 @@ class TestResolveTransposeLayoutBTranspose:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -136,8 +136,8 @@ class TestResolveTransposeLayoutATranspose:
     """Test A transpose cases: C = A^T @ B."""
 
     def test_atranspose_basic(self):
-        """A stored as [K, M], loaded with transpose=True -> param becomes [M, K] + DN."""
-        M, K, N = 64, 64, 64
+        """A stored as [K, M], loaded with transpose=True -> param keeps shape [K, M] + DN."""
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -169,7 +169,7 @@ class TestResolveTransposeLayoutATranspose:
             @pl.function(type=pl.FunctionType.InCore)
             def matmul_incore(
                 self,
-                a: pl.Tensor[[M, K], pl.FP32, pl.DN],
+                a: pl.Tensor[[K, M], pl.FP32, pl.DN],
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
@@ -183,7 +183,7 @@ class TestResolveTransposeLayoutATranspose:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
+                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -198,7 +198,7 @@ class TestResolveTransposeLayoutABTranspose:
 
     def test_abtranspose_basic(self):
         """Both A and B transposed -> both params get DN layout."""
-        M, K, N = 64, 64, 64
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -230,8 +230,8 @@ class TestResolveTransposeLayoutABTranspose:
             @pl.function(type=pl.FunctionType.InCore)
             def matmul_incore(
                 self,
-                a: pl.Tensor[[M, K], pl.FP32, pl.DN],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                a: pl.Tensor[[K, M], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
@@ -244,7 +244,7 @@ class TestResolveTransposeLayoutABTranspose:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -287,8 +287,8 @@ class TestResolveTransposeLayoutABTranspose:
             @pl.function(type=pl.FunctionType.InCore)
             def matmul_incore(
                 self,
-                a: pl.Tensor[[M, K], pl.FP32, pl.DN],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                a: pl.Tensor[[K, M], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
@@ -301,7 +301,7 @@ class TestResolveTransposeLayoutABTranspose:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -316,7 +316,7 @@ class TestResolveTransposeLayoutNoOp:
 
     def test_no_transpose_unchanged(self):
         """No transpose=True loads -> program unchanged."""
-        M, K, N = 64, 64, 64
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -348,7 +348,7 @@ class TestResolveTransposeLayoutNoOp:
 
     def test_already_dn_layout_unchanged(self):
         """Parameter already has DN layout -> pass is idempotent."""
-        M, K, N = 64, 64, 64
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -356,7 +356,7 @@ class TestResolveTransposeLayoutNoOp:
             def matmul_incore(
                 self,
                 a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
@@ -369,7 +369,7 @@ class TestResolveTransposeLayoutNoOp:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32, pl.DN]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -405,7 +405,7 @@ class TestResolveTransposeLayoutNoOp:
 
     def test_transpose_false_explicit(self):
         """Explicit transpose=False -> no change."""
-        M, K, N = 64, 64, 64
+        M, K, N = 64, 128, 32
 
         @pl.program
         class Before:
@@ -474,7 +474,7 @@ class TestResolveTransposeLayoutMixed:
             def matmul_incore(
                 self,
                 a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[K, N], pl.FP32, pl.DN],
+                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
@@ -487,7 +487,7 @@ class TestResolveTransposeLayoutMixed:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[K, N], pl.FP32, pl.DN]
+                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -530,7 +530,7 @@ class TestResolveTransposeLayoutMixed:
             @pl.function(type=pl.FunctionType.InCore)
             def matmul_incore(
                 self,
-                a: pl.Tensor[[M, K], pl.FP32, pl.DN],
+                a: pl.Tensor[[K, M], pl.FP32, pl.DN],
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
@@ -544,7 +544,7 @@ class TestResolveTransposeLayoutMixed:
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32, pl.DN], b: pl.Tensor[[K, N], pl.FP32]
+                self, a: pl.Tensor[[K, M], pl.FP32], b: pl.Tensor[[K, N], pl.FP32]
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
                 c_result = self.matmul_incore(a, b, c)
@@ -617,11 +617,159 @@ class TestResolveTransposeLayoutPartialLoad:
             def orchestrator(
                 self,
                 a: pl.Tensor[[64, 128], pl.BF16],
-                key_cache: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                key_cache: pl.Tensor[[128, 128], pl.BF16],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
                 out_result = self.kernel(a, key_cache, out)
                 return out_result
+
+        After = passes.resolve_transpose_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestResolveTransposeLayoutColumnVector:
+    """Auto-infer DN for [M, 1] column-vector InCore params."""
+
+    def test_column_vector_auto_dn(self):
+        """[M, 1] InCore param gets DN even without transpose load."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                col_vec: pl.Tensor[[16, 1], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 128])
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                r = pl.add(t, v)
+                out_store = pl.store(r, [0, 0], out)
+                return out_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 128])
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                r = pl.add(t, v)
+                out_store = pl.store(r, [0, 0], out)
+                return out_store
+
+        After = passes.resolve_transpose_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_column_vector_already_dn_unchanged(self):
+        """[M, 1] param already annotated DN is not modified."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                out_store = pl.store(v, [0, 0], out)
+                return out_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                out_store = pl.store(v, [0, 0], out)
+                return out_store
+
+        After = passes.resolve_transpose_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_non_column_vector_nd_unchanged(self):
+        """Non-column-vector ND params without transpose stay ND."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 128])
+                out_store = pl.store(t, [0, 0], out)
+                return out_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 128])
+                out_store = pl.store(t, [0, 0], out)
+                return out_store
+
+        After = passes.resolve_transpose_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_orchestration_column_vector_unchanged(self):
+        """Orchestration [M, 1] params are NOT auto-inferred (only InCore)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                out_store = pl.store(v, [0, 0], out)
+                return out_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                result = self.kernel(col_vec, out)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                out_store = pl.store(v, [0, 0], out)
+                return out_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                result = self.kernel(col_vec, out)
+                return result
 
         After = passes.resolve_transpose_layout()(Before)
         ir.assert_structural_equal(After, Expected)
