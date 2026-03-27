@@ -3,9 +3,9 @@ name: compare-codegen
 description: >-
   Compare codegen output (.pto files and pass dumps) between origin/main and
   the current branch for a given test case. Runs the test with --save-kernels
-  --dump-passes --codegen-only on both branches via git worktree, then diffs
-  the results. Use when the user asks to compare codegen output, diff .pto
-  files between branches, or check what changed in generated code.
+  and --dump-passes on both branches via git worktree, then diffs the results.
+  Use when the user asks to compare codegen output, diff .pto files between
+  branches, or check what changed in generated code.
 ---
 
 # Compare Codegen Output Between Branches
@@ -64,10 +64,10 @@ Build (if needed) and run the test on the current branch:
 [ ! -f build/CMakeCache.txt ] && cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --parallel
 
-# Run test with codegen-only + save-kernels + dump-passes
+# Run test with save-kernels + dump-passes (full test run, not codegen-only)
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
 python -m pytest "$TEST_SPEC" -v -s --forked \
-  --codegen-only --save-kernels --dump-passes \
+  --save-kernels --dump-passes \
   --kernels-dir="$BRANCH_OUTPUT" \
   --platform="${PLATFORM:-a2a3sim}" \
   $EXTRA_ARGS
@@ -94,7 +94,7 @@ cmake --build build --parallel
 # Run test
 export PYTHONPATH=$(pwd)/python:$PYTHONPATH
 python -m pytest "$TEST_SPEC" -v -s --forked \
-  --codegen-only --save-kernels --dump-passes \
+  --save-kernels --dump-passes \
   --kernels-dir="$MAIN_OUTPUT_ABSOLUTE" \
   --platform="${PLATFORM:-a2a3sim}" \
   $EXTRA_ARGS
@@ -169,6 +169,6 @@ rm -rf build_output/compare_*/
 | ----- | -------- |
 | "fatal: worktree already exists" | `git worktree prune` then retry |
 | Build fails in worktree | Check that `origin/main` is buildable; try `git fetch origin main` first |
-| No `.pto` files in output | Verify the test produces codegen output; check `--codegen-only` was passed |
+| No `.pto` files in output | Verify the test produces codegen output; some tests emit C++ or other artifacts instead of `.pto`; optional: pass `--codegen-only` via `$EXTRA_ARGS` if you only need codegen |
 | Permission denied on tmp dir | Use `--compare-dir` to specify a writable directory |
 | Test not found | Verify the pytest node ID; use `pytest --collect-only` to list available tests |

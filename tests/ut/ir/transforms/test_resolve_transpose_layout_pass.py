@@ -31,7 +31,7 @@ class TestResolveTransposeLayoutBTranspose:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -56,7 +56,7 @@ class TestResolveTransposeLayoutBTranspose:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -88,7 +88,7 @@ class TestResolveTransposeLayoutBTranspose:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -113,7 +113,7 @@ class TestResolveTransposeLayoutBTranspose:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -148,7 +148,7 @@ class TestResolveTransposeLayoutATranspose:
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
@@ -173,7 +173,7 @@ class TestResolveTransposeLayoutATranspose:
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
@@ -209,8 +209,8 @@ class TestResolveTransposeLayoutABTranspose:
                 b: pl.Tensor[[N, K], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -234,8 +234,8 @@ class TestResolveTransposeLayoutABTranspose:
                 b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -266,8 +266,8 @@ class TestResolveTransposeLayoutABTranspose:
                 b: pl.Tensor[[N, K], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -291,8 +291,8 @@ class TestResolveTransposeLayoutABTranspose:
                 b: pl.Tensor[[N, K], pl.FP32, pl.DN],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -360,7 +360,7 @@ class TestResolveTransposeLayoutNoOp:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -453,7 +453,7 @@ class TestResolveTransposeLayoutMixed:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -478,7 +478,7 @@ class TestResolveTransposeLayoutMixed:
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
                 tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -509,7 +509,7 @@ class TestResolveTransposeLayoutMixed:
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
@@ -534,7 +534,7 @@ class TestResolveTransposeLayoutMixed:
                 b: pl.Tensor[[K, N], pl.FP32],
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a = pl.load(a, [0, 0], [K, M], target_memory=pl.MemorySpace.Mat, transpose=True)
                 tile_b = pl.load(b, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
@@ -576,7 +576,7 @@ class TestResolveTransposeLayoutPartialLoad:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
                 tile_k = pl.load(
-                    key_cache, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
+                    key_cache, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)
@@ -605,7 +605,7 @@ class TestResolveTransposeLayoutPartialLoad:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
                 tile_k = pl.load(
-                    key_cache, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
+                    key_cache, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
                 tile_k_l0 = pl.move(tile_k, target_memory=pl.MemorySpace.Right)

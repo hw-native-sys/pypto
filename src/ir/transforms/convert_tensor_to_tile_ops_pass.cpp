@@ -591,21 +591,10 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
         const auto& shape_arg = substituted_args[1];
         const auto& offset_arg = substituted_args[2];
 
-        // For transpose, swap shape dims: [N,K] → [K,N]
+        // Shapes and valid_shapes use original (source tensor) coordinates.
+        // DeduceTileLoadType swaps internally when transpose=true.
         ExprPtr load_shapes = shape_arg;
         ExprPtr valid_shapes_base = (substituted_args.size() == 4) ? substituted_args[3] : shape_arg;
-        if (info.transpose) {
-          auto shape_tuple = As<MakeTuple>(shape_arg);
-          if (shape_tuple && shape_tuple->elements_.size() == 2) {
-            std::vector<ExprPtr> swapped = {shape_tuple->elements_[1], shape_tuple->elements_[0]};
-            load_shapes = std::make_shared<MakeTuple>(swapped, shape_arg->span_);
-          }
-          auto valid_tuple = As<MakeTuple>(valid_shapes_base);
-          if (valid_tuple && valid_tuple->elements_.size() == 2) {
-            std::vector<ExprPtr> swapped = {valid_tuple->elements_[1], valid_tuple->elements_[0]};
-            valid_shapes_base = std::make_shared<MakeTuple>(swapped, valid_shapes_base->span_);
-          }
-        }
 
         auto valid_shapes = valid_shapes_base;
         std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Mat},

@@ -120,7 +120,7 @@ class TestMatmulBTranspose(PTOTestCase):
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a_l1 = pl.load(a, offsets=[0, 0], shapes=[M, K], target_memory=pl.MemorySpace.Mat)
                 tile_b_l1 = pl.load(
-                    b, offsets=[0, 0], shapes=[K, N], target_memory=pl.MemorySpace.Mat, transpose=True
+                    b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
@@ -181,7 +181,7 @@ class TestMatmulATranspose(PTOTestCase):
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a_l1 = pl.load(
-                    a, offsets=[0, 0], shapes=[M, K], target_memory=pl.MemorySpace.Mat, transpose=True
+                    a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[K, N], target_memory=pl.MemorySpace.Mat)
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
@@ -243,10 +243,10 @@ class TestMatmulABTranspose(PTOTestCase):
                 c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
                 tile_a_l1 = pl.load(
-                    a, offsets=[0, 0], shapes=[M, K], target_memory=pl.MemorySpace.Mat, transpose=True
+                    a, offsets=[0, 0], shapes=[K, M], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_b_l1 = pl.load(
-                    b, offsets=[0, 0], shapes=[K, N], target_memory=pl.MemorySpace.Mat, transpose=True
+                    b, offsets=[0, 0], shapes=[N, K], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)

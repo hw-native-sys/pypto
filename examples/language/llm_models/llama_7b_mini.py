@@ -174,10 +174,10 @@ def build_llama_mini_program(
         def kernel_matmul_trans_b(
             self,
             a: pl.Tensor[[seq_len, head_dim], pl.FP32],
-            b: pl.Tensor[[head_dim, seq_len], pl.FP32, pl.DN],
+            b: pl.Tensor[[seq_len, head_dim], pl.FP32],
             output: pl.Out[pl.Tensor[[seq_len, seq_len], pl.FP32]],
         ) -> pl.Tensor[[seq_len, seq_len], pl.FP32]:
-            """[S,D] @ [D,S](DN) → [S,S]: Q @ K^T via K-tiled 16-wide blocks.
+            """[S,D] @ [S,D](DN)^T → [S,S]: Q @ K^T via K-tiled 16-wide blocks.
 
             Tiles K-dimension (head_dim) into 4×k_tile_width=16 blocks so each
             TMOV operates on Mat[S,16] → Right[S,16], satisfying the hardware
@@ -185,7 +185,7 @@ def build_llama_mini_program(
             """
             # K-tile 0: columns [0 : k_tile_width]
             a0 = pl.load(a, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
-            b0 = pl.load(b, [0, 0], [k_tile_width, seq_len], target_memory=pl.MemorySpace.Mat, transpose=True)
+            b0 = pl.load(b, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True)
             a0_l = pl.move(a0, target_memory=pl.MemorySpace.Left)
             b0_r = pl.move(b0, target_memory=pl.MemorySpace.Right)
             acc: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.matmul(a0_l, b0_r)
@@ -193,7 +193,7 @@ def build_llama_mini_program(
             # K-tile 1: columns [k1 : k1+k_tile_width]
             a1 = pl.load(a, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
             b1 = pl.load(
-                b, [k1, 0], [k_tile_width, seq_len], target_memory=pl.MemorySpace.Mat, transpose=True
+                b, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
             )
             a1_l = pl.move(a1, target_memory=pl.MemorySpace.Left)
             b1_r = pl.move(b1, target_memory=pl.MemorySpace.Right)
@@ -202,7 +202,7 @@ def build_llama_mini_program(
             # K-tile 2: columns [k2 : k2+k_tile_width]
             a2 = pl.load(a, [0, k2], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
             b2 = pl.load(
-                b, [k2, 0], [k_tile_width, seq_len], target_memory=pl.MemorySpace.Mat, transpose=True
+                b, [0, k2], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
             )
             a2_l = pl.move(a2, target_memory=pl.MemorySpace.Left)
             b2_r = pl.move(b2, target_memory=pl.MemorySpace.Right)
@@ -211,7 +211,7 @@ def build_llama_mini_program(
             # K-tile 3: columns [k3 : k3+k_tile_width]
             a3 = pl.load(a, [0, k3], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
             b3 = pl.load(
-                b, [k3, 0], [k_tile_width, seq_len], target_memory=pl.MemorySpace.Mat, transpose=True
+                b, [0, k3], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True
             )
             a3_l = pl.move(a3, target_memory=pl.MemorySpace.Left)
             b3_r = pl.move(b3, target_memory=pl.MemorySpace.Right)
@@ -456,8 +456,8 @@ def build_llama_mini_program(
                 [seq_len, head_dim], dtype=pl.FP32
             )
             q_rot = self.kernel_rope(q, cos_emb, sin_emb, q_rot)
-            k_rot_buf: pl.Tensor[[head_dim, seq_len], pl.FP32, pl.DN] = pl.create_tensor(
-                [head_dim, seq_len], dtype=pl.FP32, layout=pl.DN
+            k_rot_buf: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
+                [seq_len, head_dim], dtype=pl.FP32
             )
             k_rot = self.kernel_rope(k, cos_emb, sin_emb, k_rot_buf)
 

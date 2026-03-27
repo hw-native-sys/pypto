@@ -631,7 +631,7 @@ class TestConvertTensorToTileOps:
                     lhs, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
                 rhs_mat: pl.Tile[[128, 64], pl.BF16] = pl.load(
-                    rhs, [0, 0], [128, 64], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True
+                    rhs, [0, 0], [64, 128], [64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
                 )
                 y_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(lhs_mat, rhs_mat)
                 out_0_store: pl.Tensor[[16, 64], pl.BF16] = pl.store(y_tile, [0, 0], out_0)
@@ -2130,7 +2130,7 @@ class TestSliceMatmulConversion:
         ir.assert_structural_equal(After, Expected)
 
     def test_slice_then_matmul_btrans(self):
-        """slice + matmul(b_trans=True) -> tile.load(Mat, transpose=True) with swapped shapes."""
+        """slice + matmul(b_trans=True) -> tile.load(Mat, transpose=True) with original shapes."""
 
         @pl.program
         class Before:
@@ -2165,8 +2165,8 @@ class TestSliceMatmulConversion:
                 k_slice_tile: pl.Tile[[128, 120], pl.BF16] = pl.load(
                     k_cache,
                     [0, 0],
-                    [128, 120],
-                    [128, 120],
+                    [120, 128],
+                    [120, 128],
                     target_memory=pl.MemorySpace.Mat,
                     transpose=True,
                 )
@@ -2196,7 +2196,7 @@ class TestSliceMatmulConversion:
         ir.assert_structural_equal(After, Expected)
 
     def test_slice_then_matmul_atrans(self):
-        """slice + matmul(a_trans=True) -> tile.load(Mat, transpose=True) for lhs with swapped shapes."""
+        """slice + matmul(a_trans=True) -> tile.load(Mat, transpose=True) for lhs with original shapes."""
 
         @pl.program
         class Before:
@@ -2231,8 +2231,8 @@ class TestSliceMatmulConversion:
                 a_slice_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
                     a,
                     [0, 0],
-                    [16, 128],
-                    [16, 128],
+                    [128, 16],
+                    [128, 16],
                     target_memory=pl.MemorySpace.Mat,
                     transpose=True,
                 )

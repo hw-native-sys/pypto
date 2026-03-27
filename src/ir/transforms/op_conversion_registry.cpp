@@ -94,9 +94,6 @@ ExprPtr LoadOperandToMat(const ExprPtr& operand, bool transpose, const std::stri
   if (tensor_type) {
     auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
     auto shape = tensor_type->shape_;
-    if (transpose && shape.size() == 2) {
-      std::swap(shape[0], shape[1]);
-    }
     auto shapes = MakeShapesTuple(shape, span);
     std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
                                                         {"transpose", transpose}};

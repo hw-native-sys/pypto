@@ -225,7 +225,7 @@ def make_kernel_qk_matmul(
             kj_l1 = pl.load(
                 key_cache,
                 [kj_row, 0],
-                [head_dim, block_size],
+                [block_size, head_dim],
                 target_memory=pl.MemorySpace.Mat,
                 transpose=True,
             )

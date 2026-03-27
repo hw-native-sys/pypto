@@ -65,7 +65,7 @@ Transfer data between memory hierarchy levels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → on-chip tile (transpose only for Mat) |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → on-chip tile (transpose only for Mat). Both `offsets` and `shapes` use the source tensor's coordinate system. |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR (pipe inferred from source memory) |
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | Write source tile into target at offset |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | Update rows of `input` tile at sparse positions given by `index` tile with values from `src` tile. `input`/`src`: 2D `[rows, d]` or 4D `[B, S, 1, d]`; `index`: 2D `[b, s]` integer. Only `dim=-2` is supported |

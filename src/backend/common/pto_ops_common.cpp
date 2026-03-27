@@ -392,10 +392,18 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
   // Build partition type with all ND dimensions to match the sizes attribute.
+  // For DN layout, swap the last two shape elements (same as offsets) so that
+  // sizes are in the transposed coordinate system used by make_tensor_view.
+  bool is_dn =
+      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::DN;
+  auto shape_elems = shapes_tuple->elements_;
+  if (is_dn && shape_elems.size() >= 2) {
+    std::iter_swap(shape_elems.rbegin(), shape_elems.rbegin() + 1);
+  }
   std::string partition_type = "!pto.partition_tensor_view<";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) partition_type += "x";
-    partition_type += std::to_string(codegen.GetConstIntValue(shapes_tuple->elements_[i]));
+    partition_type += std::to_string(codegen.GetConstIntValue(shape_elems[i]));
   }
   partition_type += "x" + dtype_str + ">";
 
@@ -407,8 +415,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // base address is in the transposed coordinate system used by make_tensor_view.
   // With the "original coordinates" DSL convention, offsets are always written in
   // the tensor's declared coordinate system, so a swap is always needed for DN.
-  bool is_dn =
-      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::DN;
   auto offset_elems = offsets_tuple->elements_;
   if (is_dn && offset_elems.size() >= 2) {
     std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
@@ -421,9 +427,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   }
   partition_line << "]";
   partition_line << ", sizes = [";
-  for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
+  for (size_t i = 0; i < shape_elems.size(); ++i) {
     if (i > 0) partition_line << ", ";
-    partition_line << codegen.GetIndexConstant(codegen.GetConstIntValue(shapes_tuple->elements_[i]));
+    partition_line << codegen.GetIndexConstant(codegen.GetConstIntValue(shape_elems[i]));
   }
   partition_line << "]";
   partition_line << " : " << tensor_view_type << " -> " << partition_type;

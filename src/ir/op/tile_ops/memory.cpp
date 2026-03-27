@@ -132,13 +132,20 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     tile_view.blayout = TileLayout::col_major;
   }
 
-  // Build tile shape from shapes tuple
-  std::vector<ExprPtr> tile_shape;
-  for (const auto& shape_expr : shapes_tuple->elements_) {
-    tile_shape.push_back(shape_expr);
+  // Build tile shape from shapes tuple.
+  // When transpose=true, shapes are in original (source tensor) coordinates;
+  // swap to transposed coordinates for the output TileType.
+  auto shape_elements = shapes_tuple->elements_;
+  if (transpose && shape_elements.size() == 2) {
+    std::swap(shape_elements[0], shape_elements[1]);
   }
+  std::vector<ExprPtr> tile_shape(shape_elements.begin(), shape_elements.end());
 
-  tile_view.valid_shape = valid_shapes_tuple->elements_;
+  auto valid_elements = valid_shapes_tuple->elements_;
+  if (transpose && valid_elements.size() == 2) {
+    std::swap(valid_elements[0], valid_elements[1]);
+  }
+  tile_view.valid_shape = valid_elements;
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape
   return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view);
@@ -479,9 +486,14 @@ REGISTER_OP("tile.load")
     .set_op_category("TileOp")
     .set_description("Copy data from tensor to unified buffer (tile)")
     .add_argument("tensor", "Source tensor (TensorType)")
-    .add_argument("offsets", "Offsets in each dimension (TupleType of ScalarType)")
-    .add_argument("shapes", "Shape of tile in each dimension (TupleType of ScalarType)")
-    .add_argument("valid_shapes", "Valid shape of tile in each dimension (TupleType of ScalarType). ")
+    .add_argument("offsets",
+                  "Offsets in each dimension, in source tensor coordinates (TupleType of ScalarType)")
+    .add_argument(
+        "shapes",
+        "Shape of region to load in each dimension, in source tensor coordinates (TupleType of ScalarType)")
+    .add_argument(
+        "valid_shapes",
+        "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)

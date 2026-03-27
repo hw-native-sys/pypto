@@ -62,7 +62,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → 片上 tile（transpose 仅支持 Mat） |
+| `load` | `(tensor: Tensor, offsets: Sequence[IntLike], shapes: Sequence[IntLike], target_memory: Mem = Mem.Vec, transpose: bool = False) -> Tile` | DDR → 片上 tile（transpose 仅支持 Mat）。`offsets` 和 `shapes` 均使用源 tensor 的坐标系。 |
 | `store` | `(tile: Tile, offsets: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Tile → DDR（pipe 根据源 tile 内存空间自动推断） |
 | `assemble` | `(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile` | 将源 tile 写入目标 tile 的指定偏移处 |
 | `scatter_update` | `(input: Tile, dim: int, index: Tile, src: Tile) -> Tile` | 按 `index` tile 指定的稀疏行位置，将 `src` tile 的行数据写入 `input` tile。`input`/`src`：2D `[rows, d]` 或 4D `[B, S, 1, d]`；`index`：2D `[b, s]` 整型。当前仅支持 `dim=-2` |
