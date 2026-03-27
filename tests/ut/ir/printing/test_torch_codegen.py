@@ -10,7 +10,7 @@
 """Tests for PyTorch code emission from PyPTO IR."""
 
 import pytest
-import torch  # type: ignore[import-untyped]  # noqa: F401
+import torch  # type: ignore[import-not-found]
 from pypto import DataType, ir
 from pypto.debug import torch_codegen
 

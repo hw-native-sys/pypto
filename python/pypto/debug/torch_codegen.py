@@ -12,8 +12,8 @@
 from collections.abc import Callable
 from typing import Any
 
-from pypto.pypto_core import DataType
-from pypto.pypto_core import ir as _ir
+from pypto import DataType
+from pypto import ir as _ir
 
 # ---------------------------------------------------------------------------
 # DataType -> torch dtype string
@@ -22,13 +22,17 @@ _DTYPE_MAP: dict[str, str] = {
     "fp16": "torch.float16",
     "fp32": "torch.float32",
     "fp64": "torch.float64",
-    "bf16": "torch.bfloat16",
+    "bfloat16": "torch.bfloat16",
     "int8": "torch.int8",
     "int16": "torch.int16",
     "int32": "torch.int32",
     "int64": "torch.int64",
     "uint8": "torch.uint8",
+    "uint16": "torch.int32",  # torch has no uint16; upcast
+    "uint32": "torch.int64",  # torch has no uint32; upcast
+    "uint64": "torch.int64",  # torch has no uint64; best-effort
     "bool": "torch.bool",
+    "index": "torch.int64",
 }
 
 
@@ -311,8 +315,8 @@ def _register_ops() -> None:
     # --- Cross-core pipe ops ---
     m["tile.tpush_to_aiv"] = lambda a, _kw: f"_pipes['to_aiv'].append({a[0]}.clone())"
     m["tile.tpush_to_aic"] = lambda a, _kw: f"_pipes['to_aic'].append({a[0]}.clone())"
-    m["tile.tpop_from_aic"] = lambda _a, _kw: "_pipes['to_aiv'].popleft()"
-    m["tile.tpop_from_aiv"] = lambda _a, _kw: "_pipes['to_aic'].popleft()"
+    m["tile.tpop_from_aic"] = lambda _a, _kw: "_pipes['to_aic'].popleft()"
+    m["tile.tpop_from_aiv"] = lambda _a, _kw: "_pipes['to_aiv'].popleft()"
 
     # --- System ops (no-ops) ---
     for op_name in (
@@ -436,7 +440,10 @@ class TorchCodegen(_ir.IRVisitor):
         params = [self._name_of(p) for p in func.params]
         self._emit(f"def {func.name}({', '.join(params)}):")
         self._indent += 1
+        n_before = len(self._lines)
         self.visit_stmt(func.body)
+        if len(self._lines) == n_before:
+            self._emit("pass")
         self._indent -= 1
         self._emit("")
 
@@ -481,12 +488,16 @@ class TorchCodegen(_ir.IRVisitor):
         operand = self._visit_expr_str(op.operand)
         if isinstance(op, _ir.Neg):
             self._expr_result = f"(-{operand})"
-        elif isinstance(op, (_ir.Not, _ir.BitNot)):
+        elif isinstance(op, _ir.Not):
+            self._expr_result = f"(not {operand})"
+        elif isinstance(op, _ir.BitNot):
             self._expr_result = f"(~{operand})"
         elif isinstance(op, _ir.Abs):
             self._expr_result = f"abs({operand})"
         elif isinstance(op, _ir.Cast):
-            self._expr_result = f"int({operand})"
+            self._expr_result = (
+                f"{operand}.to({_torch_dtype(op.dtype)})" if hasattr(op, "dtype") else f"int({operand})"
+            )
         else:
             self._expr_result = operand
 
