@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -55,7 +56,6 @@ using core_affinity::CoreAffinity;
 using core_affinity::CoreSide;
 using core_affinity::CVBoundaryMove;
 using core_affinity::CVDirection;
-using core_affinity::IsCubeMemorySpace;
 using cross_core_pipe::BuildAutomaticPipeSetup;
 using cross_core_pipe::PrependPipeSetup;
 using loop_repair::BuildDefMap;
@@ -141,7 +141,7 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
             for (const auto& [key, value] : call->kwargs_) {
               if (key == "target_memory") {
                 auto target = AnyCast<MemorySpace>(value, "target_memory");
-                result = IsCubeMemorySpace(target) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
+                result = core_affinity::IsCubeMemorySpace(target) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
                 break;
               }
             }
@@ -226,20 +226,11 @@ CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span&
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(), span);
 }
 
-/// Build a clean TileType with only shape, dtype, and memory_space (no TileView/memref).
-/// tpop results should be expressible in the Python DSL without requiring TileView metadata.
-TypePtr CleanTileType(const TypePtr& tile_type) {
-  auto tt = std::dynamic_pointer_cast<const TileType>(tile_type);
-  if (!tt) return tile_type;
-  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, std::nullopt, tt->memory_space_);
-}
-
-CallPtr CreateTpop(const std::string& op_name, const TypePtr& tile_type, const Span& span,
+CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
                    const std::vector<std::pair<std::string, std::any>>& kwargs = {}) {
   auto op = OpRegistry::GetInstance().GetOp(op_name);
   auto effective_kwargs = kwargs.empty() ? MakeSplitKwargs() : kwargs;
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs),
-                                CleanTileType(tile_type), span);
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs), result_type, span);
 }
 
 CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr& result_type,
@@ -272,6 +263,32 @@ bool NeedsPostTpopMove(CoreSide side, const TileType& dest_type) {
 
 std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
   return dest_name + ((side == CoreSide::AIC) ? "_mat" : "_vec");
+}
+
+/// Determine the fractal TileView for cross-core data transfer based on the
+/// boundary move destination memory space.
+/// Non-transpose 950: Left -> NZ, Right -> ZN, Mat/Vec -> preserve original.
+TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
+  INTERNAL_CHECK(backend::GetBackendType() == backend::BackendType::Ascend950)
+      << "BuildCrossCoreTransferView is only supported on Ascend950 backend";
+
+  TileView result = original_view;
+  switch (dest_ms) {
+    case MemorySpace::Left:
+      result.blayout = TileLayout::col_major;
+      result.slayout = TileLayout::row_major;
+      return result;
+    case MemorySpace::Right:
+      result.blayout = TileLayout::row_major;
+      result.slayout = TileLayout::col_major;
+      return result;
+    case MemorySpace::Mat:
+    case MemorySpace::Vec:
+      return original_view;
+    default:
+      INTERNAL_UNREACHABLE << "cross-core move destination must be Vec, Mat, Left, or Right, got "
+                           << static_cast<int>(dest_ms);
+  }
 }
 
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
@@ -311,16 +328,49 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // Leaf boundary move — emit tpush/tpop
         const auto& bm = bm_it->second;
         if (bm.direction == push_direction) {
+          ExprPtr push_source = bm.source_tile;
+          // AIV V->C push: insert tile.move (tmov) to adapt fractal layout before tpush
+          if (side == CoreSide::AIV) {
+            auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
+            INTERNAL_CHECK(push_dest_type && push_dest_type->memory_space_.has_value() &&
+                           push_dest_type->tile_view_.has_value())
+                << "Boundary move destination must have TileType, MemSpace and TileView";
+
+            auto fractal_view = BuildCrossCoreTransferView(push_dest_type->memory_space_.value(),
+                                                           push_dest_type->tile_view_.value());
+
+            auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
+            INTERNAL_CHECK(src_type) << "V->C tpush source must have TileType";
+            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
+                                                        fractal_view, MemorySpace::Vec);
+            std::string src_name = "tile";
+            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+              src_name = sv->name_hint_;
+            }
+            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
+            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+            push_source = tmov_var;
+          }
           result.push_back(
-              std::make_shared<EvalStmt>(CreateTpush(push_op, bm.source_tile, stmt->span_), stmt->span_));
+              std::make_shared<EvalStmt>(CreateTpush(push_op, push_source, stmt->span_), stmt->span_));
         } else {
           auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-          INTERNAL_CHECK(dest_tile_type) << "Boundary move destination must have TileType";
+          INTERNAL_CHECK(dest_tile_type && dest_tile_type->memory_space_.has_value() &&
+                         dest_tile_type->tile_view_.has_value())
+              << "Boundary move destination must have TileType, MemSpace and TileView";
           auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
           bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
                                                   : bm.dest_var->name_hint_;
-          auto tpop_var = std::make_shared<Var>(tpop_name, CleanTileType(tpop_type), stmt->span_);
+          // Build tpop result type: with fractal TileView for boundary
+          auto fractal_view = BuildCrossCoreTransferView(dest_tile_type->memory_space_.value(),
+                                                         dest_tile_type->tile_view_.value());
+          auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
+          auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
+                                                             fractal_view, tt->memory_space_);
+          auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, stmt->span_);
           if (!needs_post_move) {
             tpop_var_remap[bm.dest_var.get()] = tpop_var;
           }
@@ -334,7 +384,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             kwargs = bm.source_tpop_call->kwargs_;
           }
           result.push_back(std::make_shared<AssignStmt>(
-              tpop_var, CreateTpop(pop_op, tpop_type, stmt->span_, kwargs), stmt->span_));
+              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, kwargs), stmt->span_));
           if (needs_post_move) {
             auto target_memory = dest_tile_type->memory_space_;
             INTERNAL_CHECK(target_memory.has_value())
