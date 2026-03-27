@@ -335,14 +335,37 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   return "";
 }
 
-// TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-// Helper function for Sort32
+// Helper function for Sort32: emits pto.tsort32
+// PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Operation:[" << pto_op_name << "] requires 1 argument, but got "
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments (src, idx), but got "
                                << op->args_.size();
-  codegen.Emit(pto_op_name);
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string idx = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << pto_op_name;
+  // ins clause: src, idx
+  oss << " ins(" << src << ", " << idx;
+  if (!src_type.empty() || !idx_type.empty()) {
+    oss << " : " << src_type << ", " << idx_type;
+  }
+  // outs clause: dst only (idx is modified in-place by hardware)
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
   return "";
 }
 
@@ -1226,10 +1249,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.ci", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
-  // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-  reg("tile.sort32", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
-  });
+  // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
+  if (exclude_ops.count("tile.sort32") == 0) {
+    backend.RegisterOp("tile.sort32")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
   reg("tile.mrgsort", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);

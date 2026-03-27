@@ -1950,3 +1950,26 @@ def tpop_from_aiv(
         op = _ir_core.get_op("tile.tpop_from_aiv")
         return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
     return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"split": split}, actual_span)
+
+
+# ============================================================================
+# Sorting Operations
+# ============================================================================
+
+
+def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
+    """Sort fixed 32-element blocks with explicit index tile.
+
+    Sorts 32-element blocks in src and permutes idx accordingly.
+    Output tile stores sorted value-index pairs with doubled last dimension.
+
+    Args:
+        src: Input value tile (TileType, FP16 or FP32, Vec memory)
+        idx: Input index tile (TileType, Vec memory) with sequential offsets
+        span: Optional source span for debugging
+
+    Returns:
+        Call expression returning sorted tile with doubled last dimension
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.sort32", [src, idx], {}, actual_span)

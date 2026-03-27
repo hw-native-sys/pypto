@@ -37,6 +37,8 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "bf16";
   } else if (dtype == DataType::INT32) {
     return "i32";
+  } else if (dtype == DataType::UINT32) {
+    return "ui32";
   } else if (dtype == DataType::INDEX) {
     return "index";
   } else if (dtype == DataType::INT64) {

@@ -108,6 +108,7 @@ __all__ = [
     "tpush_to_aic",
     "tpop_from_aic",
     "tpop_from_aiv",
+    "sort32",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -1546,4 +1547,24 @@ def sels(lhs: Tile, rhs: Tile, select_mode: int | float | Expr | Scalar) -> Tile
     """
     select_mode_expr = select_mode.unwrap() if isinstance(select_mode, Scalar) else select_mode
     call_expr = _ir_ops.sels(lhs.unwrap(), rhs.unwrap(), select_mode_expr)
+    return Tile(expr=call_expr)
+
+
+def sort32(src: Tile, idx: Tile) -> Tile:
+    """Sort fixed 32-element blocks with explicit index tile.
+
+    Sorts 32-element blocks in src, permuting idx alongside.
+    Returns sorted value-index pairs tile with doubled last dimension.
+
+    For FP16 src: initialize idx with [0, 1, 2, ..., 31] per block.
+    For FP32 src: initialize idx with [0, 2, 4, ..., 62] per block.
+
+    Args:
+        src: Input value tile (FP16 or FP32)
+        idx: Input index tile with sequential offsets
+
+    Returns:
+        Tile wrapping the sort32 operation (last dim doubled)
+    """
+    call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
     return Tile(expr=call_expr)

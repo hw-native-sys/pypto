@@ -34,6 +34,7 @@ class DataType(Enum):
     FP32 = "fp32"
     FP16 = "fp16"
     INT32 = "int32"
+    UINT32 = "uint32"
     INT64 = "int64"
     BOOL = "bool"
 
@@ -45,6 +46,7 @@ class DataType(Enum):
             DataType.FP32: torch.float32,
             DataType.FP16: torch.float16,
             DataType.INT32: torch.int32,
+            DataType.UINT32: torch.int32,  # PyTorch has no uint32; use int32 (same bits)
             DataType.INT64: torch.int64,
             DataType.BOOL: torch.bool,
         }
