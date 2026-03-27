@@ -205,14 +205,42 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   const auto& input_shape = tile_type->shape_;
 
   TileView tile_view;
+  auto apply_source_memory_layout = [&](TileView& view) {
+    if (!tile_type->memory_space_.has_value()) return;
+    switch (*tile_type->memory_space_) {
+      case MemorySpace::Mat:
+      case MemorySpace::Left:
+        view.blayout = TileLayout::col_major;
+        view.slayout = TileLayout::row_major;
+        break;
+      case MemorySpace::Right:
+        view.slayout = TileLayout::col_major;
+        break;
+      case MemorySpace::Acc:
+        view.blayout = TileLayout::col_major;
+        view.slayout = TileLayout::row_major;
+        break;
+      default:
+        break;
+    }
+  };
+  auto has_explicit_source_layout = [](const TileView& view) {
+    return !view.stride.empty() || view.start_offset || view.pad != PadValue::null ||
+           view.fractal != TileView{}.fractal || view.blayout != TileLayout::row_major ||
+           view.slayout != TileLayout::none_box;
+  };
 
   // Default: retain source tile's layout
   if (tile_type->tile_view_) {
     tile_view.blayout = tile_type->tile_view_->blayout;
     tile_view.slayout = tile_type->tile_view_->slayout;
+    if (!has_explicit_source_layout(tile_type->tile_view_.value())) {
+      apply_source_memory_layout(tile_view);
+    }
   } else {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::none_box;
+    apply_source_memory_layout(tile_view);
   }
 
   // Hardcoded layout for Left/Right (hardware requirements)
@@ -345,6 +373,13 @@ TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
 
   // Return TileType with the static shape and dtype
   TileView tile_view;
+  if (tile_shape.size() == 2) {
+    auto rows_const = As<ConstInt>(tile_shape[0]);
+    auto cols_const = As<ConstInt>(tile_shape[1]);
+    if (rows_const && cols_const && rows_const->value_ > 1 && cols_const->value_ == 1) {
+      tile_view.blayout = TileLayout::col_major;
+    }
+  }
   tile_view.valid_shape = tile_shape;
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }

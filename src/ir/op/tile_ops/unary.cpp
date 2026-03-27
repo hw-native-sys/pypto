@@ -37,6 +37,21 @@
 namespace pypto {
 namespace ir {
 
+namespace {
+
+std::optional<TileView> PreserveTileView(const std::shared_ptr<const TileType>& tile_type) {
+  if (!tile_type->tile_view_.has_value()) {
+    return std::nullopt;
+  }
+  TileView tile_view = tile_type->tile_view_.value();
+  if (tile_view.valid_shape.empty()) {
+    tile_view.valid_shape = tile_type->shape_;
+  }
+  return tile_view;
+}
+
+}  // namespace
+
 TypePtr DeduceTileUnaryType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name) {
@@ -49,9 +64,7 @@ TypePtr DeduceTileUnaryType(const std::vector<ExprPtr>& args,
                    << args[0]->GetType()->TypeName();
 
   // Unary operations preserve shape and data type
-  TileView tile_view;
-  tile_view.valid_shape = tile_type->shape_;
-  InheritTileViewLayout(tile_view, tile_type);
+  auto tile_view = PreserveTileView(tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -86,9 +99,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
   CHECK(found_target_type) << "tile.cast requires 'target_type' kwarg";
 
   // Cast operation preserves shape but changes data type
-  TileView tile_view;
-  tile_view.valid_shape = tile_type->shape_;
-  InheritTileViewLayout(tile_view, tile_type);
+  auto tile_view = PreserveTileView(tile_type);
   return std::make_shared<TileType>(tile_type->shape_, target_dtype, std::nullopt, tile_view);
 }
 

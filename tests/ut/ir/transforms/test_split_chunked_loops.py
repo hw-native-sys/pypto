@@ -499,7 +499,7 @@ class TestNestedChunking:
                             for j_0_rem, (x_iter_3_rem,) in pl.parallel(
                                 0, 1, 1, init_values=(x_iter_1_inner,)
                             ):
-                                x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_rem, 1.0)
+                                x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x_iter_3_rem, 1.0)
                                 x_iter_3_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_rem_rv)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
@@ -536,7 +536,7 @@ class TestNestedChunking:
                                 for j_0_in, (x_iter_3_inner,) in pl.parallel(
                                     0, 4, 1, init_values=(x_iter_3_outer,)
                                 ):
-                                    x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_inner, 1.0)
+                                    x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x_iter_3_inner, 1.0)
                                     x_iter_3_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
                                 x_iter_3_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_inner_rv)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_3_outer_rv)

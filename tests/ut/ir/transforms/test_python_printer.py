@@ -234,7 +234,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, pl.const(42, pl.INT32))
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x, pl.const(42, pl.INT32))
                 return y
 
         code = Before.as_python()
@@ -250,7 +250,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP16]:
-                y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(1.0, pl.FP16))
+                y: pl.Tensor[[64], pl.FP16] = pl.tensor.adds(x, pl.const(1.0, pl.FP16))
                 return y
 
         code = Before.as_python()
@@ -266,7 +266,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, 1.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x, 1.0)
                 return y
 
         code = Before.as_python()
@@ -283,7 +283,7 @@ class TestPythonPrinterConstDtypeRoundtrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP16]) -> pl.Tensor[[64], pl.FP16]:
-                y: pl.Tensor[[64], pl.FP16] = pl.tensor.add(x, pl.const(-2.5, pl.FP16))
+                y: pl.Tensor[[64], pl.FP16] = pl.tensor.adds(x, pl.const(-2.5, pl.FP16))
                 return y
 
         code = Before.as_python()
@@ -326,12 +326,12 @@ class TestTileViewTensorViewPrinting:
         printed = "import pypto.language as pl\nresult = " + ir.python_print_type(tile_type)
         compile(printed, "<string>", "exec")  # must not raise SyntaxError
 
-    def test_tensorview_always_emitted_when_present(self):
+    def test_tensorview_defaults_omitted_when_equivalent(self):
         tensor_view = ir.TensorView()  # all-default fields
         tensor_type = ir.TensorType([64], DataType.FP32, tensor_view=tensor_view)
 
         printed = ir.python_print_type(tensor_type)
-        assert "pl.TensorView()" in printed  # all-default fields must still be emitted
+        assert "TensorView" not in printed
 
     def test_tileview_tensorview_parseable_by_type_resolver(self):
         span = ir.Span.unknown()
@@ -392,7 +392,9 @@ class TestDynVarAndSSARename:
         assert len(lines) == 2, f"Expected 2 pl.dynamic() declarations, got {len(lines)}: {lines}"
         # One should be M, the other M_1
         assert 'M = pl.dynamic("M")' in src
-        assert 'M_1 = pl.dynamic("M_1")' in src
+        assert 'M_1 = pl.dynamic("M")' in src
+        reparsed = pl.parse_program(src)
+        ir.assert_structural_equal(prog, reparsed)
 
     def test_dyn_var_unique_names_not_disambiguated(self):
         """Distinct Var objects with different names are not affected (issue #618)."""
@@ -443,6 +445,28 @@ class TestOpOutputNormalization:
         assert "pl.tensor.adds(" in src
         assert "pl.tensor.add(" not in src
 
+    def test_explicit_tensor_add_scalar_prints_as_adds(self):
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.tensor.add(x, 1.0)
+
+        src = python_print(Prog)
+        assert "pl.tensor.adds(" in src
+        assert "pl.tensor.add(" not in src
+
+    def test_explicit_tile_add_scalar_prints_as_adds(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                return pl.tile.add(x, 1.0)
+
+        src = python_print(Prog)
+        assert "pl.tile.adds(" in src
+        assert "pl.tile.add(" not in src
+
     def test_tile_full_dtype_as_keyword(self):
         @pl.program
         class Prog:
@@ -454,3 +478,87 @@ class TestOpOutputNormalization:
         src = python_print(Prog)
         assert "dtype=pl.FP32" in src
         assert "value=" in src
+
+    def test_chunked_loops_print_loop_origin_keyword(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 16, 1, chunk=4):
+                        x = pl.assemble(x, pl.slice(x, [1], [i]), [i])
+                return x
+
+        after = passes.split_chunked_loops()(Prog)
+        src = python_print(after)
+        assert 'loop_origin="chunk_outer"' in src
+        assert 'loop_origin="chunk_inner"' in src
+        reparsed = pl.parse_program(src)
+        reparsed_src = python_print(reparsed)
+        assert 'loop_origin="chunk_outer"' in reparsed_src
+        assert 'loop_origin="chunk_inner"' in reparsed_src
+        ir.assert_structural_equal(after, reparsed)
+
+
+class TestOfficialSyntaxRoundtrip:
+    """Roundtrip should use official DSL syntax rather than parser-only escapes."""
+
+    def test_tensor_adds_roundtrip_uses_official_syntax(self):
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x, 1.0)
+                return y
+
+        printed = python_print(Prog)
+        assert "pl.tensor.adds(" in printed
+        assert "call_op" not in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
+    def test_explicit_tensor_add_scalar_roundtrip_prints_canonical_adds(self):
+        @pl.program
+        class Prog:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, 1.0)
+                return y
+
+        printed = python_print(Prog)
+        assert "pl.tensor.adds(" in printed
+        assert "pl.tensor.add(" not in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
+    def test_explicit_tile_add_scalar_roundtrip_prints_canonical_adds(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tile[[64], pl.FP32]) -> pl.Tile[[64], pl.FP32]:
+                y: pl.Tile[[64], pl.FP32] = pl.tile.add(x, 1.0)
+                return y
+
+        printed = python_print(Prog)
+        assert "pl.tile.adds(" in printed
+        assert "pl.tile.add(" not in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
+    def test_tile_full_roundtrip_uses_official_syntax(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self) -> pl.Tile[[16], pl.FP32]:
+                y: pl.Tile[[16], pl.FP32] = pl.tile.full([16], dtype=pl.FP32, value=0.0)
+                return y
+
+        printed = python_print(Prog)
+        assert "pl.tile.full(" in printed
+        assert "call_op" not in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)

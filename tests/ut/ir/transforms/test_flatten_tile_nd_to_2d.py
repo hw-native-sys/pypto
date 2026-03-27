@@ -35,7 +35,15 @@ def _load2d(
     ref_tensor = ir.Var("_ref", ir.TensorType(flat_shape, dtype), ir.Span.unknown())
     ref_offsets = [0] * len(flat_shape)
     ref_call = tile_ops.load(ref_tensor, ref_offsets, flat_shape, span=ir.Span.unknown())
-    flat_type: ir.TileType = ref_call.type  # type: ignore[assignment]
+    nd_type: ir.TileType = nd_call.type  # type: ignore[assignment]
+    ref_type: ir.TileType = ref_call.type  # type: ignore[assignment]
+    flat_type = ir.TileType(  # type: ignore[assignment]
+        flat_shape,
+        dtype,
+        ref_type.memref,
+        nd_type.tile_view,
+        ref_type.memory_space,
+    )
     return ir.Call(nd_call.op, list(nd_call.args), nd_call.kwargs, flat_type, nd_call.span)
 
 

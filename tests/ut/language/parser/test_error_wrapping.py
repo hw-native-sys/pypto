@@ -174,6 +174,25 @@ class TestTypeMismatchReassignment:
                 t = pl.create_tensor([4, 4], dtype=pl.FP32)  # different shape  # noqa: F841
                 return x
 
+    def test_reassign_sparse_acc_to_default_acc_view_succeeds(self):
+        """Sparse Acc type should match an explicit default Acc TileView on reassignment."""
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def func(
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            b_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            acc: pl.Tile[[16, 16], pl.FP32] = pl.matmul(a_left, b_right)
+            acc = pl.matmul_acc(acc, a_left, b_right)
+            return pl.store(acc, [0, 0], out)
+
+        assert func is not None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

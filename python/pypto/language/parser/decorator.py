@@ -761,8 +761,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
                 _prescan_reserve_buffers(func_def, buffer_name_meta)
 
             # Shared dyn_var_cache so all functions in this program share the same
-            # ir.Var objects for dynamic dimension variables (issue #618).
-            dyn_var_cache: dict[str, ir.Var] = {}
+            # ir.Var objects for the same DynVar instances, while still keeping
+            # distinct DynVar objects with the same display name separate
+            # (issue #618).
+            dyn_var_cache: dict[object, ir.Var] = {}
 
             for func_def in func_defs:
                 # Extract function type and level/role from decorator

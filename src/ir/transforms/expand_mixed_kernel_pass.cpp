@@ -227,11 +227,28 @@ CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span&
   return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(), span);
 }
 
+TypePtr CleanTileType(const TypePtr& tile_type) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(tile_type);
+  if (!tt) return tile_type;
+
+  std::optional<TileView> tile_view = tt->tile_view_;
+  if (!tile_view.has_value()) {
+    TileView default_view;
+    default_view.valid_shape = tt->shape_;
+    tile_view = default_view;
+  } else if (tile_view->valid_shape.empty()) {
+    tile_view->valid_shape = tt->shape_;
+  }
+
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, tile_view, tt->memory_space_);
+}
+
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
                    const std::vector<std::pair<std::string, std::any>>& kwargs = {}) {
   auto op = OpRegistry::GetInstance().GetOp(op_name);
   auto effective_kwargs = kwargs.empty() ? MakeSplitKwargs() : kwargs;
-  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs), result_type, span);
+  return std::make_shared<Call>(op, std::vector<ExprPtr>{}, std::move(effective_kwargs),
+                                CleanTileType(result_type), span);
 }
 
 CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr& result_type,
@@ -380,7 +397,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
           auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
                                                              fractal_view, tt->memory_space_);
-          auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, stmt->span_);
+          auto tpop_var = std::make_shared<Var>(tpop_name, CleanTileType(tpop_result_type), stmt->span_);
           if (!needs_post_move) {
             tpop_var_remap[bm.dest_var.get()] = tpop_var;
           }

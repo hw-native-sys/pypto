@@ -524,10 +524,21 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
   auto new_body = mutator.VisitStmt(normalized_func->body_);
 
+  std::vector<TypePtr> new_return_types;
+  new_return_types.reserve(normalized_func->return_types_.size());
+  for (const auto& return_type : normalized_func->return_types_) {
+    std::optional<MemorySpace> memory_space = std::nullopt;
+    if (auto tile_type = std::dynamic_pointer_cast<const TileType>(return_type)) {
+      memory_space = tile_type->memory_space_;
+    }
+    new_return_types.push_back(CloneTypeWithMemRefAndRemapExprs(
+        return_type, GetTypeMemRef(return_type),
+        [&mutator](const ExprPtr& expr) { return mutator.VisitExpr(expr); }, memory_space));
+  }
+
   auto result_func = std::make_shared<Function>(
-      normalized_func->name_, new_params, normalized_func->param_directions_, normalized_func->return_types_,
-      new_body, normalized_func->span_, normalized_func->func_type_, normalized_func->level_,
-      normalized_func->role_);
+      normalized_func->name_, new_params, normalized_func->param_directions_, new_return_types, new_body,
+      normalized_func->span_, normalized_func->func_type_, normalized_func->level_, normalized_func->role_);
 
   // Step 3: Collect non-DDR MemRefs and create alloc statements
   NonDDRMemRefCollector collector;

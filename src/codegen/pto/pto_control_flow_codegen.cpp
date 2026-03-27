@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -41,21 +42,22 @@ using ir::VarPtr;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
-static std::pair<VarPtr, VarPtr> GetTileValidShapeVars(const std::shared_ptr<const ir::TileType>& tile_type) {
-  VarPtr valid_row_var;
-  VarPtr valid_col_var;
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return {valid_row_var, valid_col_var};
+static std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  ExprPtr valid_row_expr;
+  ExprPtr valid_col_expr;
+  if (!tile_type) {
+    return {valid_row_expr, valid_col_expr};
   }
 
-  const auto& tile_view = tile_type->tile_view_.value();
-  if (tile_view.valid_shape.size() >= 1) {
-    valid_row_var = As<ir::Var>(tile_view.valid_shape[0]);
+  auto flat_valid_shape = GetTileBufferValidShape(*tile_type);
+  if (flat_valid_shape.size() >= 1) {
+    valid_row_expr = flat_valid_shape[0];
   }
-  if (tile_view.valid_shape.size() >= 2) {
-    valid_col_var = As<ir::Var>(tile_view.valid_shape[1]);
+  if (flat_valid_shape.size() >= 2) {
+    valid_col_expr = flat_valid_shape[1];
   }
-  return {valid_row_var, valid_col_var};
+  return {valid_row_expr, valid_col_expr};
 }
 
 /// Join a vector of strings with ", " separator
@@ -171,9 +173,9 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         if (auto const_addr = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
           addr_ssa = GetOrEmitI64Constant(const_addr->value_);
         }
-        auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
-        if (valid_row_var) valid_row_ssa = GetVarName(valid_row_var);
-        if (valid_col_var) valid_col_ssa = GetVarName(valid_col_var);
+        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+        if (valid_row_expr) valid_row_ssa = GetExprAsCode(valid_row_expr);
+        if (valid_col_expr) valid_col_ssa = GetExprAsCode(valid_col_expr);
         std::string ret_name =
             AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
         BindVarToMlir(return_var, ret_name);

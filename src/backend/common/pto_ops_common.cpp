@@ -35,6 +35,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -417,29 +418,27 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   if (result_var) {
     auto tile_type = ir::As<ir::TileType>(result_var->GetType());
     if (tile_type && tile_type->tile_view_.has_value() && codegen.HasFillpadConsumer(result_var.get())) {
-      const auto& tv = tile_type->tile_view_.value();
+      auto flat_valid_shape = codegen::GetTileBufferValidShape(*tile_type);
       bool has_dynamic = false;
       std::string vr, vc;
 
       // Extract valid_row SSA
-      if (tv.valid_shape.size() >= 1) {
-        if (auto var = ir::As<ir::Var>(tv.valid_shape[0])) {
-          std::string mlir_name = codegen.GetVarName(var);
-          vr = codegen.EmitCastToIndex(var, mlir_name);
-          has_dynamic = true;
-        } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
+      if (flat_valid_shape.size() >= 1) {
+        if (auto c = ir::As<ir::ConstInt>(flat_valid_shape[0])) {
           vr = codegen.GetIndexConstant(c->value_);
+        } else {
+          vr = codegen.GetExprAsCode(flat_valid_shape[0]);
+          has_dynamic = true;
         }
       }
 
       // Extract valid_col SSA
-      if (tv.valid_shape.size() >= 2) {
-        if (auto var = ir::As<ir::Var>(tv.valid_shape[1])) {
-          std::string mlir_name = codegen.GetVarName(var);
-          vc = codegen.EmitCastToIndex(var, mlir_name);
-          has_dynamic = true;
-        } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
+      if (flat_valid_shape.size() >= 2) {
+        if (auto c = ir::As<ir::ConstInt>(flat_valid_shape[1])) {
           vc = codegen.GetIndexConstant(c->value_);
+        } else {
+          vc = codegen.GetExprAsCode(flat_valid_shape[1]);
+          has_dynamic = true;
         }
       }
 
@@ -463,8 +462,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   auto tile_type = As<ir::TileType>(tile->GetType());
   INTERNAL_CHECK(tile_type) << "tile.store first argument must have TileType";
-  INTERNAL_CHECK(tile_type->tile_view_.has_value()) << "tile.store tile must have TileView with valid_shape";
-  auto& valid_shape = tile_type->tile_view_->valid_shape;
+  auto valid_shape = codegen::GetTileBufferValidShape(*tile_type);
   INTERNAL_CHECK(valid_shape.size() == 2) << "tile.store tile valid_shape must be 2D";
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);

@@ -12,9 +12,14 @@
 #ifndef PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
 #define PYPTO_CODEGEN_PTO_TILE_BUF_SIGNATURE_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
+#include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
@@ -23,6 +28,35 @@
 
 namespace pypto {
 namespace codegen {
+
+inline ir::ExprPtr MultiplyTileValidShapeExprs(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs) {
+  auto lhs_const = ir::As<ir::ConstInt>(lhs);
+  auto rhs_const = ir::As<ir::ConstInt>(rhs);
+  if (lhs_const && rhs_const) {
+    INTERNAL_CHECK(lhs_const->value_ > 0 && rhs_const->value_ > 0)
+        << "Tile valid_shape dimensions must be positive";
+    INTERNAL_CHECK(lhs_const->value_ <= (std::numeric_limits<int64_t>::max() / rhs_const->value_))
+        << "Tile valid_shape overflow while flattening ND valid_shape";
+    return std::make_shared<ir::ConstInt>(lhs_const->value_ * rhs_const->value_, DataType::INDEX, lhs->span_);
+  }
+  return std::make_shared<ir::Mul>(lhs, rhs, DataType::INDEX, lhs->span_);
+}
+
+inline std::vector<ir::ExprPtr> GetTileBufferValidShape(const ir::TileType& tile_type) {
+  std::vector<ir::ExprPtr> valid_shape = tile_type.shape_;
+  if (tile_type.tile_view_.has_value() && !tile_type.tile_view_->valid_shape.empty()) {
+    valid_shape = tile_type.tile_view_->valid_shape;
+  }
+  if (valid_shape.size() <= 2) {
+    return valid_shape;
+  }
+
+  ir::ExprPtr merged = valid_shape.front();
+  for (size_t i = 1; i + 1 < valid_shape.size(); ++i) {
+    merged = MultiplyTileValidShapeExprs(merged, valid_shape[i]);
+  }
+  return {merged, valid_shape.back()};
+}
 
 /**
  * @brief PTO-visible typed buffer signature
@@ -96,17 +130,18 @@ struct TileBufSignature {
       sig.slayout = tv.slayout;
       sig.fractal = tv.fractal;
       sig.pad = tv.pad;
-      if (tv.valid_shape.size() >= 1) {
-        if (auto c0 = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
+      auto flat_valid_shape = GetTileBufferValidShape(tile_type);
+      if (flat_valid_shape.size() >= 1) {
+        if (auto c0 = ir::As<ir::ConstInt>(flat_valid_shape[0])) {
           sig.v_row = c0->value_;
-        } else if (ir::As<ir::Var>(tv.valid_shape[0])) {
+        } else {
           sig.v_row_dynamic = true;
         }
       }
-      if (tv.valid_shape.size() >= 2) {
-        if (auto c1 = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
+      if (flat_valid_shape.size() >= 2) {
+        if (auto c1 = ir::As<ir::ConstInt>(flat_valid_shape[1])) {
           sig.v_col = c1->value_;
-        } else if (ir::As<ir::Var>(tv.valid_shape[1])) {
+        } else {
           sig.v_col_dynamic = true;
         }
       }

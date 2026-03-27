@@ -119,6 +119,42 @@ class TestInferTileMemorySpaceKwargOps:
         _assert_var_memory_space(printed, "x_tile", "Mat")
         _assert_var_memory_space(printed, "x_left", "Left")
 
+    def test_move_with_explicit_layout_kwargs_preserves_call_kwargs(self):
+        """tile.move should preserve explicit blayout/slayout kwargs through inference."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_vec: pl.Tile[[16, 128], pl.BF16] = pl.move(
+                    x_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(x_vec, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.BF16]) -> pl.Tensor[[16, 128], pl.BF16]:
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                y: pl.Tensor[[16, 128], pl.BF16] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.infer_tile_memory_space()(Before)
+        printed = ir.python_print(After)
+        _assert_var_memory_space(printed, "x_tile", "Mat")
+        _assert_var_memory_space(printed, "x_vec", "Vec")
+        assert "blayout=pl.TileLayout.row_major" in printed
+        assert "slayout=pl.TileLayout.none_box" in printed
+
     def test_create_default_vec(self):
         """tile.create without target_memory kwarg defaults to Vec."""
 
@@ -297,6 +333,11 @@ class TestInferTileMemorySpaceOtherOps:
         printed = ir.python_print(After)
         _assert_var_memory_space(printed, "z_tile", "Acc")
         _assert_var_memory_space(printed, "w_tile", "Vec")
+        assert "w_tile: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(" in printed
+        assert (
+            "w_tile: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView("
+            "blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major, fractal=1024)]" not in printed
+        )
 
     def test_chained_elementwise_inherits(self):
         """Chained elementwise ops: add then mul both inherit Vec."""
