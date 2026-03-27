@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
@@ -274,8 +275,9 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 /// boundary move destination memory space.
 /// Non-transpose 950: Left -> NZ, Right -> ZN, Mat/Vec -> preserve original.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  INTERNAL_CHECK(backend::GetBackendType() == backend::BackendType::Ascend950)
-      << "BuildCrossCoreTransferView is only supported on Ascend950 backend";
+  if (backend::GetBackendType() != backend::BackendType::Ascend950) {
+    return original_view;
+  }
 
   TileView result = original_view;
   switch (dest_ms) {
@@ -341,8 +343,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                            push_dest_type->tile_view_.has_value())
                 << "Boundary move destination must have TileType, MemSpace and TileView";
 
-            auto fractal_view = BuildCrossCoreTransferView(push_dest_type->memory_space_.value(),
-                                                           push_dest_type->tile_view_.value());
+            // NOLINT: optional checked by INTERNAL_CHECK above
+            auto fractal_view = BuildCrossCoreTransferView(
+                push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+                push_dest_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
 
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
             INTERNAL_CHECK(src_type) << "V->C tpush source must have TileType";
@@ -370,8 +374,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
                                                   : bm.dest_var->name_hint_;
           // Build tpop result type: with fractal TileView for boundary
-          auto fractal_view = BuildCrossCoreTransferView(dest_tile_type->memory_space_.value(),
-                                                         dest_tile_type->tile_view_.value());
+          // NOLINT: optional checked by INTERNAL_CHECK above
+          auto fractal_view = BuildCrossCoreTransferView(
+              dest_tile_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+              dest_tile_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
           auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
                                                              fractal_view, tt->memory_space_);
