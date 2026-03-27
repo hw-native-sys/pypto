@@ -183,6 +183,13 @@ class MoveCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_)) {
+      CheckInputConstraints(call);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
  private:
   const std::map<VarPtr, MemorySpace>& var_memory_;
   std::set<MoveKey, MoveKeyLess> needed_moves_;
@@ -433,6 +440,13 @@ class TileMemoryInferredVerifier : public IRVisitor {
       VerifyInputConstraints(call);
     }
 
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_)) {
+      VerifyInputConstraints(call);
+    }
     IRVisitor::VisitStmt_(op);
   }
 

@@ -814,6 +814,32 @@ class TestAutoMoveInsertion:
         # Matmul uses the original moved vars
         assert "pl.tile.matmul(x_left, y_right)" in printed
 
+    def test_eval_stmt_consumer_collects_and_inserts_move(self):
+        """EvalStmt consumers should also trigger required auto-inserted moves."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                value: pl.Scalar[pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                    x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                )
+                pl.tile.write(x_tile, [0, 0], value)
+                return out_0
+
+        After = passes.infer_tile_memory_space()(Before)
+        printed = ir.python_print(After)
+
+        _assert_var_memory_space(printed, "x_tile", "Mat")
+        _assert_var_memory_space(printed, "x_tile_Vec", "Vec")
+        assert "pl.tile.write(x_tile_Vec, [0, 0], value)" in printed
+        assert printed.count("pl.tile.move") == 1
+
     def test_store_no_move_for_vec(self):
         """tile.store accepts Vec — no move needed for Vec tile."""
 
