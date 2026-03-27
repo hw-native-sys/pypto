@@ -531,5 +531,18 @@ def test_type_error_on_invalid_input():
         torch_codegen(ir.ConstInt(42, DataType.INT64, _span()))  # type: ignore[arg-type]
 
 
+def test_unsupported_op_raises():
+    """torch_codegen should raise ValueError for unregistered ops."""
+    a = _tensor_var("a", [64])
+    out = _tensor_var("out", [64])
+    # Construct a Call with a plain Op (not GlobalVar, not in _OP_MAP)
+    fake_op = ir.Op("fake.nonexistent_op")
+    call = ir.Call(fake_op, [a], _span())
+    assign = ir.AssignStmt(out, call, _span())
+    func = _simple_function("f", [a], assign)
+    with pytest.raises(ValueError, match="Unsupported op 'fake.nonexistent_op'"):
+        torch_codegen(func)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

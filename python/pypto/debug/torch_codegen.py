@@ -504,8 +504,10 @@ class TorchCodegen(_ir.IRVisitor):
             # Cross-function call
             self._expr_result = f"{op_name}({', '.join(arg_strs)})"
         else:
-            # Unknown op: emit as comment
-            self._expr_result = f"None  # UNKNOWN: {op_name}({', '.join(arg_strs)})"
+            raise ValueError(
+                f"Unsupported op '{op_name}' in torch_codegen. "
+                f"Register a handler in _OP_MAP or use a GlobalVar for cross-function calls."
+            )
 
     # -- statement visitors --
 
