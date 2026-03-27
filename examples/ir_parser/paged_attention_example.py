@@ -605,6 +605,7 @@ def golden(tensors: dict, params: dict | None = None) -> None:
             if bn == 0:
                 oi, li, mi = oi_new, lij, mij
             else:
+                assert oi is not None and li is not None and mi is not None
                 mi_new = torch.maximum(mi, mij)
                 alpha = torch.exp(mi - mi_new)
                 beta = torch.exp(mij - mi_new)
