@@ -14,7 +14,7 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstInt, Expr, PadValue, ScalarType, Span, TensorLayout
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PadValue, ScalarType, Span, TensorLayout
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -47,6 +47,33 @@ def create(
 
 
 create_tensor = create
+
+
+def full(
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType,
+    value: int | float,
+    span: Span | None = None,
+) -> Call:
+    """Create a tensor of specified shape filled with a constant value.
+
+    Args:
+        shape: Shape of the tensor (list of int/Expr, or MakeTuple)
+        dtype: Data type of tensor elements
+        value: Filling scalar value (int or float)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a TensorType
+    """
+    actual_span = _get_span_or_capture(span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    if isinstance(value, int):
+        value_expr = ConstInt(value, dtype, actual_span)
+    else:
+        value_expr = ConstFloat(value, dtype, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype}
+    return _ir_core.create_op_call("tensor.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
 def read(

@@ -2405,6 +2405,7 @@ class ASTParser:
         "create_tensor",
         "dim",
         "assemble",
+        "full",
     }
     _TILE_ONLY_OPS = {
         "load",

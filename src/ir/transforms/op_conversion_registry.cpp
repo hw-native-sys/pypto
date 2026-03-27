@@ -158,6 +158,9 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.transpose", "tile.transpose");
   RegisterSimple("tensor.concat", "tile.concat");
 
+  // Memory creation ops
+  RegisterSimple("tensor.full", "tile.full");
+
   // ────────────────────────────────────────────────────────────────────────
   // Broadcast-aware elementwise binary ops
   //

@@ -272,6 +272,57 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
 }
 
+TypePtr DeduceTensorFullType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 2) << "tensor.full requires exactly 2 arguments (shape, value), but got "
+                          << args.size();
+
+  // Extract dtype from kwargs
+  bool found_dtype = false;
+  DataType dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dtype") {
+      dtype = AnyCast<DataType>(value, "kwarg key: dtype");
+      found_dtype = true;
+      break;
+    }
+  }
+  CHECK(found_dtype) << "tensor.full requires 'dtype' kwarg";
+
+  // First argument must be TupleType (shape)
+  auto shape_tuple_type = As<TupleType>(args[0]->GetType());
+  CHECK(shape_tuple_type) << "tensor.full requires shape to be TupleType, but got "
+                          << args[0]->GetType()->TypeName();
+
+  // Validate all shape elements are ScalarType with integer dtype
+  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
+    CHECK(scalar_type) << "tensor.full shape element " << i << " must be ScalarType, but got "
+                       << shape_tuple_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.full shape element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  // Second argument must be ConstInt or ConstFloat
+  CHECK(As<ConstInt>(args[1]) || As<ConstFloat>(args[1]))
+      << "tensor.full requires value to be ConstInt or ConstFloat, but got " << args[1]->TypeName();
+
+  // Extract shape dimensions (same pattern as tensor.create)
+  std::vector<ExprPtr> shape;
+  shape.reserve(shape_tuple_type->types_.size());
+
+  if (auto make_tuple = As<MakeTuple>(args[0])) {
+    shape = make_tuple->elements_;
+  } else {
+    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+      shape.emplace_back(std::make_shared<TupleGetItemExpr>(args[0], static_cast<int>(i), args[0]->span_));
+    }
+  }
+
+  return std::make_shared<TensorType>(shape, dtype);
+}
+
 // ============================================================================
 // Registration Function for Tensor Memory Operations
 // ============================================================================
@@ -327,6 +378,17 @@ REGISTER_OP("tensor.fillpad")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorFillpadType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.full")
+    .set_op_category("TensorOp")
+    .set_description("Create a tensor of specified shape filled with a constant value")
+    .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("value", "Filling value (ConstInt or ConstFloat)")
+    .set_attr<DataType>("dtype")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorFullType(args, kwargs);
     });
 
 TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,

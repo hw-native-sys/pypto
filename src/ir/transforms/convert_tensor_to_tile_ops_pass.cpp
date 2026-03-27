@@ -948,7 +948,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
-  if (op_name == "tensor.slice" || op_name == "tensor.create") {
+  if (op_name == "tensor.slice" || op_name == "tensor.create" || op_name == "tensor.full") {
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
     }

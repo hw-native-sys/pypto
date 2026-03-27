@@ -2326,5 +2326,28 @@ class TestScatterUpdateConversion:
         assert "tile.scatter_update" in after_str
 
 
+class TestTensorFullConversion:
+    def test_tensor_full_conversion(self):
+        """tensor.full -> tile.full conversion."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tensor[[64], pl.FP32] = pl.full([64], dtype=pl.FP32, value=0.0)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(t, x)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.full" in ir_str
+        assert "tensor.full" not in ir_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

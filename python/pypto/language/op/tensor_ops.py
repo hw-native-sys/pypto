@@ -23,6 +23,7 @@ __all__ = [
     "dim",
     "slice",
     "fillpad",
+    "full",
     "matmul",
     "matmul_acc",
     "mul",
@@ -184,6 +185,21 @@ def fillpad(tensor: Tensor, pad_value: PadValue = PadValue.zero) -> Tensor:
         Tensor wrapping the fillpad operation
     """
     call_expr = _ir_ops.fillpad(tensor.unwrap(), pad_value=pad_value)
+    return Tensor(expr=call_expr)
+
+
+def full(shape: Sequence[IntLike], dtype: DataType, value: int | float) -> Tensor:
+    """Create a tensor of specified shape filled with a constant value.
+
+    Args:
+        shape: Shape of the tensor
+        dtype: Data type of tensor elements
+        value: Filling scalar value (int or float)
+
+    Returns:
+        Tensor wrapping the full operation
+    """
+    call_expr = _ir_ops.full(_normalize_intlike(shape), dtype, value)
     return Tensor(expr=call_expr)
 
 
