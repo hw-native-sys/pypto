@@ -508,7 +508,7 @@ class TestExpandMixedKernelCodegen:
             dict mapping function name to generated MLIR code for InCore-variant functions.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend950)
 
         # Full PTOAS pipeline with expand_mixed_kernel at its intended position
         pipeline = passes.PassPipeline()

@@ -15,7 +15,8 @@ while preserving IR structure and SSA consistency.
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, ir, passes
+from pypto.backend import BackendType
 
 
 def _get_function(program: ir.Program, name: str) -> ir.Function:
@@ -105,6 +106,14 @@ class TestDeepCloneNoSharedIdentity:
 
 class TestDeepCloneWithExpandMixedKernel:
     """Integration test: ExpandMixedKernel uses DeepClone internally."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_backend(self):
+        """Configure Ascend950 backend for expand_mixed_kernel tests."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        yield
+        backend.reset_for_testing()
 
     def test_expand_mixed_kernel_whole_program(self):
         """After ExpandMixedKernel, whole-program structural equality should work."""

@@ -275,9 +275,8 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 /// boundary move destination memory space.
 /// Non-transpose 950: Left -> NZ, Right -> ZN, Mat/Vec -> preserve original.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  if (backend::GetBackendType() != backend::BackendType::Ascend950) {
-    return original_view;
-  }
+  INTERNAL_CHECK(backend::GetBackendType() == backend::BackendType::Ascend950)
+      << "BuildCrossCoreTransferView is only supported on Ascend950 backend";
 
   TileView result = original_view;
   switch (dest_ms) {
