@@ -52,6 +52,8 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
    Or with development dependencies:
 
    ```bash
+   # Install CPU-only torch first (avoids pulling ~2GB CUDA dependencies)
+   pip install torch --index-url https://download.pytorch.org/whl/cpu
    pip install -e ".[dev]"
    ```
 
@@ -106,7 +108,8 @@ python examples/ir_parser/flash_attention_parsing.py
 To run unit tests:
 
 ```bash
-# Install with development dependencies
+# Install with development dependencies (CPU-only torch first)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
 
 # Run unit tests in parallel

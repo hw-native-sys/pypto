@@ -10,7 +10,7 @@
 """Tests for PyTorch code emission from PyPTO IR."""
 
 import pytest
-import torch
+import torch  # type: ignore[import-not-found]  # debug/test dep, not a core dep of PyPTO
 from pypto import DataType, ir
 from pypto.debug import torch_codegen
 
