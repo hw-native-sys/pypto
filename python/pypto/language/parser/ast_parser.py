@@ -10,7 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +66,105 @@ def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     if upper_value is None or lower_value is None:
         return None
     return upper_value - lower_value
+
+
+def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
+    """Return whether two shape-like expression lists are statically identical."""
+    if len(lhs) != len(rhs):
+        return False
+    for lhs_dim, rhs_dim in zip(lhs, rhs):
+        if lhs_dim is rhs_dim:
+            continue
+        lhs_value = _const_int_value(lhs_dim)
+        rhs_value = _const_int_value(rhs_dim)
+        if lhs_value is None or rhs_value is None or lhs_value != rhs_value:
+            return False
+    return True
+
+
+def _infer_implicit_tile_layout_from_shape(shape: Sequence[ir.Expr]) -> ir.TileLayout:
+    """Infer the block layout represented by omitted TileView syntax."""
+    if len(shape) != 2:
+        return ir.TileLayout.row_major
+    rows_value = _const_int_value(shape[0])
+    cols_value = _const_int_value(shape[1])
+    if rows_value is None or cols_value is None:
+        return ir.TileLayout.row_major
+    return ir.TileLayout.col_major if cols_value == 1 and rows_value > 1 else ir.TileLayout.row_major
+
+
+def _implicit_tile_view_defaults(
+    shape: Sequence[ir.Expr],
+    memory_space: ir.MemorySpace | None = None,
+) -> tuple[ir.TileLayout, ir.TileLayout, int]:
+    """Return the layout/fractal defaults implied by omitted TileView syntax."""
+    default_blayout = _infer_implicit_tile_layout_from_shape(shape)
+    default_slayout = ir.TileLayout.none_box
+    default_fractal = ir.TileView().fractal
+    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+    elif memory_space == ir.MemorySpace.Right:
+        default_slayout = ir.TileLayout.col_major
+    elif memory_space == ir.MemorySpace.Acc:
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+        default_fractal = 1024
+    return default_blayout, default_slayout, default_fractal
+
+
+def _has_printable_tile_view(
+    tile_view: ir.TileView | None,
+    shape: Sequence[ir.Expr],
+    memory_space: ir.MemorySpace | None = None,
+) -> bool:
+    """Return whether a TileView carries non-default metadata in Python text form."""
+    if tile_view is None:
+        return False
+    if tile_view.valid_shape and not _shape_exprs_match(tile_view.valid_shape, shape):
+        return True
+    if tile_view.stride:
+        return True
+    if tile_view.start_offset is not None:
+        return True
+    default_blayout, default_slayout, default_fractal = _implicit_tile_view_defaults(shape, memory_space)
+    if tile_view.blayout != default_blayout:
+        return True
+    if tile_view.slayout != default_slayout:
+        return True
+    if tile_view.fractal != default_fractal:
+        return True
+    if tile_view.pad != ir.PadValue.null:
+        return True
+    return False
+
+
+def _normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
+    """Normalize omitted default TileView metadata before syntax-level comparison."""
+    if isinstance(type_, ir.TileType):
+        tile_view = type_.tile_view
+        if tile_view is not None and not _has_printable_tile_view(tile_view, type_.shape, type_.memory_space):
+            tile_view = None
+        if tile_view is type_.tile_view:
+            return type_
+        return ir.TileType(type_.shape, type_.dtype, type_.memref, tile_view, type_.memory_space)
+
+    return type_
+
+
+def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Return whether two IR types are equivalent in parser-visible syntax."""
+    if lhs is rhs:
+        return True
+    if lhs is None or rhs is None:
+        return lhs is rhs
+    lhs = _normalize_type_for_syntax_match(lhs)
+    rhs = _normalize_type_for_syntax_match(rhs)
+    assert lhs is not None
+    assert rhs is not None
+    if type(lhs) is not type(rhs):
+        return False
+    return ir.python_print_type(lhs) == ir.python_print_type(rhs)
 
 
 class ASTParser:
@@ -441,7 +540,7 @@ class ASTParser:
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
-                and existing_var.type != value_type
+                and not _types_match(existing_var.type, value_type)
             ):
                 raise ParserTypeError(
                     f"Cannot reassign '{var_name}' with a different type: "

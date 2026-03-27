@@ -16,31 +16,69 @@ from collections.abc import Sequence
 from typing import Any
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, MemRef
+from pypto.pypto_core.ir import Expr, MemorySpace, MemRef, TileView
 
 
 class TileMeta(type):
     """Metaclass for Tile to enable subscript notation."""
 
     def __getitem__(cls, item: tuple) -> "Tile":
-        """Enable Tile[[shape], dtype] and Tile[[shape], dtype, memref] syntax.
+        """Enable Tile[[shape], dtype] annotation syntax.
 
         Args:
-            item: Tuple of (shape, dtype) or (shape, dtype, memref)
+            item: Tuple of:
+                - (shape, dtype)
+                - (shape, dtype, memory_space_or_tile_view)
+                - (shape, dtype, memref, memory_space)
+                - (shape, dtype, memref, memory_space, tile_view)
 
         Returns:
-            Tile instance with shape, dtype, and optional memref
+            Tile instance with shape, dtype, and optional memref / memory space / tile view
         """
-        if not isinstance(item, tuple) or len(item) not in (2, 3):
-            raise TypeError("Tile requires [shape, dtype] or [shape, dtype, memref] notation")
+        if not isinstance(item, tuple) or len(item) not in (2, 3, 4, 5):
+            raise TypeError(
+                "Tile requires [shape, dtype], [shape, dtype, memory_space_or_tile_view], "
+                "[shape, dtype, memref, memory_space], or "
+                "[shape, dtype, memref, memory_space, tile_view] notation"
+            )
 
-        if len(item) == 3:
-            shape, dtype, memref = item
-            if not isinstance(memref, MemRef):
-                raise TypeError(f"Tile 3rd argument must be a MemRef instance, got {type(memref).__name__}")
-            return cls(shape, dtype, memref=memref, _annotation_only=True)
-        shape, dtype = item
-        return cls(shape, dtype, _annotation_only=True)
+        shape, dtype, *extras = item
+        memref = None
+        memory_space = None
+        tile_view = None
+
+        for extra in extras:
+            if isinstance(extra, MemRef):
+                if memref is not None:
+                    raise TypeError("Tile annotation can contain at most one MemRef")
+                memref = extra
+                continue
+            if isinstance(extra, MemorySpace):
+                if memory_space is not None:
+                    raise TypeError("Tile annotation can contain at most one memory space")
+                memory_space = extra
+                continue
+            if isinstance(extra, TileView):
+                if tile_view is not None:
+                    raise TypeError("Tile annotation can contain at most one TileView")
+                tile_view = extra
+                continue
+            raise TypeError(
+                "Tile trailing arguments must be MemRef, MemorySpace, or TileView, "
+                f"got {type(extra).__name__}"
+            )
+
+        if memref is not None and memory_space is None:
+            raise TypeError("Tile annotation with MemRef must also specify an explicit MemorySpace")
+
+        return cls(
+            shape,
+            dtype,
+            memref=memref,
+            memory_space=memory_space,
+            tile_view=tile_view,
+            _annotation_only=True,
+        )
 
     def __call__(
         cls,
@@ -48,6 +86,8 @@ class TileMeta(type):
         dtype=None,
         expr: Expr | None = None,
         memref: "MemRef | None" = None,
+        memory_space: "MemorySpace | None" = None,
+        tile_view: "TileView | None" = None,
         _annotation_only: bool = False,
     ) -> "Tile":
         """Enable both Tile((shape), dtype) syntax and runtime wrapping."""
@@ -59,8 +99,26 @@ class TileMeta(type):
             and expr is None
         ):
             real_shape, real_dtype = shape
-            return type.__call__(cls, real_shape, real_dtype, None, memref, _annotation_only)
-        return type.__call__(cls, shape, dtype, expr, memref, _annotation_only)
+            return type.__call__(
+                cls,
+                real_shape,
+                real_dtype,
+                expr=None,
+                memref=memref,
+                memory_space=memory_space,
+                tile_view=tile_view,
+                _annotation_only=_annotation_only,
+            )
+        return type.__call__(
+            cls,
+            shape,
+            dtype,
+            expr=expr,
+            memref=memref,
+            memory_space=memory_space,
+            tile_view=tile_view,
+            _annotation_only=_annotation_only,
+        )
 
 
 class Tile(metaclass=TileMeta):
@@ -92,6 +150,8 @@ class Tile(metaclass=TileMeta):
         dtype: DataType | None = None,
         expr: Expr | None = None,
         memref: MemRef | None = None,
+        memory_space: MemorySpace | None = None,
+        tile_view: TileView | None = None,
         _annotation_only: bool = False,
     ):
         """Initialize Tile.
@@ -107,12 +167,16 @@ class Tile(metaclass=TileMeta):
             self.shape = shape
             self.dtype = dtype
             self.memref = memref
+            self.memory_space = memory_space
+            self.tile_view = tile_view
             self._expr = None
         elif expr is not None:
             self._expr = expr
             self.shape = None
             self.dtype = None
             self.memref = None
+            self.memory_space = None
+            self.tile_view = None
         else:
             raise ValueError(
                 "Tile must be initialized with either (shape, dtype) for "
@@ -145,9 +209,14 @@ class Tile(metaclass=TileMeta):
         """String representation."""
         if self._expr is not None:
             return f"Tile(expr={self._expr})"
+        parts = [f"[{self.shape}]", f"{self.dtype}"]
         if self.memref is not None:
-            return f"Tile[[{self.shape}], {self.dtype}, {self.memref}]"
-        return f"Tile[[{self.shape}], {self.dtype}]"
+            parts.append(f"{self.memref}")
+        if self.memory_space is not None:
+            parts.append(f"{self.memory_space}")
+        if self.tile_view is not None:
+            parts.append(f"{self.tile_view}")
+        return f"Tile[{', '.join(parts)}]"
 
 
 __all__ = ["Tile"]

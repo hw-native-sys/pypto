@@ -95,6 +95,11 @@ tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Lef
 `TileType.memory_space` 才是 Tile 放置位置的唯一来源。如果 `TileType`
 携带 `MemRef`, 请在 `TileType` 自身上显式提供 tile 内存空间。
 
+对于 Python DSL 类型标注，省略的 `TileView` 语法会被规范化为一个隐式
+TileView：它由 tile shape 以及（如果存在）tile memory space 推导得到。
+像 `pl.TileView()` 这样的冗余显式默认写法，会与省略写法被视为语义等价，
+并且在 printer 输出时可能统一成规范形式。
+
 ### TupleType
 
 异构类型元组。

@@ -28,6 +28,19 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+_DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY = [
+    ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()]", ir.MemorySpace.Vec),
+    ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Mat, pl.TileView()]", ir.MemorySpace.Mat),
+    ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Left, pl.TileView()]", ir.MemorySpace.Left),
+    ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Right, pl.TileView()]", ir.MemorySpace.Right),
+    ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc, pl.TileView()]", ir.MemorySpace.Acc),
+]
+_DEFAULT_TILEVIEW_ANNOTATIONS = [annotation for annotation, _ in _DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY]
+_NON_DEFAULT_TILEVIEW_ANNOTATION = (
+    "pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[16, 64])]"
+)
+
+
 def _make_resolver(
     closure_vars: dict | None = None, scope_lookup: "Callable[[str], Any | None] | None" = None
 ) -> TypeResolver:
@@ -152,6 +165,57 @@ class TestTypeResolver:
 
         with pytest.raises(ParserTypeError, match="Unknown shape variable"):
             resolver._parse_shape(node)
+
+    @pytest.mark.parametrize(
+        ("annotation", "expected_memory_space"),
+        _DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY,
+    )
+    def test_tile_annotation_accepts_memory_space_and_tileview_without_memref(
+        self, annotation: str, expected_memory_space: ir.MemorySpace
+    ):
+        """Tile[...] accepts explicit MemorySpace + TileView() even without MemRef."""
+        resolved = eval(annotation, {"pl": pl})
+
+        assert resolved.memory_space == expected_memory_space
+        assert resolved.tile_view is not None
+        assert resolved.memref is None
+
+    @pytest.mark.parametrize("annotation", _DEFAULT_TILEVIEW_ANNOTATIONS)
+    def test_explicit_empty_tileview_prints_as_canonical_implicit_form(self, annotation: str):
+        """Redundant explicit TileView() prints back as canonical omitted syntax."""
+        resolver = _make_resolver()
+        resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+        assert isinstance(resolved, ir.TileType)
+
+        printed = ir.python_print_type(resolved)
+
+        assert "pl.TileView(" not in printed
+        assert printed == annotation.replace(", pl.TileView()", "")
+
+    def test_non_default_tileview_is_not_canonicalized_away(self):
+        """A non-default TileView must remain explicit in printed canonical syntax."""
+        resolver = _make_resolver()
+        annotation = _NON_DEFAULT_TILEVIEW_ANNOTATION
+
+        resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+        assert isinstance(resolved, ir.TileType)
+        printed = ir.python_print_type(resolved)
+
+        assert "pl.TileView(" in printed
+        assert "valid_shape=[16, 64]" in printed
+
+    @pytest.mark.parametrize("annotation", _DEFAULT_TILEVIEW_ANNOTATIONS)
+    def test_tile_type_text_roundtrip_is_stable_after_canonicalization(self, annotation: str):
+        """Once canonicalized, the printed tile type should parse and print stably."""
+        resolver = _make_resolver()
+        first = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+        assert isinstance(first, ir.TileType)
+
+        printed = ir.python_print_type(first)
+        reparsed = resolver.resolve_type(ast.parse(printed, mode="eval").body)
+        assert isinstance(reparsed, ir.TileType)
+
+        assert ir.python_print_type(reparsed) == printed
 
 
 class TestTupleTypeResolver:

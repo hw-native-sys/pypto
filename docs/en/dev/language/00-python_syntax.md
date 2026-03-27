@@ -86,6 +86,16 @@ tile: pl.Tile[
 ]
 ```
 
+**Notes:**
+
+- Omitting `pl.TileView(...)` does **not** mean "no TileView semantics". The DSL infers an implicit
+  TileView from the tile shape and, when present, the tile memory space.
+- In that implicit form, `valid_shape` defaults to the tile shape. Layout/fractal defaults are also
+  inferred from the shape / memory-space combination.
+- An explicit `pl.TileView()` (or one that only repeats those implicit defaults) is treated as
+  semantically equivalent to the omitted form. Parser / printer roundtrips may canonicalize both
+  forms to the same printed syntax.
+
 ## Expressions
 
 ### Variables and Constants

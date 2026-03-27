@@ -96,6 +96,12 @@ tile_with_view = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.Mem.Lef
 `TileType` carries a `MemRef`, provide the tile memory space on the `TileType`
 itself.
 
+For Python DSL annotations, omitted `TileView` syntax is normalized to an
+implicit TileView derived from the tile shape and, when present, the tile
+memory space. Redundant explicit defaults such as `pl.TileView()` are treated
+as semantically equivalent to the omitted form and may print back in canonical
+syntax.
+
 ### TupleType
 
 Heterogeneous tuple of types.

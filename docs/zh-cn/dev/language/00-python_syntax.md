@@ -86,6 +86,15 @@ tile: pl.Tile[
 ]
 ```
 
+**说明：**
+
+- 省略 `pl.TileView(...)` **不**表示“没有 TileView 语义”。DSL 会根据 tile 的 shape，以及在存在时的
+  tile memory space，推导一个隐式 TileView。
+- 在这种隐式形式下，`valid_shape` 默认等于 tile shape；布局 / fractal 默认值也会根据
+  shape / memory-space 组合推导。
+- 显式写出的 `pl.TileView()`（或只是在重复这些隐式默认值的写法）与省略写法在语义上等价。
+  parser / printer 的往返过程中，二者可能会被规范化为同一种打印形式。
+
 ## 表达式 (Expression)
 
 ### 变量和常量
