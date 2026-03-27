@@ -151,12 +151,12 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 sij: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[1], pl.FP32],
                 pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 128], pl.BF16],
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32],
+                pl.Tensor[[16, 1], pl.FP32],
             ]:
                 # Read scale value from config tensor
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
@@ -236,12 +236,12 @@ class SoftmaxPrepareUnalignedTestCase(PTOTestCase):
                 config: pl.Tensor[[1], pl.FP32],
                 valid_len_cfg: pl.Tensor[[1], pl.INT64],
                 pij_out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                mij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+                lij_out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[16, 128], pl.BF16],
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32],
+                pl.Tensor[[16, 1], pl.FP32],
             ]:
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
                 valid_len: pl.Scalar[pl.INT64] = pl.tensor.read(valid_len_cfg, [0])
@@ -389,17 +389,17 @@ class OnlineUpdateTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                mij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                mij: pl.Tensor[[16, 1], pl.FP32],
+                lij: pl.Tensor[[16, 1], pl.FP32],
                 oi_new: pl.Tensor[[16, 128], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
-                mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-                li: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+                mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+                li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
                 oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
                 dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> tuple[
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
-                pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                pl.Tensor[[16, 1], pl.FP32],
+                pl.Tensor[[16, 1], pl.FP32],
                 pl.Tensor[[16, 128], pl.FP32],
                 pl.Tensor[[16, 128], pl.FP32],
             ]:

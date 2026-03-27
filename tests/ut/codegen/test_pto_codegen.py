@@ -1306,5 +1306,93 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
 
 
+class TestColumnVectorCodegen:
+    """[M, 1] column-vector tensors auto-emit DN layout in make_tensor_view."""
+
+    def test_column_vector_auto_dn_layout(self):
+        """[M, 1] tensor without DN annotation emits shape=[M,1] strides=[1,M] layout=dn."""
+
+        @pl.program
+        class ColVecProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                return pl.store(v, [0, 0], out)
+
+        mlir_code = _generate_default_mlir(ColVecProgram)
+        lines = _get_mlir_lines(mlir_code)
+        col_vec_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "shape = [%c16, %c1]" in col_vec_view
+        assert "strides = [%c1, %c16]" in col_vec_view
+        assert "layout = #pto.layout<dn>" in col_vec_view
+
+    def test_column_vector_with_explicit_dn(self):
+        """[M, 1] tensor with explicit DN also emits shape=[M,1] strides=[1,M] layout=dn."""
+
+        @pl.program
+        class ColVecDNProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(col_vec, [0, 0], [16, 1])
+                return pl.store(v, [0, 0], out)
+
+        mlir_code = _generate_default_mlir(ColVecDNProgram)
+        lines = _get_mlir_lines(mlir_code)
+        col_vec_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "shape = [%c16, %c1]" in col_vec_view
+        assert "strides = [%c1, %c16]" in col_vec_view
+        assert "layout = #pto.layout<dn>" in col_vec_view
+
+    def test_regular_2d_nd_unchanged(self):
+        """Non-column-vector ND [R,C] tensor keeps ND layout."""
+
+        @pl.program
+        class RegularProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [16, 128])
+                return pl.store(t, [0, 0], out)
+
+        mlir_code = _generate_default_mlir(RegularProgram)
+        lines = _get_mlir_lines(mlir_code)
+        a_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "shape = [%c16, %c128]" in a_view
+        assert "strides = [%c128, %c1]" in a_view
+        assert "layout = #pto.layout<nd>" in a_view
+
+    def test_row_vector_stays_nd(self):
+        """[1, N] row-vector tensor stays ND (only [M, 1] gets forced DN)."""
+
+        @pl.program
+        class RowVecProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                row_vec: pl.Tensor[[1, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                v = pl.load(row_vec, [0, 0], [1, 128])
+                return pl.store(v, [0, 0], out)
+
+        mlir_code = _generate_default_mlir(RowVecProgram)
+        lines = _get_mlir_lines(mlir_code)
+        row_view = _single_line(lines, "pto.make_tensor_view %arg0")
+        assert "shape = [%c1, %c128]" in row_view
+        assert "strides = [%c128, %c1]" in row_view
+        assert "layout = #pto.layout<nd>" in row_view
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

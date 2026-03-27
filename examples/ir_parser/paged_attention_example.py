@@ -47,12 +47,12 @@ from pypto.runtime import RunConfig, TensorSpec, run
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_init_inplace(
     oi: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-    li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.FP32],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
 ]:
     """Initialize inplace accumulators to zero (VECTOR)."""
     return oi, li, mi
@@ -79,12 +79,12 @@ def kernel_softmax_prepare(
     sij: pl.Tensor[[16, 128], pl.FP32],
     scale: pl.Scalar[pl.FP32],
     out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.BF16],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
 ]:
     """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
     s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
@@ -108,12 +108,12 @@ def kernel_softmax_prepare_unaligned(
     scale: pl.Scalar[pl.FP32],
     valid_len: pl.Scalar[pl.INDEX],
     out_pij: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
-    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    out_mi: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    out_li: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
 ) -> tuple[
     pl.Tensor[[16, 128], pl.BF16],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
 ]:
     """Softmax prepare with unaligned valid_len: load, set_validshape, fillpad, scale, softmax (VECTOR)."""
     s_tile = pl.load(sij, [0, 0], [16, 128], valid_shapes=[16, valid_len], target_memory=pl.MemorySpace.Vec)
@@ -150,18 +150,18 @@ def kernel_pv_matmul(
 
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_online_update(
-    mij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
-    lij: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    mij: pl.Tensor[[16, 1], pl.FP32],
+    lij: pl.Tensor[[16, 1], pl.FP32],
     oi_new: pl.Tensor[[16, 128], pl.FP32],
-    mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
-    li: pl.InOut[pl.Tensor[[16, 1], pl.FP32, pl.DN]],
+    mi: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+    li: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
     oi: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
     dst: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
     is_first: pl.Scalar[pl.BOOL],
     is_last: pl.Scalar[pl.BOOL],
 ) -> tuple[
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
-    pl.Tensor[[16, 1], pl.FP32, pl.DN],
+    pl.Tensor[[16, 1], pl.FP32],
+    pl.Tensor[[16, 1], pl.FP32],
     pl.Tensor[[16, 128], pl.FP32],
     pl.Tensor[[16, 128], pl.FP32],
 ]:
@@ -271,7 +271,7 @@ def build_paged_attention_program(
         def paged_attention(
             self,
             query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-            key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
+            key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
             context_lens: pl.Tensor[[batch], pl.INT32],
@@ -306,15 +306,13 @@ def build_paged_attention_program(
                         [q_tile, head_dim_cfg],
                         dtype=pl.FP32,
                     )
-                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,
-                        layout=pl.DN,
                     )
-                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,
-                        layout=pl.DN,
                     )
 
                     # Initialize accumulators via shared module-level InCore kernel
@@ -334,9 +332,9 @@ def build_paged_attention_program(
 
                         # Key/Value views: physical block row = cur_block_idx * block_size
                         kv_block_row = cur_block_idx * block_size_cfg
-                        kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             key_cache,
-                            [head_dim_cfg, block_size_cfg],
+                            [block_size_cfg, head_dim_cfg],
                             [kv_block_row, 0],
                         )
                         vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
@@ -437,7 +435,7 @@ def build_paged_attention_unaligned_program(
         def paged_attention(
             self,
             query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-            key_cache: pl.Tensor[[head_dim, key_cache_rows], pl.BF16, pl.DN],
+            key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
             block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
             context_lens: pl.Tensor[[batch], pl.INT32],
@@ -463,15 +461,13 @@ def build_paged_attention_unaligned_program(
                         [q_tile, head_dim_cfg],
                         dtype=pl.FP32,
                     )
-                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,
-                        layout=pl.DN,
                     )
-                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,
-                        layout=pl.DN,
                     )
                     oi, li_update, mi_update = kernel_init_inplace(oi_buf, li_buf, mi_buf)
 
@@ -485,9 +481,9 @@ def build_paged_attention_unaligned_program(
                         valid_len = pl.min(block_size_cfg, cur_seq - bn * block_size_cfg)
 
                         kv_block_row = cur_block_idx * block_size_cfg
-                        kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             key_cache,
-                            [head_dim_cfg, block_size_cfg],
+                            [block_size_cfg, head_dim_cfg],
                             [kv_block_row, 0],
                         )
                         vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(

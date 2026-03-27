@@ -38,7 +38,7 @@ If the user only gives a short name (e.g., "paged attention"), search under
 Optional user inputs:
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
+| --------- | ------- | ----------- |
 | platform | `a2a3sim` | `--platform` value |
 | extra pytest args | _(none)_ | Additional pytest flags (e.g. `-k "shape_64"`) |
 
@@ -166,7 +166,7 @@ rm -rf build_output/compare_*/
 ## Troubleshooting
 
 | Issue | Solution |
-|-------|----------|
+| ----- | -------- |
 | "fatal: worktree already exists" | `git worktree prune` then retry |
 | Build fails in worktree | Check that `origin/main` is buildable; try `git fetch origin main` first |
 | No `.pto` files in output | Verify the test produces codegen output; check `--codegen-only` was passed |

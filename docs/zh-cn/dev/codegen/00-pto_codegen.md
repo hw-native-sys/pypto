@@ -166,6 +166,7 @@ print(pto_code)
 %0 = pto.make_tensor_view %arg0,
      shape = [%c32, %c32]
      strides = [%c32, %c1]
+     {layout = #pto.layout<nd>}
      : !pto.tensor_view<?x?xf32>
 ```
 
@@ -175,6 +176,31 @@ print(pto_code)
 - 步幅按行主序计算: 二维张量为 `[dim1, 1]`
 - 常量 (`%c32`, `%c1`) 自动生成
 - 张量视图类型每个维度使用 `?` (如二维为 `?x?xf32`)
+
+#### 二维张量的 Layout 处理
+
+`make_tensor_view` 上的 `layout` 属性告诉 PTOAS 内存布局约定。代码生成器根据
+张量的 IR 类型和形状决定 shape、strides 和 layout:
+
+| 情况 | 输出 Shape | 输出 Strides | Layout | 说明 |
+| ---- | ---------- | ------------ | ------ | ---- |
+| ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | 标准行主序 |
+| DN `[R, C]` (均 > 1) | `[C, R]` | `[1, C]` | `dn` | Shape 交换以符合 PTOAS 列主序约定 |
+| 列向量 `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | 自动检测, 无需 DN 标注 |
+
+**列向量自动 DN**: 任何最后一维为编译时常量 `1` 的二维张量 (即形状 `[M, 1]`)
+会自动以 `layout = dn` 和步幅 `[1, M]` 输出。这是因为 PTOAS 对于形状/步幅模式
+`[M, 1] / [1, 1]` 始终推断为 DN, 使得退化的 ND 表示产生歧义。代码生成器通过始终
+使用无歧义的 DN 步幅来解决此问题。用户无需在 DSL 中为 `[M, 1]` 张量标注 `pl.DN`。
+
+列向量 `[16, 1]` 示例 (DSL 中无 DN 标注):
+
+```mlir
+%col_view = pto.make_tensor_view %arg1,
+    shape = [%c16, %c1], strides = [%c1, %c16]
+    {layout = #pto.layout<dn>}
+    : !pto.tensor_view<?x?xf32>
+```
 
 ### 分配生成
 

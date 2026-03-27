@@ -72,12 +72,12 @@ class AivHubTestCase(PTOTestCase):
             def orchestrator(
                 self,
                 oi: pl.Out[pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32]],
-                li: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
-                mi: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
+                li: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32]],
+                mi: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32],
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
             ]:
                 oi, li, mi = kernel_aiv_hub(oi, li, mi)
                 return oi, li, mi
@@ -132,13 +132,13 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                 sij_buf: pl.Tensor[[N_UNROLL_Q, BLOCK_SIZE], pl.FP32],
                 config: pl.Tensor[[2], pl.FP32],
                 pij_buf: pl.Out[pl.Tensor[[N_UNROLL_Q, BLOCK_SIZE], pl.BF16]],
-                mi_out: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
-                li_out: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
+                mi_out: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32]],
+                li_out: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32]],
                 n_blocks_cfg: pl.Tensor[[1], pl.INT64],
             ) -> tuple[
                 pl.Tensor[[N_UNROLL_Q, BLOCK_SIZE], pl.BF16],
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
             ]:
                 scale: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
                 n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(n_blocks_cfg, [0])
@@ -387,17 +387,17 @@ class OnlineUpdateTestCase(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                mij: pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
-                lij: pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
+                mij: pl.Tensor[[Q_TILE, 1], pl.FP32],
+                lij: pl.Tensor[[Q_TILE, 1], pl.FP32],
                 oi_new: pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
-                mi: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
-                li: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN]],
+                mi: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32]],
+                li: pl.InOut[pl.Tensor[[Q_TILE, 1], pl.FP32]],
                 oi: pl.InOut[pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32]],
                 dst: pl.Out[pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32]],
             ) -> tuple[
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
-                pl.Tensor[[Q_TILE, 1], pl.FP32, pl.DN],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
+                pl.Tensor[[Q_TILE, 1], pl.FP32],
                 pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32],
                 pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32],
             ]:

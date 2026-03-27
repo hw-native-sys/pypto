@@ -166,6 +166,7 @@ For each `TensorType` parameter, the codegen generates:
 %0 = pto.make_tensor_view %arg0,
      shape = [%c32, %c32]
      strides = [%c32, %c1]
+     {layout = #pto.layout<nd>}
      : !pto.tensor_view<?x?xf32>
 ```
 
@@ -175,6 +176,34 @@ For each `TensorType` parameter, the codegen generates:
 - Strides computed as row-major: `[dim1, 1]` for 2D tensors
 - Constants (`%c32`, `%c1`) auto-generated
 - Tensor view type uses `?` for each dimension (e.g., `?x?xf32` for 2D)
+
+#### Layout Handling for 2D Tensors
+
+The `layout` attribute on `make_tensor_view` tells PTOAS the memory layout
+convention. The codegen determines shape, strides, and layout based on the
+tensor's IR type and shape:
+
+| Case | Shape emitted | Strides emitted | Layout | Notes |
+| ---- | ------------- | --------------- | ------ | ----- |
+| ND `[R, C]` | `[R, C]` | `[C, 1]` | `nd` | Standard row-major |
+| DN `[R, C]` (both > 1) | `[C, R]` | `[1, C]` | `dn` | Shape swapped for PTOAS column-major convention |
+| Column vector `[M, 1]` | `[M, 1]` | `[1, M]` | `dn` | Auto-detected, no DN annotation needed |
+
+**Column vector auto-DN**: Any 2D tensor whose last dimension is a compile-time
+constant `1` (i.e., shape `[M, 1]`) is automatically emitted with `layout = dn`
+and strides `[1, M]`. This is required because PTOAS always infers DN for the
+shape/stride pattern `[M, 1] / [1, 1]`, making the degenerate ND representation
+ambiguous. The codegen resolves this by always using unambiguous DN strides.
+Users do not need to annotate `[M, 1]` tensors with `pl.DN` in the DSL.
+
+Example for a `[16, 1]` column vector (no DN annotation in DSL):
+
+```mlir
+%col_view = pto.make_tensor_view %arg1,
+    shape = [%c16, %c1], strides = [%c1, %c16]
+    {layout = #pto.layout<dn>}
+    : !pto.tensor_view<?x?xf32>
+```
 
 ### Allocation Generation
 

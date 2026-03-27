@@ -447,7 +447,7 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
             def paged_attention(
                 self,
                 query: pl.Tensor[[QR, HD], pl.BF16],
-                key_cache: pl.Tensor[[HD, KCR], pl.BF16, pl.DN],
+                key_cache: pl.Tensor[[KCR, HD], pl.BF16],
                 value_cache: pl.Tensor[[KCR, HD], pl.BF16],
                 block_table: pl.Tensor[[BT], pl.INT32],
                 context_lens: pl.Tensor[[B], pl.INT32],
@@ -476,12 +476,8 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
                         oi_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
                             [q_tile, head_dim_cfg], dtype=pl.FP32
                         )
-                        li_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
-                            [q_tile, 1], dtype=pl.FP32, layout=pl.DN
-                        )
-                        mi_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
-                            [q_tile, 1], dtype=pl.FP32, layout=pl.DN
-                        )
+                        li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                         oi, li_update, mi_update = kernel_init_inplace(oi_buf, li_buf, mi_buf)
 
                         for bn in pl.range(bn_this_batch):
@@ -491,8 +487,8 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
                             cur_block_idx = pl.tensor.read(block_table, [b_idx * block_num_cfg + bn])
                             valid_len = pl.min(block_size_cfg, cur_seq - bn * block_size_cfg)
                             kv_block_row = cur_block_idx * block_size_cfg
-                            kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
-                                key_cache, [head_dim_cfg, block_size_cfg], [kv_block_row, 0]
+                            kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
+                                key_cache, [block_size_cfg, head_dim_cfg], [kv_block_row, 0]
                             )
                             vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                                 value_cache, [block_size_cfg, head_dim_cfg], [kv_block_row, 0]

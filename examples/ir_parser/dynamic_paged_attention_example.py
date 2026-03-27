@@ -74,12 +74,12 @@ def build_dynamic_paged_attention_program(
     @pl.function(type=pl.FunctionType.InCore)
     def dyn_kernel_init_inplace(
         oi: pl.Out[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
-        li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
-        mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
+        li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
     ) -> tuple[
         pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
     ]:
         """No-op passthrough: binds concrete tensor shapes to dynamic type annotations.
 
@@ -110,12 +110,12 @@ def build_dynamic_paged_attention_program(
         sij: pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.FP32],
         scale: pl.Scalar[pl.FP32],
         out_pij: pl.Out[pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.BF16]],
-        out_mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
-        out_li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
+        out_mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        out_li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
     ) -> tuple[
         pl.Tensor[[Q_HEADS, BLOCK_SIZE_DYN], pl.BF16],
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
     ]:
         """Scale sij, compute row_max (mi), exp(sij-mi), cast to BF16, row_sum (li). VECTOR."""
         s_tile = pl.load(sij, [0, 0], [_Q_TILE, _BLOCK_SIZE], target_memory=pl.MemorySpace.Vec)
@@ -149,18 +149,18 @@ def build_dynamic_paged_attention_program(
 
     @pl.function(type=pl.FunctionType.InCore)
     def dyn_kernel_online_update(
-        mij: pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
-        lij: pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
+        mij: pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        lij: pl.Tensor[[Q_HEADS, 1], pl.FP32],
         oi_new: pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
-        mi: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
-        li: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN]],
+        mi: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        li: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
         oi: pl.InOut[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
         dst: pl.Out[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
         is_first: pl.Scalar[pl.BOOL],
         is_last: pl.Scalar[pl.BOOL],
     ) -> tuple[
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
-        pl.Tensor[[Q_HEADS, 1], pl.FP32, pl.DN],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
         pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
         pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
     ]:
@@ -249,7 +249,7 @@ def build_dynamic_paged_attention_program(
         def paged_attention(
             self,
             query: pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
-            key_cache: pl.Tensor[[HEAD_DIM_DYN, KEY_CACHE_ROWS_DYN], pl.BF16, pl.DN],
+            key_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
             value_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
             block_table: pl.Tensor[[BLOCK_TABLE_FLAT_DYN], pl.INT32],
             context_lens: pl.Tensor[[BATCH_DYN], pl.INT32],
@@ -292,15 +292,13 @@ def build_dynamic_paged_attention_program(
                         [q_tile, head_dim_cfg],  # type: ignore[reportArgumentType]
                         dtype=pl.FP32,
                     )
-                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,  # type: ignore[reportArgumentType]
-                        layout=pl.DN,
                     )
-                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
                         dtype=pl.FP32,  # type: ignore[reportArgumentType]
-                        layout=pl.DN,
                     )
                     # Bind concrete tensor shapes to dynamic type annotations (no-op passthrough)
                     oi, li_update, mi_update = dyn_kernel_init_inplace(oi_buf, li_buf, mi_buf)
@@ -320,10 +318,10 @@ def build_dynamic_paged_attention_program(
                         # Starting row of this physical block in the flat KV-cache pool
                         kv_block_row = cur_block_idx * block_size_cfg
 
-                        # Slice the key block: key_cache is stored as [head_dim, KV_rows] (DN layout)
-                        kj: pl.Tensor[[head_dim_cfg, block_size_cfg], pl.BF16, pl.DN] = pl.slice(
+                        # Slice the key block: key_cache is [KV_rows, head_dim]
+                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
                             key_cache,
-                            [head_dim_cfg, block_size_cfg],  # type: ignore[reportArgumentType]
+                            [block_size_cfg, head_dim_cfg],  # type: ignore[reportArgumentType]
                             [kv_block_row, 0],
                         )
                         # Slice the value block: value_cache is stored as [KV_rows, head_dim]
@@ -356,12 +354,10 @@ def build_dynamic_paged_attention_program(
                         mi_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
                             dtype=pl.FP32,  # type: ignore[reportArgumentType]
-                            layout=pl.DN,
                         )
                         li_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
                             dtype=pl.FP32,  # type: ignore[reportArgumentType]
-                            layout=pl.DN,
                         )
                         pij_f16, mi, li = dyn_kernel_softmax_prepare(
                             sij_valid,

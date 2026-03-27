@@ -157,16 +157,16 @@ def BuildBatchPagedAttentionProgram(
             self,
             sij_batch: pl.Tensor[[batch_q_tile, block_size], pl.FP32],
             pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
-            mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
-            lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
+            mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+            lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
             scale_value: pl.Scalar[pl.FP32],
             context_lens: pl.Tensor[[batch], pl.INT32],
             batch_count: pl.Scalar[pl.INT64],
             block_idx: pl.Scalar[pl.INT64],
         ) -> tuple[
             pl.Tensor[[batch_q_tile, block_size], pl.BF16],
-            pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
-            pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
+            pl.Tensor[[batch_q_tile, 1], pl.FP32],
+            pl.Tensor[[batch_q_tile, 1], pl.FP32],
         ]:
             """Softmax prepare: scale, row_max, exp, row_sum (VECTOR, func_id=1).
 

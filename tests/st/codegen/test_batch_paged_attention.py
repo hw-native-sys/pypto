@@ -282,14 +282,14 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 self,
                 sij_batch: pl.Tensor[[batch_q_tile, block_size], pl.FP32],
                 pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
-                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
-                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
+                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
                 scale_value: pl.Scalar[pl.FP32],
                 context_lens: pl.Tensor[[batch], pl.INT32],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, block_size], pl.BF16],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32],
             ]:
                 for b in pl.range(batch):
                     cur_seq = pl.tensor.read(context_lens, [b])
@@ -332,12 +332,12 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
                 scale_config: pl.Tensor[[1], pl.FP32],
                 config: pl.Tensor[[2], pl.INT64],
                 pij_batch: pl.Out[pl.Tensor[[batch_q_tile, block_size], pl.BF16]],
-                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
-                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN]],
+                mij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
+                lij_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
             ) -> tuple[
                 pl.Tensor[[batch_q_tile, block_size], pl.BF16],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
-                pl.Tensor[[batch_q_tile, 1], pl.FP32, pl.DN],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32],
+                pl.Tensor[[batch_q_tile, 1], pl.FP32],
             ]:
                 scale_value: pl.Scalar[pl.FP32] = pl.tensor.read(scale_config, [0])
 

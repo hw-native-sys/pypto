@@ -37,12 +37,12 @@ def make_kernel_aiv_hub(q_tile: int, head_dim: int):
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_aiv_hub(
         oi: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
-        li: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
-        mi: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
+        li: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
+        mi: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
     ) -> tuple[
         pl.Tensor[[q_tile, head_dim], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
+        pl.Tensor[[q_tile, 1], pl.FP32],
+        pl.Tensor[[q_tile, 1], pl.FP32],
     ]:
         """Initialize inplace accumulators to zero (VECTOR)."""
         return oi, li, mi
@@ -58,13 +58,13 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
         sij_buf: pl.Tensor[[n_unroll_q, block_size], pl.FP32],
         scale: pl.Scalar[pl.FP32],
         pij_buf: pl.Out[pl.Tensor[[n_unroll_q, block_size], pl.BF16]],
-        mi_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
-        li_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
+        mi_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
+        li_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
         n_blocks: pl.Scalar[pl.INDEX],
     ) -> tuple[
         pl.Tensor[[n_unroll_q, block_size], pl.BF16],
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
+        pl.Tensor[[q_tile, 1], pl.FP32],
+        pl.Tensor[[q_tile, 1], pl.FP32],
     ]:
         """Two-pass softmax: pass 1 finds global row_max, pass 2 computes exp+sum (VECTOR)."""
         for i, (mi_out_iter,) in pl.range(n_blocks, init_values=(mi_out,)):
@@ -78,17 +78,13 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
             tmp_tile = pl.create_tile([q_tile, block_size], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
             local_max = pl.row_max(scaled, tmp_tile)
             if i == 0:
-                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.store(
-                    local_max, [0, 0], mi_out_iter
-                )
+                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(local_max, [0, 0], mi_out_iter)
             else:
                 global_max = pl.load(mi_out_iter, [0, 0], [q_tile, 1], target_memory=pl.MemorySpace.Vec)
                 gm_nd = pl.reshape(global_max, [1, q_tile])
                 lm_nd = pl.reshape(local_max, [1, q_tile])
                 new_max = pl.reshape(pl.maximum(gm_nd, lm_nd), [q_tile, 1])
-                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.store(
-                    new_max, [0, 0], mi_out_iter
-                )
+                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(new_max, [0, 0], mi_out_iter)
             (mi_out_carry,) = pl.yield_(mi_out_updated)
 
         for i, (pij_buf_iter, li_out_iter) in pl.range(n_blocks, init_values=(pij_buf, li_out)):
@@ -111,14 +107,12 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
             li_local = pl.row_sum(pij_f32, tmp_tile_p2)
             li_local_nd = pl.reshape(li_local, [1, q_tile])
             if i == 0:
-                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.store(
-                    li_local, [0, 0], li_out_iter
-                )
+                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(li_local, [0, 0], li_out_iter)
             else:
                 li_acc = pl.load(li_out_iter, [0, 0], [q_tile, 1])
                 li_acc_nd = pl.reshape(li_acc, [1, q_tile])
                 li_sum = pl.reshape(pl.add(li_acc_nd, li_local_nd), [q_tile, 1])
-                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.store(li_sum, [0, 0], li_out_iter)
+                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(li_sum, [0, 0], li_out_iter)
             pij_buf_carry, li_out_carry = pl.yield_(pij_buf_updated, li_out_updated)
 
         return pij_buf_carry, mi_out_carry, li_out_carry
@@ -131,18 +125,18 @@ def make_kernel_online_update(q_tile: int, head_dim: int):
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_online_update(  # noqa: PLR0913
-        mij: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
-        lij: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
+        mij: pl.Tensor[[q_tile, 1], pl.FP32],
+        lij: pl.Tensor[[q_tile, 1], pl.FP32],
         oi_new: pl.Tensor[[q_tile, head_dim], pl.FP32],
-        mi: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
-        li: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32, pl.DN]],
+        mi: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32]],
+        li: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32]],
         oi: pl.InOut[pl.Tensor[[q_tile, head_dim], pl.FP32]],
         dst: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
         is_first: pl.Scalar[pl.INDEX],
         is_last: pl.Scalar[pl.INDEX],
     ) -> tuple[
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
-        pl.Tensor[[q_tile, 1], pl.FP32, pl.DN],
+        pl.Tensor[[q_tile, 1], pl.FP32],
+        pl.Tensor[[q_tile, 1], pl.FP32],
         pl.Tensor[[q_tile, head_dim], pl.FP32],
         pl.Tensor[[q_tile, head_dim], pl.FP32],
     ]:
@@ -359,15 +353,13 @@ def build_paged_attention_multi_config_program(
                         [q_tile, head_dim],
                         dtype=pl.FP32,  # type: ignore[reportArgumentType]
                     )
-                    li_update: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
-                        dtype=pl.FP32,
-                        layout=pl.DN,  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,  # type: ignore[reportArgumentType]
                     )
-                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
-                        dtype=pl.FP32,
-                        layout=pl.DN,  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,  # type: ignore[reportArgumentType]
                     )
                     oi, li_update, mi_update = _hub(oi, li_update, mi_update)
 
@@ -397,15 +389,13 @@ def build_paged_attention_multi_config_program(
                             [n_unroll_q, block_size],
                             dtype=pl.BF16,  # type: ignore[reportArgumentType]
                         )
-                        mi: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                        mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
-                            dtype=pl.FP32,
-                            layout=pl.DN,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
                         )
-                        li: pl.Tensor[[q_tile, 1], pl.FP32, pl.DN] = pl.create_tensor(
+                        li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
-                            dtype=pl.FP32,
-                            layout=pl.DN,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
                         )
                         pij_buf, mi, li = _sf(
                             sij_buf,

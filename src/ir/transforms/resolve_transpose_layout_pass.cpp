@@ -83,18 +83,7 @@ class TransposeLoadScanner : public IRVisitor {
   std::vector<TransposeParamInfo> results_;
 };
 
-// Check whether a 2D tensor shape has last dim == constant 1 (column vector).
-bool IsColumnVector(const std::shared_ptr<const TensorType>& tensor_type) {
-  if (tensor_type->shape_.size() != 2) return false;
-  auto last_dim = As<ConstInt>(tensor_type->shape_[1]);
-  if (!last_dim || last_dim->value_ != 1) return false;
-  auto first_dim = As<ConstInt>(tensor_type->shape_[0]);
-  return !first_dim || first_dim->value_ > 1;
-}
-
-// Add DN layout annotation to InCore parameters that either:
-//   (a) have transpose tile.load, or
-//   (b) are column vectors [M, 1] (M > 1).
+// Add DN layout annotation to InCore parameters that have transpose tile.load.
 // Shape is preserved (no swap); DN is a codegen hint only.
 FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
   TransposeLoadScanner scanner(func->params_);
@@ -104,14 +93,6 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
   std::unordered_set<size_t> needs_dn;
   for (const auto& info : transpose_results) {
     needs_dn.insert(info.param_index);
-  }
-
-  // Also mark [M, 1] column-vector params for DN.
-  for (size_t i = 0; i < func->params_.size(); ++i) {
-    auto tensor_type = As<TensorType>(func->params_[i]->GetType());
-    if (tensor_type && IsColumnVector(tensor_type)) {
-      needs_dn.insert(i);
-    }
   }
 
   if (needs_dn.empty()) {
