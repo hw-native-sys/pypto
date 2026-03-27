@@ -398,7 +398,12 @@ class TestCrossCoreBoundaries:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 w_tile = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
@@ -1035,7 +1040,12 @@ class TestVectorOpClassification:
                 )
                 y_right = pl.move(y_l1, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 z_exp = pl.exp(z_vec)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_exp, [0, 0], out_0)
                 return out_0
@@ -1111,7 +1121,12 @@ class TestRealisticPatterns:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 exp_tile = pl.exp(z_vec)
                 sum_tile = pl.add(exp_tile, exp_tile)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
@@ -1180,7 +1195,12 @@ class TestRealisticPatterns:
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 z_exp = pl.exp(z_vec)
                 z_mul = pl.mul(z_exp, z_exp)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
@@ -1717,7 +1737,12 @@ class TestAutoPipeSetup:
                 y_tile = pl.load(y, [0, 0], [128, 16], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_tile, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 z_exp = pl.exp(z_vec)
                 z_sum = pl.add(z_vec, z_exp)
                 out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_sum, [0, 0], out_0)
@@ -1765,7 +1790,12 @@ class TestAutoPipeSetup:
                 y_mat = pl.load(y, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
                 y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                 z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
                 if flag == 0:
                     branch_tile = pl.exp(z_vec)
                 else:
@@ -1884,7 +1914,12 @@ class TestNestedStructures:
                     y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
                     y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
                     z_tile = pl.matmul(x_sum_left, y_right)
-                    z_vec = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
+                    z_vec = pl.move(
+                        z_tile,
+                        target_memory=pl.MemorySpace.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
                     w_tile = pl.exp(z_vec)
                     out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
@@ -2661,7 +2696,12 @@ class TestDCERegression:
                     w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
                     w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
                     z = pl.matmul(x_left, w_right)
-                    tmp = pl.move(z, target_memory=pl.MemorySpace.Vec)
+                    tmp = pl.move(
+                        z,
+                        target_memory=pl.MemorySpace.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
                     carried_next = pl.tile.add(tmp, tmp)
                     acc_out = pl.yield_(carried_next)
                 carried = acc_out

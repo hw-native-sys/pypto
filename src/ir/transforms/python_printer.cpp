@@ -602,6 +602,9 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     } else if (value.type() == typeid(TensorLayout)) {
       stream_ << prefix_ << ".TensorLayout."
               << TensorLayoutToString(AnyCast<TensorLayout>(value, "printing kwarg: " + key));
+    } else if (value.type() == typeid(TileLayout)) {
+      stream_ << prefix_ << ".TileLayout."
+              << TileLayoutToString(AnyCast<TileLayout>(value, "printing kwarg: " + key));
     } else if (value.type() == typeid(PadValue)) {
       auto pad = AnyCast<PadValue>(value, "printing kwarg: " + key);
       stream_ << prefix_ << ".PadValue.";

@@ -80,6 +80,30 @@ TensorLayout StringToTensorLayout(const std::string& str) {
   throw TypeError("Unknown TensorLayout string: " + str);
 }
 
+std::string TileLayoutToString(TileLayout layout) {
+  switch (layout) {
+    case TileLayout::none_box:
+      return "none_box";
+    case TileLayout::row_major:
+      return "row_major";
+    case TileLayout::col_major:
+      return "col_major";
+    default:
+      throw TypeError("Unknown TileLayout value: " + std::to_string(static_cast<int>(layout)));
+  }
+}
+
+TileLayout StringToTileLayout(const std::string& str) {
+  if (str == "none_box") {
+    return TileLayout::none_box;
+  } else if (str == "row_major") {
+    return TileLayout::row_major;
+  } else if (str == "col_major") {
+    return TileLayout::col_major;
+  }
+  throw TypeError("Unknown TileLayout string: " + str);
+}
+
 ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::optional<MemRefPtr> memref)
     : dtype_(dtype), memref_(std::move(memref)) {
   for (int64_t dim : shape) {

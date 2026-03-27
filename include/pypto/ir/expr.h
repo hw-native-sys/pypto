@@ -115,9 +115,9 @@ class Op {
     static_assert(
         std::is_same_v<T, bool> || std::is_same_v<T, int> || std::is_same_v<T, std::string> ||
             std::is_same_v<T, double> || std::is_same_v<T, DataType> || std::is_same_v<T, MemorySpace> ||
-            std::is_same_v<T, TensorLayout> || std::is_same_v<T, PadValue>,
+            std::is_same_v<T, TensorLayout> || std::is_same_v<T, TileLayout> || std::is_same_v<T, PadValue>,
         "SetAttrType only accepts: bool, int, std::string, double, DataType, MemorySpace, TensorLayout, "
-        "PadValue");
+        "TileLayout, PadValue");
 
     attrs_.emplace(key, std::type_index(typeid(T)));
   }

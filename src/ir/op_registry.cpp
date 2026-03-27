@@ -54,6 +54,11 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
         throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
                         "' expects MemorySpace, but got incompatible type");
       }
+    } else if (it->second == std::type_index(typeid(TileLayout))) {
+      if (std::type_index(value.type()) != std::type_index(typeid(TileLayout))) {
+        throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
+                        "' expects TileLayout, but got incompatible type");
+      }
     } else if (std::type_index(value.type()) != it->second) {
       throw TypeError("Kwarg '" + key + "' for operator '" + op_name + "' has incompatible type");
     }

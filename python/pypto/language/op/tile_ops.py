@@ -110,7 +110,7 @@ __all__ = [
 from pypto.ir.op import tile_ops as _ir_ops
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace, PadValue
+from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from .system_ops import (  # noqa: F401
@@ -309,17 +309,24 @@ def concat(src0: Tile, src1: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def move(tile: Tile, target_memory: MemorySpace) -> Tile:
+def move(
+    tile: Tile,
+    target_memory: MemorySpace,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
+) -> Tile:
     """Move tile between memory levels.
 
     Args:
         tile: Input tile
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        blayout: Optional block layout for the destination tile
+        slayout: Optional scatter layout for the destination tile
 
     Returns:
         Tile wrapping the move operation
     """
-    call_expr = _ir_ops.move(tile.unwrap(), target_memory)
+    call_expr = _ir_ops.move(tile.unwrap(), target_memory, blayout=blayout, slayout=slayout)
     return Tile(expr=call_expr)
 
 

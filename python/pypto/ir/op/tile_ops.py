@@ -19,7 +19,7 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, PadValue, Span
+from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, PadValue, Span, TileLayout
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -247,6 +247,8 @@ def concat(
 def move(
     tile: Expr,
     target_memory: MemorySpace,
+    blayout: TileLayout | None = None,
+    slayout: TileLayout | None = None,
     span: Span | None = None,
 ) -> Call:
     """Move tile between memory levels.
@@ -254,6 +256,8 @@ def move(
     Args:
         tile: Input tile (TileType)
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
+        blayout: Optional block layout for the destination tile
+        slayout: Optional scatter layout for the destination tile
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -265,6 +269,10 @@ def move(
     kwargs: dict[str, Any] = {
         "target_memory": target_memory,
     }
+    if blayout is not None:
+        kwargs["blayout"] = blayout
+    if slayout is not None:
+        kwargs["slayout"] = slayout
 
     return _ir_core.create_op_call("tile.move", args, kwargs, actual_span)
 

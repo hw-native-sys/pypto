@@ -208,6 +208,16 @@ enum class TileLayout {
 };
 
 /**
+ * @brief Convert TileLayout enum to string
+ */
+std::string TileLayoutToString(TileLayout layout);
+
+/**
+ * @brief Convert string to TileLayout enum
+ */
+TileLayout StringToTileLayout(const std::string& str);
+
+/**
  * @brief Tile pad enumeration
  *
  * Defines the padding mode for out-of-bound tile accesses:

@@ -205,12 +205,27 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   const auto& input_shape = tile_type->shape_;
 
   TileView tile_view;
+
+  // Default: retain source tile's layout
+  if (tile_type->tile_view_) {
+    tile_view.blayout = tile_type->tile_view_->blayout;
+    tile_view.slayout = tile_type->tile_view_->slayout;
+  } else {
+    tile_view.blayout = TileLayout::row_major;
+    tile_view.slayout = TileLayout::none_box;
+  }
+
+  // Hardcoded layout for Left/Right (hardware requirements)
   if (space == MemorySpace::Left) {
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
     tile_view.slayout = TileLayout::col_major;
   }
+
+  // Explicit kwargs override everything
+  tile_view.blayout = GetKwarg<TileLayout>(kwargs, "blayout", tile_view.blayout);
+  tile_view.slayout = GetKwarg<TileLayout>(kwargs, "slayout", tile_view.slayout);
 
   // Keep original shape
   std::vector<ExprPtr> output_shape = input_shape;
@@ -497,6 +512,8 @@ REGISTER_OP("tile.move")
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
+    .set_attr<TileLayout>("blayout")
+    .set_attr<TileLayout>("slayout")
     .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
