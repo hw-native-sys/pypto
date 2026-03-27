@@ -24,6 +24,57 @@ from pypto.language.typing import Tensor, Tile
 class TestUnifiedTensorDispatch:
     """pl.X with Tensor args produces the same IR as pl.tensor.X."""
 
+    def _assert_explicit_tensor_scalar_sugar(self, op_name: str, scalar_val: int | float) -> None:
+        """Assert explicit tensor scalar ops canonicalize to scalar-only forms."""
+        if op_name == "add":
+
+            @pl.function
+            def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.add(a, scalar_val)
+                return c
+
+            @pl.function
+            def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(a, scalar_val)
+                return c
+        elif op_name == "mul":
+
+            @pl.function
+            def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.mul(a, scalar_val)
+                return c
+
+            @pl.function
+            def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(a, scalar_val)
+                return c
+        elif op_name == "sub":
+
+            @pl.function
+            def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.sub(a, scalar_val)
+                return c
+
+            @pl.function
+            def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.subs(a, scalar_val)
+                return c
+        elif op_name == "div":
+
+            @pl.function
+            def sugared(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.div(a, scalar_val)
+                return c
+
+            @pl.function
+            def canonical(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.tensor.divs(a, scalar_val)
+                return c
+        else:
+            raise AssertionError(f"Unsupported tensor scalar sugar op: {op_name}")
+
+        ir.assert_structural_equal(sugared, canonical)
+
     def test_add(self):
         @pl.function
         def unified(a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -140,6 +191,14 @@ class TestUnifiedTensorDispatch:
             return c
 
         ir.assert_structural_equal(unified, explicit)
+
+    @pytest.mark.parametrize(
+        ("op_name", "scalar_val"),
+        [("add", 5), ("mul", 2.0), ("sub", 3), ("div", 4.0)],
+    )
+    def test_explicit_tensor_scalar_sugars_to_scalar_op(self, op_name: str, scalar_val: int | float):
+        """Explicit tensor scalar ops sugar to scalar-only forms."""
+        self._assert_explicit_tensor_scalar_sugar(op_name, scalar_val)
 
     def test_matmul(self):
         @pl.function
@@ -676,6 +735,89 @@ class TestUnifiedBlockDispatch:
 class TestScalarAutoDispatch:
     """pl.add(Tile, scalar) produces the same IR as pl.tile.adds."""
 
+    def _assert_explicit_tile_scalar_sugar(self, op_name: str, scalar_val: int | float) -> None:
+        """Assert explicit tile scalar ops canonicalize to scalar-only forms."""
+        if op_name == "add":
+
+            @pl.function
+            def sugared(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+
+            @pl.function
+            def canonical(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.adds(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+        elif op_name == "mul":
+
+            @pl.function
+            def sugared(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.mul(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+
+            @pl.function
+            def canonical(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+        elif op_name == "sub":
+
+            @pl.function
+            def sugared(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.sub(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+
+            @pl.function
+            def canonical(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.subs(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+        elif op_name == "div":
+
+            @pl.function
+            def sugared(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.div(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+
+            @pl.function
+            def canonical(
+                t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+                b: pl.Tile[[64, 64], pl.FP32] = pl.tile.divs(a, scalar_val)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+                return result
+        else:
+            raise AssertionError(f"Unsupported tile scalar sugar op: {op_name}")
+
+        ir.assert_structural_equal(sugared, canonical)
+
     def test_add_tile_scalar(self):
         @pl.function
         def unified(
@@ -759,6 +901,14 @@ class TestScalarAutoDispatch:
             return result
 
         ir.assert_structural_equal(unified, explicit)
+
+    @pytest.mark.parametrize(
+        ("op_name", "scalar_val"),
+        [("add", 5), ("mul", 3.14), ("sub", 2), ("div", 4)],
+    )
+    def test_explicit_tile_scalar_sugars_to_scalar_op(self, op_name: str, scalar_val: int | float):
+        """Explicit tile scalar ops sugar to scalar-only forms."""
+        self._assert_explicit_tile_scalar_sugar(op_name, scalar_val)
 
 
 class TestPromotedOps:

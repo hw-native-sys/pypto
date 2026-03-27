@@ -68,8 +68,8 @@ from pypto.pypto_core.ir import Expr, PadValue, TensorLayout
 from ..typing import IntLike, Scalar, Tensor
 
 
-def _unwrap_rhs(rhs: int | float | Tensor | Scalar) -> int | float | Expr:
-    """Unwrap rhs operand: extract Expr from Tensor/Scalar wrappers, pass through primitives."""
+def _unwrap_rhs(rhs: int | float | Expr | Tensor | Scalar) -> int | float | Expr:
+    """Unwrap rhs operands into the IR-layer representation."""
     if isinstance(rhs, (Tensor, Scalar)):
         return rhs.unwrap()
     return rhs
@@ -267,12 +267,11 @@ def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the mul operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = _unwrap_rhs(rhs)
-    call_expr = _ir_ops.mul(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.mul(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
-def muls(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def muls(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """Element-wise multiplication of tensor and scalar.
 
     Args:
@@ -283,7 +282,7 @@ def muls(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         Tensor wrapping the muls operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.muls(lhs_expr, rhs)
+    call_expr = _ir_ops.muls(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
@@ -301,12 +300,11 @@ def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the add operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = _unwrap_rhs(rhs)
-    call_expr = _ir_ops.add(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.add(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
-def adds(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def adds(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """Element-wise addition of tensor and scalar.
 
     Args:
@@ -317,7 +315,7 @@ def adds(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         Tensor wrapping the adds operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.adds(lhs_expr, rhs)
+    call_expr = _ir_ops.adds(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
@@ -335,12 +333,11 @@ def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the sub operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = _unwrap_rhs(rhs)
-    call_expr = _ir_ops.sub(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.sub(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
-def subs(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
+def subs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     """Element-wise subtraction of tensor and scalar.
 
     Args:
@@ -351,7 +348,7 @@ def subs(lhs: Tensor, rhs: int | float | Expr) -> Tensor:
         Tensor wrapping the subs operation
     """
     lhs_expr = lhs.unwrap()
-    call_expr = _ir_ops.subs(lhs_expr, rhs)
+    call_expr = _ir_ops.subs(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
@@ -369,8 +366,7 @@ def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
         Tensor wrapping the div operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = _unwrap_rhs(rhs)
-    call_expr = _ir_ops.div(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.div(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 
@@ -385,8 +381,7 @@ def divs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
         Tensor wrapping the divs operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.divs(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.divs(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 

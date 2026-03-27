@@ -19,7 +19,17 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, MemorySpace, PadValue, Span, TileLayout
+from pypto.pypto_core.ir import (
+    Call,
+    ConstFloat,
+    ConstInt,
+    Expr,
+    MemorySpace,
+    PadValue,
+    ScalarType,
+    Span,
+    TileLayout,
+)
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 
@@ -41,6 +51,29 @@ def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _i
         )
     if len(offsets_tuple.elements) == 0:
         raise ValueError("offsets and shapes must have at least one dimension")
+
+
+def _normalize_tile_binary_rhs(rhs: int | float | Expr, span: Span) -> Expr:
+    """Normalize a tile binary-op rhs into an IR expression."""
+    return (
+        _normalize_expr(rhs, span, int_dtype=DataType.INT32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+
+
+def _create_tile_binary_call(
+    tile_op_name: str,
+    scalar_op_name: str,
+    lhs: Expr,
+    rhs: int | float | Expr,
+    span: Span,
+) -> Call:
+    """Create a tile binary call with scalar auto-dispatch."""
+    rhs_expr = _normalize_tile_binary_rhs(rhs, span)
+    if isinstance(rhs_expr.type, ScalarType):
+        return _ir_core.create_op_call(scalar_op_name, [lhs, rhs_expr], {}, span)
+    return _ir_core.create_op_call(tile_op_name, [lhs, rhs_expr], {}, span)
 
 
 # ============================================================================
@@ -346,72 +379,72 @@ def fillpad(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None =
 # ============================================================================
 
 
-def mul(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise multiplication of two tiles.
+def mul(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise multiplication of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.muls.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise multiplication
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.mul", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.mul", "tile.muls", lhs, rhs, actual_span)
 
 
-def add(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise addition of two tiles.
+def add(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise addition of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.adds.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise addition
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.add", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.add", "tile.adds", lhs, rhs, actual_span)
 
 
-def div(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise division of two tiles.
+def div(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise division of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.divs.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise division
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.div", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.div", "tile.divs", lhs, rhs, actual_span)
 
 
-def sub(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise subtraction of two tiles.
+def sub(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise subtraction of tile and tile or scalar.
 
-    Supports broadcasting for two tiles.
+    Supports broadcasting for two tiles. Scalar rhs canonicalizes to tile.subs.
 
     Args:
         lhs: Left-hand side tile (TileType)
-        rhs: Right-hand side tile (TileType)
+        rhs: Right-hand side tile or scalar
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise subtraction
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.sub", [lhs, rhs], {}, actual_span)
+    return _create_tile_binary_call("tile.sub", "tile.subs", lhs, rhs, actual_span)
 
 
 def rem(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:

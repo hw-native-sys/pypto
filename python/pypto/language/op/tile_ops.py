@@ -121,6 +121,11 @@ from .system_ops import (  # noqa: F401
 )
 
 
+def _unwrap_rhs(rhs: int | float | Expr | Tile | Scalar) -> int | float | Expr:
+    """Unwrap rhs operands into the IR-layer representation."""
+    return rhs.unwrap() if isinstance(rhs, (Tile, Scalar)) else rhs
+
+
 def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
@@ -378,59 +383,59 @@ def get_block_idx() -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def add(lhs: Tile, rhs: Tile) -> Tile:
-    """Element-wise addition of two tiles.
+def add(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+    """Element-wise addition of tile and tile or scalar.
 
     Args:
         lhs: Left-hand side tile
-        rhs: Right-hand side tile
+        rhs: Right-hand side tile or scalar
 
     Returns:
         Tile wrapping the add operation
     """
-    call_expr = _ir_ops.add(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.add(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
-def sub(lhs: Tile, rhs: Tile) -> Tile:
-    """Element-wise subtraction of two tiles.
+def sub(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+    """Element-wise subtraction of tile and tile or scalar.
 
     Args:
         lhs: Left-hand side tile
-        rhs: Right-hand side tile
+        rhs: Right-hand side tile or scalar
 
     Returns:
         Tile wrapping the sub operation
     """
-    call_expr = _ir_ops.sub(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.sub(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
-def mul(lhs: Tile, rhs: Tile) -> Tile:
-    """Element-wise multiplication of two tiles.
+def mul(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+    """Element-wise multiplication of tile and tile or scalar.
 
     Args:
         lhs: Left-hand side tile
-        rhs: Right-hand side tile
+        rhs: Right-hand side tile or scalar
 
     Returns:
         Tile wrapping the mul operation
     """
-    call_expr = _ir_ops.mul(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.mul(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
-def div(lhs: Tile, rhs: Tile) -> Tile:
-    """Element-wise division of two tiles.
+def div(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile:
+    """Element-wise division of tile and tile or scalar.
 
     Args:
         lhs: Left-hand side tile
-        rhs: Right-hand side tile
+        rhs: Right-hand side tile or scalar
 
     Returns:
         Tile wrapping the div operation
     """
-    call_expr = _ir_ops.div(lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.div(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
@@ -444,8 +449,7 @@ def adds(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     Returns:
         Tile wrapping the adds operation
     """
-    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.adds(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.adds(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
@@ -459,8 +463,7 @@ def subs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     Returns:
         Tile wrapping the subs operation
     """
-    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.subs(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.subs(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
@@ -474,8 +477,7 @@ def muls(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     Returns:
         Tile wrapping the muls operation
     """
-    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.muls(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.muls(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 
@@ -489,8 +491,7 @@ def divs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     Returns:
         Tile wrapping the divs operation
     """
-    rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.divs(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.divs(lhs.unwrap(), _unwrap_rhs(rhs))
     return Tile(expr=call_expr)
 
 

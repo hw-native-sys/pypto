@@ -166,6 +166,18 @@ class TestTileOperationSpanCapture:
         assert result.span.filename.endswith("test_operation_span_capture.py")
         assert result.span.is_valid()
 
+    def test_tile_add_scalar_captures_span(self):
+        """Test tile add scalar sugar span capture."""
+        tile_type = ir.TileType([16, 16], DataType.FP16)
+        a = ir.Var("a", tile_type, ir.Span.unknown())
+
+        line_before = get_current_line()
+        result = tile_ops.add(a, 1.0)
+
+        assert result.span.filename.endswith("test_operation_span_capture.py")
+        assert result.span.is_valid()
+        assert result.span.begin_line == line_before + 1
+
     def test_tile_load_captures_span(self):
         """Test tile load operation span capture."""
         tensor = ir.Var("tensor", ir.TensorType([64, 64], DataType.FP16), ir.Span.unknown())
