@@ -2770,7 +2770,7 @@ class TestDCERegression:
         assert "branch_out__rv_v0: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec] = pl.yield_(acc_iter)" in aiv_str
         assert aiv_str.index(
             "z__ssa_v0_Vec: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic"
-        ) < (aiv_str.index("if i__idx_v0 == 0:"))
+        ) < (aiv_str.index("pl.tile.add(acc_iter, z__ssa_v0_Vec)"))
 
 
 if __name__ == "__main__":

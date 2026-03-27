@@ -95,6 +95,16 @@ def _prepare_and_run_allocate_memory_addr(program):
     return program
 
 
+def _prepare_and_run_full_memory_pipeline(program):
+    """Run the full tile memory pipeline through address allocation."""
+
+    program = passes.infer_tile_memory_space()(program)
+    program = passes.init_mem_ref()(program)
+    program = passes.memory_reuse()(program)
+    program = passes.allocate_memory_addr()(program)
+    return program
+
+
 def test_allocate_memory_addr_simple():
     """Test AllocateMemoryAddr with a simple function containing TileType variables.
 
@@ -228,6 +238,40 @@ def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
         Exception, match=re.escape("AllocateMemoryAddr found overlapping reserve_buffer ranges")
     ):
         _prepare_and_run_allocate_memory_addr(Before)
+
+
+def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
+    """Right buffers should share one address window when matmul moves do not overlap."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tensor[[4, 128], pl.BF16],
+            rhs0: pl.Tensor[[128, 64], pl.BF16],
+            rhs1: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[4, 64], pl.FP32]],
+        ) -> pl.Tensor[[4, 64], pl.FP32]:
+            lhs_tile: pl.Tile[[4, 128], pl.BF16] = pl.load(
+                lhs, [0, 0], [4, 128], target_memory=pl.MemorySpace.Mat
+            )
+            rhs0_tile: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                rhs0, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            rhs1_tile: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                rhs1, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            _acc0: pl.Tile[[4, 64], pl.FP32] = pl.matmul(lhs_tile, rhs0_tile)
+            acc1: pl.Tile[[4, 64], pl.FP32] = pl.matmul(lhs_tile, rhs1_tile)
+            result: pl.Tensor[[4, 64], pl.FP32] = pl.store(acc1, [0, 0], out_0)
+            return result
+
+    optimized_program = _prepare_and_run_full_memory_pipeline(Before)
+    optimized_func = list(optimized_program.functions.values())[0]
+
+    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+    assert memref_addrs["rhs0_tile_Right"] == memref_addrs["rhs1_tile_Right"]
 
 
 def test_allocate_memory_addr_empty_function():

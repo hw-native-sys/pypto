@@ -288,29 +288,48 @@ class TileMemorySpaceMutator : public IRMutator {
   std::vector<StmtPtr> VisitAndInsertMoves(const std::vector<StmtPtr>& stmts, bool& changed) {
     std::vector<StmtPtr> new_stmts;
     for (const auto& stmt : stmts) {
+      InsertMovesForConsumer(new_stmts, stmt, changed);
       auto new_stmt = IRMutator::VisitStmt(stmt);
       if (new_stmt.get() != stmt.get()) changed = true;
       new_stmts.push_back(new_stmt);
-
-      // After producer AssignStmt, insert tile.move stmts if needed
-      if (auto assign = As<AssignStmt>(stmt)) {
-        for (const auto& key : needed_moves_) {
-          if (key.first == assign->var_) {
-            InsertMoveStmt(new_stmts, assign->var_, key.second, assign->span_);
-            changed = true;
-          }
-        }
-      }
     }
     return new_stmts;
   }
 
+  void InsertMovesForConsumer(std::vector<StmtPtr>& stmts, const StmtPtr& stmt, bool& changed) {
+    CallPtr call;
+    Span span = stmt ? stmt->span_ : Span::unknown();
+    if (auto assign = As<AssignStmt>(stmt)) {
+      call = As<Call>(assign->value_);
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      call = As<Call>(eval->expr_);
+    }
+    if (!call) return;
+
+    const auto* constraints = GetInputConstraints(call->op_->name_);
+    if (!constraints) return;
+
+    for (size_t i = 0; i < constraints->size() && i < call->args_.size(); ++i) {
+      if ((*constraints)[i].empty()) continue;
+      auto var = As<Var>(call->args_[i]);
+      if (!var) continue;
+
+      MoveKey key = {var, (*constraints)[i][0]};
+      if (needed_moves_.count(key) == 0 || created_moves_.count(key) > 0) {
+        continue;
+      }
+
+      InsertMoveStmt(stmts, var, key.second, span);
+      changed = true;
+    }
+  }
+
   void InsertMoveStmt(std::vector<StmtPtr>& stmts, const VarPtr& original_var, MemorySpace target,
                       const Span& span) {
-    // Get the mutated producer var
-    auto cache_it = var_cache_.find(original_var);
-    INTERNAL_CHECK(cache_it != var_cache_.end()) << "Internal error: producer var not in cache";
-    auto mutated_producer = cache_it->second;
+    auto mutated_producer = IRMutator::VisitExpr(original_var);
+    auto mutated_producer_var = As<Var>(mutated_producer);
+    INTERNAL_CHECK(mutated_producer_var)
+        << "Internal error: inferred tile-memory producer is not a Var expression";
 
     // Create tile.move call via OpRegistry
     auto& op_reg = OpRegistry::GetInstance();
@@ -322,8 +341,6 @@ class TileMemorySpaceMutator : public IRMutator {
     INTERNAL_CHECK(move_type) << "Internal error: tile.move return type is not TileType";
     auto moved_type = std::make_shared<TileType>(move_type->shape_, move_type->dtype_, move_type->memref_,
                                                  move_type->tile_view_, target);
-    auto mutated_producer_var = As<Var>(mutated_producer);
-    INTERNAL_CHECK(mutated_producer_var) << "Internal error: mutated producer is not a Var";
     auto moved_var = std::make_shared<Var>(
         mutated_producer_var->name_hint_ + "_" + MemorySpaceToString(target), std::move(moved_type), span);
 
