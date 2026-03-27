@@ -20,7 +20,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 license = "LicenseRef-CANN-Open-Software-License-Agreement-Version-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy>=2.0"]
+dependencies = ["numpy>=2.0", "torch>=2.0.0"]
 keywords = ["python", "pto", "tile", "tile-centric"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,7 +44,6 @@ dev = [
     "pyright==1.1.407",
     "ruff==0.14.8",
     "clang-tidy==21.1.0",
-    "torch>=2.0.0",
 ]
 
 [project.urls]
@@ -117,7 +116,7 @@ reportCallIssue = false
 reportAssignmentType = false
 reportOperatorIssue = false
 reportRedeclaration = false
-reportMissingImports = false
+reportMissingImports = "warning"
 
 [tool.pylint]
 # Pylint is not used in this project, but as it is a widely used linter,
