@@ -236,7 +236,12 @@ CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const
 CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr& result_type,
                    const Span& span) {
   auto op = OpRegistry::GetInstance().GetOp("tile.move");
+
   std::vector<std::pair<std::string, std::any>> kwargs{{"target_memory", std::any(target_memory)}};
+  if (auto tt = std::dynamic_pointer_cast<const TileType>(result_type); tt && tt->tile_view_.has_value()) {
+    kwargs.emplace_back("blayout", std::any(tt->tile_view_->blayout));
+    kwargs.emplace_back("slayout", std::any(tt->tile_view_->slayout));
+  }
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
 }
 
