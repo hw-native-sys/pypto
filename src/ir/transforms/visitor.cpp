@@ -37,7 +37,9 @@ void IRVisitor::VisitFunction(const FunctionPtr& func) {
   for (auto& param : func->params_) {
     VisitExpr(param);
   }
-  VisitStmt(func->body_);
+  if (func->body_) {
+    VisitStmt(func->body_);
+  }
 }
 
 void IRVisitor::VisitExpr(const ExprPtr& expr) { ExprFunctor<void>::VisitExpr(expr); }

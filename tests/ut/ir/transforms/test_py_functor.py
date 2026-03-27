@@ -12,7 +12,6 @@
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.pypto_core.ir import IRMutator, IRVisitor
 
 
 class TestIRVisitor:
@@ -29,7 +28,7 @@ class TestIRVisitor:
                     x = pl.add(x, 1.0)
                 return x
 
-        class Counter(IRVisitor):
+        class Counter(ir.IRVisitor):
             def __init__(self):
                 super().__init__()
                 self.count = 0
@@ -53,7 +52,7 @@ class TestIRVisitor:
                 z = pl.mul(y, 2.0)
                 return z
 
-        class CallCollector(IRVisitor):
+        class CallCollector(ir.IRVisitor):
             def __init__(self):
                 super().__init__()
                 self.op_names: list[str] = []
@@ -78,7 +77,7 @@ class TestIRVisitor:
                     x = pl.add(x, 1.0)
                 return x
 
-        class ForAndCallCounter(IRVisitor):
+        class ForAndCallCounter(ir.IRVisitor):
             def __init__(self):
                 super().__init__()
                 self.for_count = 0
@@ -99,15 +98,12 @@ class TestIRVisitor:
 
     def test_visit_binary_expr_grouped(self):
         """visit_binary_expr handles all binary expression types."""
+        span = ir.Span("test", 0, 0)
+        a = ir.ConstInt(1, ir.DataType.INT32, span)
+        b = ir.ConstInt(2, ir.DataType.INT32, span)
+        add = ir.Add(a, b, ir.DataType.INT32, span)
 
-        @pl.program
-        class Prog:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y = pl.add(x, 1.0)
-                return y
-
-        class BinaryCounter(IRVisitor):
+        class BinaryCounter(ir.IRVisitor):
             def __init__(self):
                 super().__init__()
                 self.binary_count = 0
@@ -117,10 +113,8 @@ class TestIRVisitor:
                 super().visit_binary_expr(op)
 
         counter = BinaryCounter()
-        counter.visit_program(Prog)
-        # tensor.add produces a Call, not a BinaryExpr, so binary_count may be 0.
-        # The key assertion is that traversal completes without error.
-        assert isinstance(counter.binary_count, int)
+        counter.visit_expr(add)
+        assert counter.binary_count == 1
 
     def test_default_visitor_no_crash(self):
         """Default IRVisitor traverses without crashing."""
@@ -133,7 +127,7 @@ class TestIRVisitor:
                     x = pl.add(x, 1.0)
                 return x
 
-        visitor = IRVisitor()
+        visitor = ir.IRVisitor()
         visitor.visit_program(Prog)  # Should not raise
 
 
@@ -150,7 +144,7 @@ class TestIRMutator:
                 y = pl.add(x, 1.0)
                 return y
 
-        mutator = IRMutator()
+        mutator = ir.IRMutator()
         result = mutator.visit_program(Prog)
         assert result is Prog
 
@@ -165,7 +159,7 @@ class TestIRMutator:
                     x = pl.add(x, 1.0)
                 return x
 
-        mutator = IRMutator()
+        mutator = ir.IRMutator()
         result = mutator.visit_program(Prog)
         assert result is Prog
         ir.assert_structural_equal(result, Prog)
@@ -186,7 +180,7 @@ class TestPipelineIntegration:
 
         # Identity mutator wrapped as a pass
         my_pass = passes.create_program_pass(
-            lambda prog: IRMutator().visit_program(prog),
+            lambda prog: ir.IRMutator().visit_program(prog),
             "IdentityPythonPass",
         )
         pipeline = passes.PassPipeline()
@@ -201,7 +195,7 @@ class TestPipelineIntegration:
         call_count_holder = [0]
 
         def analysis_transform(prog):
-            class Counter(IRVisitor):
+            class Counter(ir.IRVisitor):
                 def __init__(self):
                     super().__init__()
                     self.count = 0
