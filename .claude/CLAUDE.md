@@ -25,5 +25,6 @@ Skills are workflow guides that help the main assistant perform specific tasks:
 - **`fix-issue`** - Fixes a GitHub issue by fetching, branching, planning, and implementing
 - **`fix-pr`** - Fixes PR issues: addresses review comments and resolves CI failures
 - **`clean-branches`** - Removes stale local and remote fork branches that have been merged into main
+- **`compare-codegen`** - Compares codegen output (.pto files, pass dumps) between origin/main and current branch for a given test case
 
 **Key advantage:** `code-review` and `testing` use `context: fork` to run in isolated subagent contexts. They can run in parallel during commit workflows without polluting the main context window.

@@ -21,6 +21,7 @@ Task mapping:
 - Issue workflows: `.claude/skills/create-issue/SKILL.md`,
   `.claude/skills/fix-issue/SKILL.md`, `.claude/skills/fix-pr/SKILL.md`
 - Branch cleanup: `.claude/skills/clean-branches/SKILL.md`
+- Codegen comparison: `.claude/skills/compare-codegen/SKILL.md`
 
 When a Claude skill or agent refers to `Task`, a subagent, or Claude-only
 plugins:
