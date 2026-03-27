@@ -39,10 +39,8 @@ import re
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch  # type: ignore[import]
+import torch
 
 from .tensor_spec import SCALAR_CTYPE_MAP, ScalarSpec, TensorSpec
 
@@ -181,8 +179,6 @@ def _compute_golden_imports(compute_golden_src: str) -> list[str]:
 
 def _init_expr(spec: TensorSpec) -> str:
     """Return the Python expression (string) used to initialise this tensor in golden.py."""
-    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
-
     dtype_str = _torch_dtype_str(spec.dtype)
     shape_str = repr(tuple(spec.shape))
 
@@ -217,10 +213,8 @@ def _init_expr(spec: TensorSpec) -> str:
     raise TypeError(f"Unsupported init_value type {type(iv)!r} for tensor {spec.name!r}")
 
 
-def _tensor_literal_expr(tensor: "torch.Tensor", shape_str: str, dtype_str: str) -> str:
+def _tensor_literal_expr(tensor: torch.Tensor, shape_str: str, dtype_str: str) -> str:
     """Generate an inline expression for a concrete torch.Tensor init_value."""
-    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
-
     if tensor.numel() == 0:
         return f"torch.zeros({shape_str}, dtype={dtype_str})"
 
@@ -250,10 +244,8 @@ def _tensor_literal_expr(tensor: "torch.Tensor", shape_str: str, dtype_str: str)
     )
 
 
-def _torch_dtype_str(dtype: "torch.dtype") -> str:
+def _torch_dtype_str(dtype: torch.dtype) -> str:
     """Return the string representation of a torch dtype (e.g. 'torch.float32')."""
-    import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
-
     _map: dict[torch.dtype, str] = {
         torch.float32: "torch.float32",
         torch.float16: "torch.float16",

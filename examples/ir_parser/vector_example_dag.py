@@ -24,7 +24,7 @@ Dependencies: t0->t1, t0->t2, t1->t3, t2->t3, t3->t4, t0->t4
 """
 
 import pypto.language as pl
-import torch  # type: ignore[import]
+import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime import RunConfig, TensorSpec, run

@@ -2,7 +2,9 @@
 
 ## Overview
 
-During any task, log encountered defects or system problems to `KNOWN_ISSUES.md` in the project root. This captures issues even when they are unrelated to the current task.
+During any task, log encountered defects or system problems to `KNOWN_ISSUES.md`. This captures issues even when they are unrelated to the current task.
+
+**Always write to the main repository's `KNOWN_ISSUES.md`**, even when working in a git worktree. Use `git worktree list` to find the main repo root (the first entry). This ensures all issues are tracked in a single, central location.
 
 ## When to Log
 
@@ -50,10 +52,11 @@ Each issue is separated by `---`. Keep descriptions concise but include enough c
 
 ## How to Log
 
-1. Read `KNOWN_ISSUES.md` first (create if it doesn't exist)
-2. Check the issue is not already logged (avoid duplicates)
-3. Append the new issue using the format above
-4. Continue with the current task (do not fix the logged issue now)
+1. Determine the main repo root (use `git worktree list` — the first entry is the main repo)
+2. Read `KNOWN_ISSUES.md` at the main repo root (create if it doesn't exist)
+3. Check the issue is not already logged (avoid duplicates)
+4. Append the new issue using the format above
+5. Continue with the current task (do not fix the logged issue now)
 
 ## On Task Completion
 
@@ -72,4 +75,5 @@ Each issue is separated by `---`. Keep descriptions concise but include enough c
 
 - `KNOWN_ISSUES.md` is in `.gitignore` - it is a local-only tracking file
 - Each developer's file is independent; it does not get shared via git
+- **Always write to the main repo root**, never to a worktree's directory — this keeps all issues in one place
 - Use `/create-issue` and select from known issues to promote an entry to a proper GitHub issue

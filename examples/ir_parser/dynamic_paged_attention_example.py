@@ -20,7 +20,7 @@ accepts any batch size at runtime.
 # pyright: reportUndefinedVariable=false
 
 import pypto.language as pl
-import torch  # type: ignore[import]
+import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime import RunConfig, TensorSpec, run

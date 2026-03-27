@@ -36,7 +36,7 @@ These can be imported and reused by other @pl.program definitions.
 import struct
 
 import pypto.language as pl
-import torch  # type: ignore[import]
+import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime import RunConfig, TensorSpec, run

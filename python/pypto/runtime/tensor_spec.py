@@ -16,10 +16,9 @@ initialisation strategy, and whether it is an output to be validated.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    import torch  # type: ignore[import]
+import torch
 
 
 @dataclass
@@ -50,18 +49,16 @@ class TensorSpec:
 
     name: str
     shape: list[int]
-    dtype: "torch.dtype"
-    init_value: "int | float | torch.Tensor | Callable | None" = field(default=None)
+    dtype: torch.dtype
+    init_value: int | float | torch.Tensor | Callable | None = field(default=None)
     is_output: bool = False
 
-    def create_tensor(self) -> "torch.Tensor":
+    def create_tensor(self) -> torch.Tensor:
         """Create and return a ``torch.Tensor`` based on this specification.
 
         Returns:
             Initialised tensor with the requested shape and dtype.
         """
-        import torch  # type: ignore[import]  # noqa: PLC0415 — optional dependency
-
         if self.init_value is None or self.is_output:
             return torch.zeros(self.shape, dtype=self.dtype)
         if isinstance(self.init_value, (int, float)):

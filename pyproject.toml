@@ -117,6 +117,7 @@ reportCallIssue = false
 reportAssignmentType = false
 reportOperatorIssue = false
 reportRedeclaration = false
+reportMissingImports = false
 
 [tool.pylint]
 # Pylint is not used in this project, but as it is a widely used linter,
