@@ -12,6 +12,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import is_backend_configured, reset_for_testing
 
 
 def _iter_all_stmts(func):
@@ -461,6 +462,50 @@ def test_allocated_memory_addr_verifier_via_pipeline():
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
         result = pipeline.run(Before)
         assert result is not None
+
+
+def test_allocate_memory_addr_uses_default_policy_without_backend():
+    """Test that AllocateMemoryAddr falls back to DefaultMemoryAllocatorPolicy when no backend is configured.
+
+    Without a backend, the pass should still produce correct 32-byte aligned
+    addresses using the default policy (skip DDR, sort by id, 32-byte alignment).
+    """
+    was_configured = is_backend_configured()
+    if was_configured:
+        reset_for_testing()
+    try:
+        assert not is_backend_configured(), "Backend must not be configured for this test"
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+                tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        optimized_program = _prepare_and_run_allocate_memory_addr(Before)
+        optimized_func = next(iter(optimized_program.functions.values()))
+
+        memref_addrs = get_memref_addresses_from_tiles(optimized_func)
+        assert len(memref_addrs) == 3, f"Expected 3 MemRef addresses, got {len(memref_addrs)}"
+
+        for var_name, addr in memref_addrs.items():
+            assert addr >= 0, f"MemRef address for '{var_name}' should be non-negative"
+            assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned (default policy)"
+
+        sorted_addrs = sorted(memref_addrs.values())
+        for i in range(1, len(sorted_addrs)):
+            assert sorted_addrs[i] > sorted_addrs[i - 1], "Addresses should be strictly increasing"
+    finally:
+        if was_configured:
+            reset_for_testing()
 
 
 if __name__ == "__main__":

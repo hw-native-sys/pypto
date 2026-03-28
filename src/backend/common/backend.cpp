@@ -30,6 +30,7 @@
 #include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_registry.h"
+#include "pypto/ir/memory_allocator_policy.h"
 
 // clang-format off
 #include <msgpack.hpp>
@@ -366,6 +367,25 @@ uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
 
   // Memory type not found in SoC
   return 0;
+}
+
+uint64_t Backend::GetMemAlignment(ir::MemorySpace mem_type) const {
+  for (const auto& [die, die_count] : soc_->GetDieCounts()) {
+    for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
+      for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
+        for (const auto& mem : core.GetMems()) {
+          if (mem.GetMemType() == mem_type) {
+            return mem.GetAlignment();
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+ir::MemoryAllocatorPolicyPtr Backend::CreateMemoryAllocatorPolicy() const {
+  return std::make_unique<ir::DefaultMemoryAllocatorPolicy>();
 }
 
 // ========== Operator Registration ==========

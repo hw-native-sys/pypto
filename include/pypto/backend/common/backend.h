@@ -24,6 +24,7 @@
 
 #include "pypto/backend/common/soc.h"
 #include "pypto/core/common.h"
+#include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
@@ -268,6 +269,30 @@ class Backend {
    * @return Memory size in bytes, or 0 if not found
    */
   [[nodiscard]] uint64_t GetMemSize(ir::MemorySpace mem_type) const;
+
+  /**
+   * @brief Get memory alignment for a specific memory type
+   *
+   * Returns the alignment requirement of a single memory component of the
+   * given type. If the type exists in multiple cores, returns the alignment
+   * from the first occurrence.
+   *
+   * @param mem_type Memory space type
+   * @return Alignment in bytes, or 0 if not found
+   */
+  [[nodiscard]] uint64_t GetMemAlignment(ir::MemorySpace mem_type) const;
+
+  /**
+   * @brief Create a memory allocator policy for address allocation
+   *
+   * Returns a policy object that controls how AllocateMemoryAddr assigns
+   * addresses (alignment, space filtering, ordering). The default
+   * implementation returns a DefaultMemoryAllocatorPolicy. Derived backends
+   * can override this to provide custom placement strategies.
+   *
+   * @return Owning pointer to the policy
+   */
+  [[nodiscard]] virtual ir::MemoryAllocatorPolicyPtr CreateMemoryAllocatorPolicy() const;
 
   /**
    * @brief Get backend type name for serialization

@@ -31,6 +31,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
@@ -49,9 +50,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-// Helper function to align address to 32-byte boundary
-inline uint64_t Align32(uint64_t addr) { return (addr + 31) & ~31ULL; }
 
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 using ReserveBufferBaseMap = std::unordered_map<const Call*, int64_t>;
@@ -134,7 +132,8 @@ struct ReserveBufferResolution {
   ReservedEndBySpace reserved_end_by_space;
 };
 
-ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func) {
+ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func,
+                                                  const MemoryAllocatorPolicy& policy) {
   ReserveBufferResolution resolution;
   if (!func || !func->body_) return resolution;
 
@@ -160,7 +159,8 @@ ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func) {
         << "': " << resolved_base;
     resolution.resolved_bases[reserve.call] = static_cast<int64_t>(resolved_base);
 
-    const uint64_t buffer_end = Align32(resolved_base + static_cast<uint64_t>(reserve.size));
+    const uint64_t buffer_end =
+        policy.AlignAddress(resolved_base + static_cast<uint64_t>(reserve.size), reserve_space);
     auto& reserved_ranges = reserved_ranges_by_space[reserve_space];
     auto next_it = reserved_ranges.lower_bound(resolved_base);
     auto overlaps = [&](const std::pair<const uint64_t, uint64_t>& range) {
@@ -336,10 +336,11 @@ void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefWithSpac
 }
 
 /**
- * @brief Allocate memory addresses for non-DDR memory spaces
+ * @brief Allocate memory addresses using the given allocation policy
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
-    const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space) {
+    const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space,
+    const MemoryAllocatorPolicy& policy) {
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
   for (const auto& [memref, memory_space] : memrefs) {
@@ -350,14 +351,11 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
 
   for (auto& [space, refs] : space_to_memrefs) {
-    // Skip DDR space - keep original MemRefs
-    if (space == MemorySpace::DDR) {
+    if (!policy.ShouldAllocate(space)) {
       continue;
     }
 
-    // Sort by ID for deterministic allocation
-    std::sort(refs.begin(), refs.end(),
-              [](const MemRefPtr& a, const MemRefPtr& b) { return a->id_ < b->id_; });
+    policy.OrderMemRefs(refs);
 
     // Allocate sequential aligned addresses
     uint64_t current_addr = 0;
@@ -377,7 +375,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       memref_pairs.emplace_back(old_memref.get(), new_memref);
 
       // Next address = align(current + size)
-      current_addr = Align32(current_addr + old_memref->size_);
+      current_addr = policy.AlignAddress(current_addr + old_memref->size_, space);
     }
   }
 
@@ -405,15 +403,20 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
  * and the alloc statement arguments in place.
  */
 FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
+  // Obtain the allocation policy from the backend (or fall back to the default).
+  auto policy = backend::BackendConfig::IsConfigured() ? backend::GetBackend()->CreateMemoryAllocatorPolicy()
+                                                       : std::make_unique<DefaultMemoryAllocatorPolicy>();
+  CHECK(policy) << "Backend::CreateMemoryAllocatorPolicy() returned null";
+
   // Step 1: Resolve reserve_buffer bases before assigning tile addresses.
-  auto reserve_resolution = ResolveReserveBufferBases(func);
+  auto reserve_resolution = ResolveReserveBufferBases(func, *policy);
 
   // Step 2: Collect all unique MemRef objects from TileType variables
   std::vector<MemRefWithSpace> memrefs;
   CollectMemRefsFromStatement(func->body_, memrefs);
 
-  // Step 3: Allocate memory addresses for non-DDR spaces
-  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space);
+  // Step 3: Allocate memory addresses using the policy
+  auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {
     return func;
