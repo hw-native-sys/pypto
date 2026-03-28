@@ -265,7 +265,7 @@ REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
   // For a compile-time constant dim, emit the literal directly.
   // For a dynamic dim (e.g. pl.dynamic("M")), GenerateExprString returns the
   // dynamic var name (e.g. "M"), which is not a valid C++ identifier in the
-  // orchestration scope.  Read the runtime shape from the OrchArg instead.
+  // orchestration scope.  Read the runtime shape from the TaskArg instead.
   std::string dim_expr;
   if (As<ConstInt>(tensor_type->shape_[axis])) {
     dim_expr = codegen.GenerateExprString(tensor_type->shape_[axis]);
