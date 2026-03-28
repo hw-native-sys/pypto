@@ -155,9 +155,15 @@ class LifetimeAnalyzer : public IRVisitor {
     }
   }
 
-  void VisitStmt_(const ForStmtPtr& op) override { ProcessLoopBody(op->iter_args_, op->body_); }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    ProcessLoopBody(op->iter_args_, op->body_);
+    RegisterReturnVars(op->iter_args_, op->return_vars_);
+  }
 
-  void VisitStmt_(const WhileStmtPtr& op) override { ProcessLoopBody(op->iter_args_, op->body_); }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    ProcessLoopBody(op->iter_args_, op->body_);
+    RegisterReturnVars(op->iter_args_, op->return_vars_);
+  }
 
  private:
   int current_order_ = 0;
@@ -174,6 +180,11 @@ class LifetimeAnalyzer : public IRVisitor {
   std::map<VarPtr, int> var_def_order_;
   std::map<VarPtr, int> var_raw_last_use_;  // Raw last use (without loop extension)
   std::map<VarPtr, StmtPtr> var_def_stmt_;
+
+  // Maps ForStmt/WhileStmt return_vars to their corresponding initValue vars.
+  // YieldFixup will place return_vars into initValue's MemRef buffer,
+  // so any post-loop use of a return_var must extend the initValue's lifetime.
+  std::map<VarPtr, VarPtr> return_var_to_init_var_;
 
   void CollectUsesFromExpr(const ExprPtr& expr, int use_order) {
     if (!expr) return;
@@ -203,15 +214,36 @@ class LifetimeAnalyzer : public IRVisitor {
     loop_scopes_.push_back({loop_start, loop_end});
   }
 
+  void RegisterReturnVars(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
+    size_t count = std::min(return_vars.size(), iter_args.size());
+    for (size_t i = 0; i < count; ++i) {
+      const auto& rv = return_vars[i];
+      if (!As<TileType>(rv->GetType())) continue;
+
+      // Map return_var -> initValue var so that post-loop uses of the
+      // return_var extend the initValue's lifetime (not the return_var's).
+      // We do NOT register return_vars in ordered_defs_ -- they must not
+      // participate in sharing group computation, which would inflate
+      // group lifetimes and block unrelated reuse opportunities.
+      auto init_var = As<Var>(iter_args[i]->initValue_);
+      if (init_var && var_def_order_.count(init_var)) {
+        return_var_to_init_var_[rv] = init_var;
+      }
+    }
+  }
+
   void RecordRawUse(const VarPtr& var, int use_order) {
-    if (!var_def_order_.count(var)) {
+    // If var is a loop return_var, redirect the use to its initValue var.
+    // YieldFixup will alias the return_var to the initValue's MemRef,
+    // so keeping the initValue live prevents premature buffer reuse.
+    auto it = return_var_to_init_var_.find(var);
+    const VarPtr& target = (it != return_var_to_init_var_.end()) ? it->second : var;
+
+    if (!var_def_order_.count(target)) {
       return;
     }
-    if (var_raw_last_use_.count(var)) {
-      var_raw_last_use_[var] = std::max(var_raw_last_use_[var], use_order);
-    } else {
-      var_raw_last_use_[var] = use_order;
-    }
+    // operator[] default-inserts 0 for missing keys; use_order is always >= 0.
+    var_raw_last_use_[target] = std::max(var_raw_last_use_[target], use_order);
   }
 
   /**

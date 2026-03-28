@@ -1040,6 +1040,42 @@ class TestControlFlow:
         # tile_a's last use is in the else-yield which ends before tile_e's def
         _assert_shares_memref(func, "tile_a", "tile_e")
 
+    def test_loop_return_var_blocks_init_memref_reuse(self):
+        """Return_var used after loop must block reuse of initValue's MemRef.
+
+        Regression test for issue #768: MemoryReuse allowed a post-loop
+        variable to reuse the initValue's MemRef, but YieldFixup later
+        placed the loop output in the same buffer, causing the accumulated
+        result to be overwritten before the final add consumed it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                input_b: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                o_acc: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                o_acc_z: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(o_acc, 0.0)
+                for _kb, (acc,) in pl.range(0, 4, init_values=(o_acc_z,)):
+                    chunk: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                    acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc, chunk)
+                    loop_out = pl.yield_(acc_next)
+                # loop_out is live here -- it shares initValue's MemRef after YieldFixup
+                resid: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_b, [0, 0], [64, 64])
+                # resid must NOT reuse o_acc_z's MemRef -- loop_out still needs it
+                final: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(loop_out, resid)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(final, [0, 0], output)
+                return result
+
+        func = _run_memory_reuse(Before)
+        _assert_not_shares_memref(func, "o_acc_z", "resid")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
