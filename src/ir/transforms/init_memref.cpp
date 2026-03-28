@@ -201,8 +201,6 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
-  // Handle tile.store specially: return value should share the same MemRef as the 3rd argument
-  // (output_tensor)
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
@@ -240,7 +238,7 @@ class InitMemRefMutator : public IRMutator {
         }
       }
 
-      // Handle accumulate operations: output shares MemRef with a specific input arg
+      // Handle ops whose output reuses a specific input arg's MemRef (registry-based)
       auto reuse_arg_idx = GetOutputReusesInputArg(call->op_->name_);
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
@@ -256,30 +254,6 @@ class InitMemRefMutator : public IRMutator {
                 source_memory_space);
             VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
             var_map_[op->var_] = new_var;
-            return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
-          }
-        }
-      }
-
-      // Check if the RHS is a tile.store call
-      if (call->op_->name_ == "tile.store") {
-        // Get the 3rd argument (output tensor) after mutation
-        auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
-        if (new_call && new_call->args_.size() > 2) {
-          auto output_tensor_arg = new_call->args_[2];
-
-          // Extract MemRef from the output tensor
-          auto shared_memref = GetTypeMemRef(output_tensor_arg->GetType());
-
-          // Create new variable with the shared MemRef
-          if (shared_memref.has_value()) {
-            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
-                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-                ResolveTileMemorySpace(op->var_->GetType()));
-
-            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
-            var_map_[op->var_] = new_var;
-
             return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
           }
         }

@@ -45,9 +45,9 @@ program_with_memrefs = init_pass(program)
 
 1. **Normalize structure**: Call `NormalizeStmtStructure` to ensure flat `SeqStmts` structure
 2. **Initialize MemRef**: Read `memory_space` from `TileType` (set by InferTileMemorySpace), create MemRef objects (addr=-1) and attach to variable types
-   - **tile.store**: result shares MemRef with the output tensor argument
+   - **tile.store**: result shares MemRef with the output tensor argument (specified by `output_reuses_input_arg` registry attribute)
    - **View ops** (e.g. `tile.reshape`): output shares MemRef with the input tile
-   - **Accumulate ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the accumulator input (specified by `output_reuses_input_arg` registry attribute)
+   - **Reuse-input ops** (e.g. `tile.matmul_acc`, `tile.gemv_acc`): output shares MemRef with the specified input (via `output_reuses_input_arg` registry attribute)
    - **ForStmt/IfStmt return_vars**: patched to share MemRef with corresponding yield values
 3. **Collect non-DDR MemRefs**: Gather unique MemRef objects from TileType variables that are not in DDR
 4. **Create alloc statements**: For each non-DDR MemRef, create `tile.alloc(memspace, -1, size, id)`
@@ -86,8 +86,8 @@ Key observations:
 
 - `addr=-1` indicates addresses are not yet assigned (done later by AllocateMemoryAddr)
 - DDR MemRefs (params) do not get `tile.alloc` statements
-- `tile.store` result shares MemRef with the output tensor parameter
-- Accumulate ops (`matmul_acc`, `gemv_acc`) share MemRef with their accumulator input, preventing redundant Acc allocs
+- `tile.store` result shares MemRef with the output tensor parameter (via `output_reuses_input_arg` registry attribute)
+- Reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`) share MemRef with their designated input, preventing redundant allocs
 - Alloc statements are placed at the beginning of the function body's top-level `SeqStmts`
 
 ## ForStmt Loop-Carry Variables
@@ -120,7 +120,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
-  - Handles MemRef sharing for `tile.store`, view ops, accumulate ops, and ForStmt/IfStmt yield values
+  - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), and ForStmt/IfStmt yield values
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
 - `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 

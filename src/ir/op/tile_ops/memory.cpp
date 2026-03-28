@@ -500,6 +500,7 @@ REGISTER_OP("tile.store")
                   "Optional ND partition shape (TupleType). "
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
+    .set_output_reuses_input(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileStoreType(args, kwargs, "tile.store");

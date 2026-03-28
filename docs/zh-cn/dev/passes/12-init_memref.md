@@ -45,9 +45,9 @@ program_with_memrefs = init_pass(program)
 
 1. **规范化结构**：调用 `NormalizeStmtStructure` 确保 `SeqStmts` 为扁平结构
 2. **初始化 MemRef**：从 `TileType` 读取 `memory_space`（由 InferTileMemorySpace 设置），创建 MemRef 对象（addr=-1）并附加到变量类型
-   - **tile.store**：结果与输出 tensor 参数共享 MemRef
+   - **tile.store**：结果与输出 tensor 参数共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **View 操作**（如 `tile.reshape`）：输出与输入 tile 共享 MemRef
-   - **累加操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与累加器输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
+   - **复用输入操作**（如 `tile.matmul_acc`、`tile.gemv_acc`）：输出与指定输入共享 MemRef（由 `output_reuses_input_arg` 注册表属性指定）
    - **ForStmt/IfStmt return_vars**：修补为与对应 yield 值共享 MemRef
 3. **收集非 DDR MemRef**：从 TileType 变量中收集不在 DDR 中的唯一 MemRef 对象
 4. **创建 alloc 语句**：为每个非 DDR MemRef 创建 `tile.alloc(memspace, -1, size, id)`
@@ -86,8 +86,8 @@ def main(
 
 - `addr=-1` 表示地址尚未分配（稍后由 AllocateMemoryAddr 完成）
 - DDR MemRef（参数）不会生成 `tile.alloc` 语句
-- `tile.store` 结果与输出张量参数共享 MemRef
-- 累加操作（`matmul_acc`、`gemv_acc`）与累加器输入共享 MemRef，避免冗余 Acc alloc
+- `tile.store` 结果与输出张量参数共享 MemRef（通过 `output_reuses_input_arg` 注册表属性指定）
+- 复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）与指定输入共享 MemRef，避免冗余 alloc
 - Alloc 语句放置在函数体顶层 `SeqStmts` 的开头
 
 ## ForStmt 循环携带变量
@@ -120,7 +120,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
-  - 处理 `tile.store`、view 操作、累加操作以及 ForStmt/IfStmt yield 值的 MemRef 共享
+  - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
 - `CreateAllocStatement` / `InsertAllocsIntoBody` 创建并插入 alloc 操作
 
