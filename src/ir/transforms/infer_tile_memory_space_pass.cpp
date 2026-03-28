@@ -14,12 +14,15 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -316,6 +319,13 @@ class TileMemorySpaceMutator : public IRMutator {
     const auto* constraints = GetInputConstraints(call->op_->name_);
     if (!constraints) return;
 
+    // Look up backend layout spec so tile.move carries the correct layout for the consumer.
+    // This avoids a later ResolveBackendOpLayouts repair pass needing to insert tile.reshape.
+    const backend::BackendTileLayoutSpec* layout_spec = nullptr;
+    if (backend::BackendConfig::IsConfigured()) {
+      layout_spec = backend::GetBackend()->GetTileLayoutSpec(call->op_->name_);
+    }
+
     for (size_t i = 0; i < constraints->size() && i < call->args_.size(); ++i) {
       if ((*constraints)[i].empty()) continue;
       auto var = As<Var>(call->args_[i]);
@@ -326,13 +336,25 @@ class TileMemorySpaceMutator : public IRMutator {
         continue;
       }
 
-      InsertMoveStmt(stmts, var, key.second, span);
+      // Get required layout for this input from backend spec.
+      // blayout comes from the spec; slayout is set to none_box because the backend spec
+      // only defines block-level layout, and Vec/scalar-processing spaces use ND format
+      // (no scatter layout).
+      std::optional<TileLayout> required_blayout;
+      std::optional<TileLayout> required_slayout;
+      if (layout_spec && i < layout_spec->input_layouts.size() && layout_spec->input_layouts[i].has_value()) {
+        required_blayout = layout_spec->input_layouts[i];
+        required_slayout = TileLayout::none_box;
+      }
+
+      InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
       changed = true;
     }
   }
 
   void InsertMoveStmt(std::vector<StmtPtr>& stmts, const VarPtr& original_var, MemorySpace target,
-                      const Span& span) {
+                      const Span& span, std::optional<TileLayout> required_blayout = std::nullopt,
+                      std::optional<TileLayout> required_slayout = std::nullopt) {
     auto mutated_producer = IRMutator::VisitExpr(original_var);
     auto mutated_producer_var = As<Var>(mutated_producer);
     INTERNAL_CHECK(mutated_producer_var)
@@ -341,6 +363,12 @@ class TileMemorySpaceMutator : public IRMutator {
     // Create tile.move call via OpRegistry
     auto& op_reg = OpRegistry::GetInstance();
     std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", std::any(target)}};
+    if (required_blayout.has_value()) {
+      kwargs.emplace_back("blayout", std::any(*required_blayout));
+    }
+    if (required_slayout.has_value()) {
+      kwargs.emplace_back("slayout", std::any(*required_slayout));
+    }
     auto move_call = op_reg.Create("tile.move", {mutated_producer}, kwargs, span);
 
     // Create moved var with memory_space_ set
