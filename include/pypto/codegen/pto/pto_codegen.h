@@ -41,7 +41,7 @@ namespace codegen {
  * @brief PTO MLIR code generator
  *
  * Generates PTO-ISA MLIR format code from PyPTO IR Program.
- * Traverses the IR using the visitor pattern (aligned with CCECodegen).
+ * Traverses the IR using the visitor pattern.
  * Automatically generates make_tensor_view, partition_view, and alloc_tile instructions.
  */
 class PTOCodegen : public CodegenBase {

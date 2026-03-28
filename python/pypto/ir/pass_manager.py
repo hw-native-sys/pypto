@@ -26,7 +26,6 @@ class OptimizationStrategy(Enum):
 
     Default = "Default"  # Full tensor-oriented PTO pipeline
     DebugTileOptimization = "DebugTileOptimization"  # Debug-only PTO tile pipeline
-    TileCCEOptimization = "TileCCEOptimization"  # CCE-oriented tile pipeline with sync
 
 
 class PassManager:
@@ -60,12 +59,6 @@ class PassManager:
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]
-        cce_prefix_passes: list[PassSpec] = [
-            ("UnrollLoops", lambda: passes.unroll_loops()),
-            ("ConvertToSSA", lambda: passes.convert_to_ssa()),
-            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
-            ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
-        ]
         tensor_only_passes: list[PassSpec] = [
             ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
             ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
@@ -86,22 +79,9 @@ class PassManager:
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
         ]
-        tile_cce_passes: list[PassSpec] = [
-            ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
-            ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
-            ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
-            # TODO: Add ExpandMixedKernel here once downstream passes (InitMemRef,
-            # MemoryReuse, etc.) support cross-core transfer ops (tpush/tpop).
-            # Codegen already supports AIC/AIV/Group function types.
-            ("InitMemRef", lambda: passes.init_mem_ref()),
-            ("MemoryReuse", lambda: passes.memory_reuse()),
-            ("InsertSync", lambda: passes.insert_sync()),
-            ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
-        ]
         cls._strategy_passes = {
             OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,
             OptimizationStrategy.DebugTileOptimization: tensor_prefix_passes + tile_pto_passes,
-            OptimizationStrategy.TileCCEOptimization: cce_prefix_passes + tile_cce_passes,
         }
 
     @classmethod

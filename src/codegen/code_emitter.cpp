@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "pypto/codegen/cce/code_emitter.h"
+#include "pypto/codegen/code_emitter.h"
 
 #include <cstddef>
 #include <string>

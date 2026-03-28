@@ -476,15 +476,15 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # 为 None 时自动生成
-    strategy=ir.OptimizationStrategy.Default,  # 或 DebugTileOptimization / TileCCEOptimization
+    strategy=ir.OptimizationStrategy.Default,  # 或 DebugTileOptimization
     dump_passes=True,                          # 每个 pass 后打印 IR
-    backend_type=BackendType.Ascend910B_PTO,              # PTO 或 CCE
+    backend_type=BackendType.Ascend910B,
 )
 ```
 
 | 参数 | 选项 | 说明 |
 | ---- | ---- | ---- |
-| `strategy` | `Default`、`DebugTileOptimization`、`TileCCEOptimization` | `Default` = 完整的 tensor 导向流水线。`DebugTileOptimization` = 仅用于调试的 PTO tile 流水线，不包含 tensor-only pass。`TileCCEOptimization` = 面向 CCE 且带同步插入的 tile-only 流水线 |
+| `strategy` | `Default`、`DebugTileOptimization` | `Default` = 完整的 tensor 导向流水线。`DebugTileOptimization` = 仅用于调试的 PTO tile 流水线，不包含 tensor-only pass |
 | `backend_type` | `PTO`、`CCE` | 代码生成后端 |
 | `dump_passes` | `True`/`False` | 每个优化 pass 前后打印 IR |
 | `skip_ptoas` | `True`/`False` | 跳过 PTOAS 步骤，输出原始 MLIR 文件（默认 `False`） |

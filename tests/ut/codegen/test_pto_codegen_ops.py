@@ -499,7 +499,7 @@ class Test910BBlockOpsCodegen:
         """Test code generation for all tile-level operations."""
         # Set backend type for testing
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
 
         dtype = DataType.FP32
 
@@ -547,7 +547,7 @@ class TestTileReadWriteOffsetCodegen:
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)
@@ -624,7 +624,7 @@ class TestBroadcastOpsCodegen:
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)
@@ -654,6 +654,35 @@ class TestBroadcastOpsCodegen:
         mlir = self._generate_mlir(Prog)
         assert "pto.tcolexpandmul" in mlir, f"col_expand_mul should generate pto.tcolexpandmul, got:\n{mlir}"
 
+    def test_col_expand_codegen(self):
+        """tile.col_expand(target, col_vec) should emit pto.tcolexpand with only col_vec in ins()."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                col_vec_tensor: pl.Tensor[[1, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                col_tile: pl.Tile[[1, 16], pl.FP32] = pl.load(col_vec_tensor, [0, 0], [1, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.col_expand(src_tile, col_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolexpand" in mlir, f"col_expand should generate pto.tcolexpand, got:\n{mlir}"
+        # ptoas expects unary ins; two SSA values look like "ins(%a, %b : ...)".
+        for line in mlir.splitlines():
+            if "pto.tcolexpand" in line and "ins(" in line:
+                after_ins = line.split("ins(", 1)[1]
+                value_list = after_ins.split(" : ", 1)[0]
+                assert "," not in value_list, f"tcolexpand ins should be single SSA operand, got: {line!r}"
+                break
+        else:
+            raise AssertionError("no pto.tcolexpand ins(...) line in MLIR")
+
 
 class TestTileSliceCodegen:
     """Tests for tile.slice PTO code generation (pto.textract)."""
@@ -661,7 +690,7 @@ class TestTileSliceCodegen:
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program_cls)

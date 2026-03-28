@@ -255,8 +255,7 @@ backend.RegisterOp("tile.<op_name>").f_codegen(
 
 | Backend | Ops Registration | Codegen |
 | ------- | ---------------- | ------- |
-| 910B PTO | `src/backend/910B_PTO/backend_910b_pto_ops.cpp` | `src/codegen/pto/pto_codegen.cpp` |
-| 910B CCE | `src/backend/910B_CCE/backend_910b_cce_ops.cpp` | `src/codegen/cce/cce_codegen.cpp` |
+| 910B | `src/backend/910B/backend_910b_ops.cpp` | `src/codegen/pto/pto_codegen.cpp` |
 
 ---
 
@@ -368,7 +367,6 @@ Add to the appropriate category table (TensorOp or TileOp section).
 ### Codegen Docs
 
 - PTO: `docs/en/dev/codegen/00-pto_codegen.md`
-- CCE: `docs/en/dev/codegen/01-cce_codegen.md`
 - Orchestration: `docs/en/dev/codegen/02-orchestration_codegen.md`
 
 ### Pass Docs (if conversion changes are significant)

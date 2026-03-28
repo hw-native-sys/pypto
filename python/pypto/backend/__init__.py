@@ -12,8 +12,7 @@
 from pypto.pypto_core.backend import (
     # Backend type and implementations
     Backend,
-    Backend910B_CCE,
-    Backend910B_PTO,
+    Backend910B,
     Backend950,
     BackendType,
     Cluster,
@@ -36,8 +35,7 @@ __all__ = [
     "Die",
     "SoC",
     "Backend",
-    "Backend910B_CCE",
-    "Backend910B_PTO",
+    "Backend910B",
     "Backend950",
     "BackendType",
     "set_backend_type",

@@ -476,15 +476,15 @@ from pypto.backend import BackendType
 output_dir = ir.compile(
     program,
     output_dir=None,                           # auto-generated if None
-    strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization / TileCCEOptimization
+    strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization
     dump_passes=True,                          # print IR after each pass
-    backend_type=BackendType.Ascend910B_PTO,              # PTO or CCE
+    backend_type=BackendType.Ascend910B,
 )
 ```
 
 | Parameter | Options | Description |
 | --------- | ------- | ----------- |
-| `strategy` | `Default`, `DebugTileOptimization`, `TileCCEOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes. `TileCCEOptimization` = CCE-oriented tile-only pipeline with sync insertion |
+| `strategy` | `Default`, `DebugTileOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes |
 | `backend_type` | `PTO`, `CCE` | Code generator backend |
 | `dump_passes` | `True`/`False` | Print IR before/after each optimization pass |
 | `skip_ptoas` | `True`/`False` | Skip PTOAS step, emit raw MLIR files (default `False`) |

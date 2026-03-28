@@ -732,7 +732,7 @@ class PTOASTestCaseMixin:
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class QKMatmulPTOASTestCase(PTOASTestCaseMixin, QKMatmulTestCase):
@@ -788,75 +788,12 @@ class UnalignedPagedAttentionPTOASTestCase(PTOASTestCaseMixin, UnalignedPagedAtt
 
 
 class TestPagedAttentionKernels:
-    """Integration tests for the four Paged Attention kernels.
+    """Integration tests for Paged Attention kernels (PTO backend + PTOAS).
 
     Each test instantiates the corresponding PTOTestCase and runs it through
     the test_runner fixture, which handles kernel compilation and result
     validation against compute_expected.
     """
-
-    @pytest.mark.skip("Skip CCE backend")
-    @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
-    def test_qk_matmul(self, test_runner, num_heads, head_dim, block_size):
-        test_case = QKMatmulTestCase(num_heads=num_heads, head_dim=head_dim, block_size=block_size)
-        result = test_runner.run(test_case)
-        assert result.passed, f"QK matmul test failed: {result.error}"
-
-    @pytest.mark.skip("Skip CCE backend")
-    @pytest.mark.parametrize("num_heads,block_size", [(16, 128)])
-    def test_softmax_prepare(self, test_runner, num_heads, block_size):
-        test_case = SoftmaxPrepareTestCase(num_heads=num_heads, block_size=block_size)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Softmax prepare test failed: {result.error}"
-
-    @pytest.mark.skip("Skip CCE backend")
-    @pytest.mark.parametrize("num_heads,block_size,head_dim", [(16, 128, 128)])
-    def test_pv_matmul(self, test_runner, num_heads, block_size, head_dim):
-        test_case = PVMatmulTestCase(num_heads=num_heads, block_size=block_size, head_dim=head_dim)
-        result = test_runner.run(test_case)
-        assert result.passed, f"PV matmul test failed: {result.error}"
-
-    @pytest.mark.skip("Skip CCE backend")
-    @pytest.mark.parametrize(
-        "num_heads,head_dim,is_first,is_last",
-        [
-            (16, 128, 1, 1),  # single block: first + last
-            (16, 128, 1, 0),  # first block, more to come
-            (16, 128, 0, 1),  # last block
-            (16, 128, 0, 0),  # middle block
-        ],
-    )
-    def test_online_update(self, test_runner, num_heads, head_dim, is_first, is_last):
-        test_case = OnlineUpdateTestCase(
-            num_heads=num_heads, head_dim=head_dim, is_first=is_first, is_last=is_last
-        )
-        result = test_runner.run(test_case)
-        assert result.passed, (
-            f"Online update test failed (is_first={is_first}, is_last={is_last}): {result.error}"
-        )
-
-    @pytest.mark.skip("Skip CCE backend")
-    @pytest.mark.parametrize(
-        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
-        [
-            (64, 16, 128, 128, 8192, 32768),
-        ],
-    )
-    def test_paged_attention(
-        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
-    ):
-        test_case = PagedAttentionTestCase(
-            batch=batch,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            block_size=block_size,
-            context_len=context_len,
-            max_model_len=max_model_len,
-        )
-        result = test_runner.run(test_case)
-        assert result.passed, f"Paged attention test failed: {result.error}"
-
-    # ── PTOAS variants ────────────────────────────────────────────────────
 
     @pytest.mark.parametrize("num_heads,head_dim,block_size", [(16, 128, 128)])
     def test_qk_matmul_ptoas(self, test_runner, num_heads, head_dim, block_size):

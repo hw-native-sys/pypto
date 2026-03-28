@@ -62,20 +62,6 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "AllocateMemoryAddr",
 ]
 
-TILE_CCE_OPTIMIZATION_PASSES = [
-    "UnrollLoops",
-    "ConvertToSSA",
-    "NormalizeStmtStructure",
-    "FlattenCallExpr",
-    "FlattenTileNdTo2D",
-    "InferTileMemorySpace",
-    "ResolveTransposeLayout",
-    "InitMemRef",
-    "MemoryReuse",
-    "InsertSync",
-    "AllocateMemoryAddr",
-]
-
 
 def _build_tile_only_program():
     @pl.program
@@ -103,14 +89,12 @@ class TestOptimizationStrategy:
         """Test that all optimization strategies exist."""
         assert ir.OptimizationStrategy.Default is not None
         assert ir.OptimizationStrategy.DebugTileOptimization is not None
-        assert ir.OptimizationStrategy.TileCCEOptimization is not None
 
     def test_optimization_strategy_values_are_different(self):
         """Test that optimization strategies have different values."""
         strategies = [
             ir.OptimizationStrategy.Default,
             ir.OptimizationStrategy.DebugTileOptimization,
-            ir.OptimizationStrategy.TileCCEOptimization,
         ]
         assert len(strategies) == len(set(strategies))
 
@@ -131,14 +115,6 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.DebugTileOptimization
         assert pm.pass_names == DEBUG_TILE_OPTIMIZATION_PASSES
-        assert not set(TENSOR_ONLY_PASSES).intersection(pm.pass_names)
-
-    def test_pass_manager_get_strategy_tile_cce_optimization(self):
-        """Test getting TileCCEOptimization strategy PassManager."""
-        pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.TileCCEOptimization)
-        assert pm is not None
-        assert pm.strategy == ir.OptimizationStrategy.TileCCEOptimization
-        assert pm.pass_names == TILE_CCE_OPTIMIZATION_PASSES
         assert not set(TENSOR_ONLY_PASSES).intersection(pm.pass_names)
 
 
@@ -166,21 +142,13 @@ class TestPassManagerExecution:
         program = _build_tile_only_program()
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
         tile_result = ir.PassManager.get_strategy(ir.OptimizationStrategy.DebugTileOptimization).run_passes(
             program
         )
 
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_CCE)
-        tile_cce_result = ir.PassManager.get_strategy(ir.OptimizationStrategy.TileCCEOptimization).run_passes(
-            program
-        )
-
         assert isinstance(tile_result, ir.Program)
-        assert isinstance(tile_cce_result, ir.Program)
         assert tile_result.name == program.name
-        assert tile_cce_result.name == program.name
 
 
 class TestPassManagerMultipleInstances:

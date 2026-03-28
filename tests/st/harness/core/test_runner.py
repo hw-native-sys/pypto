@@ -39,10 +39,9 @@ _ST_DIR = Path(__file__).parent.parent.parent
 _PROJECT_ROOT = _ST_DIR.parent.parent
 
 # Map BackendType to the architecture prefix used by the platform string.
-# "a2a3" covers Ascend 910B (PTO and CCE backends); "a5" covers Ascend 950.
+# "a2a3" covers Ascend 910B; "a5" covers Ascend 950.
 _BACKEND_TO_ARCH: dict[BackendType, str] = {
-    BackendType.Ascend910B_PTO: "a2a3",
-    BackendType.Ascend910B_CCE: "a2a3",
+    BackendType.Ascend910B: "a2a3",
     BackendType.Ascend950: "a5",
 }
 

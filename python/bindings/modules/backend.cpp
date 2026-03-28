@@ -23,8 +23,7 @@
 #include <vector>
 
 #include "../module.h"
-#include "pypto/backend/910B_CCE/backend_910b_cce.h"
-#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/soc.h"
@@ -37,8 +36,7 @@ namespace pypto {
 namespace python {
 
 using pypto::backend::Backend;
-using pypto::backend::Backend910B_CCE;
-using pypto::backend::Backend910B_PTO;
+using pypto::backend::Backend910B;
 using pypto::backend::Backend950;
 using pypto::backend::BackendType;
 using pypto::backend::Cluster;
@@ -55,8 +53,7 @@ void BindBackend(nb::module_& m) {
   // ========== BackendType enum ==========
   nb::enum_<BackendType>(backend_mod, "BackendType",
                          "Backend type for passes and codegen (use Instance internally)")
-      .value("Ascend910B_CCE", BackendType::Ascend910B_CCE, "910B CCE backend (C++ codegen)")
-      .value("Ascend910B_PTO", BackendType::Ascend910B_PTO, "910B PTO backend (PTO assembly codegen)")
+      .value("Ascend910B", BackendType::Ascend910B, "910B backend (PTO assembly codegen)")
       .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
 
   // ========== Mem class ==========
@@ -140,15 +137,10 @@ void BindBackend(nb::module_& m) {
       .def_prop_ro(
           "soc", [](const Backend& backend) -> const SoC& { return backend.GetSoC(); }, "Get SoC object");
 
-  // ========== Backend910B_CCE concrete implementation ==========
-  nb::class_<Backend910B_CCE, Backend>(backend_mod, "Backend910B_CCE", "910B CCE backend implementation")
-      .def_static("instance", &Backend910B_CCE::Instance, nb::rv_policy::reference,
-                  "Get singleton instance of 910B CCE backend");
-
-  // ========== Backend910B_PTO concrete implementation ==========
-  nb::class_<Backend910B_PTO, Backend>(backend_mod, "Backend910B_PTO", "910B PTO backend implementation")
-      .def_static("instance", &Backend910B_PTO::Instance, nb::rv_policy::reference,
-                  "Get singleton instance of 910B PTO backend");
+  // ========== Backend910B concrete implementation ==========
+  nb::class_<Backend910B, Backend>(backend_mod, "Backend910B", "910B backend implementation")
+      .def_static("instance", &Backend910B::Instance, nb::rv_policy::reference,
+                  "Get singleton instance of 910B backend");
 
   // ========== Backend950 concrete implementation ==========
   nb::class_<Backend950, Backend>(backend_mod, "Backend950", "950 PTO backend implementation")

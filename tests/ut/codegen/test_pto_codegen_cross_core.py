@@ -213,7 +213,7 @@ class TestCrossCoreTpushTpopCodegen:
         setup with explicit AIC/AIV tpush/tpop ops.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
         # backend.set_backend_type(BackendType.Ascend950)
 
         pipeline = passes.PassPipeline()

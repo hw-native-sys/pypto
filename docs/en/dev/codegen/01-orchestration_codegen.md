@@ -2,7 +2,7 @@
 
 ## Overview
 
-The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [CCE codegen](01-cce_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
+The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
 - Wraps device memory pointers (via `OrchArg`) into `Tensor` objects
 - Builds `PTOParam` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
@@ -390,9 +390,9 @@ if (condition) {
 ```python
 from pypto import codegen, backend
 
-backend.set_backend_type(backend.BackendType.Ascend910B_CCE)
-generator = codegen.CCECodegen()
-files = generator.generate(MyProgram)
+backend.set_backend_type(backend.BackendType.Ascend910B)
+result = codegen.generate_orchestration(MyProgram, orch_func)
+code = result.code
 
 # Access generated orchestration code
 orch_code = files["orchestration/orch_func_name.cpp"]
@@ -403,5 +403,4 @@ The orchestration file is named `orchestration/<func_name>.cpp` in the generated
 ## See Also
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
-- [CCE Codegen](01-cce_codegen.md) — C++ code generation for InCore kernels
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen

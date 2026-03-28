@@ -16,7 +16,7 @@ Adding a new op follows a layered workflow with three phases:
 
 - **Phase A** (required): Tile op definition + tests + docs
 - **Phase B** (optional): Tensor op + tensor-to-tile conversion + tests + docs
-- **Phase C** (optional): Codegen (orchestration, PTO, CCE) + system tests
+- **Phase C** (optional): Codegen (orchestration, PTO) + system tests
 
 ## Task Tracking
 
@@ -306,9 +306,7 @@ backend.RegisterOp("tile.<op_name>").f_codegen(
 ```
 
 Also check if 910B backend needs special handling:
-`src/backend/910B_PTO/backend_910b_pto_ops.cpp`
-
-For CCE backend: `src/backend/910B_CCE/backend_910b_cce_ops.cpp`
+`src/backend/910B/backend_910b_ops.cpp`
 
 ### C3: System Tests
 
@@ -316,7 +314,7 @@ For CCE backend: `src/backend/910B_CCE/backend_910b_cce_ops.cpp`
 
 System tests require hardware/environment. Follow patterns in:
 
-- `tests/st/codegen/test_add_mul_orch_cce_codegen.py`
+- `tests/st/codegen/test_add_mul_orch_codegen.py`
 
 **Codegen unit tests** (no hardware needed):
 `tests/ut/codegen/test_pto_codegen_ops.py`

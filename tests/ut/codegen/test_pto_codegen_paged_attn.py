@@ -169,7 +169,7 @@ class PagedAttention:
 
 def test_tile_ops_codegen():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    backend.set_backend_type(BackendType.Ascend910B)
 
     program = PagedAttention
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -221,7 +221,7 @@ class UnalignedPagedAttention:
 def test_unaligned_tile_ops_codegen():
     """Test that unaligned paged attention emits pto.set_validshape."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    backend.set_backend_type(BackendType.Ascend910B)
 
     program = UnalignedPagedAttention
     pm = PassManager.get_strategy(OptimizationStrategy.Default)

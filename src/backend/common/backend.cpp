@@ -27,8 +27,7 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/910B_CCE/backend_910b_cce.h"
-#include "pypto/backend/910B_PTO/backend_910b_pto.h"
+#include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_registry.h"
 
@@ -48,15 +47,12 @@ namespace backend {
 
 const Backend* GetBackendInstance(BackendType type) {
   switch (type) {
-    case BackendType::Ascend910B_CCE:
-      return &Backend910B_CCE::Instance();
-    case BackendType::Ascend910B_PTO:
-      return &Backend910B_PTO::Instance();
+    case BackendType::Ascend910B:
+      return &Backend910B::Instance();
     case BackendType::Ascend950:
       return &Backend950::Instance();
     default:
-      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910B_CCE, Ascend910B_PTO, "
-                      "or Ascend950)";
+      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910B or Ascend950)";
       return nullptr;  // unreachable
   }
 }

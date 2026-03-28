@@ -72,7 +72,7 @@ find docs/en/dev -name "*.md" | sort   # List all documentation files
 
 - `ir/` - IR Foundation (types, operators, builders, parsers)
 - `passes/` - Passes & Transforms (pass system, individual passes)
-- `codegen/` - Code Generation (PTO, CCE)
+- `codegen/` - Code Generation
 - `language/` - Python DSL
 
 **Do not assume specific file names - explore the structure to find relevant files.**

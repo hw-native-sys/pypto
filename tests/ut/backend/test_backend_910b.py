@@ -7,48 +7,34 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for Backend910B_CCE and Backend910B_PTO implementation."""
+"""Tests for Backend910B implementation."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
 from pypto import ir
-from pypto.backend import Backend910B_CCE, Backend910B_PTO
+from pypto.backend import Backend910B
 
 
 class TestBackend910BConstruction:
     """Tests for 910B backend construction and basic properties."""
 
-    def test_backend_910b_cce_construction(self):
-        """Test Backend910B_CCE singleton instance."""
-        backend = Backend910B_CCE.instance()
+    def test_backend_910b_construction(self):
+        """Test Backend910B singleton instance."""
+        backend = Backend910B.instance()
 
-        # Backend910B_CCE should be accessible via singleton
         assert backend is not None
         assert backend.soc is not None
-        assert backend.get_type_name() == "910B_CCE"
+        assert backend.get_type_name() == "910B"
 
         # Verify singleton behavior
-        backend2 = Backend910B_CCE.instance()
-        assert backend is backend2
-
-    def test_backend_910b_pto_construction(self):
-        """Test Backend910B_PTO singleton instance."""
-        backend = Backend910B_PTO.instance()
-
-        # Backend910B_PTO should be accessible via singleton
-        assert backend is not None
-        assert backend.soc is not None
-        assert backend.get_type_name() == "910B_PTO"
-
-        # Verify singleton behavior
-        backend2 = Backend910B_PTO.instance()
+        backend2 = Backend910B.instance()
         assert backend is backend2
 
     def test_soc_structure(self):
         """Test SoC structure matches 910B specification."""
-        backend = Backend910B_CCE.instance()
+        backend = Backend910B.instance()
         soc = backend.soc
 
         # 910B has 1 die with 24 AIC cores + 48 AIV cores = 72 total cores
@@ -61,7 +47,7 @@ class TestBackend910BMemoryPath:
 
     def test_find_mem_paths(self):
         """Test finding memory paths between different memory spaces."""
-        backend = Backend910B_CCE.instance()
+        backend = Backend910B.instance()
 
         # Test cases: (from, to, expected_path)
         test_cases = [
@@ -96,7 +82,7 @@ class TestBackend910BMemorySize:
 
     def test_get_mem_sizes(self):
         """Test getting memory sizes for different memory types."""
-        backend = Backend910B_CCE.instance()
+        backend = Backend910B.instance()
 
         # Test cases: (memory_type, expected_size_in_KB)
         test_cases = [
@@ -122,7 +108,7 @@ class TestBackend910BMemoryHierarchy:
 
     def test_memory_hierarchy_connections(self):
         """Test memory hierarchy connections are correctly configured."""
-        backend = Backend910B_CCE.instance()
+        backend = Backend910B.instance()
 
         # Test cases: (from, to, expected_path_length)
         test_cases = [
@@ -149,8 +135,8 @@ class TestBackend910BSerialization:
     """Tests for 910B backend serialization."""
 
     def test_export_backend(self):
-        """Test exporting Backend910B_CCE singleton."""
-        backend = Backend910B_CCE.instance()
+        """Test exporting Backend910B singleton."""
+        backend = Backend910B.instance()
 
         with tempfile.NamedTemporaryFile(suffix=".msgpack", delete=False) as f:
             temp_path = f.name

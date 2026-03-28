@@ -82,7 +82,7 @@ class BatchQKMatmulTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         query_rows = self.batch * self.num_heads
@@ -249,7 +249,7 @@ class BatchSoftmaxPrepareTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         batch_q_tile = self.batch * self.q_tile
@@ -425,7 +425,7 @@ class BatchPVMatmulTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         key_cache_rows = self.batch * self.block_num * self.block_size

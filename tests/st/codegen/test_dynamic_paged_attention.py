@@ -83,7 +83,7 @@ class DynamicPagedAttentionTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def get_program(self) -> Any:
         return build_dynamic_paged_attention_program(

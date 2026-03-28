@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""End-to-end test for orchestration function CCE codegen.
+"""End-to-end test for orchestration function codegen.
 
 This test verifies the complete compilation pipeline for an orchestration program
 implementing the formula: f = (a + b + 1)(a + b + 2)
@@ -76,12 +76,12 @@ class TestAddMulOrchestration(PTOTestCase):
 class TestOrchestrationCodegen:
     """Test suite for orchestration codegen."""
 
-    def test_add_mul_orch_cce_codegen(self, test_runner):
-        """Test end-to-end CCE codegen for orchestration function.
+    def test_add_mul_orch_codegen(self, test_runner):
+        """Test end-to-end codegen for orchestration function.
 
         Verifies that:
         - IR program is built successfully with 4 functions (3 InCore + 1 Orchestration)
-        - Compilation with PassManager and CCECodegen completes
+        - Compilation with PassManager and codegen completes
         - Output directory is created
         - Required files are generated (orchestration and kernel files)
         - Generated files are not empty

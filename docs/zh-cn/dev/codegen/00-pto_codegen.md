@@ -92,7 +92,7 @@ class MyKernel:
 output_dir = compile(
     MyKernel,
     strategy=OptimizationStrategy.DebugTileOptimization,
-    backend_type=BackendType.Ascend910B_PTO,
+    backend_type=BackendType.Ascend910B,
 )
 ```
 
@@ -466,7 +466,7 @@ tile_c = pl.mul(tile_a, tile_b)
 
 ## 内核包装器生成 (PTO 后端)
 
-通过 `ir.compile()` 使用 PTO 后端编译时, 会自动为每个 InCore 函数生成内核包装器, 以桥接 ptoas 输出到 CCE/编排调用约定。
+通过 `ir.compile()` 使用 PTO 后端编译时, 会自动为每个 InCore 函数生成内核包装器, 以桥接 ptoas 输出到编排调用约定。
 
 ### 流水线
 
@@ -481,7 +481,7 @@ InCore Function -> PTOCodegen -> .pto -> ptoas -> .cpp -> kernel_wrapper -> kern
 
 ### 输出结构
 
-当程序包含编排函数时, PTO 后端生成与 CCE 后端相同的输出结构:
+当程序包含编排函数时, PTO 后端生成以下输出结构:
 
 ```text
 output_dir/
@@ -490,17 +490,17 @@ output_dir/
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
 ├── kernels/aiv/
-│   └── <func_name>.cpp              # Final wrapper (CCE-compatible)
+│   └── <func_name>.cpp              # Final wrapper
 ├── orchestration/
 │   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
-编排代码生成与 CCE 共享 -- 两个后端使用 PTO2 运行时 API (`pto2_rt_submit_task`, `make_tensor_external` 等) 生成相同的编排 C++ 代码。
+编排代码生成使用 PTO2 运行时 API (`pto2_rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
 ### 参数解包
 
-包装器按照与 CCECodegen 相同的约定解包 `int64_t* args`:
+包装器按照标准约定解包 `int64_t* args`:
 
 | 参数类型 | 解包模式 |
 | -------- | -------- |

@@ -141,9 +141,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
 PTOCodegen::PTOCodegen() : backend_(backend::GetBackend()) {
   auto type = backend::GetBackendType();
-  CHECK(type == backend::BackendType::Ascend910B_PTO || type == backend::BackendType::Ascend950)
-      << "PTOCodegen requires Ascend910B_PTO or Ascend950 backend, but "
-      << (type == backend::BackendType::Ascend910B_CCE ? "Ascend910B_CCE" : "unknown") << " is configured";
+  CHECK(type == backend::BackendType::Ascend910B || type == backend::BackendType::Ascend950)
+      << "PTOCodegen requires Ascend910B or Ascend950 backend, but unknown type is configured";
 }
 
 PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
@@ -168,7 +167,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
     case backend::BackendType::Ascend950:
       target_arch = "a5";
       break;
-    case backend::BackendType::Ascend910B_PTO:
+    case backend::BackendType::Ascend910B:
       target_arch = "a2a3";
       break;
     default:

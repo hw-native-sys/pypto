@@ -17,8 +17,6 @@
 #include <nanobind/stl/vector.h>
 
 #include "pypto/backend/common/backend.h"
-#include "pypto/codegen/cce/cce_codegen.h"
-#include "pypto/codegen/cce/type_converter.h"
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -37,35 +35,6 @@ void BindCodegen(nb::module_& m) {
   nb::module_ codegen_module =
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
 
-  // TypeConverter class for type conversions
-  nb::class_<TypeConverter>(codegen_module, "TypeConverter",
-                            "Utility for converting IR types to pto-isa C++ types")
-      .def(nb::init<>(), "Create a type converter")
-      .def("ConvertPipeType", &TypeConverter::ConvertPipeType, nb::arg("pipe"),
-           "Convert PipeType to pto-isa pipe type string\n\n"
-           "Args:\n"
-           "    pipe: Pipeline type\n\n"
-           "Returns:\n"
-           "    C++ pipe type string with 'PIPE_' prefix (e.g., 'PIPE_MTE1', 'PIPE_V')")
-      .def("ConvertEventId", &TypeConverter::ConvertEventId, nb::arg("event_id"),
-           "Convert event ID to pto-isa event ID string\n\n"
-           "Args:\n"
-           "    event_id: Event ID (must be in range [0, 7])\n\n"
-           "Returns:\n"
-           "    C++ event ID string with 'EVENT_ID' prefix (e.g., 'EVENT_ID0')")
-      .def("GenerateShapeType", &TypeConverter::GenerateShapeType, nb::arg("dims"),
-           "Generate Shape type instantiation\n\n"
-           "Args:\n"
-           "    dims: Shape dimensions\n\n"
-           "Returns:\n"
-           "    Shape type string with 5D padding (e.g., 'Shape<1, 1, 1, 128, 64>')")
-      .def("GenerateStrideType", &TypeConverter::GenerateStrideType, nb::arg("shape"),
-           "Generate Stride type instantiation for row-major layout\n\n"
-           "Args:\n"
-           "    shape: Shape dimensions\n\n"
-           "Returns:\n"
-           "    Stride type string with 5D padding");
-
   // PTOCodegen - PTO assembly code generator
   nb::class_<PTOCodegen>(
       codegen_module, "PTOCodegen",
@@ -76,25 +45,6 @@ void BindCodegen(nb::module_& m) {
       .def("generate", &PTOCodegen::Generate, nb::arg("program"),
            "Generate PTO assembly from PyPTO IR Program. Returns PTO assembly code string (.pto format) with "
            "instructions like tmul, tadd, FOR/ENDFOR, etc.");
-
-  // CCECodegen - CCE/pto-isa C++ code generator (unified in codegen module)
-  nb::class_<CCECodegen>(codegen_module, "CCECodegen",
-                         "CCE code generator for converting PyPTO IR to pto-isa C++ code")
-      .def(nb::init<>(), "Create a CCE code generator (backend is always CCE)")
-      .def(
-          "generate",
-          [](CCECodegen& self, const ProgramPtr& program) {
-            auto files_map = self.Generate(program);
-            nb::dict result;
-            for (const auto& pair : files_map) {
-              result[pair.first.c_str()] = pair.second;
-            }
-            return result;
-          },
-          nb::arg("program"),
-          "Generate C++ code from a PyPTO IR Program. Returns a dict mapping file paths to "
-          "content. Kernel functions -> kernels/<func_name>.cpp, orchestration -> "
-          "orchestration/<func_name>.cpp.");
 
   // OrchestrationResult - result of orchestration code generation
   nb::class_<OrchestrationResult>(codegen_module, "OrchestrationResult",
@@ -109,7 +59,7 @@ void BindCodegen(nb::module_& m) {
   codegen_module.def("generate_orchestration", &GenerateOrchestration, nb::arg("program"), nb::arg("func"),
                      "Generate C++ orchestration code for a function.\n\n"
                      "Uses PTO2 runtime API (pto2_rt_submit_task, make_tensor_external, etc.).\n"
-                     "This is backend-agnostic and works with both CCE and PTO backends.\n\n"
+                     "This is backend-agnostic.\n\n"
                      "Args:\n"
                      "    program: The IR Program containing all functions\n"
                      "    func: The orchestration function to generate code for\n\n"

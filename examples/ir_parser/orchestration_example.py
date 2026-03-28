@@ -168,12 +168,12 @@ def main():
     print("-" * 70)
 
     # Step 3: Compile (using high-level ir.compile API)
-    print("\n[3] Compiling with PassManager and CCECodegen...")
+    print("\n[3] Compiling with PassManager and codegen...")
     output_dir = ir.compile(
         program,
-        strategy=ir.OptimizationStrategy.TileCCEOptimization,
+        strategy=ir.OptimizationStrategy.Default,
         dump_passes=True,
-        backend_type=BackendType.Ascend910B_CCE,
+        backend_type=BackendType.Ascend910B,
     )
     print("✓ Compilation complete")
     print(f"✓ Output directory: {output_dir}")

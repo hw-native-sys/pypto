@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#include "pypto/codegen/cce/code_emitter.h"
+#include "pypto/codegen/code_emitter.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"

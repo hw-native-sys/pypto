@@ -49,15 +49,14 @@ class Backend;
  * @brief Backend type identifier for selecting backend instance
  */
 enum class BackendType {
-  Ascend910B_CCE,  ///< 910B CCE backend (C++ codegen)
-  Ascend910B_PTO,  ///< 910B PTO backend (PTO assembly codegen)
-  Ascend950        ///< 950 PTO backend
+  Ascend910B,  ///< 910B backend (PTO assembly codegen)
+  Ascend950    ///< 950 PTO backend
 };
 
 /**
  * @brief Get the singleton backend instance for the given type
  *
- * @param type Backend type (CCE or PTO)
+ * @param type Backend type
  * @return Pointer to the backend instance (never null)
  */
 const Backend* GetBackendInstance(BackendType type);
@@ -273,7 +272,7 @@ class Backend {
   /**
    * @brief Get backend type name for serialization
    *
-   * @return Backend type name (e.g., "910B_CCE", "910B_PTO")
+   * @return Backend type name (e.g., "910B", "950")
    */
   [[nodiscard]] virtual std::string GetTypeName() const = 0;
 

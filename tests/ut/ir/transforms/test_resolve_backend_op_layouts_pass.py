@@ -43,7 +43,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
         try:
             after = passes.resolve_backend_op_layouts()(Before)
         finally:
@@ -81,7 +81,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
         try:
             after = passes.resolve_backend_op_layouts()(Before)
         finally:
@@ -115,7 +115,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_PTO)
+        backend.set_backend_type(BackendType.Ascend910B)
         try:
             after = passes.resolve_backend_op_layouts()(Before)
         finally:

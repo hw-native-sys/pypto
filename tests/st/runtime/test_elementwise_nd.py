@@ -185,7 +185,7 @@ class Tile4DMulPartialTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -212,7 +212,7 @@ class Tile4DTopToBottomTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -239,7 +239,7 @@ class Tile4DQuadrantTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -271,7 +271,7 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

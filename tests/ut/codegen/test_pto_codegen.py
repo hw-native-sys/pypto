@@ -49,7 +49,7 @@ _TW = pl.dynamic("TW")
 def _setup_backend():
     """Configure PTO backend before each test."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    backend.set_backend_type(BackendType.Ascend910B)
     yield
     backend.reset_for_testing()
 
@@ -808,7 +808,7 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path):
             output_dir=str(output_dir),
             strategy=OptimizationStrategy.Default,
             dump_passes=False,
-            backend_type=BackendType.Ascend910B_PTO,
+            backend_type=BackendType.Ascend910B,
             skip_ptoas=True,
         )
 

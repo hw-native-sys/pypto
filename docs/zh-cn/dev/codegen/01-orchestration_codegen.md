@@ -2,7 +2,7 @@
 
 ## 概述
 
-编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[CCE 代码生成](01-cce_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
+编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
 
 - 将设备内存指针（通过 `OrchArg`）封装为 `Tensor` 对象
 - 构建 `PTOParam` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
@@ -389,9 +389,9 @@ if (condition) {
 ```python
 from pypto import codegen, backend
 
-backend.set_backend_type(backend.BackendType.Ascend910B_CCE)
-generator = codegen.CCECodegen()
-files = generator.generate(MyProgram)
+backend.set_backend_type(backend.BackendType.Ascend910B)
+result = codegen.generate_orchestration(MyProgram, orch_func)
+code = result.code
 
 # 访问生成的编排代码
 orch_code = files["orchestration/orch_func_name.cpp"]
@@ -402,5 +402,4 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 ## 参见
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
-- [CCE 代码生成](01-cce_codegen.md) — InCore 核函数的 C++ 代码生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass

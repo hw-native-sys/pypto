@@ -15,7 +15,6 @@ from datetime import datetime
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate
 from pypto.pypto_core import backend as _backend_core
-from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
@@ -38,7 +37,7 @@ def compile(
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool = True,
-    backend_type: BackendType = BackendType.Ascend910B_PTO,
+    backend_type: BackendType = BackendType.Ascend910B,
     skip_ptoas: bool = False,
     verification_level: _passes.VerificationLevel | None = None,
 ) -> str:
@@ -47,7 +46,7 @@ def compile(
     This function provides a complete compilation pipeline that:
     1. Runs optimization passes via PassManager
     2. Optionally dumps IR before and after each pass (if dump_passes=True)
-    3. Generates code via selected backend (PTO or CCE)
+    3. Generates code via selected backend
     4. Saves all artifacts to a unified output directory
 
     Args:
@@ -55,9 +54,9 @@ def compile(
         output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
-        backend_type: Backend type for passes and codegen (default: Ascend910B_PTO)
-        skip_ptoas: When True (PTO backends only), skip the ptoas compilation step and
-            emit raw MLIR (.pto) files instead of compiled C++ kernel wrappers.
+        backend_type: Backend type for passes and codegen (default: Ascend910B)
+        skip_ptoas: Skip the ptoas compilation step and emit raw MLIR (.pto) files
+            instead of compiled C++ kernel wrappers.
         verification_level: Override verification level for this compilation via
             PassContext. None uses the default (Basic, or PYPTO_VERIFY_LEVEL env var).
 
@@ -72,10 +71,9 @@ def compile(
         ...     program,
         ...     strategy=ir.OptimizationStrategy.Default,
         ...     dump_passes=True,
-        ...     backend_type=BackendType.Ascend910B_PTO
+        ...     backend_type=BackendType.Ascend910B
         ... )
     """
-    # Set the global backend type (idempotent - can be called multiple times)
     _backend_core.set_backend_type(backend_type)
 
     if output_dir is None:
@@ -90,7 +88,6 @@ def compile(
             "Set the verification level on the existing PassContext instead."
         )
 
-    # ReportInstrument: generate memory usage report after AllocateMemoryAddr
     report_dir = os.path.join(output_dir, "report")
     os.makedirs(report_dir, exist_ok=True)
     report_instrument = _passes.ReportInstrument(report_dir)
@@ -113,16 +110,12 @@ def compile(
         passes_dump_dir = os.path.join(output_dir, "passes_dump")
         transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
-    if backend_type in (BackendType.Ascend910B_PTO, BackendType.Ascend950):
+    if backend_type in (BackendType.Ascend910B, BackendType.Ascend950):
         try:
             files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)
             raise
-        _write_files(files, output_dir)
-    elif backend_type == BackendType.Ascend910B_CCE:
-        codegen_instance = _codegen_core.CCECodegen()
-        files = codegen_instance.generate(transformed_program)  # type: ignore[arg-type]
         _write_files(files, output_dir)
     else:
         raise ValueError(f"Unsupported backend type: {backend_type}")

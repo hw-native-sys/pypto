@@ -29,7 +29,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 14 | `14-init_memref.md` | 14th pass |
 | 15 | `15-memory_reuse.md` | 15th pass |
 | 16 | `16-allocate_memory_addr.md` | 16th pass |
-| -- | `14-insert_sync.md` | CCE strategy only (not in Default) |
+| -- | `14-insert_sync.md` | Not in Default strategy |
 | -- | `16-utility_passes.md` | Not in default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

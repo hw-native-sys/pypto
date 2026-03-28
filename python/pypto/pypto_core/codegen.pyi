@@ -7,55 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 # pylint: disable=unused-argument
-"""Code generation module for converting IR to pto-isa C++ (PTOCodegen, CCECodegen, TypeConverter)."""
+"""Code generation module for converting IR to PTO assembly (PTOCodegen)."""
 
-from pypto.pypto_core.ir import CoreType, Function, PipeType, Program
-
-class TypeConverter:
-    """Utility for converting IR types to pto-isa C++ types"""
-
-    def __init__(self) -> None:
-        """Create a type converter"""
-
-    def ConvertPipeType(self, pipe: PipeType) -> str:
-        """Convert PipeType to pto-isa pipe type string
-
-        Args:
-            pipe: Pipeline type
-
-        Returns:
-            C++ pipe type string with 'PIPE_' prefix (e.g., 'PIPE_MTE1', 'PIPE_V')
-        """
-
-    def ConvertEventId(self, event_id: int) -> str:
-        """Convert event ID to pto-isa event ID string
-
-        Args:
-            event_id: Event ID (must be in range [0, 7])
-
-        Returns:
-            C++ event ID string with 'EVENT_ID' prefix (e.g., 'EVENT_ID0')
-        """
-
-    def GenerateShapeType(self, dims: list[int]) -> str:
-        """Generate Shape type instantiation
-
-        Args:
-            dims: Shape dimensions
-
-        Returns:
-            Shape type string with 5D padding (e.g., 'Shape<1, 1, 1, 128, 64>')
-        """
-
-    def GenerateStrideType(self, shape: list[int]) -> str:
-        """Generate Stride type instantiation for row-major layout
-
-        Args:
-            shape: Shape dimensions
-
-        Returns:
-            Stride type string with 5D padding
-        """
+from pypto.pypto_core.ir import CoreType, Function, Program
 
 class PTOCodegen:
     """Code generator that transforms PyPTO IR to PTO assembly (.pto format).
@@ -83,32 +37,6 @@ class PTOCodegen:
             >>> from pypto import codegen
             >>> cg = codegen.PTOCodegen()
             >>> pto_code = cg.generate(program)
-        """
-
-class CCECodegen:
-    """CCE code generator for converting PyPTO IR to pto-isa C++ code."""
-
-    def __init__(self) -> None:
-        """Create a code generator."""
-
-    def generate(self, program: Program) -> dict[str, str]:
-        """Generate C++ code from a PyPTO IR Program.
-
-        Classifies functions into kernel and orchestration, then generates:
-        - Kernel functions -> kernels/<func_name>.cpp (CCE kernel C++ code)
-        - Orchestration function -> orchestration/<func_name>.cpp (orchestration C++ code)
-
-        Args:
-            program: The IR Program to generate code for
-
-        Returns:
-            Dict mapping file path to generated C++ code content
-
-        Example:
-            >>> from pypto import codegen
-            >>> cg = codegen.CCECodegen()
-            >>> files = cg.generate(program)
-            >>> kernel_code = files["kernels/my_kernel.cpp"]
         """
 
 class OrchestrationResult:
@@ -148,7 +76,7 @@ class DistributedCodegen:
 def generate_orchestration(program: Program, func: Function) -> OrchestrationResult:
     """Generate C++ orchestration code for a function.
 
-    Uses PTO2 runtime API. This is backend-agnostic and works with both CCE and PTO backends.
+    Uses PTO2 runtime API. This is backend-agnostic.
 
     Args:
         program: The IR Program containing all functions
@@ -169,9 +97,7 @@ def infer_function_core_type(func: Function) -> CoreType:
     """
 
 __all__ = [
-    "TypeConverter",
     "PTOCodegen",
-    "CCECodegen",
     "DistributedCodegen",
     "OrchestrationResult",
     "generate_orchestration",

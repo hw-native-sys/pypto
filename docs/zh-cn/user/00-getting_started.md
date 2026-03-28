@@ -179,7 +179,7 @@ output_dir = ir.compile(
     VectorAddProgram,
     strategy=ir.OptimizationStrategy.Default,
     dump_passes=True,
-    backend_type=BackendType.Ascend910B_CCE,
+    backend_type=BackendType.Ascend910B,
 )
 print(f"Generated code in: {output_dir}")
 ```
@@ -189,7 +189,7 @@ print(f"Generated code in: {output_dir}")
 | 参数 | 默认值 | 说明 |
 | ---- | ------ | ---- |
 | `program` | （必需） | 要编译的 `ir.Program` |
-| `strategy` | `Default` | 优化策略（`Default`、`DebugTileOptimization` 或 `TileCCEOptimization`） |
+| `strategy` | `Default` | 优化策略（`Default` 或 `DebugTileOptimization`） |
 | `dump_passes` | `True` | 每个优化 pass 后打印 IR |
 | `backend_type` | `PTO` | 代码生成后端（`PTO` 或 `CCE`） |
 | `output_dir` | 自动生成 | 输出文件目录 |

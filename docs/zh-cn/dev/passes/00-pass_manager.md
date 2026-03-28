@@ -17,7 +17,7 @@
 - **属性跟踪**：Pass 声明所需、产生和失效的属性
 - **插桩**：PassContext 持有 PassInstrument，在每个 Pass 执行前/后运行
 - **运行时验证**：VerificationInstrument 根据实际 IR 检查属性
-- **基于策略的流水线**：预配置的优化级别（`Default`、`DebugTileOptimization`、`TileCCEOptimization`）
+- **基于策略的流水线**：预配置的优化级别（`Default`、`DebugTileOptimization`）
 - **不可变变换**：返回新的 IR 节点，不就地修改
 
 ## IRProperty 系统

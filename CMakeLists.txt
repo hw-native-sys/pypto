@@ -192,10 +192,7 @@ set(PYPTO_SOURCES
     src/ir/serialization/type_registry.cpp
 
     # Codegen
-    src/codegen/cce/cce_codegen.cpp
-    src/codegen/cce/code_context.cpp
-    src/codegen/cce/code_emitter.cpp
-    src/codegen/cce/type_converter.cpp
+    src/codegen/code_emitter.cpp
     src/codegen/codegen_base.cpp
     src/codegen/orchestration/orchestration_codegen.cpp
     src/codegen/orchestration_op_registry.cpp
@@ -208,10 +205,8 @@ set(PYPTO_SOURCES
     src/codegen/tensor_op_codegen.cpp
 
     # Backend
-    src/backend/910B_CCE/backend_910b_cce.cpp
-    src/backend/910B_CCE/backend_910b_cce_ops.cpp
-    src/backend/910B_PTO/backend_910b_pto.cpp
-    src/backend/910B_PTO/backend_910b_pto_ops.cpp
+    src/backend/910B/backend_910b.cpp
+    src/backend/910B/backend_910b_ops.cpp
     src/backend/950/backend_950.cpp
     src/backend/950/backend_950_ops.cpp
     src/backend/common/backend.cpp

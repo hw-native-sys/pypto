@@ -578,7 +578,7 @@ def main():
             atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
-            backend_type=BackendType.Ascend910B_PTO,
+            backend_type=BackendType.Ascend910B,
         ),
     )
     print(f"Result: {result}")

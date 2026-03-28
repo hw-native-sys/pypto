@@ -34,7 +34,7 @@ Scenarios:
 Shapes: (16, 16) for scenarios 1 and 4; (32, 32) full / (16, 16) valid for
 scenario 2; (128, 16) for scenario 3 (rows divisible by 2).
 
-All tests use OptimizationStrategy.Default and BackendType.Ascend910B_PTO.
+All tests use OptimizationStrategy.Default and BackendType.Ascend910B.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
@@ -139,7 +139,7 @@ class DynOrchAddTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
@@ -226,7 +226,7 @@ class DynOrchValidShapeAddTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         vr = int(tensors["vs"][0])
@@ -301,7 +301,7 @@ class DynOrchLoopMixedDimsAddTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
@@ -372,7 +372,7 @@ class DynOrchDimOnDynParamAddTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
@@ -545,7 +545,7 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         # Derive all config from tensor shapes (mirrors orchestration logic)

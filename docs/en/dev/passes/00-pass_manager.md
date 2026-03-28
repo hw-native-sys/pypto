@@ -17,7 +17,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 - **Property Tracking**: Passes declare required, produced, and invalidated properties
 - **Instrumentation**: PassContext holds PassInstruments that run before/after each pass
 - **Runtime Verification**: VerificationInstrument checks properties against actual IR
-- **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`, `DebugTileOptimization`, `TileCCEOptimization`)
+- **Strategy-based Pipelines**: Pre-configured optimization levels (`Default`, `DebugTileOptimization`)
 - **Immutable Transformations**: Return new IR nodes, don't modify in place
 
 ## IRProperty System

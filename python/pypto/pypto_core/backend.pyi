@@ -12,10 +12,9 @@
 from pypto import ir
 
 class BackendType:
-    """Backend type for passes and codegen (CCE or PTO)."""
+    """Backend type for passes and codegen."""
 
-    Ascend910B_CCE: BackendType
-    Ascend910B_PTO: BackendType
+    Ascend910B: BackendType
     Ascend950: BackendType
 
 class Mem:
@@ -74,20 +73,12 @@ class Backend:
     @property
     def soc(self) -> SoC: ...
 
-class Backend910B_CCE(Backend):
-    """910B CCE backend implementation (singleton)."""
+class Backend910B(Backend):
+    """910B backend implementation (singleton)."""
 
     @staticmethod
-    def instance() -> Backend910B_CCE:
-        """Get singleton instance of 910B CCE backend."""
-        ...
-
-class Backend910B_PTO(Backend):
-    """910B PTO backend implementation (singleton)."""
-
-    @staticmethod
-    def instance() -> Backend910B_PTO:
-        """Get singleton instance of 910B PTO backend."""
+    def instance() -> Backend910B:
+        """Get singleton instance of 910B backend."""
         ...
 
 class Backend950(Backend):
@@ -107,7 +98,7 @@ def set_backend_type(backend_type: BackendType) -> None:
     change to a different type.
 
     Args:
-        backend_type: The backend type to use (CCE or PTO)
+        backend_type: The backend type to use
 
     Raises:
         ValueError: If attempting to change an already-set backend type

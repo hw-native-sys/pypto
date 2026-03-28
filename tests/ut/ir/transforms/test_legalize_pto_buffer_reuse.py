@@ -33,7 +33,7 @@ _FP16 = DataType.FP16
 def _setup_backend():
     """Configure backend before each test."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B_PTO)
+    backend.set_backend_type(BackendType.Ascend910B)
     yield
     backend.reset_for_testing()
 

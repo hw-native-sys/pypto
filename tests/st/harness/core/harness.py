@@ -159,24 +159,24 @@ class PTOTestCase(ABC):
     def get_strategy(self) -> OptimizationStrategy:
         """Return the optimization strategy for the pass pipeline.
 
-        Override to use a different strategy (e.g., Default).
-        Default is OptimizationStrategy.TileCCEOptimization.
+        Override to use a different strategy.
+        Default is OptimizationStrategy.Default.
 
         Returns:
             OptimizationStrategy enum value.
         """
-        return OptimizationStrategy.TileCCEOptimization
+        return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.
 
-        Override to use PTO backend.
-        Default is BackendType.Ascend910B_CCE.
+        Override to target a different backend.
+        Default is BackendType.Ascend910B.
 
         Returns:
             BackendType enum value.
         """
-        return BackendType.Ascend910B_CCE
+        return BackendType.Ascend910B
 
     def define_scalars(self) -> list[ScalarSpec]:
         """Define scalar OrchArg parameters for this test.

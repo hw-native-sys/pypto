@@ -319,10 +319,10 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
 
 
 def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
-    """Generate a complete CCE-compatible wrapper file for one InCore function.
+    """Generate a complete kernel wrapper file for one InCore function.
 
     Combines:
-    1. CCE kernel header (includes, macros)
+    1. Kernel header (includes, macros)
     2. Preprocessed ptoas code (static, no duplicate includes)
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
     """
@@ -332,7 +332,7 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
     call_args = ", ".join(var_names)
 
     wrapper_func = (
-        "// --- CCE-compatible entry point ---\n"
+        "// --- Kernel entry point ---\n"
         'extern "C" __aicore__ __attribute__((always_inline)) '
         "void kernel_entry(__gm__ int64_t* args)\n"
         "{\n"
@@ -350,7 +350,7 @@ def _generate_config_file(
     func_name_to_id: dict[str, int],
     func_name_to_core_type: dict[str, _ir_core.CoreType],
 ) -> str:
-    """Generate kernel_config.py content matching the CCE format."""
+    """Generate kernel_config.py content."""
     lines = [
         "# Kernel and Orchestration Configuration\n",
         "from pathlib import Path\n",
@@ -438,7 +438,7 @@ def generate(
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
-    Analogous to ``CCECodegen.generate()`` — returns a complete file map for the
+    Analogous to the previous codegen pipeline — returns a complete file map for the
     PTO backend. Kernel InCore functions go through the ptoas pipeline by default;
     when ``skip_ptoas=True``, the raw MLIR (.pto) content is returned directly
     without invoking ptoas.
@@ -560,7 +560,7 @@ def generate(
             logger.error("Failed to compile function '%s': %s", func.name, e)
             errors.append((func.name, e))
 
-    # Orchestration + config (shared codegen with CCE)
+    # Orchestration + config
     if orch_func is not None:
         try:
             orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)

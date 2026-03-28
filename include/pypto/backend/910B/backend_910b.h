@@ -9,10 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_BACKEND_910B_CCE_BACKEND_910B_CCE_H_
-#define PYPTO_BACKEND_910B_CCE_BACKEND_910B_CCE_H_
+#ifndef PYPTO_BACKEND_910B_BACKEND_910B_H_
+#define PYPTO_BACKEND_910B_BACKEND_910B_H_
 
-#include <map>
 #include <string>
 
 #include "pypto/backend/common/backend.h"
@@ -22,14 +21,14 @@ namespace pypto {
 namespace backend {
 
 /**
- * @brief Backend implementation for 910B hardware with CCE code generation
+ * @brief Backend implementation for 910B hardware with PTO code generation
  *
- * Provides CCE (C++ pto-isa) code generation for 910B architecture.
+ * Provides PTO (MLIR) code generation for 910B architecture.
  * Uses shared 910B SoC configuration created by Create910BSoC().
  * Operators are registered via REGISTER_BACKEND_OP macro in separate
  * compilation units.
  */
-class Backend910B_CCE : public Backend {
+class Backend910B : public Backend {
  public:
   /**
    * @brief Get registration instance for static operator registration
@@ -39,22 +38,22 @@ class Backend910B_CCE : public Backend {
    *
    * @return Reference to registration instance
    */
-  static Backend910B_CCE& Instance();
+  static Backend910B& Instance();
 
   /**
    * @brief Get backend type name
    *
-   * @return "910B_CCE"
+   * @return "910B"
    */
-  [[nodiscard]] std::string GetTypeName() const override { return "910B_CCE"; }
+  [[nodiscard]] std::string GetTypeName() const override { return "910B"; }
 
   /**
-   * @brief Generate CCE code for program
+   * @brief Generate PTO MLIR code for program
    *
    * @param program IR program to generate code for
-   * @return Map of file paths to generated C++ code
+   * @return Generated MLIR code string
    */
-  std::map<std::string, std::string> GenerateCode(const ir::ProgramPtr& program);
+  std::string GenerateCode(const ir::ProgramPtr& program);
 
  private:
   /**
@@ -63,10 +62,10 @@ class Backend910B_CCE : public Backend {
    * Constructor is private to enforce singleton pattern.
    * Use Instance() to get the singleton instance.
    */
-  Backend910B_CCE();
+  Backend910B();
 };
 
 }  // namespace backend
 }  // namespace pypto
 
-#endif  // PYPTO_BACKEND_910B_CCE_BACKEND_910B_CCE_H_
+#endif  // PYPTO_BACKEND_910B_BACKEND_910B_H_

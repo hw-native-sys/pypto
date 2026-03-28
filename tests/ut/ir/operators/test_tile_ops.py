@@ -407,7 +407,7 @@ class TestTileReductionOps:
 
         program = RowMaxKernel
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_CCE)
+        backend.set_backend_type(BackendType.Ascend910B)
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized_program = pm.run_passes(program)
 
@@ -433,7 +433,7 @@ class TestTileReductionOps:
 
         program = RowSumKernel
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B_CCE)
+        backend.set_backend_type(BackendType.Ascend910B)
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized_program = pm.run_passes(program)
 

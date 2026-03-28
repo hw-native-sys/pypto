@@ -92,7 +92,7 @@ class MyKernel:
 output_dir = compile(
     MyKernel,
     strategy=OptimizationStrategy.DebugTileOptimization,
-    backend_type=BackendType.Ascend910B_PTO,
+    backend_type=BackendType.Ascend910B,
 )
 ```
 
@@ -469,7 +469,7 @@ When no TileView is associated with the MemRef, the codegen falls back to the de
 
 ## Kernel Wrapper Generation (PTO Backend)
 
-When compiling with the PTO backend via `ir.compile()`, a kernel wrapper is automatically generated for each InCore function to bridge the ptoas output to the CCE/orchestration calling convention.
+When compiling with the PTO backend via `ir.compile()`, a kernel wrapper is automatically generated for each InCore function to bridge the ptoas output to the orchestration calling convention.
 
 ### Pipeline
 
@@ -484,7 +484,7 @@ Each InCore function is compiled independently through ptoas. The final wrapper 
 
 ### Output Structure
 
-When the program contains an Orchestration function, the PTO backend generates the same output structure as the CCE backend:
+When the program contains an Orchestration function, the PTO backend generates the following output structure:
 
 ```text
 output_dir/
@@ -493,17 +493,17 @@ output_dir/
 │   ├── <func_name>.pto              # MLIR from PTOCodegen
 │   └── <func_name>.cpp              # C++ from ptoas
 ├── kernels/aiv/
-│   └── <func_name>.cpp              # Final wrapper (CCE-compatible)
+│   └── <func_name>.cpp              # Final wrapper
 ├── orchestration/
 │   └── <orch_func_name>.cpp         # PTO2 runtime orchestration code
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
-The orchestration codegen is shared with CCE — both backends generate identical orchestration C++ code using the PTO2 runtime API (`pto2_rt_submit_task`, `make_tensor_external`, etc.).
+The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`pto2_rt_submit_task`, `make_tensor_external`, etc.).
 
 ### Argument Unpacking
 
-The wrapper unpacks `int64_t* args` following the same convention as CCECodegen:
+The wrapper unpacks `int64_t* args` following the standard convention:
 
 | Parameter Type | Unpacking Pattern |
 | -------------- | ----------------- |

@@ -99,7 +99,7 @@ class TestForLoopAddPTO(TestForLoopAdd):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestForLoopMul(PTOTestCase):
@@ -167,7 +167,7 @@ class TestForLoopMulPTO(TestForLoopMul):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestForLoopYieldAdd(PTOTestCase):
@@ -408,7 +408,7 @@ class TestForIfElseNestedPTO(TestForIfElseNested):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestWhileLoopAdd(PTOTestCase):
@@ -429,7 +429,7 @@ class TestWhileLoopAdd(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -491,7 +491,7 @@ class TestForLoopBreak(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -555,7 +555,7 @@ class TestForLoopContinue(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -622,7 +622,7 @@ class TestForLoopBreakContinue(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

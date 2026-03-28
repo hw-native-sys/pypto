@@ -34,7 +34,7 @@ unusable at the fuzz level:
    not defined before the if/else.
 2. ``init_memref.cpp`` does not assign a MemRef to IfStmt return_vars,
    leaving the phi variable's TileType with a DDR memory space that
-   the CCE codegen rejects (``type_converter.cpp:76``).
+   the codegen rejects (``type_converter.cpp:76``).
 
 By storing inside each branch, only the ``result`` variable (TensorType)
 survives after the if/else.  Both branches write to the same ``output``

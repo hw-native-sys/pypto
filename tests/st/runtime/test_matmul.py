@@ -282,7 +282,7 @@ class TestMatmulPTO(TestMatmul):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestMatmulBTransposePTO(TestMatmulBTranspose):
@@ -297,7 +297,7 @@ class TestMatmulBTransposePTO(TestMatmulBTranspose):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestMatmulATransposePTO(TestMatmulATranspose):
@@ -312,7 +312,7 @@ class TestMatmulATransposePTO(TestMatmulATranspose):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestMatmulABTransposePTO(TestMatmulABTranspose):
@@ -327,7 +327,7 @@ class TestMatmulABTransposePTO(TestMatmulABTranspose):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestMatmulAcc(PTOTestCase):
@@ -368,7 +368,7 @@ class TestMatmulAccPTO(TestMatmulAcc):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestMatmulOperations:

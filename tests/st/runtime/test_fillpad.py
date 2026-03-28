@@ -123,7 +123,7 @@ class FillpadZeroTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -151,7 +151,7 @@ class FillpadMaxTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -179,7 +179,7 @@ class FillpadMinTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

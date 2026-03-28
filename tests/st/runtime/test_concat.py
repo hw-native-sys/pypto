@@ -41,7 +41,7 @@ class TileConcatTestCase(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:, :16] = tensors["a"]

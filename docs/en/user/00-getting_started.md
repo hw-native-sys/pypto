@@ -179,7 +179,7 @@ output_dir = ir.compile(
     VectorAddProgram,
     strategy=ir.OptimizationStrategy.Default,
     dump_passes=True,
-    backend_type=BackendType.Ascend910B_CCE,
+    backend_type=BackendType.Ascend910B,
 )
 print(f"Generated code in: {output_dir}")
 ```
@@ -189,7 +189,7 @@ print(f"Generated code in: {output_dir}")
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `program` | (required) | The `ir.Program` to compile |
-| `strategy` | `Default` | Optimization strategy (`Default`, `DebugTileOptimization`, or `TileCCEOptimization`) |
+| `strategy` | `Default` | Optimization strategy (`Default` or `DebugTileOptimization`) |
 | `dump_passes` | `True` | Print IR after each optimization pass |
 | `backend_type` | `PTO` | Code generator (`PTO` or `CCE`) |
 | `output_dir` | auto-generated | Where to write output files |

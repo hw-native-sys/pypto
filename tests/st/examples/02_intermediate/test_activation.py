@@ -42,7 +42,7 @@ class BaseActivationTest(PTOTestCase):
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B_PTO
+        return BackendType.Ascend910B
 
 
 class TestSiluActivation(BaseActivationTest):
