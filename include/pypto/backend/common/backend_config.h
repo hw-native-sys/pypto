@@ -37,7 +37,7 @@ class BackendConfig {
    * times with the same type (idempotent), but will throw an error if
    * attempting to change to a different type.
    *
-   * \param type The backend type to use (CCE or PTO)
+   * \param type The backend type to use (Ascend910B or Ascend950)
    * \throws pypto::ValueError if attempting to change an already-set type
    */
   static void SetBackendType(BackendType type);

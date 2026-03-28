@@ -142,9 +142,6 @@ The test framework provides extensive configuration through pytest command-line 
 ### Usage Examples
 
 ```bash
-# Test with CCE optimization strategy
-pytest tests/st/ -v --forked --strategy=CCE
-
 # Run hardware tests on device 1
 pytest tests/st/ -v --forked --platform=a2a3 --device=1
 
@@ -161,7 +158,7 @@ pytest tests/st/ -v --forked --save-kernels --dump-passes
 pytest tests/st/ -v --forked --codegen-only --save-kernels
 
 # Combine multiple options
-pytest tests/st/ -v --forked --platform=a2a3sim --strategy=CCE --save-kernels --dump-passes
+pytest tests/st/ -v --forked --platform=a2a3sim --save-kernels --dump-passes
 ```
 
 ## Advanced Usage
@@ -245,13 +242,10 @@ PyPTO supports different optimization strategies. Select at runtime:
 
 ```bash
 # Use Default optimization strategy (default)
-pytest tests/st/ -v --forked --strategy=Default
-
-# Use CCE optimization strategy
-pytest tests/st/ -v --forked --strategy=CCE
+pytest tests/st/ -v --forked
 
 # Combine with other options
-pytest tests/st/ -v --forked --strategy=CCE --save-kernels --dump-passes
+pytest tests/st/ -v --forked --save-kernels --dump-passes
 ```
 
 You can also override the strategy in individual test cases by implementing the `get_strategy()` method:

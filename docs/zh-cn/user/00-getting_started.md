@@ -189,10 +189,12 @@ print(f"Generated code in: {output_dir}")
 | 参数 | 默认值 | 说明 |
 | ---- | ------ | ---- |
 | `program` | （必需） | 要编译的 `ir.Program` |
-| `strategy` | `Default` | 优化策略（`Default` 或 `DebugTileOptimization`） |
-| `dump_passes` | `True` | 每个优化 pass 后打印 IR |
-| `backend_type` | `PTO` | 代码生成后端（`PTO` 或 `CCE`） |
-| `output_dir` | 自动生成 | 输出文件目录 |
+| `output_dir` | `None` → `build_output/<name>_<timestamp>` | 代码生成、报告及（开启 dump 时）各 pass IR 的输出目录 |
+| `strategy` | `OptimizationStrategy.Default` | Pass 流水线预设（`Default` 或 `DebugTileOptimization`） |
+| `dump_passes` | `True` | 为 `True` 时，在每个 pass 后将 IR 快照写入 `output_dir/passes_dump/` |
+| `backend_type` | `BackendType.Ascend910B` | Pass 与代码生成的目标硬件（`Ascend910B` 或 `Ascend950`） |
+| `skip_ptoas` | `False` | 为 `True` 时跳过 ptoas，只生成原始 `.pto`（MLIR），不生成已编译的 C++ 包装代码 |
+| `verification_level` | `None` | 可选的 `ir.VerificationLevel` 覆盖；`None` 表示使用默认（或环境变量 `PYPTO_VERIFY_LEVEL`） |
 
 `DebugTileOptimization` 只是用于观察 PTO tile 流水线的调试捷径。除非你正在
 专门排查策略选择或 pass 顺序，否则应优先使用 `Default`。

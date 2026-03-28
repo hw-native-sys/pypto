@@ -477,19 +477,20 @@ output_dir = ir.compile(
     program,
     output_dir=None,                           # auto-generated if None
     strategy=ir.OptimizationStrategy.Default,  # or DebugTileOptimization
-    dump_passes=True,                          # print IR after each pass
+    dump_passes=True,                          # dump IR snapshots under output_dir/passes_dump/
     backend_type=BackendType.Ascend910B,
 )
 ```
 
 | Parameter | Options | Description |
 | --------- | ------- | ----------- |
-| `strategy` | `Default`, `DebugTileOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes |
-| `backend_type` | `PTO`, `CCE` | Code generator backend |
-| `dump_passes` | `True`/`False` | Print IR before/after each optimization pass |
-| `skip_ptoas` | `True`/`False` | Skip PTOAS step, emit raw MLIR files (default `False`) |
-| `output_dir` | path or `None` | Output directory (auto-created if `None`) |
-| `verification_level` | `NONE`, `BASIC` | IR verification level (`BASIC` is default) |
+| `program` | `ir.Program` | Required program object (from `@pl.program` or equivalent) |
+| `strategy` | `OptimizationStrategy.Default`, `DebugTileOptimization` | `Default` = full tensor-oriented pipeline. `DebugTileOptimization` = debug-only PTO tile pipeline without tensor-only passes |
+| `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (`import BackendType` from `pypto.backend`) |
+| `dump_passes` | `True`/`False` | If `True`, write IR snapshots under `<output_dir>/passes_dump/` after each pass (default `True`) |
+| `skip_ptoas` | `True`/`False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
+| `output_dir` | path or `None` | If `None`, uses `build_output/<program_name>_<timestamp>`; directory is created as needed |
+| `verification_level` | `None`, `ir.VerificationLevel.NONE`, `BASIC` | `None` = use default (`BASIC`, or override via `PYPTO_VERIFY_LEVEL`). Otherwise set explicit verification level |
 
 ### Optimization Pipeline
 
@@ -517,4 +518,4 @@ The `Default` strategy runs these passes in order:
 
 ### Debugging
 
-Use `node.as_python()` to inspect IR for functions or programs. Pass `concise=True` to omit intermediate type annotations for cleaner output. Compile with `dump_passes=True` to see IR at each optimization stage.
+Use `node.as_python()` to inspect IR for functions or programs. Pass `concise=True` to omit intermediate type annotations for cleaner output. Compile with `dump_passes=True` to dump IR snapshots for each optimization stage under `passes_dump/` in the output directory.

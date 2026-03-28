@@ -477,19 +477,20 @@ output_dir = ir.compile(
     program,
     output_dir=None,                           # 为 None 时自动生成
     strategy=ir.OptimizationStrategy.Default,  # 或 DebugTileOptimization
-    dump_passes=True,                          # 每个 pass 后打印 IR
+    dump_passes=True,                          # 将 IR 快照写入 output_dir/passes_dump/
     backend_type=BackendType.Ascend910B,
 )
 ```
 
 | 参数 | 选项 | 说明 |
 | ---- | ---- | ---- |
-| `strategy` | `Default`、`DebugTileOptimization` | `Default` = 完整的 tensor 导向流水线。`DebugTileOptimization` = 仅用于调试的 PTO tile 流水线，不包含 tensor-only pass |
-| `backend_type` | `PTO`、`CCE` | 代码生成后端 |
-| `dump_passes` | `True`/`False` | 每个优化 pass 前后打印 IR |
-| `skip_ptoas` | `True`/`False` | 跳过 PTOAS 步骤，输出原始 MLIR 文件（默认 `False`） |
-| `output_dir` | 路径或 `None` | 输出目录（`None` 时自动创建） |
-| `verification_level` | `NONE`、`BASIC` | IR 校验级别（默认 `BASIC`） |
+| `program` | `ir.Program` | 必填，待编译的程序对象（来自 `@pl.program` 等） |
+| `strategy` | `OptimizationStrategy.Default`、`DebugTileOptimization` | `Default` = 完整 tensor 导向流水线。`DebugTileOptimization` = 仅用于调试的 PTO tile 流水线，不包含 tensor-only pass |
+| `backend_type` | `BackendType.Ascend910B`、`BackendType.Ascend950` | Pass 与代码生成的目标硬件（从 `pypto.backend` 导入 `BackendType`） |
+| `dump_passes` | `True`/`False` | 为 `True` 时在每个 pass 后将 IR 快照写入 `<output_dir>/passes_dump/`（默认 `True`） |
+| `skip_ptoas` | `True`/`False` | 跳过 ptoas；只生成原始 `.pto`（MLIR），不生成已编译的 C++ 包装代码（默认 `False`） |
+| `output_dir` | 路径或 `None` | `None` 时使用 `build_output/<program_name>_<timestamp>`；目录按需创建 |
+| `verification_level` | `None`、`ir.VerificationLevel.NONE`、`BASIC` | `None` 表示使用默认（`BASIC`，或由环境变量 `PYPTO_VERIFY_LEVEL` 覆盖）；否则显式指定校验级别 |
 
 ### 优化流水线
 
@@ -517,4 +518,4 @@ output_dir = ir.compile(
 
 ### 调试
 
-使用 `node.as_python()` 查看函数或程序的 IR。传入 `concise=True` 可省略中间类型标注以获得更清晰的输出。编译时设置 `dump_passes=True` 以查看每个优化阶段的 IR。
+使用 `node.as_python()` 查看函数或程序的 IR。传入 `concise=True` 可省略中间类型标注以获得更清晰的输出。编译时设置 `dump_passes=True`，可在输出目录下的 `passes_dump/` 中得到各优化阶段的 IR 快照。

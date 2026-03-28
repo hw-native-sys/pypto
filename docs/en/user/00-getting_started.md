@@ -189,10 +189,12 @@ print(f"Generated code in: {output_dir}")
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `program` | (required) | The `ir.Program` to compile |
-| `strategy` | `Default` | Optimization strategy (`Default` or `DebugTileOptimization`) |
-| `dump_passes` | `True` | Print IR after each optimization pass |
-| `backend_type` | `PTO` | Code generator (`PTO` or `CCE`) |
-| `output_dir` | auto-generated | Where to write output files |
+| `output_dir` | `None` → `build_output/<name>_<timestamp>` | Directory for codegen, reports, and (when dumping) pass IR |
+| `strategy` | `OptimizationStrategy.Default` | Pass pipeline preset (`Default` or `DebugTileOptimization`) |
+| `dump_passes` | `True` | When `True`, write IR snapshots under `output_dir/passes_dump/` after each pass |
+| `backend_type` | `BackendType.Ascend910B` | Target hardware for passes and codegen (`Ascend910B` or `Ascend950`) |
+| `skip_ptoas` | `False` | If `True`, skip the ptoas step and emit raw `.pto` (MLIR) instead of compiled C++ wrappers |
+| `verification_level` | `None` | Optional `ir.VerificationLevel` override; `None` uses defaults (or `PYPTO_VERIFY_LEVEL`) |
 
 `DebugTileOptimization` is a debug-only shortcut for inspecting the PTO tile
 pipeline. Prefer `Default` unless you are explicitly debugging strategy
