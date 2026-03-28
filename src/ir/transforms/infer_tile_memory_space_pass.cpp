@@ -337,14 +337,16 @@ class TileMemorySpaceMutator : public IRMutator {
       }
 
       // Get required layout for this input from backend spec.
-      // blayout comes from the spec; slayout is set to none_box because the backend spec
-      // only defines block-level layout, and Vec/scalar-processing spaces use ND format
-      // (no scatter layout).
+      // blayout comes from the spec; slayout is set to none_box only for Vec targets
+      // because Vec/scalar-processing spaces use ND format (no scatter layout).
+      // For other memory spaces (Mat, Left, Right), the scatter layout is preserved.
       std::optional<TileLayout> required_blayout;
       std::optional<TileLayout> required_slayout;
       if (layout_spec && i < layout_spec->input_layouts.size() && layout_spec->input_layouts[i].has_value()) {
         required_blayout = layout_spec->input_layouts[i];
-        required_slayout = TileLayout::none_box;
+        if (key.second == MemorySpace::Vec) {
+          required_slayout = TileLayout::none_box;
+        }
       }
 
       InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
