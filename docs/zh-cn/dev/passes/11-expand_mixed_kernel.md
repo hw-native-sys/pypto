@@ -24,7 +24,18 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 | 方向 | AIC 侧 | AIV 侧 |
 | ---- | ------ | ------ |
 | Cube→Vector（如 Acc→Vec） | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
-| Vector→Cube（如 Vec→Mat） | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
+| Vector→Cube（如 Vec→Mat/Left/Right） | `dest_var = tpop_from_aiv()` | `tile.move` 适配 fractal 布局，然后 `tpush_to_aic(adapted_tile)` |
+
+**Fractal TileView 布局（Ascend950）**：在 Ascend950 后端上，跨核传输 tile 会根据目标内存空间分配 fractal TileView：
+
+| 方向 | Push/Pop TileView (blayout, slayout) | 名称 |
+| ---- | ------------------------------------ | ---- |
+| Vec->Left | col_major, row_major | NZ |
+| Vec->Right | row_major, col_major | ZN |
+| Vec->Mat | 需要显示在move中设置 | — |
+| Mat/Acc->Vec | 需要显示在move中设置 | — |
+
+此功能由 `BuildCrossCoreTransferView` 实现，它为 `tpop` 结果类型和 tpush 前的 `tile.move` 操作分配布局。在 AIV 推送侧（V→C），会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局（NZ 或 ZN）。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
 
 当拆分后的内核包含跨核 `tpush`/`tpop` 时，该 Pass 还会自动在函数前缀补齐前端 pipe setup：
 
@@ -57,6 +68,7 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
 - Tile 操作必须已展平为 2D（需先运行 `FlattenTileNdTo2D`）
 - Tile 内存空间必须已推断（需先运行 `InferTileMemorySpace`）
+- Fractal TileView 分配需要 Ascend950 后端（`backend::GetBackendType() == Ascend950`）
 
 **使用时机**：在 `InferTileMemorySpace` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
 
@@ -90,10 +102,12 @@ program_expanded = expand_pass(program)
      将 FunctionType 转换为 AIC（纯 Cube）或 AIV（纯 Vector / 仅共享操作）
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环
      - 对于 BOUNDARY（Cube→Vector）：生成 tpush_to_aiv(source_tile)
-     - 对于 BOUNDARY（Vector→Cube）：生成 dest_var = tpop_from_aiv()
+     - 对于 BOUNDARY（Vector→Cube）：生成 dest_var = tpop_from_aiv()，携带 fractal TileView
   5. 构建 AIV 函数体：对称（保留 VECTOR + SHARED，删除 CUBE）
-     - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()
-     - 对于 BOUNDARY（Vector→Cube）：生成 tpush_to_aic(source_tile)
+     - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()，携带 fractal TileView
+     - 对于 BOUNDARY（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
+  5a. 通过 BuildCrossCoreTransferView 为所有边界 tpop 结果类型和 tpush 前的 tile.move 操作
+      分配 fractal TileView（仅 Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始）
   6. 修复两侧函数体中的循环携带状态
      - 删除在当前核心侧无用的 dead iter_args
      - 为保留下来的 iter_args 补回缺失的 init value 定义
@@ -179,7 +193,8 @@ class After:
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(split=0)  # BOUNDARY：从 AIC 弹出
+        # tpop 结果携带 fractal TileView（Vec 目标 → 保持原始布局）
+        z_vec: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.tpop_from_aic(split=0)
         out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR 操作
         pl.system.tfree_to_aic(z_vec)                    # 释放已消费的跨核槽位
         return out_0
@@ -284,6 +299,9 @@ class After:
 | 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
 | CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
 | 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileMemorySpace` 在该 Pass 之前已设置此信息 |
+| tpop 结果携带 Fractal TileView | tpop 结果类型直接携带 fractal TileView（NZ/ZN），而非剥离布局——下游 Pass 和 codegen 无需额外推断即可看到正确布局 |
+| AIV 侧 tpush 前插入 `tile.move` | V→C 传输要求数据为 fractal 布局；在 `tpush_to_aic` 前插入显式 `tile.move` 使布局转换在 IR 中可见 |
+| `CreateMove` 传播布局 kwargs | 当结果类型携带 TileView 时，`blayout`/`slayout` 作为 kwargs 转发，使生成的 `tile.move` 调用自描述 |
 | Group 保留原始函数名 | 无已有 Group 调用者时：Orchestration 调用点无需修改——不需要重写调用点 |
 | 改写已有 Group 调用者 | 当 Group 已调用 InCore 时（如来自 `OutlineClusterScopes`）：就地改写以调用 AIC + AIV，避免冗余的 Group→Group 嵌套 |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
@@ -291,4 +309,4 @@ class After:
 | 两阶段拆分后循环状态修复 | 先保证 loop-carried state 合法，再在 DCE 移除死共享别名后重新裁剪 iter_arg，最后再跑一次 DCE 清理暴露出的 init-value 链 |
 | 自动生成 pipe setup | tensor 级 mixed kernel 无需手写 `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`；Pass 会根据跨核 tile 操作自动推导 |
 | 自动生成 tfree 链 | 消费侧拆分内核会在 IR 层释放每个 `tpop` 得到的槽位，使 PTO codegen 直接看到所需的 `tpop -> use -> tfree -> next tpop` 顺序 |
-| 单一 slot size 策略 | 对齐当前后端“每函数单 reserve/import buffer + 单 `initialize_pipe.slot_size`”的实现假设 |
+| 单一 slot size 策略 | 对齐当前后端”每函数单 reserve/import buffer + 单 `initialize_pipe.slot_size`”的实现假设 |

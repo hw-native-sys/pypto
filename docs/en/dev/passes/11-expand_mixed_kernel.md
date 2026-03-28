@@ -24,7 +24,18 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 | Direction | AIC side | AIV side |
 | --------- | -------- | -------- |
 | Cube→Vector (e.g. Acc→Vec) | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
-| Vector→Cube (e.g. Vec→Mat) | `dest_var = tpop_from_aiv()` | `tpush_to_aic(source_tile)` |
+| Vector→Cube (e.g. Vec→Mat/Left/Right) | `dest_var = tpop_from_aiv()` | `tile.move` to adapt fractal layout, then `tpush_to_aic(adapted_tile)` |
+
+**Fractal TileView layout (Ascend950)**: On Ascend950 backend, cross-core transfer tiles are assigned a fractal TileView based on the destination memory space:
+
+| Direction | Push/Pop TileView (blayout, slayout) | Name |
+| --------- | ------------------------------------ | ---- |
+| Vec→Left | col_major, row_major | NZ |
+| Vec→Right | row_major, col_major | ZN |
+| Vec→Mat | must be explicitly set in move | — |
+| Mat/Acc→Vec | must be explicitly set in move | — |
+
+This is implemented by `BuildCrossCoreTransferView`, which assigns the layout to both `tpop` result types and pre-tpush `tile.move` ops. On the AIV push side (V→C), a `tile.move` is inserted before `tpush_to_aic` to convert the source tile into the required fractal layout (NZ or ZN). The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
 
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 
@@ -57,6 +68,7 @@ For consumer-side cross-core tiles, the pass also normalizes statement order to 
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
 - Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
 - Tile memory space must be inferred (run `InferTileMemorySpace` first)
+- Fractal TileView assignment requires Ascend950 backend (`backend::GetBackendType() == Ascend950`)
 
 **When to use**: Run after `InferTileMemorySpace` when InCore functions may contain both Cube and Vector tile operations.
 
@@ -90,10 +102,12 @@ Phase 2 — Expand each InCore function F:
      convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
      - For BOUNDARY (Cube→Vector): emit tpush_to_aiv(source_tile)
-     - For BOUNDARY (Vector→Cube): emit dest_var = tpop_from_aiv()
+     - For BOUNDARY (Vector→Cube): emit dest_var = tpop_from_aiv() with fractal TileView
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
-     - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic()
-     - For BOUNDARY (Vector→Cube): emit tpush_to_aic(source_tile)
+     - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
+     - For BOUNDARY (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
+  5a. Assign fractal TileView to all boundary tpop result types and pre-tpush tile.move ops
+      via BuildCrossCoreTransferView (Ascend950 only: Left→NZ, Right→ZN, Mat/Vec→preserve)
   6. Repair loop-carried state on both bodies
      - Strip dead iter_args whose carried values are unused on this side
      - Pull back missing init-value definitions for surviving iter_args
@@ -180,7 +194,8 @@ class After:
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
-        z_vec: pl.Tile[[16, 128], pl.FP32] = pl.tile.tpop_from_aic(split=0)  # BOUNDARY: pop from AIC
+        # tpop result carries fractal TileView (no layout for Vec destination → preserved)
+        z_vec: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.tpop_from_aic(split=0)
         out_0 = pl.store(z_vec, [0, 0], out_0)           # VECTOR op
         pl.system.tfree_to_aic(z_vec)                    # release the consumed cross-core slot
         return out_0
@@ -285,6 +300,9 @@ This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` 
 | Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
 | BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
 | MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileMemorySpace` sets this before the pass runs |
+| Fractal TileView on tpop results | tpop result types carry the fractal TileView (NZ/ZN) directly rather than stripping layout — downstream passes and codegen see the correct layout without extra inference |
+| Pre-tpush `tile.move` on AIV side | V→C transfers require data in fractal layout; inserting an explicit `tile.move` before `tpush_to_aic` makes the layout conversion visible in IR |
+| `CreateMove` propagates layout kwargs | When the result type has a TileView, `blayout`/`slayout` are forwarded as kwargs so the generated `tile.move` call is self-describing |
 | Group keeps original function name | When no existing Group caller: Orchestration call sites work unchanged — no call-site rewriting needed |
 | Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
