@@ -34,9 +34,12 @@ Generated file format::
 """
 
 import ast
+import builtins
 import inspect
+import math
 import re
 import textwrap
+import types
 from collections.abc import Callable
 from pathlib import Path
 
@@ -336,6 +339,12 @@ def _extract_compute_golden(golden_fn: Callable) -> str:
     source = "\n".join(renamed_lines)
     if is_method:
         source = _inline_bound_self_attributes(source, golden_fn.__self__)
+
+    # Inject closure variable values as constants above the function definition.
+    closure_lines = _extract_closure_constants(golden_fn)
+    if closure_lines:
+        source = "\n".join(closure_lines) + "\n\n" + source
+
     return source
 
 
@@ -359,3 +368,66 @@ def _inline_bound_self_attributes(source: str, bound_instance: object) -> str:
         source = re.sub(rf"\bself\.{attr_name}\b", literal_value, source)
 
     return source
+
+
+def _extract_closure_constants(fn: Callable) -> list[str]:
+    """Extract closure and global variable bindings as top-level constant assignments.
+
+    Handles two categories of captured variables:
+
+    1. **Closure variables** (free variables from an enclosing scope).
+    2. **Global constants** referenced by the function that are simple scalar
+       values (not builtins, modules, or callables).
+
+    Only supports int, float, str, bool, and None values. Unsupported types
+    are silently skipped (the generated code may still fail at runtime if those
+    variables are actually used).
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    _SIMPLE_TYPES = (int, float, str, bool, type(None))
+
+    def _safe_repr(value: object) -> str | None:
+        """Return a repr that is valid Python, or None for non-finite floats."""
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return repr(value)
+
+    # 1. Closure (free) variables
+    closure = getattr(fn, "__closure__", None)
+    freevars = getattr(getattr(fn, "__code__", None), "co_freevars", ())
+    if closure and freevars:
+        for name, cell in zip(freevars, closure, strict=True):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if isinstance(value, _SIMPLE_TYPES):
+                literal = _safe_repr(value)
+                if literal is not None:
+                    lines.append(f"{name} = {literal}")
+                    seen.add(name)
+
+    # 2. Global constants — names referenced via LOAD_GLOBAL that resolve to
+    #    simple scalar values in the function's __globals__.
+    code = getattr(fn, "__code__", None)
+    fn_globals = getattr(fn, "__globals__", {})
+    if code and fn_globals:
+        builtin_names = set(dir(builtins))
+        for name in code.co_names:
+            if name in seen or name in builtin_names:
+                continue
+            value = fn_globals.get(name)
+            if value is None and name not in fn_globals:
+                continue  # Name not in globals at all
+            if isinstance(value, (types.ModuleType, type)):
+                continue
+            if callable(value):
+                continue
+            if isinstance(value, _SIMPLE_TYPES):
+                literal = _safe_repr(value)
+                if literal is not None:
+                    lines.append(f"{name} = {literal}")
+                    seen.add(name)
+
+    return lines

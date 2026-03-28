@@ -518,6 +518,40 @@ class TestOutlineIncoreScopes:
             "orchestration must pass 'acc' to the outlined function"
         )
 
+    def test_outline_scope_does_not_capture_outer_init_value(self):
+        """Outer loop's init value must NOT become a parameter of the outlined incore function.
+
+        When an incore scope uses a loop-carried variable (IterArg) from an
+        outer ForStmt, only the IterArg itself should be captured as a
+        parameter, not its initValue_ expression.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, init: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for sb, (acc,) in pl.range(4, init_values=(init,)):
+                    with pl.incore():
+                        result: pl.Tensor[[64], pl.FP32] = pl.add(acc, y)
+                    acc_rv = pl.yield_(result)
+                return acc_rv
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+
+        printed = After.as_python()
+        incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore)")[1].split("@pl.function")[
+            0
+        ]
+        incore_params = incore_section.split("(self,")[1].split(")")[0]
+
+        assert "acc" in incore_params, "loop-carried 'acc' must be a parameter"
+        assert "init" not in incore_params, (
+            "outer loop's init value 'init' must NOT be a parameter of the incore function"
+        )
+
 
 class TestSplitIncoreOrchVerifier:
     """Regression tests for the SplitIncoreOrch property verifier."""

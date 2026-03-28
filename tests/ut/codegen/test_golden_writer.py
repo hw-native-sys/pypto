@@ -10,7 +10,11 @@
 """Unit tests for pypto.runtime.golden_writer."""
 
 import pytest
-from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
+from pypto.runtime.golden_writer import (
+    _extract_closure_constants,
+    _extract_compute_golden,
+    generate_golden_source,
+)
 from pypto.runtime.tensor_spec import ScalarSpec, TensorSpec
 
 torch = pytest.importorskip("torch")
@@ -146,6 +150,75 @@ class TestGoldenWriterScalar:
         namespace["compute_golden"](tensors)
 
         assert torch.equal(tensors["out"], torch.full((4,), 2.5, dtype=torch.float32))
+
+
+class TestExtractClosureConstants:
+    """Tests for _extract_closure_constants."""
+
+    def test_closure_variable_captured(self):
+        """Closure variables with simple scalar values are extracted."""
+        scale = 42
+        offset = 3.14
+
+        def fn(tensors, params=None):
+            tensors["out"][:] = tensors["a"] * scale + offset
+
+        lines = _extract_closure_constants(fn)
+        assert "scale = 42" in lines
+        assert "offset = 3.14" in lines
+
+    def test_closure_string_and_none(self):
+        """String and None closure values are captured."""
+        tag = "hello"
+        sentinel = None
+
+        def fn(tensors, params=None):
+            _ = tag, sentinel
+
+        lines = _extract_closure_constants(fn)
+        assert "tag = 'hello'" in lines
+        assert "sentinel = None" in lines
+
+    def test_closure_non_simple_types_skipped(self):
+        """Non-scalar closure values (lists, dicts, objects) are silently skipped."""
+        data = [1, 2, 3]
+
+        def fn(tensors, params=None):
+            _ = data
+
+        lines = _extract_closure_constants(fn)
+        assert len(lines) == 0
+
+    def test_non_finite_floats_skipped(self):
+        """nan and inf closure values are skipped (repr produces invalid Python)."""
+        nan_val = float("nan")
+        inf_val = float("inf")
+
+        def fn(tensors, params=None):
+            _ = nan_val, inf_val
+
+        lines = _extract_closure_constants(fn)
+        assert len(lines) == 0
+
+    def test_no_closure_returns_empty(self):
+        """Functions without closures return an empty list."""
+
+        def fn(tensors, params=None):
+            tensors["out"][:] = tensors["a"] * 2
+
+        lines = _extract_closure_constants(fn)
+        assert lines == []
+
+    def test_closure_injected_into_extract_compute_golden(self):
+        """Closure constants appear above function def in _extract_compute_golden output."""
+        factor = 5
+
+        def my_golden(tensors, params=None):
+            tensors["out"][:] = tensors["a"] * factor
+
+        src = _extract_compute_golden(my_golden)
+        assert "factor = 5" in src
+        assert src.index("factor = 5") < src.index("def compute_golden(")
 
 
 if __name__ == "__main__":

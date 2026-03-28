@@ -55,16 +55,32 @@ class VarRefCollector : public IRVisitor {
 
   void VisitExpr_(const IterArgPtr& op) override {
     var_refs.insert(op.get());
-    // Use dynamic_pointer_cast (not As<Var>) to match both Var and IterArg,
-    // avoiding recursive initValue_ traversal that would pull in outer-scope vars.
-    if (op->initValue_) {
-      auto as_var = std::dynamic_pointer_cast<const Var>(op->initValue_);
-      if (as_var) {
-        var_refs.insert(as_var.get());
-      } else {
-        VisitExpr(op->initValue_);
+    // Do not traverse initValue_: when an IterArg appears as an expression
+    // reference (defined by an outer loop), its initValue_ belongs to that
+    // outer loop's initialization, not to the scope being analyzed.
+    // InitValues of IterArgs defined by inner ForStmt/WhileStmt are visited
+    // explicitly in VisitStmt_ overrides below.
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // Explicitly visit initValue_ for IterArgs defined by THIS ForStmt.
+    // These are genuine references to variables from the enclosing scope
+    // that must be captured as inputs when outlining.
+    for (const auto& iter_arg : op->iter_args_) {
+      if (iter_arg->initValue_) {
+        VisitExpr(iter_arg->initValue_);
       }
     }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& iter_arg : op->iter_args_) {
+      if (iter_arg->initValue_) {
+        VisitExpr(iter_arg->initValue_);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
   }
 };
 
