@@ -9,21 +9,25 @@
 """
 Paged Attention Multi-Config Example
 
-Generates output compatible with multi-config paged_attention_unroll test interface:
-- N_UNROLL = 8 (matching multi-config)
-- Orchestration pre-extracts block_indices via pl.slice() from block_table
-- Kernels receive block_indices tensor view (no block_table + bt_offset indirection)
-- Golden function uses N_UNROLL=8 grouping with two-pass softmax
+Builds a multi-config paged attention program using the PyPTO DSL with:
+- N_UNROLL block grouping per unroll iteration
+- Dynamic runtime config (batch, num_heads, block_size, etc. read from config tensor)
+- Per-request context length from context_lens tensor
+- valid_len support for partial blocks (last block may have fewer valid columns)
+- Two-pass softmax within each unroll group + online update across groups
 
-Key interface difference vs multi-config:
-  multi-config passes 8 individual scalar block_indices to each kernel.
+Orchestration pre-extracts block_indices via pl.slice() from block_table.
+Kernels receive block_indices tensor view (no block_table + bt_offset indirection).
+
+Key interface difference vs multi-config C++ impl:
+  multi-config passes N_UNROLL individual scalar block_indices to each kernel.
   PyPTO passes a single block_indices tensor view (functionally equivalent —
-  same data access pattern: block_indices[i] → physical block index).
+  same data access pattern: block_indices[i] -> physical block index).
 
 Tile dimensions (matching multi-config Case2, q_tile=16):
-  QK Matmul:       qi(16, 128) @ kj.T(128, 64) → sij(16, 64)
-  Softmax:         sij(16, N) → pij(16, N) bf16, mi(16, 1), li(16, 1)
-  PV Matmul:       pij(16, 64) @ vj(64, 128) → oi(16, 128)
+  QK Matmul:       qi(16, 128) @ kj.T(128, 64) -> sij(16, 64)
+  Softmax:         sij(16, N) -> pij(16, N) bf16, mi(16, 1), li(16, 1)
+  PV Matmul:       pij(16, 64) @ vj(64, 128) -> oi(16, 128)
   Online Update:   operates on (16, 128) data tiles, (16, 1) scalar tiles
 
 Module-level InCore kernels (reusable, importable):
@@ -47,7 +51,7 @@ Q_TILE = 16
 BLOCK_SIZE = 64
 HEAD_DIM = 128
 N_UNROLL = 64
-N_UNROLL_Q = N_UNROLL * Q_TILE  # 128 — static sij/pij buffer height
+N_UNROLL_Q = N_UNROLL * Q_TILE  # 1024 — static sij/pij buffer height
 
 
 # ── Kernel factory functions ──────────────────────────────────────────────────
@@ -83,24 +87,34 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
         mi_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
         li_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
         n_blocks: pl.Scalar[pl.INDEX],
+        last_valid_len: pl.Scalar[pl.INDEX],
     ) -> tuple[
         pl.Tensor[[n_unroll_q, block_size], pl.BF16],
         pl.Tensor[[q_tile, 1], pl.FP32],
         pl.Tensor[[q_tile, 1], pl.FP32],
     ]:
-        """Two-pass softmax: pass 1 finds global row_max, pass 2 computes exp+sum (VECTOR).
+        """Two-pass softmax with partial-block support (VECTOR).
 
+        Pass 1 finds global row_max, pass 2 computes exp+sum.
+        The last block (i == n_blocks - 1) uses valid_shapes + fillpad to mask
+        out invalid columns with -inf so they don't affect row_max or row_sum.
         Uses mi_out/li_out as GM scratch for cross-iteration state via store/load round-trips.
         """
         # Pass 1: find global row_max across all blocks
         for i, (mi_out_iter,) in pl.range(n_blocks, init_values=(mi_out,)):
+            if i == n_blocks - 1:
+                valid_len: pl.Scalar[pl.INDEX] = pl.yield_(last_valid_len)
+            else:
+                valid_len: pl.Scalar[pl.INDEX] = pl.yield_(block_size)
             s_tile = pl.load(
                 sij_buf,
                 [i * q_tile, 0],
                 [q_tile, block_size],
+                valid_shapes=[q_tile, valid_len],
                 target_memory=pl.MemorySpace.Vec,
             )
-            scaled = pl.mul(s_tile, scale)
+            s_tile_padded = pl.tile.fillpad(s_tile, pad_value=pl.PadValue.min)
+            scaled = pl.mul(s_tile_padded, scale)
             tmp_tile = pl.create_tile(
                 [q_tile, block_size],
                 dtype=pl.FP32,
@@ -131,12 +145,18 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
                 [q_tile, 1],
                 target_memory=pl.MemorySpace.Vec,
             )
-            s_tile_p2 = pl.load(
+            if i == n_blocks - 1:
+                valid_len_p2: pl.Scalar[pl.INDEX] = pl.yield_(last_valid_len)
+            else:
+                valid_len_p2: pl.Scalar[pl.INDEX] = pl.yield_(block_size)
+            s_tile_raw = pl.load(
                 sij_buf,
                 [i * q_tile, 0],
                 [q_tile, block_size],
+                valid_shapes=[q_tile, valid_len_p2],
                 target_memory=pl.MemorySpace.Vec,
             )
+            s_tile_p2 = pl.tile.fillpad(s_tile_raw, pad_value=pl.PadValue.min)
             scaled_p2 = pl.mul(s_tile_p2, scale)
             centered = pl.row_expand_sub(scaled_p2, global_max)
             exp_tile = pl.exp(centered)
@@ -420,22 +440,22 @@ def build_paged_attention_multi_config_program(
     head_dim: int,
     block_size: int,
     max_num_blocks_per_req: int,
-    context_len: int,
     q_tile: int = Q_TILE,
     n_unroll: int = N_UNROLL,
 ):
     """Build paged-attention @pl.program with multi-config interface.
 
-    Orchestration pre-extracts block_indices via pl.slice() before kernel calls.
+    Orchestration reads runtime config from the config tensor and per-request
+    context lengths from context_lens.  Pre-extracts block_indices via
+    pl.slice() before kernel calls.
 
     Parameters
     ----------
-    batch:                  number of requests in the batch
-    num_heads:              number of query heads
+    batch:                  max number of requests (tensor allocation size)
+    num_heads:              max number of query heads (tensor allocation size)
     head_dim:               per-head feature dimension (128)
     block_size:             KV-cache block size (64)
     max_num_blocks_per_req: maximum number of KV blocks per request
-    context_len:            context length (should be multiple of block_size for no-mask mode)
     q_tile:                 query-head tile size (16)
     n_unroll:               number of blocks per unroll group
     """
@@ -444,8 +464,6 @@ def build_paged_attention_multi_config_program(
     key_cache_rows = batch * max_num_blocks_per_req * block_size
     out_rows = batch * num_heads
     block_table_flat_size = batch * max_num_blocks_per_req
-    q_loop_static = (num_heads + q_tile - 1) // q_tile
-    max_bn = (context_len + block_size - 1) // block_size
 
     _hub = make_kernel_aiv_hub(q_tile, head_dim)
     _sf = make_kernel_softmax_prepare(q_tile, block_size, n_unroll_q)
@@ -455,7 +473,7 @@ def build_paged_attention_multi_config_program(
 
     @pl.program
     class PagedAttentionMultiConfigProgram:
-        """Paged attention with multi-config N_UNROLL=8 interface."""
+        """Paged attention with dynamic config and valid_len support."""
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def paged_attention(
@@ -471,13 +489,21 @@ def build_paged_attention_multi_config_program(
             size_key_cache: pl.Tensor[[1], pl.INT64],
             size_value_cache: pl.Tensor[[1], pl.INT64],
         ) -> pl.Tensor[[out_rows, head_dim], pl.FP32]:
-            """Paged attention orchestration with N_UNROLL=8 block grouping.
+            """Paged attention orchestration with dynamic config and valid_len.
 
             Config: [batch, num_heads, kv_head_num, head_dim, block_size, block_num, scale_bits]
             """
-            for b_idx in pl.range(batch):
-                for q_idx in pl.range(q_loop_static):
-                    cur_offset = b_idx * num_heads + q_idx * q_tile
+            batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+            num_heads_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+            block_size_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
+            block_num_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [5])
+            q_loop_cfg = (num_heads_cfg + q_tile - 1) // q_tile
+
+            for b_idx in pl.range(batch_cfg):
+                cur_seq = pl.tensor.read(context_lens, [b_idx])
+                bn_this_batch = (cur_seq + block_size_cfg - 1) // block_size_cfg
+                for q_idx in pl.range(q_loop_cfg):
+                    cur_offset = b_idx * num_heads_cfg + q_idx * q_tile
 
                     oi = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
                     li_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
@@ -487,12 +513,17 @@ def build_paged_attention_multi_config_program(
                     qi = pl.slice(query, [q_tile, head_dim], [cur_offset, 0])
 
                     # ── n_unroll loop over KV blocks ──────────
-                    for bn in pl.range(0, max_bn, n_unroll):
-                        n_blocks = pl.min(n_unroll, max_bn - bn)
-                        bt_offset = b_idx * max_num_blocks_per_req + bn
+                    for bn in pl.range(0, bn_this_batch, n_unroll):  # type: ignore[reportArgumentType]
+                        n_blocks = pl.min(n_unroll, bn_this_batch - bn)  # type: ignore[reportArgumentType]
+                        bt_offset = b_idx * block_num_cfg + bn
 
                         # Pre-extract block indices from block_table (multi-config)
-                        block_indices = pl.slice(block_table, [n_unroll], [bt_offset])
+                        block_indices = pl.slice(block_table, [n_unroll], [bt_offset])  # type: ignore[reportArgumentType]
+
+                        # valid columns for the last block in this unroll group
+                        last_valid_len = pl.min(
+                            block_size_cfg, cur_seq - (bn + n_blocks - 1) * block_size_cfg
+                        )
 
                         # 1. QK matmul (CUBE)
                         sij_buf = pl.create_tensor([n_unroll_q, block_size], dtype=pl.FP32)
@@ -514,7 +545,8 @@ def build_paged_attention_multi_config_program(
                             pij_buf,
                             mi,
                             li,
-                            n_blocks,
+                            n_blocks,  # type: ignore[reportArgumentType]
+                            last_valid_len,  # type: ignore[reportArgumentType]
                         )
 
                         # 3. PV matmul (CUBE)
@@ -532,7 +564,7 @@ def build_paged_attention_multi_config_program(
                             is_first = pl.yield_(1)
                         else:
                             is_first = pl.yield_(0)
-                        if bn + n_blocks == max_bn:
+                        if bn + n_blocks == bn_this_batch:
                             is_last = pl.yield_(1)
                         else:
                             is_last = pl.yield_(0)
@@ -564,7 +596,7 @@ def golden_multi_config(tensors: dict, params: dict | None = None) -> None:
 
     Mirrors the orchestration structure: each group of up to n_unroll blocks
     uses a two-pass softmax (global row_max across all blocks in the group,
-    then exp with that max).
+    then exp with that max).  Supports partial blocks via valid_len.
     """
     config = tensors["config"]
     batch = int(config[0].item())
@@ -584,7 +616,7 @@ def golden_multi_config(tensors: dict, params: dict | None = None) -> None:
 
     out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
     q_tile = min(num_heads, 128)
-    n_unroll = (params or {}).get("n_unroll", 8)
+    n_unroll = (params or {}).get("n_unroll", N_UNROLL)
 
     def _update(
         oi_a: torch.Tensor | None,
@@ -621,6 +653,11 @@ def golden_multi_config(tensors: dict, params: dict | None = None) -> None:
                     bidx = int(block_table[b, bn + i].item())
                     kj = key_cache[bidx]
                     sij = torch.mm(qi, kj.T) * scale
+                    # Mask invalid columns on the last block
+                    if i == n_blocks - 1:
+                        last_valid = min(block_size, cur_seq - (bn + i) * block_size)
+                        if last_valid < block_size:
+                            sij[:, last_valid:] = float("-inf")
                     all_sij.append(sij)
 
                 # Two-pass softmax: global row_max across all blocks in group
@@ -699,14 +736,12 @@ def build_tensor_specs_multi_config(
 
 
 def main():
-    # Small config for simulation testing
-    # Use context_len as multiple of block_size to avoid partial-block masking
     batch = 4
     num_heads = 16
     head_dim = HEAD_DIM
     block_size = BLOCK_SIZE
     max_model_len = 2048
-    context_len = 1024  # 1024 / 64 = 16 blocks, 16 / 8 = 2 N_UNROLL iterations
+    context_len = 1024
     scale = 1.0
     max_num_blocks_per_req = max_model_len // block_size  # 32
 
@@ -716,7 +751,6 @@ def main():
         head_dim=head_dim,
         block_size=block_size,
         max_num_blocks_per_req=max_num_blocks_per_req,
-        context_len=context_len,
     )
 
     tensor_specs = build_tensor_specs_multi_config(

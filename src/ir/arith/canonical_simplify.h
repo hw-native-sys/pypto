@@ -188,7 +188,7 @@ class CanonicalSimplifier::Impl : public ExprFunctor<ExprPtr> {
     return r == CompareResult::kGE || r == CompareResult::kGT || r == CompareResult::kEQ;
   }
 
-  [[maybe_unused]] Analyzer* parent_;
+  Analyzer* parent_;
   std::unordered_map<const Expr*, ExprPtr> var_map_;
 
   /// Cache mapping ExprPtr (by raw pointer) to its SumExpr representation.

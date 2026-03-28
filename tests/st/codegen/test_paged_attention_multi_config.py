@@ -149,6 +149,7 @@ class SoftmaxPrepareTestCase(PTOTestCase):
                     mi_out,
                     li_out,
                     n_blocks,
+                    BLOCK_SIZE,
                 )
                 return pij_buf, mi_out, li_out
 
@@ -543,7 +544,6 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
             head_dim=self.head_dim,
             block_size=self.block_size,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
-            context_len=self.context_len,
             q_tile=self.q_tile,
             n_unroll=self.n_unroll,
         )
@@ -590,11 +590,15 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
                 for bn in range(0, max_bn_b, n_unroll):
                     n_blocks = min(n_unroll, max_bn_b - bn)
 
+                    last_valid_len = min(block_size, cur_seq - (bn + n_blocks - 1) * block_size)
+
                     all_sij = []
                     for i in range(n_blocks):
                         bidx = int(block_table[b, bn + i].item())
                         kj = key_cache[bidx]
                         sij = torch.mm(qi, kj.T) * scale
+                        if i == n_blocks - 1 and last_valid_len < block_size:
+                            sij[:, last_valid_len:] = float("-inf")
                         all_sij.append(sij)
 
                     global_max = all_sij[0].max(dim=-1, keepdim=True)[0]
@@ -744,7 +748,7 @@ class TestPagedAttentionMultiConfigKernels:
     @pytest.mark.parametrize(
         "batch,num_heads,head_dim,block_size,context_len,max_model_len,q_tile,n_unroll",
         [
-            # Original small-scale case
+            # Original small-scale case (aligned, single unroll iteration)
             (4, 16, 128, 64, 1024, 2048, 16, 64),
             # Case1-aligned: block_size=128, q_tile=16
             (4, 16, 128, 128, 1024, 2048, 16, 8),
@@ -752,6 +756,24 @@ class TestPagedAttentionMultiConfigKernels:
             (4, 64, 128, 64, 1024, 2048, 64, 8),
             # Case3-aligned: head_dim=256, q_tile=32 (q_tile=64 exceeds Vec limit)
             (4, 64, 256, 64, 1024, 2048, 32, 8),
+            # ── Unaligned context_len (partial block / valid_len) ──
+            # 1000 / 64 = 15 full + 40 cols partial, n_unroll=64 → single iteration
+            (4, 16, 128, 64, 1000, 2048, 16, 64),
+            # 700 / 64 = 10 full + 60 cols partial, n_unroll=8 → 1 full group + 1 partial (3 blocks)
+            (4, 16, 128, 64, 700, 2048, 16, 8),
+            # 500 / 128 = 3 full + 116 cols partial, block_size=128
+            (4, 16, 128, 128, 500, 2048, 16, 8),
+            # ── Small context / edge cases ──
+            # Single block, aligned
+            (1, 16, 128, 64, 64, 2048, 16, 8),
+            # Single block, partial (50 valid cols)
+            (1, 16, 128, 64, 50, 2048, 16, 8),
+            # Two blocks, second partial (100 / 64 = 1 full + 36 cols partial)
+            (2, 16, 128, 64, 100, 2048, 16, 8),
+            # ── Batch=1 with unaligned ──
+            (1, 16, 128, 64, 1000, 2048, 16, 64),
+            # ── Multi-iteration with unaligned + large num_heads ──
+            (4, 64, 128, 64, 700, 2048, 64, 8),
         ],
     )
     def test_paged_attention_multi_config_ptoas(
