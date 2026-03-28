@@ -32,8 +32,8 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 | ---- | ------------------------------------ | ---- |
 | Vec->Left | col_major, row_major | NZ |
 | Vec->Right | row_major, col_major | ZN |
-| Vec->Mat | 需要显示在move中设置 | — |
-| Mat/Acc->Vec | 需要显示在move中设置 | — |
+| Vec->Mat | 需要显式在move中设置，否则同src | — |
+| Mat/Acc->Vec | 需要显式在move中设置，否则同src | — |
 
 此功能由 `BuildCrossCoreTransferView` 实现，它为 `tpop` 结果类型和 tpush 前的 `tile.move` 操作分配布局。在 AIV 推送侧（V→C），会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局（NZ 或 ZN）。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
 

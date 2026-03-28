@@ -210,9 +210,6 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   if (tile_type->tile_view_) {
     tile_view.blayout = tile_type->tile_view_->blayout;
     tile_view.slayout = tile_type->tile_view_->slayout;
-  } else {
-    tile_view.blayout = TileLayout::row_major;
-    tile_view.slayout = TileLayout::none_box;
   }
 
   // Hardcoded layout for Left/Right (hardware requirements)
@@ -220,6 +217,7 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
     tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
     tile_view.slayout = TileLayout::row_major;
   } else if (space == MemorySpace::Right) {
+    tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
   }
 
