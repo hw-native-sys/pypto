@@ -179,10 +179,10 @@ class PTOTestCase(ABC):
         return BackendType.Ascend910B
 
     def define_scalars(self) -> list[ScalarSpec]:
-        """Define scalar OrchArg parameters for this test.
+        """Define scalar TaskArg parameters for this test.
 
         Override to provide scalar values that are passed to the orchestration
-        function via OrchArg scalar slots (after all tensor slots).
+        function via TaskArg scalar slots (after all tensor slots).
 
         Returns:
             List of ScalarSpec objects.  Empty by default.

@@ -4,7 +4,7 @@
 
 编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
 
-- 将设备内存指针（通过 `OrchArg`）封装为 `Tensor` 对象
+- 将设备内存指针（通过 `TaskArg`）封装为 `Tensor` 对象
 - 构建 `PTOParam` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
 - 通过 `pto2_rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
 - 处理控制流（循环、条件分支），使用 `PTO2_SCOPE`
@@ -78,25 +78,25 @@ static inline Tensor make_tensor_2d_dn(...) { ... }
 
 ```cpp
 // 阶段 3：配置函数 — 返回期望的参数数量
-PTO2OrchestrationConfig aicpu_orchestration_config(OrchArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
 // 阶段 4：入口函数签名
 // A2/A3：
-void aicpu_orchestration_entry(OrchArg* orch,
+void aicpu_orchestration_entry(TaskArg* orch,
     int arg_count, int orch_thread_num, int orch_thread_index) {
 // A5（Ascend950）：在参数列表前增加 PTO2Runtime* rt
-// void aicpu_orchestration_entry(PTO2Runtime* rt, OrchArg* orch, ...)
+// void aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)
 ```
 
 ### 阶段 5–6：张量设置
 
 ```cpp
-// 阶段 5：外部张量 — ND 布局直接调用 to_tensor()
-Tensor ext_a = orch[0].to_tensor();
-Tensor ext_b = orch[1].to_tensor();
+// 阶段 5：外部张量 — ND 布局直接调用 from_task_arg()
+Tensor ext_a = from_task_arg(orch[0]);
+Tensor ext_b = from_task_arg(orch[1]);
 
 // DN 布局：传入逻辑形状 — make_tensor_external_2d_dn 内部处理轴转置
 uint32_t dn_shapes[2] = {orch[2].tensor.shapes[0], orch[2].tensor.shapes[1]};
@@ -136,11 +136,11 @@ PTO2_SCOPE() {
 
 | 类型 | 来源 | C++ 构造方式 | 命名 |
 | ---- | ---- | ------------ | ---- |
-| 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `orch[N].to_tensor()` | `ext_<name>` |
+| 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `from_task_arg(orch[N])` | `ext_<name>` |
 | 外部（DN） | 函数参数，DN 布局 | `make_tensor_external_2d_dn(orch[N].data<void>(), {orch[N].tensor.shapes[0], orch[N].tensor.shapes[1]}, ...)` — 轴排序由函数内部处理 | `ext_<name>` |
 | 内部（Internal） | 函数体中的 `pl.create_tensor(...)` | `make_tensor(shapes, ndims, dtype)` | `<name>`（无前缀） |
 
-外部张量封装从主机通过 `OrchArg` 传入的设备内存指针。内部张量是运行时分配的临时工作空间。
+外部张量封装从主机通过 `TaskArg` 传入的设备内存指针。内部张量是运行时分配的临时工作空间。
 
 ### 参数方向
 
@@ -178,7 +178,7 @@ Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 
 | 元素 | A2/A3 | A5 |
 | ---- | ----- | -- |
-| 入口函数 | `aicpu_orchestration_entry(OrchArg* orch, ...)` | `aicpu_orchestration_entry(PTO2Runtime* rt, OrchArg* orch, ...)` |
+| 入口函数 | `aicpu_orchestration_entry(TaskArg* orch, ...)` | `aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)` |
 | Scope 宏 | `PTO2_SCOPE()` | `PTO2_SCOPE(rt)` |
 | 提交调用 | `pto2_rt_submit_aiv_task(id, params)` | `pto2_rt_submit_aiv_task(rt, id, params)` |
 
@@ -235,7 +235,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
-| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch[N].tensor.shapes[axis]` | 从 OrchArg 获取运行时维度 |
+| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch[N].tensor.shapes[axis]` | 从 TaskArg 获取运行时维度 |
 
 ## 完整示例
 
@@ -268,22 +268,22 @@ static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 
-PTO2OrchestrationConfig aicpu_orchestration_config(OrchArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(OrchArg* orch,
+void aicpu_orchestration_entry(TaskArg* orch,
     int arg_count, int orch_thread_num, int orch_thread_index) {
     // 注意：A5 在参数列表前增加 PTO2Runtime* rt
     (void)arg_count;
     (void)orch_thread_num;
     (void)orch_thread_index;
 
-    // 外部张量（来自 OrchArg）
-    Tensor ext_a = orch[0].to_tensor();
-    Tensor ext_b = orch[1].to_tensor();
-    Tensor ext_d = orch[2].to_tensor();
+    // 外部张量（来自 TaskArg）
+    Tensor ext_a = from_task_arg(orch[0]);
+    Tensor ext_b = from_task_arg(orch[1]);
+    Tensor ext_d = from_task_arg(orch[2]);
 
     // 内部张量（中间变量）
     uint32_t c_shapes[2] = {16, 16};
@@ -332,7 +332,7 @@ void aicpu_orchestration_entry(OrchArg* orch,
 | 外部张量 | `ext_<name>` | `ext_a` |
 | 内部张量 | `<name>`（无前缀） | `c` |
 | 任务参数 | `params_t<N>` | `params_t0` |
-| OrchArg 索引 | `orch[N]`（第 N 个张量参数） | `orch[0]` |
+| TaskArg 索引 | `orch[N]`（第 N 个张量参数） | `orch[0]` |
 
 ## 控制流生成
 

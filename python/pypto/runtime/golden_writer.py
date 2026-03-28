@@ -71,7 +71,7 @@ def write_golden(
         rtol: Relative tolerance used by CodeRunner for result comparison.
         atol: Absolute tolerance used by CodeRunner for result comparison.
         scalar_specs: Optional list of scalar parameter specifications.  Scalar
-            OrchArg entries appear after all tensor entries in the generated list.
+            TaskArg entries appear after all tensor entries in the generated list.
 
     Returns:
         The resolved ``output_path`` after writing.
@@ -103,9 +103,9 @@ def generate_golden_source(
             When provided, *golden_fn* is ignored and this string is used directly.
             Use this when the source comes from a method that requires caller-side
             transformation (e.g. stripping ``self`` from the signature).
-        scalar_specs: Optional list of scalar OrchArg specifications.  Entries are
+        scalar_specs: Optional list of scalar TaskArg specifications.  Entries are
             placed after all tensor entries in the returned list, matching the
-            OrchArg slot order produced by orchestration codegen.
+            TaskArg slot order produced by orchestration codegen.
 
     Returns:
         Full Python source for ``golden.py`` as a string.

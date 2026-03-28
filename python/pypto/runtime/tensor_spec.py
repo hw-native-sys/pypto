@@ -89,9 +89,9 @@ SCALAR_CTYPE_MAP: dict[str, str] = {
 
 @dataclass
 class ScalarSpec:
-    """Specification for a scalar OrchArg parameter.
+    """Specification for a scalar TaskArg parameter.
 
-    Scalar parameters occupy OrchArg slots after all tensor parameters.
+    Scalar parameters occupy TaskArg slots after all tensor parameters.
     The generated golden.py emits ``ctypes`` scalar values so that
     Simpler's CodeRunner populates ``orch[i].scalar`` correctly.
 

@@ -15,13 +15,13 @@ Four scenarios are covered, mirroring the UT codegen tests in
 tests/ut/codegen/test_orchestration_codegen.py (TestDynShapeOrchestration).
 The key feature under test is that the **orchestration function itself** uses
 ``pl.dynamic()`` dims (``M``, ``N``) in its tensor type annotations, exercising
-the ``OrchArg::to_tensor()`` path introduced by the dynamic-shape commit.
+the ``from_task_arg()`` path introduced by the dynamic-shape commit.
 
 Scenarios:
-- Scenario 1 — fully dynamic M×N orch: both InCore and orchestration use
-  ``pl.Tensor[[M, N], pl.FP32]``; validates ``OrchArg::to_tensor()`` for
+- Scenario 1 — fully dynamic MxN orch: both InCore and orchestration use
+  ``pl.Tensor[[M, N], pl.FP32]``; validates ``from_task_arg()`` for
   external tensors with no static shape information in the orch signature.
-- Scenario 2 — dynamic orch + valid_shapes scalars: orchestration uses M×N
+- Scenario 2 — dynamic orch + valid_shapes scalars: orchestration uses MxN
   dims; m, n scalars are read from an INT64 tensor via ``pl.tensor.read`` and
   forwarded to the InCore kernel as valid_shapes.
 - Scenario 3 — mixed dynamic M / static cols: orchestration uses
@@ -81,7 +81,7 @@ class DynOrchAddTestCase(PTOTestCase):
 
     Key difference from DynShapeAddTestCase in test_dynamic_shape.py: the
     orchestration signature uses ``pl.Tensor[[M, N], pl.FP32]`` (dynamic dims)
-    instead of closure-variable static dims.  Validates that OrchArg::to_tensor()
+    instead of closure-variable static dims.  Validates that from_task_arg()
     correctly delivers runtime tensor metadata for fully dynamic external params.
     Expected result: c = a + b over the full rows×cols tile.
     """
@@ -241,7 +241,7 @@ class DynOrchLoopMixedDimsAddTestCase(PTOTestCase):
     match the static dim in the orchestration type annotation.  rows must be
     divisible by 2 — the loop processes pairs of rows per iteration.  The InCore
     function reads M from the first tensor dimension via pl.tensor.dim.
-    Validates OrchArg::to_tensor() for mixed dynamic/static dim tensors.
+    Validates from_task_arg() for mixed dynamic/static dim tensors.
     Expected result: c = a + b over the full rows×cols tile.
     """
 
@@ -381,7 +381,7 @@ class DynOrchDimOnDynParamAddTestCase(PTOTestCase):
 class DynOrchPagedAttentionTestCase(PTOTestCase):
     """Paged attention where the orchestration uses fully dynamic dims (QR, KCR, HD, BT, B).
 
-    Exercises OrchArg::to_tensor() for all external tensors in the paged attention
+    Exercises from_task_arg() for all external tensors in the paged attention
     pipeline.  All runtime configuration values (batch, num_heads, head_dim,
     block_size, max_blocks) are derived from tensor shapes via pl.tensor.dim()
     and scalar arithmetic — no config_t tensor is needed.

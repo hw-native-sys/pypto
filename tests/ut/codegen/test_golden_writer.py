@@ -33,7 +33,7 @@ class _BoundGoldenCase:
 
 
 class TestGoldenWriterScalar:
-    """Tests for scalar OrchArg entries in generated golden.py."""
+    """Tests for scalar TaskArg entries in generated golden.py."""
 
     def test_scalar_int64_in_generate_inputs(self):
         """Scalar INT64 entry appears after tensors with ctypes.c_int64."""
