@@ -10,7 +10,7 @@
 """Tensor wrapper type for PyPTO Language DSL."""
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast, overload
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorLayout
@@ -46,15 +46,29 @@ class TensorMeta(type):
         shape, dtype = item
         return cls(shape, dtype, _annotation_only=True)
 
+    @overload
     def __call__(
         cls,
-        shape: Any = None,
-        dtype: Any = None,
+        shape: Sequence[int] | None = None,
+        dtype: DataType | None = None,
         expr: Expr | None = None,
         layout: "TensorLayout | None" = None,
         memref: "MemRef | None" = None,
         _annotation_only: bool = False,
-    ) -> "Tensor":  # type: ignore[misc]
+    ) -> "Tensor": ...
+
+    @overload
+    def __call__(
+        cls,
+        shape: tuple[Any, Any],
+        dtype: None = None,
+        expr: None = None,
+        layout: "TensorLayout | None" = None,
+        memref: "MemRef | None" = None,
+        _annotation_only: bool = False,
+    ) -> "Tensor": ...
+
+    def __call__(cls, *args: Any, **kwargs: Any) -> "Tensor":
         """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
 
         Args:
@@ -69,6 +83,13 @@ class TensorMeta(type):
             Tensor instance
         """
         # Support metaclass instantiation for annotations
+        shape = kwargs.get("shape", args[0] if len(args) > 0 else None)
+        dtype = kwargs.get("dtype", args[1] if len(args) > 1 else None)
+        expr = kwargs.get("expr", args[2] if len(args) > 2 else None)
+        layout = kwargs.get("layout", args[3] if len(args) > 3 else None)
+        memref = kwargs.get("memref", args[4] if len(args) > 4 else None)
+        annotation_only = kwargs.get("_annotation_only", args[5] if len(args) > 5 else False)
+
         if (
             isinstance(shape, tuple)
             and len(shape) == 2
@@ -77,8 +98,11 @@ class TensorMeta(type):
             and expr is None
         ):
             real_shape, real_dtype = shape
-            return type.__call__(cls, real_shape, real_dtype, None, layout, memref, _annotation_only)
-        return type.__call__(cls, shape, dtype, expr, layout, memref, _annotation_only)
+            return cast(
+                "Tensor",
+                type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only),
+            )
+        return cast("Tensor", type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only))
 
 
 class Tensor(metaclass=TensorMeta):

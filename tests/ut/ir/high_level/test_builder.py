@@ -167,7 +167,7 @@ class TestIRBuilderForLoop:
 
                 # Body: sum = sum + i
                 add_expr = ir.Add(sum_iter, i, DataType.INT64, ir.Span.unknown())
-                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())  # type: ignore[arg-type]
+                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())
                 ib.emit(yield_stmt)
             ib.return_stmt(sum_final)
         func = f.get_result()
@@ -236,7 +236,7 @@ class TestIRBuilderWhileLoop:
                 # Body: x = x + 1
                 one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
                 add_expr = ir.Add(x_iter, one, DataType.INT64, ir.Span.unknown())
-                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())  # type: ignore[arg-type]
+                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())
                 ib.emit(yield_stmt)
 
             ib.return_stmt(x_final)
@@ -285,7 +285,7 @@ class TestIRBuilderWhileLoop:
                 # Body: x = x + 1
                 one = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
                 add_expr = ir.Add(x_iter, one, DataType.INT64, ir.Span.unknown())
-                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())  # type: ignore[arg-type]
+                yield_stmt = ir.YieldStmt([add_expr], ir.Span.unknown())
                 ib.emit(yield_stmt)
 
             # Access output after loop

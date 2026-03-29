@@ -10,6 +10,7 @@
 """Unit tests for SplitChunkedLoops pass."""
 
 import re
+from typing import cast
 
 import pypto.language as pl
 import pytest
@@ -23,6 +24,17 @@ def _prepare_for_split(program):
     program = passes.convert_to_ssa()(program)
     program = passes.flatten_call_expr()(program)
     return program
+
+
+def _top_level_stmts(program: ir.Program) -> list[ir.Stmt]:
+    """Return the first function's top-level statements."""
+    func = list(program.functions.values())[0]
+    return list(cast(ir.SeqStmts, func.body).stmts)
+
+
+def _body_stmts(stmt: ir.Stmt) -> list[ir.Stmt]:
+    """Return child statements from a SeqStmts body."""
+    return list(cast(ir.SeqStmts, stmt).stmts)
 
 
 def _normalize_expected(program):
@@ -242,38 +254,35 @@ class TestChunkingWithKind:
         After = passes.split_chunked_loops()(Before)
 
         # Extract the function body
-        func = list(After.functions.values())[0]
-        body = func.body
+        stmts = _top_level_stmts(After)
 
         # Body should be SeqStmts: [auto_incore_scope, return]
-        assert body.stmts is not None  # type: ignore[attr-defined]
-        stmts = list(body.stmts)  # type: ignore[attr-defined]
         assert len(stmts) == 2  # auto_incore scope + return
 
         # The first stmt is the AutoInCore scope
-        scope = stmts[0]
+        scope = cast(ir.ScopeStmt, stmts[0])
         assert scope.scope_kind == ir.ScopeKind.AutoInCore
 
         # Inside the scope is the outer for loop
-        outer_for = scope.body
+        outer_for = cast(ir.ForStmt, scope.body)
         assert outer_for.kind == ir.ForKind.Unroll
         assert len(outer_for.iter_args) == 1
         assert len(outer_for.return_vars) == 1
 
         # Outer loop bounds: range(0, 3, 1) — 12/4 = 3 full chunks
-        assert outer_for.start.value == 0
-        assert outer_for.stop.value == 3
+        assert cast(ir.ConstInt, outer_for.start).value == 0
+        assert cast(ir.ConstInt, outer_for.stop).value == 3
 
         # Inner loop is inside outer body (SeqStmts: [inner_for, yield])
-        outer_body_stmts = list(outer_for.body.stmts)
-        inner_for = outer_body_stmts[0]
+        outer_body_stmts = _body_stmts(outer_for.body)
+        inner_for = cast(ir.ForStmt, outer_body_stmts[0])
         assert inner_for.kind == ir.ForKind.Unroll
         assert len(inner_for.iter_args) == 1
         assert len(inner_for.return_vars) == 1
 
         # Inner loop bounds: range(0, 4, 1)
-        assert inner_for.start.value == 0
-        assert inner_for.stop.value == 4
+        assert cast(ir.ConstInt, inner_for.start).value == 0
+        assert cast(ir.ConstInt, inner_for.stop).value == 4
 
 
 class TestPrinterRoundTrip:
@@ -359,19 +368,18 @@ class TestLoopOrigin:
 
     def _get_func_body_stmts(self, program):
         """Get the top-level statements from the first function's body."""
-        func = list(program.functions.values())[0]
-        return list(func.body.stmts)  # type: ignore[attr-defined]
+        return _top_level_stmts(program)
 
     def _get_auto_incore_body_stmts(self, program):
         """Get statements inside the AutoInCore scope."""
         stmts = self._get_func_body_stmts(program)
         # First stmt should be AutoInCore scope
-        scope = stmts[0]
+        scope = cast(ir.ScopeStmt, stmts[0])
         assert scope.scope_kind == ir.ScopeKind.AutoInCore
         body = scope.body
         # Body may be a single stmt or SeqStmts
         if hasattr(body, "stmts"):
-            return list(body.stmts)
+            return _body_stmts(body)
         return [body]
 
     def test_divisible_chunk_origin(self):
@@ -390,13 +398,13 @@ class TestLoopOrigin:
         After = passes.split_chunked_loops()(Before)
 
         inner_stmts = self._get_auto_incore_body_stmts(After)
-        outer_for = inner_stmts[0]
+        outer_for = cast(ir.ForStmt, inner_stmts[0])
 
         assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
 
         # Inner loop is inside outer body
-        outer_body_stmts = list(outer_for.body.stmts)
-        inner_for = outer_body_stmts[0]
+        outer_body_stmts = _body_stmts(outer_for.body)
+        inner_for = cast(ir.ForStmt, outer_body_stmts[0])
         assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
 
     def test_non_divisible_chunk_origin(self):
@@ -416,13 +424,13 @@ class TestLoopOrigin:
 
         inner_stmts = self._get_auto_incore_body_stmts(After)
         # stmts: [outer_for, remainder_for]
-        outer_for = inner_stmts[0]
-        remainder_for = inner_stmts[1]
+        outer_for = cast(ir.ForStmt, inner_stmts[0])
+        remainder_for = cast(ir.ForStmt, inner_stmts[1])
 
         assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
 
-        outer_body_stmts = list(outer_for.body.stmts)
-        inner_for = outer_body_stmts[0]
+        outer_body_stmts = _body_stmts(outer_for.body)
+        inner_for = cast(ir.ForStmt, outer_body_stmts[0])
         assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
 
         assert remainder_for.loop_origin == ir.LoopOrigin.ChunkRemainder
@@ -443,7 +451,7 @@ class TestLoopOrigin:
         After = passes.split_chunked_loops()(Before)
 
         inner_stmts = self._get_auto_incore_body_stmts(After)
-        remainder_for = inner_stmts[0]
+        remainder_for = cast(ir.ForStmt, inner_stmts[0])
         assert remainder_for.loop_origin == ir.LoopOrigin.ChunkRemainder
 
     def test_non_chunked_loop_origin(self):
@@ -461,7 +469,7 @@ class TestLoopOrigin:
         After = passes.split_chunked_loops()(Before)
 
         stmts = self._get_func_body_stmts(After)
-        for_stmt = stmts[0]
+        for_stmt = cast(ir.ForStmt, stmts[0])
         assert for_stmt.loop_origin == ir.LoopOrigin.Original
 
 

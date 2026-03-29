@@ -82,7 +82,7 @@ def _make_non_ssa_program() -> ir.Program:
             result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
-    return NonSSA  # type: ignore[return-value]
+    return NonSSA
 
 
 def _make_ssa_violating_program() -> ir.Program:
@@ -112,7 +112,7 @@ def _make_valid_ssa_program() -> ir.Program:
             result: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
             return result
 
-    return ValidSSA  # type: ignore[return-value]
+    return ValidSSA
 
 
 class TestPassContext:

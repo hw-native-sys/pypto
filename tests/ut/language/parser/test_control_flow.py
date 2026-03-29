@@ -42,7 +42,7 @@ class TestForLoops:
             init1: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
             init2: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
-            for i, (val1, val2) in pl.range(5, init_values=(init1, init2)):  # type: ignore
+            for i, (val1, val2) in pl.range(5, init_values=(init1, init2)):
                 new1: pl.Tensor[[1], pl.INT32] = pl.add(val1, i)
                 new2: pl.Tensor[[1], pl.INT32] = pl.mul(val2, 2)
                 out1, out2 = pl.yield_(new1, new2)
@@ -74,7 +74,7 @@ class TestForLoops:
             init: pl.Tensor[[1], pl.INT32] = pl.create_tensor([1], dtype=pl.INT32)
 
             for i, (outer,) in pl.range(3, init_values=(init,)):
-                for j, (inner,) in pl.range(2, init_values=(outer,)):  # type: ignore
+                for j, (inner,) in pl.range(2, init_values=(outer,)):
                     new_inner: pl.Tensor[[1], pl.INT32] = pl.add(inner, 1)
                     inner_out = pl.yield_(new_inner)
 
@@ -186,7 +186,7 @@ class TestComplexControlFlow:
             acc1: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
             acc2: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
 
-            for i, (a1, a2) in pl.range(10, init_values=(acc1, acc2)):  # type: ignore
+            for i, (a1, a2) in pl.range(10, init_values=(acc1, acc2)):
                 if i == 0:
                     new1: pl.Tensor[[64], pl.FP32] = pl.mul(a1, 2.0)
                     new2: pl.Tensor[[64], pl.FP32] = pl.mul(a2, 3.0)
@@ -213,7 +213,7 @@ class TestComplexControlFlow:
                 result1 = pl.yield_(new_acc)
 
             # Second loop uses output of first
-            for j, (acc2,) in pl.range(3, init_values=(result1,)):  # type: ignore
+            for j, (acc2,) in pl.range(3, init_values=(result1,)):
                 new_acc2: pl.Tensor[[64], pl.FP32] = pl.mul(acc2, 2.0)
                 result2 = pl.yield_(new_acc2)
 

@@ -16,7 +16,7 @@ import linecache
 import sys
 import textwrap
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeAlias, TypeVar, cast, overload
 
 from pypto.pypto_core import ir
 
@@ -120,6 +120,8 @@ def _parse_ast_tree(source_code: str, entity_type: str) -> ast.AST:
 
 
 TypeASTNode = TypeVar("TypeASTNode", bound=ast.FunctionDef | ast.ClassDef)
+FunctionDecorator: TypeAlias = Callable[[Callable[..., Any]], ir.Function]
+ProgramDecorator: TypeAlias = Callable[[type], ir.Program]
 
 
 def _find_ast_node(tree: ast.AST, node_type: type[TypeASTNode], name: str, entity_type: str) -> TypeASTNode:
@@ -520,14 +522,36 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     )
 
 
+@overload
 def function(
-    func: Callable | None = None,
+    func: Callable[..., Any],
     *,
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
     strict_ssa: bool = False,
-) -> ir.Function:
+) -> ir.Function: ...
+
+
+@overload
+def function(
+    func: None = None,
+    *,
+    type: ir.FunctionType = ir.FunctionType.Opaque,
+    level: ir.Level | None = None,
+    role: ir.Role | None = None,
+    strict_ssa: bool = False,
+) -> FunctionDecorator: ...
+
+
+def function(
+    func: Callable[..., Any] | None = None,
+    *,
+    type: ir.FunctionType = ir.FunctionType.Opaque,
+    level: ir.Level | None = None,
+    role: ir.Role | None = None,
+    strict_ssa: bool = False,
+) -> ir.Function | FunctionDecorator:
     """Decorator that parses a DSL function and returns IR Function.
 
     This decorator analyzes the decorated function's AST, parses the DSL
@@ -559,12 +583,12 @@ def function(
     caller_frame = sys._getframe(1)
     closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
 
-    def _decorator(f: Callable) -> ir.Function:
+    def _decorator(f: Callable[..., Any]) -> ir.Function | Callable[..., Any]:
         # Check if this is a method inside a class decorated with @pl.program
         # If so, return the original function - it will be parsed by @pl.program decorator
         if _is_class_method(f):
             # Don't parse now - let @pl.program handle it with proper global_vars context
-            return f  # type: ignore[return-value]
+            return f
 
         # Get source code and file information
         source_file, source_lines_raw, starting_line = _get_source_info(f, "function")
@@ -619,10 +643,10 @@ def function(
     # Support both @pl.function and @pl.function(type=...)
     if func is None:
         # Called with parameters: @pl.function(type=...)
-        return _decorator  # type: ignore[return-value]
+        return cast(FunctionDecorator, _decorator)
     else:
         # Called without parameters: @pl.function
-        return _decorator(func)
+        return cast(ir.Function, _decorator(func))
 
 
 def inline(func: Callable) -> InlineFunction:
@@ -673,7 +697,15 @@ def inline(func: Callable) -> InlineFunction:
     )
 
 
-def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
+@overload
+def program(cls: type) -> ir.Program: ...
+
+
+@overload
+def program(cls: None = None, *, strict_ssa: bool = False) -> ProgramDecorator: ...
+
+
+def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program | ProgramDecorator:
     """Decorator that parses a class with @pl.function methods into a Program.
 
     The class should contain one or more methods decorated with @pl.function.
@@ -839,7 +871,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program:
     # Support both @pl.program and @pl.program(strict_ssa=...)
     if cls is None:
         # Called with parameters: @pl.program(strict_ssa=...)
-        return _decorator  # type: ignore[return-value]
+        return cast(ProgramDecorator, _decorator)
     else:
         # Called without parameters: @pl.program
         return _decorator(cls)

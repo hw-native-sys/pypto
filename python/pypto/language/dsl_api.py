@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
     from pypto.language.typing import Scalar, Tensor, Tile
@@ -114,8 +114,8 @@ class RangeIterator(Generic[T]):
 
         # Return just the value if no init_values, otherwise return (value, iter_args_tuple)
         if not self.init_values:
-            return value  # type: ignore[return-value]
-        return (value, self.init_values)  # type: ignore[return-value]
+            return cast("Scalar", value)
+        return cast(tuple["Scalar", tuple[Any, ...]], (value, self.init_values))
 
 
 def _make_range_iterator(
@@ -320,7 +320,10 @@ def unroll(
         >>> for i in pl.unroll(0, 6, 2):
         ...     x = pl.add(x, i)
     """
-    return _make_range_iterator(*args, chunk=chunk, chunk_policy=chunk_policy, func_name="unroll")  # type: ignore[return-value]
+    return cast(
+        RangeIterator["Scalar"],
+        _make_range_iterator(*args, chunk=chunk, chunk_policy=chunk_policy, func_name="unroll"),
+    )
 
 
 class WhileIterator(Generic[W]):
@@ -374,7 +377,7 @@ class WhileIterator(Generic[W]):
 
         # Only iterate once - the parser will handle the while loop
         self._exhausted = True
-        return self.init_values  # type: ignore[return-value]
+        return self.init_values
 
 
 @overload

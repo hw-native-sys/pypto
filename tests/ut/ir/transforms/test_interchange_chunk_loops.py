@@ -10,6 +10,7 @@
 """Unit tests for InterchangeChunkLoops pass."""
 
 import re
+from typing import cast
 
 import pypto.language as pl
 import pytest
@@ -24,6 +25,17 @@ def _prepare_for_interchange(program):
     program = passes.flatten_call_expr()(program)
     program = passes.split_chunked_loops()(program)
     return program
+
+
+def _top_level_stmts(program: ir.Program) -> list[ir.Stmt]:
+    """Return the first function's top-level statements."""
+    func = list(program.functions.values())[0]
+    return list(cast(ir.SeqStmts, func.body).stmts)
+
+
+def _body_stmts(stmt: ir.Stmt) -> list[ir.Stmt]:
+    """Return child statements from a SeqStmts body."""
+    return list(cast(ir.SeqStmts, stmt).stmts)
 
 
 class TestSingleParallelChunk:
@@ -45,20 +57,19 @@ class TestSingleParallelChunk:
         After = passes.interchange_chunk_loops()(Before)
 
         # Verify structure: outer → InCore { inner → body }
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
-        outer_for = stmts[0]
+        outer_for = cast(ir.ForStmt, stmts[0])
         assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
         assert outer_for.kind == ir.ForKind.Parallel
 
         # Outer body = SeqStmts [InCore, yield]
-        outer_body_stmts = list(outer_for.body.stmts)
-        scope_stmt = outer_body_stmts[0]
+        outer_body_stmts = _body_stmts(outer_for.body)
+        scope_stmt = cast(ir.ScopeStmt, outer_body_stmts[0])
         assert scope_stmt.scope_kind == ir.ScopeKind.InCore
 
         # InCore body = inner ForStmt
-        inner_for = scope_stmt.body
+        inner_for = cast(ir.ForStmt, scope_stmt.body)
         assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
         assert inner_for.kind == ir.ForKind.Parallel
 
@@ -83,33 +94,32 @@ class TestNestedParallelChunks:
         After = passes.interchange_chunk_loops()(Before)
 
         # Verify structure: i_out → j_out → InCore { i_in → j_in → body }
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # i_out
-        i_out = stmts[0]
+        i_out = cast(ir.ForStmt, stmts[0])
         assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
         assert i_out.kind == ir.ForKind.Parallel
 
         # j_out inside i_out body
-        i_out_body = list(i_out.body.stmts)
-        j_out = i_out_body[0]
+        i_out_body = _body_stmts(i_out.body)
+        j_out = cast(ir.ForStmt, i_out_body[0])
         assert j_out.loop_origin == ir.LoopOrigin.ChunkOuter
         assert j_out.kind == ir.ForKind.Parallel
 
         # InCore inside j_out body
-        j_out_body = list(j_out.body.stmts)
-        scope = j_out_body[0]
+        j_out_body = _body_stmts(j_out.body)
+        scope = cast(ir.ScopeStmt, j_out_body[0])
         assert scope.scope_kind == ir.ScopeKind.InCore
 
         # i_in inside InCore
-        i_in = scope.body
+        i_in = cast(ir.ForStmt, scope.body)
         assert i_in.loop_origin == ir.LoopOrigin.ChunkInner
         assert i_in.kind == ir.ForKind.Parallel
 
         # j_in inside i_in body
-        i_in_body = list(i_in.body.stmts)
-        j_in = i_in_body[0]
+        i_in_body = _body_stmts(i_in.body)
+        j_in = cast(ir.ForStmt, i_in_body[0])
         assert j_in.loop_origin == ir.LoopOrigin.ChunkInner
         assert j_in.kind == ir.ForKind.Parallel
 
@@ -130,29 +140,28 @@ class TestNestedParallelChunks:
         After = passes.interchange_chunk_loops()(Before)
 
         # Verify iter_args are correctly threaded
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
-        i_out = stmts[0]
+        stmts = _top_level_stmts(After)
+        i_out = cast(ir.ForStmt, stmts[0])
 
         # i_out should have iter_args (from x)
         assert len(i_out.iter_args) == 1
         assert len(i_out.return_vars) == 1
 
         # j_out should have iter_args chained from i_out
-        i_out_body = list(i_out.body.stmts)
-        j_out = i_out_body[0]
+        i_out_body = _body_stmts(i_out.body)
+        j_out = cast(ir.ForStmt, i_out_body[0])
         assert len(j_out.iter_args) == 1
         assert len(j_out.return_vars) == 1
 
         # InCore → i_in → j_in all with iter_args
-        j_out_body = list(j_out.body.stmts)
-        scope = j_out_body[0]
-        i_in = scope.body
+        j_out_body = _body_stmts(j_out.body)
+        scope = cast(ir.ScopeStmt, j_out_body[0])
+        i_in = cast(ir.ForStmt, scope.body)
         assert len(i_in.iter_args) == 1
         assert len(i_in.return_vars) == 1
 
-        i_in_body = list(i_in.body.stmts)
-        j_in = i_in_body[0]
+        i_in_body = _body_stmts(i_in.body)
+        j_in = cast(ir.ForStmt, i_in_body[0])
         assert len(j_in.iter_args) == 1
         assert len(j_in.return_vars) == 1
 
@@ -264,26 +273,25 @@ class TestChunkWithRemainderInChain:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # i_out (ChunkOuter, Parallel — preserves original kind from pl.parallel)
-        i_out = stmts[0]
+        i_out = cast(ir.ForStmt, stmts[0])
         assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
         assert i_out.kind == ir.ForKind.Parallel
         assert len(i_out.iter_args) == 1
 
         # InCore { i_in → body with remainder }
-        i_out_body = list(i_out.body.stmts)
-        scope = i_out_body[0]
+        i_out_body = _body_stmts(i_out.body)
+        scope = cast(ir.ScopeStmt, i_out_body[0])
         assert scope.scope_kind == ir.ScopeKind.InCore
 
-        i_in = scope.body
+        i_in = cast(ir.ForStmt, scope.body)
         assert i_in.loop_origin == ir.LoopOrigin.ChunkInner
         assert len(i_in.iter_args) == 1
 
         # i_in's iter_arg should chain from i_out's iter_arg (not from original init)
-        assert i_in.iter_args[0].initValue.name_hint == i_out.iter_args[0].name_hint
+        assert cast(ir.Var, i_in.iter_args[0].initValue).name_hint == i_out.iter_args[0].name_hint
 
     def test_chunk_with_remainder_body_contains_remainder_loop(self):
         """Remainder loop inside chain body must be preserved after interchange."""
@@ -326,28 +334,27 @@ class TestRemainderLoops:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # Main chunk pair: i_out → j_out → InCore { i_in → j_in → body }
-        i_out = stmts[0]
+        i_out = cast(ir.ForStmt, stmts[0])
         assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
 
         # Remainder: i_rem contains j_out→InCore{j_in} + InCore{j_rem}
-        i_rem = stmts[1]
+        i_rem = cast(ir.ForStmt, stmts[1])
         assert i_rem.loop_origin == ir.LoopOrigin.ChunkRemainder
 
         # Inside i_rem body, look for InCore scopes
-        i_rem_body = list(i_rem.body.stmts)
+        i_rem_body = _body_stmts(i_rem.body)
 
         # j_out should have InCore wrapping j_in inside its body
-        j_out_in_rem = i_rem_body[0]
+        j_out_in_rem = cast(ir.ForStmt, i_rem_body[0])
         assert j_out_in_rem.loop_origin == ir.LoopOrigin.ChunkOuter
-        j_out_body = list(j_out_in_rem.body.stmts)
-        assert j_out_body[0].scope_kind == ir.ScopeKind.InCore
+        j_out_body = _body_stmts(j_out_in_rem.body)
+        assert cast(ir.ScopeStmt, j_out_body[0]).scope_kind == ir.ScopeKind.InCore
 
         # j_rem should be wrapped in InCore
-        j_rem_incore = i_rem_body[1]
+        j_rem_incore = cast(ir.ScopeStmt, i_rem_body[1])
         assert j_rem_incore.scope_kind == ir.ScopeKind.InCore
 
 
@@ -523,15 +530,14 @@ class TestNonChunkStatementsWrapping:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # First stmt should be InCore wrapping the standalone op
-        incore_scope = stmts[0]
+        incore_scope = cast(ir.ScopeStmt, stmts[0])
         assert incore_scope.scope_kind == ir.ScopeKind.InCore
 
         # Second stmt should be ChunkOuter (interchanged)
-        outer_for = stmts[1]
+        outer_for = cast(ir.ForStmt, stmts[1])
         assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
 
     def test_standalone_op_after_parallel_chunk(self):
@@ -550,11 +556,10 @@ class TestNonChunkStatementsWrapping:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # First stmt should be ChunkOuter (interchanged)
-        outer_for = stmts[0]
+        outer_for = cast(ir.ForStmt, stmts[0])
         assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
 
         # There should be an InCore wrapping the standalone mul op
@@ -605,13 +610,12 @@ class TestNonChunkStatementsWrapping:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # Both should be ChunkOuter loops (interchanged)
-        i_out = stmts[0]
+        i_out = cast(ir.ForStmt, stmts[0])
         assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
-        j_out = stmts[1]
+        j_out = cast(ir.ForStmt, stmts[1])
         assert j_out.loop_origin == ir.LoopOrigin.ChunkOuter
 
         # No extra InCore wrapping around the outers themselves
@@ -653,11 +657,10 @@ class TestNonChunkStatementsWrapping:
         Before = _prepare_for_interchange(Input)
         After = passes.interchange_chunk_loops()(Before)
 
-        func = list(After.functions.values())[0]
-        stmts = list(func.body.stmts)  # type: ignore[attr-defined]
+        stmts = _top_level_stmts(After)
 
         # First stmt: ChunkOuter from parallel chunk (interchanged)
-        assert stmts[0].loop_origin == ir.LoopOrigin.ChunkOuter
+        assert cast(ir.ForStmt, stmts[0]).loop_origin == ir.LoopOrigin.ChunkOuter
 
         # Sequential chunk should be wrapped in InCore
         after_str = python_print(After)

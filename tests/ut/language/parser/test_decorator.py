@@ -1611,7 +1611,7 @@ class TestExternalFunctionControlFlow:
         ) -> pl.Tensor[[64], pl.FP32]:
             init_a: pl.Tensor[[64], pl.FP32] = x
             init_b: pl.Tensor[[64], pl.FP32] = x
-            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):
                 new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
                 new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
                 out_a, out_b = pl.yield_(new_a, new_b)
@@ -1631,7 +1631,7 @@ class TestExternalFunctionControlFlow:
             def dual_accumulate(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 init_a: pl.Tensor[[64], pl.FP32] = x
                 init_b: pl.Tensor[[64], pl.FP32] = x
-                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):
                     new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
                     new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
                     out_a, out_b = pl.yield_(new_a, new_b)
@@ -1878,7 +1878,7 @@ class TestInlineFunctionControlFlow:
         ) -> pl.Tensor[[64], pl.FP32]:
             init_a: pl.Tensor[[64], pl.FP32] = x
             init_b: pl.Tensor[[64], pl.FP32] = x
-            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+            for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):
                 new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
                 new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
                 out_a, out_b = pl.yield_(new_a, new_b)
@@ -1898,7 +1898,7 @@ class TestInlineFunctionControlFlow:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 init_a: pl.Tensor[[64], pl.FP32] = x
                 init_b: pl.Tensor[[64], pl.FP32] = x
-                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):  # type: ignore
+                for i, (a, b) in pl.range(5, init_values=(init_a, init_b)):
                     new_a: pl.Tensor[[64], pl.FP32] = pl.add(a, 1.0)
                     new_b: pl.Tensor[[64], pl.FP32] = pl.mul(b, 2.0)
                     out_a, out_b = pl.yield_(new_a, new_b)

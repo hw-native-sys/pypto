@@ -173,7 +173,7 @@ class TestFlashAttention:
             attn: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
             scale: pl.Tensor[[64, 1], pl.FP32] = pl.create_tensor([64, 1], dtype=pl.FP32)
 
-            for i, (attn_val, scale_val) in pl.range(4, init_values=(attn, scale)):  # type: ignore
+            for i, (attn_val, scale_val) in pl.range(4, init_values=(attn, scale)):
                 # Update both
                 new_attn: pl.Tensor[[64, 128], pl.FP32] = pl.mul(attn_val, 1.1)
                 new_scale: pl.Tensor[[64, 1], pl.FP32] = pl.add(scale_val, 0.1)

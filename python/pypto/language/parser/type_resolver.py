@@ -11,7 +11,7 @@
 
 import ast
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
@@ -758,7 +758,7 @@ class TypeResolver:
             Pure int list or pure Expr list
         """
         if all(isinstance(d, int) for d in shape):
-            return shape  # type: ignore[return-value]
+            return cast(list[int], shape)
 
         # Convert all to Expr
         return [ir.ConstInt(d, DataType.INDEX, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]

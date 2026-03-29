@@ -9,6 +9,8 @@
 
 """Unit tests for FlattenTileNdTo2D pass."""
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -35,7 +37,7 @@ def _load2d(
     ref_tensor = ir.Var("_ref", ir.TensorType(flat_shape, dtype), ir.Span.unknown())
     ref_offsets = [0] * len(flat_shape)
     ref_call = tile_ops.load(ref_tensor, ref_offsets, flat_shape, span=ir.Span.unknown())
-    flat_type: ir.TileType = ref_call.type  # type: ignore[assignment]
+    flat_type = cast(ir.TileType, ref_call.type)
     return ir.Call(nd_call.op, list(nd_call.args), nd_call.kwargs, flat_type, nd_call.span)
 
 

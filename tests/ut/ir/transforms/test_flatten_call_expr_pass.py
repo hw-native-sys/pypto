@@ -379,7 +379,7 @@ class TestFlattenCallInForRange:
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 # get_block_idx() in for range
-                for _i in pl.range(pl.tile.get_block_idx()):  # type: ignore[attr-defined,arg-type]
+                for _i in pl.range(pl.tile.get_block_idx()):
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
@@ -390,8 +390,8 @@ class TestFlattenCallInForRange:
             def main(
                 self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t__tmp_v0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()  # type: ignore[attr-defined]
-                for _i in pl.range(t__tmp_v0):  # type: ignore[arg-type]
+                t__tmp_v0: pl.Scalar[pl.UINT64] = pl.tile.get_block_idx()
+                for _i in pl.range(t__tmp_v0):
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output

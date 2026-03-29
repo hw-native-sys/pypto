@@ -35,6 +35,7 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
+import importlib
 import os
 import sys
 import time
@@ -268,7 +269,7 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-    from code_runner import CodeRunner  # type: ignore[import]  # noqa: PLC0415,I001 — available after sys.path setup
+    CodeRunner = importlib.import_module("code_runner").CodeRunner  # noqa: N806
 
     CodeRunner(
         kernels_dir=str(work_dir),
