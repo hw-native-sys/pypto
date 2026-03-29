@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,13 +41,35 @@ from harness.core.environment import (  # noqa: E402
     get_simpler_python_path,
     get_simpler_scripts_path,
 )
-from harness.core.test_runner import TestRunner  # noqa: E402
+from harness.core.harness import PTOTestCase  # noqa: E402
+from harness.core.test_runner import (  # noqa: E402
+    TestRunner,
+    _precompile_cache,
+    prebuild_binaries,
+    precompile_test_cases,
+    pregenerate_golden_inputs,
+)
 from pypto import LogLevel, set_log_level  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 # Temp directories created for pre-compilation (when --save-kernels is not set).
 # Cleaned up in pytest_sessionfinish.
 _temp_precompile_dirs: list[Path] = []
+
+
+def _init_simpler_root_if_needed() -> None:
+    """Populate SIMPLER_ROOT if not already set.
+
+    pytest_collection_finish runs before session fixtures, so
+    setup_simpler_dependency may not have set SIMPLER_ROOT yet when
+    prebuild_binaries is called.  This function bridges that gap.
+    """
+    if os.environ.get("SIMPLER_ROOT"):
+        return
+    try:
+        os.environ["SIMPLER_ROOT"] = str(ensure_simpler_available())
+    except Exception:
+        pass  # SIMPLER_ROOT unavailable; prebuild_binaries will bail out early
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -251,6 +274,53 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_a5)
 
 
+def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]) -> None:
+    """Inspect *item* and add any newly discovered PTOTestCase instance to *seen*."""
+    if any(m.name == "skip" for m in item.iter_markers()):
+        return
+
+    module = item.module
+
+    # Collect PTOTestCase subclasses visible in this module.
+    testcase_classes: dict[str, type] = {}
+    for attr in dir(module):
+        obj = getattr(module, attr, None)
+        if (
+            obj is not None
+            and isinstance(obj, type)
+            and issubclass(obj, PTOTestCase)
+            and obj is not PTOTestCase
+        ):
+            testcase_classes[attr] = obj
+
+    if not testcase_classes:
+        return
+
+    # callspec params for @pytest.mark.parametrize (empty dict if none).
+    callspec = getattr(item, "callspec", None)
+    call_params: dict[str, Any] = callspec.params if callspec else {}
+
+    # Scan test function source to find which class name is referenced.
+    try:
+        source = inspect.getsource(item.function)
+    except (OSError, TypeError):
+        return
+
+    for cls_name, cls in testcase_classes.items():
+        if not re.search(r"\b" + re.escape(cls_name) + r"\s*\(", source):
+            continue
+        # Filter callspec params to those accepted by __init__.
+        try:
+            sig = inspect.signature(cls.__init__)
+            valid = {k: v for k, v in call_params.items() if k in sig.parameters}
+            instance = cls(**valid)
+        except Exception:
+            continue  # constructor mismatch — skip
+        name = instance.get_name()
+        if name not in seen:
+            seen[name] = instance
+
+
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Phase 1: discover and pre-compile all test cases in parallel after collection.
 
@@ -266,14 +336,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     - Cases that cannot be discovered fall back to the original
       compile-on-demand path inside ``TestRunner.run()``.
     """
-    from harness.core.harness import PTOTestCase
-    from harness.core.test_runner import (
-        _precompile_cache,
-        prebuild_binaries,
-        precompile_test_cases,
-        pregenerate_golden_inputs,
-    )
-
     if not session.items:
         return
 
@@ -281,50 +343,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     seen: dict[str, PTOTestCase] = {}  # test_name → instance (deduped)
 
     for item in session.items:
-        # Skip items already marked as skip (e.g. hardware / a5 markers).
-        if any(m.name == "skip" for m in item.iter_markers()):
-            continue
-
-        module = item.module
-
-        # Collect PTOTestCase subclasses visible in this module.
-        testcase_classes: dict[str, type] = {}
-        for attr in dir(module):
-            obj = getattr(module, attr, None)
-            if (
-                obj is not None
-                and isinstance(obj, type)
-                and issubclass(obj, PTOTestCase)
-                and obj is not PTOTestCase
-            ):
-                testcase_classes[attr] = obj
-
-        if not testcase_classes:
-            continue
-
-        # callspec params for @pytest.mark.parametrize (empty dict if none).
-        callspec = getattr(item, "callspec", None)
-        call_params: dict[str, Any] = callspec.params if callspec else {}
-
-        # Scan test function source to find which class name is referenced.
-        try:
-            source = inspect.getsource(item.function)
-        except (OSError, TypeError):
-            continue
-
-        for cls_name, cls in testcase_classes.items():
-            if not re.search(r"\b" + re.escape(cls_name) + r"\s*\(", source):
-                continue
-            # Filter callspec params to those accepted by __init__.
-            try:
-                sig = inspect.signature(cls.__init__)
-                valid = {k: v for k, v in call_params.items() if k in sig.parameters}
-                instance = cls(**valid)
-            except Exception:
-                continue  # constructor mismatch — skip
-            name = instance.get_name()
-            if name not in seen:
-                seen[name] = instance
+        _collect_test_case_from_item(item, seen)
 
     if not seen:
         return
@@ -344,8 +363,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         if kernels_dir:
             cache_dir = Path(kernels_dir)
         else:
-            from datetime import datetime
-
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             cache_dir = _PROJECT_ROOT / "build_output" / f"precompile_{timestamp}"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -373,7 +390,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             if tc.get_name() in _precompile_cache and _precompile_cache[tc.get_name()][1] is None
         ]
         print(
-            f"[PyPTO] Pre-generating golden inputs for {len(ok_cases)} test case(s) in parallel (workers={workers_str})…"
+            f"[PyPTO] Pre-generating golden inputs for {len(ok_cases)} test case(s)"
+            f" in parallel (workers={workers_str})…"
         )
         n_gen = pregenerate_golden_inputs(ok_cases, cache_dir, max_workers=max_workers)
         print(f"[PyPTO] Golden inputs pre-generated — {n_gen} case(s) cached\n")
@@ -385,8 +403,13 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         # CodeRunner calls serve from disk without recompiling.
         if not session.config.getoption("--codegen-only"):
             platform: str = session.config.getoption("--platform")
+            # Ensure SIMPLER_ROOT is available before prebuild_binaries checks it.
+            # This hook runs before session fixtures, so setup_simpler_dependency
+            # may not have set it yet.
+            _init_simpler_root_if_needed()
             print(
-                f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s) in parallel (workers={workers_str})…"
+                f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"
+                f" in parallel (workers={workers_str})…"
             )
             n_built = prebuild_binaries(ok_cases, cache_dir, platform, max_workers=max_workers)
             print(f"[PyPTO] Binary pre-build done — {n_built} case(s) compiled\n")

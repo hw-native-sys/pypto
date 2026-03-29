@@ -19,7 +19,11 @@ Orchestrates the full test execution pipeline:
 """
 
 import concurrent.futures
+import importlib.util
+import logging
+import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -28,10 +32,22 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
-from pypto.runtime.runner import RunConfig, RunResult, _execute_on_device
+from pypto.runtime.runner import (
+    _BINARY_RUNTIME_CACHE,
+    RunConfig,
+    RunResult,
+    _execute_on_device,
+    _get_simpler_stamp,
+    _golden_cache_file,
+    _inputs_cache_file,
+    _install_binary_cache_patch,
+    _save_golden,
+    _save_inputs,
+)
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
 
 from harness.core.harness import PTOTestCase
@@ -39,6 +55,7 @@ from harness.core.harness import PTOTestCase
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
 _PROJECT_ROOT = _ST_DIR.parent.parent
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Pre-compilation cache (Phase 1 / Phase 2 split)
@@ -260,14 +277,6 @@ def pregenerate_golden_inputs(
     Returns:
         Number of (test_case, case_name) pairs successfully pre-generated.
     """
-    import importlib.util
-
-    from pypto.runtime.runner import (
-        _golden_cache_file,
-        _inputs_cache_file,
-        _save_golden,
-        _save_inputs,
-    )
 
     def _load_module(path: Path, name: str):
         spec = importlib.util.spec_from_file_location(name, path)
@@ -308,8 +317,6 @@ def pregenerate_golden_inputs(
 
     # ── Generate in parallel (one task per (test_case, case_name) pair) ──────
     def _gen_case(module, golden_path: Path, case_name: str, params: dict) -> bool:
-        import torch
-
         inputs_file = _inputs_cache_file(golden_path, case_name)
         golden_file = _golden_cache_file(golden_path, case_name)
         try:
@@ -363,10 +370,6 @@ def prebuild_binaries(
         Number of test cases whose kernels and orchestration were successfully
         pre-built.
     """
-    import importlib.util
-    import os
-    import sys
-
     simpler_root = os.environ.get("SIMPLER_ROOT", "")
     if not simpler_root:
         return 0
@@ -376,16 +379,15 @@ def prebuild_binaries(
             sys.path.insert(0, p)
 
     try:
-        from code_runner import _ensure_pto_isa_root  # type: ignore[import]
-        from kernel_compiler import KernelCompiler  # type: ignore[import]
-        from pypto.runtime.runner import (
-            _BINARY_RUNTIME_CACHE,
-            _get_simpler_stamp,
-            _install_binary_cache_patch,
-        )
-        from runtime_builder import RuntimeBuilder  # type: ignore[import]
+        code_runner_mod = importlib.import_module("code_runner")
+        kernel_compiler_mod = importlib.import_module("kernel_compiler")
+        runtime_builder_mod = importlib.import_module("runtime_builder")
     except ImportError:
         return 0
+
+    _ensure_pto_isa_root = code_runner_mod._ensure_pto_isa_root
+    KernelCompiler = kernel_compiler_mod.KernelCompiler
+    RuntimeBuilder = runtime_builder_mod.RuntimeBuilder
 
     _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
 
@@ -464,13 +466,14 @@ def prebuild_binaries(
             all_futs.extend(kfuts)
             all_futs.append(ofut)
 
-        # Wait for everything; swallow individual failures (write-through patch
-        # simply won't cache on failure, test will fall back to live compilation)
+        # Wait for everything; individual failures are logged but non-fatal:
+        # the write-through patch simply won't cache on failure and the test
+        # falls back to live compilation.
         for fut in concurrent.futures.as_completed(all_futs):
             try:
                 fut.result()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("Pre-build task failed (will fall back to live compilation): %s", e)
 
     # Count test cases where all kernels AND orchestration succeeded
     n_ok = sum(

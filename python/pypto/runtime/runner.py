@@ -35,8 +35,11 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
+import ctypes
+import functools
 import importlib
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -45,6 +48,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import torch
 
 from pypto import ir
 from pypto.backend import BackendType, set_backend_type
@@ -57,13 +62,13 @@ from .tensor_spec import TensorSpec
 # Golden inputs pre-generation cache
 # ---------------------------------------------------------------------------
 # .pt files written by pregenerate_golden_inputs() (see test_runner.py) are
-# the persistent cache.  This flag just prevents re-patching CodeRunner in
+# the persistent cache.  These flags prevent re-patching CodeRunner in
 # the same process.
-_code_runner_patched: bool = False
-_binary_cache_patched: bool = False
-_simpler_stamp_value: str | None = None
+_code_runner_patched: list[bool] = [False]
+_binary_cache_patched: list[bool] = [False]
 
 
+@functools.lru_cache(maxsize=1)
 def _get_simpler_stamp() -> str:
     """Return Simpler's current git commit (short hash) as a cache-key stamp.
 
@@ -74,16 +79,10 @@ def _get_simpler_stamp() -> str:
 
     The value is computed once and cached in-process.
     """
-    global _simpler_stamp_value
-    if _simpler_stamp_value is not None:
-        return _simpler_stamp_value
+    simpler_root = os.environ.get("SIMPLER_ROOT", "")
+    if not simpler_root:
+        return "unknown"
     try:
-        import subprocess
-
-        simpler_root = os.environ.get("SIMPLER_ROOT", "")
-        if not simpler_root:
-            _simpler_stamp_value = "unknown"
-            return _simpler_stamp_value
         r = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             check=False,
@@ -92,10 +91,9 @@ def _get_simpler_stamp() -> str:
             cwd=simpler_root,
             timeout=5,
         )
-        _simpler_stamp_value = r.stdout.strip() if r.returncode == 0 else "unknown"
+        return r.stdout.strip() if r.returncode == 0 else "unknown"
     except Exception:
-        _simpler_stamp_value = "unknown"
-    return _simpler_stamp_value
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -143,10 +141,6 @@ def _save_inputs(result: list, path: Path) -> None:
         {"kind": "tensor", "name": "a",    "data": <torch.Tensor>}
         {"kind": "ctypes", "name": "size", "ctype": "c_int64", "value": 1024}
     """
-    import ctypes
-
-    import torch
-
     path.parent.mkdir(parents=True, exist_ok=True)
     serialisable = []
     for name, val in result:
@@ -171,10 +165,6 @@ def _load_inputs(path: Path) -> list | None:
 
     Returns ``None`` if the file does not exist or cannot be read.
     """
-    import ctypes
-
-    import torch
-
     if not path.exists():
         return None
     try:
@@ -194,8 +184,6 @@ def _load_inputs(path: Path) -> list | None:
 
 def _save_golden(golden: dict, path: Path) -> None:
     """Serialise pre-computed golden output tensors to *path*."""
-    import torch
-
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(golden, path)
 
@@ -205,8 +193,6 @@ def _load_golden(path: Path) -> dict | None:
 
     Returns ``None`` if the file does not exist or cannot be read.
     """
-    import torch
-
     if not path.exists():
         return None
     try:
@@ -216,9 +202,11 @@ def _load_golden(path: Path) -> dict | None:
 
 
 def _save_binary(data: bytes, path: Path) -> None:
-    """Save compiled binary bytes to *path*."""
+    """Save compiled binary bytes to *path* atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def _load_binary(path: Path) -> bytes | None:
@@ -438,8 +426,7 @@ def _install_golden_inputs_patch(CodeRunner) -> None:
 
     Each ``torch.load`` produces fresh tensors, so no cloning is needed.
     """
-    global _code_runner_patched
-    if _code_runner_patched:
+    if _code_runner_patched[0]:
         return
 
     orig_init = CodeRunner.__init__
@@ -474,7 +461,7 @@ def _install_golden_inputs_patch(CodeRunner) -> None:
         self._golden_module.compute_golden = _cached_compute
 
     CodeRunner.__init__ = _patched_init
-    _code_runner_patched = True
+    _code_runner_patched[0] = True
 
 
 # Persistent runtime binary cache — shared across test cases and sessions.
@@ -505,8 +492,7 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
     Idempotent — safe to call multiple times. Cache miss triggers compilation
     and saves the result; subsequent calls serve from disk.
     """
-    global _binary_cache_patched
-    if _binary_cache_patched:
+    if _binary_cache_patched[0]:
         return
 
     # --- KernelCompiler.compile_incore ---
@@ -567,7 +553,7 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
         return result
 
     RuntimeBuilder.build = _patched_build
-    _binary_cache_patched = True
+    _binary_cache_patched[0] = True
 
 
 def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_id: int) -> None:
@@ -591,16 +577,14 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-    code_runner_cls = importlib.import_module("code_runner").CodeRunner
-
-    from code_runner import CodeRunner
-    from kernel_compiler import KernelCompiler
-    from runtime_builder import RuntimeBuilder
+    CodeRunner = importlib.import_module("code_runner").CodeRunner
+    KernelCompiler = importlib.import_module("kernel_compiler").KernelCompiler
+    RuntimeBuilder = importlib.import_module("runtime_builder").RuntimeBuilder
 
     _install_golden_inputs_patch(CodeRunner)
     _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
 
-    code_runner_cls(
+    CodeRunner(
         kernels_dir=str(work_dir),
         golden_path=str(golden_path),
         platform=platform,
