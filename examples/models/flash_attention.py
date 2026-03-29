@@ -121,4 +121,5 @@ def flash_attn(
     return attn_final
 
 
-print(flash_attn)
+if __name__ == "__main__":
+    print(flash_attn)
