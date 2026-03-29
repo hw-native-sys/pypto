@@ -279,7 +279,7 @@ class TileMemorySpaceMutator : public IRMutator {
     }
 
     if (!changed) return op;
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
+    return OpRegistry::GetInstance().Create(op->op_->name_, new_args, op->kwargs_, op->span_);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {

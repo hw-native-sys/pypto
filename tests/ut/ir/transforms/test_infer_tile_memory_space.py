@@ -840,6 +840,15 @@ class TestAutoMoveInsertion:
         assert "pl.tile.write(x_tile_Vec, [0, 0], value)" in printed
         assert printed.count("pl.tile.move") == 1
 
+        incore_func = After.get_function("main_incore_0")
+        assert incore_func is not None
+        assert isinstance(incore_func.body, ir.SeqStmts)
+        write_stmt = incore_func.body.stmts[2]
+        assert isinstance(write_stmt, ir.EvalStmt)
+        assert isinstance(write_stmt.expr, ir.Call)
+        assert isinstance(write_stmt.expr.type, ir.TileType)
+        assert write_stmt.expr.type.memory_space == ir.MemorySpace.Vec
+
     def test_store_no_move_for_vec(self):
         """tile.store accepts Vec — no move needed for Vec tile."""
 
