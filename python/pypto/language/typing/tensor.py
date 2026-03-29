@@ -16,6 +16,23 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorLayout
 
 
+def _validate_tensor_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Validate TensorMeta.__call__ argument structure."""
+    allowed_kwargs = {"shape", "dtype", "expr", "layout", "memref", "_annotation_only"}
+    unexpected = set(kwargs) - allowed_kwargs
+    if unexpected:
+        name = sorted(unexpected)[0]
+        raise TypeError(f"Tensor() got an unexpected keyword argument '{name}'")
+
+    if len(args) > 6:
+        raise TypeError(f"Tensor() takes at most 6 positional arguments but {len(args)} were given")
+
+    param_names = ("shape", "dtype", "expr", "layout", "memref", "_annotation_only")
+    for index, name in enumerate(param_names[: len(args)]):
+        if name in kwargs:
+            raise TypeError(f"Tensor() got multiple values for argument '{name}'")
+
+
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
@@ -82,6 +99,8 @@ class TensorMeta(type):
         Returns:
             Tensor instance
         """
+        _validate_tensor_meta_call(args, kwargs)
+
         # Support metaclass instantiation for annotations
         shape = kwargs.get("shape", args[0] if len(args) > 0 else None)
         dtype = kwargs.get("dtype", args[1] if len(args) > 1 else None)

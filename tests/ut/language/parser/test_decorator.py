@@ -260,6 +260,26 @@ class TestScalarParameters:
         # Runtime: legacy pl.Scalar(dtype) still creates valid annotation-only instance
         assert pl.Scalar(pl.FP32).dtype == pl.FP32
 
+    def test_scalar_legacy_call_rejects_duplicate_dtype(self):
+        """Scalar legacy call rejects duplicate dtype values."""
+        with pytest.raises(TypeError, match="multiple values for argument 'dtype'"):
+            pl.Scalar(pl.FP32, dtype=pl.INT32)
+
+    def test_scalar_legacy_call_rejects_unknown_kwarg(self):
+        """Scalar legacy call rejects unknown keyword arguments."""
+        with pytest.raises(TypeError, match="unexpected keyword argument 'typo'"):
+            pl.Scalar(dtype=pl.FP32, typo=1)
+
+    def test_tensor_call_rejects_unknown_kwarg(self):
+        """Tensor call rejects unknown keyword arguments."""
+        with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
+            pl.Tensor([1], pl.FP32, foo=1)
+
+    def test_tensor_call_rejects_duplicate_shape(self):
+        """Tensor call rejects duplicate shape values."""
+        with pytest.raises(TypeError, match="multiple values for argument 'shape'"):
+            pl.Tensor([1], pl.FP32, shape=[2])
+
     def test_tile_ops_with_scalar(self):
         """Test tile operations with scalar parameter."""
 

@@ -15,6 +15,23 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr
 
 
+def _validate_scalar_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Validate ScalarMeta.__call__ argument structure."""
+    allowed_kwargs = {"dtype", "expr", "_annotation_only"}
+    unexpected = set(kwargs) - allowed_kwargs
+    if unexpected:
+        name = sorted(unexpected)[0]
+        raise TypeError(f"Scalar() got an unexpected keyword argument '{name}'")
+
+    if len(args) > 3:
+        raise TypeError(f"Scalar() takes at most 3 positional arguments but {len(args)} were given")
+
+    param_names = ("dtype", "expr", "_annotation_only")
+    for index, name in enumerate(param_names[: len(args)]):
+        if name in kwargs:
+            raise TypeError(f"Scalar() got multiple values for argument '{name}'")
+
+
 class ScalarMeta(type):
     """Metaclass for Scalar to enable subscript notation."""
 
@@ -40,6 +57,8 @@ class ScalarMeta(type):
         Returns:
             Scalar instance
         """
+        _validate_scalar_meta_call(args, kwargs)
+
         # When called with just dtype (legacy notation), treat it as annotation mode
         dtype = kwargs.get("dtype", args[0] if len(args) > 0 else None)
         expr = kwargs.get("expr", args[1] if len(args) > 1 else None)

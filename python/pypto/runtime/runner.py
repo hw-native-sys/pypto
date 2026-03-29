@@ -269,9 +269,9 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-    CodeRunner = importlib.import_module("code_runner").CodeRunner  # noqa: N806
+    code_runner_cls = importlib.import_module("code_runner").CodeRunner
 
-    CodeRunner(
+    code_runner_cls(
         kernels_dir=str(work_dir),
         golden_path=str(golden_path),
         platform=platform,
