@@ -66,7 +66,7 @@ def _tile_load(tensor, offsets, shapes):
     tile = tensor[slices].clone()
     # Pad to requested shape if source is smaller (mirrors hardware valid_shapes)
     if tile.shape != tuple(shapes):
-        padded = torch.zeros(shapes, dtype=tile.dtype)
+        padded = tile.new_zeros(shapes)
         pad_slices = tuple(slice(0, s) for s in tile.shape)
         padded[pad_slices] = tile
         return padded
@@ -182,8 +182,9 @@ def _handle_reduction(torch_fn: str) -> OpHandler:
 
 
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
-    # args: [tensor_or_tile, shape_tuple, offset_tuple, ...]
-    # Use view (not clone) so writes propagate back to the original tensor.
+    # Both tensor.slice and tile.slice use view semantics in torch codegen.
+    # The IR commonly slices output tensors for in-place writes that must
+    # propagate back to the original tensor.
     return f"_tensor_slice({a[0]}, {a[2]}, {a[1]})"
 
 
@@ -456,7 +457,8 @@ class TorchCodegen(_ir.IRVisitor):
         self._indent += 1
         if self._check_shapes:
             for p in func.params:
-                # Params may receive partial tiles, so only check dtype.
+                # InCore kernel params may receive partial data (boundary tiles),
+                # so only check dtype — not shape — for all function params.
                 self._emit_shape_dtype_check(self._name_of(p), p.type, shape=False)
         n_before = len(self._lines)
         self.visit_stmt(func.body)
@@ -562,9 +564,9 @@ class TorchCodegen(_ir.IRVisitor):
             f'f"Expected {var_name} to be a Tensor, got {{type({var_name}).__name__}}"'
         )
         if shape:
-            # Check if all dimensions are resolvable (ConstInt or locally-scoped
-            # Vars).  Dimensions from pl.dynamic() are Vars whose names are not
-            # in the generated scope, so we fall back to an ndim-only check.
+            # Check if all dimensions are ConstInt.  Non-ConstInt dimensions
+            # (including Vars from pl.dynamic()) cause us to fall back to an
+            # ndim-only check plus per-static-dim assertions.
             all_static = all(isinstance(d, _ir.ConstInt) for d in ir_shape)
             if all_static:
                 dim_strs = [self._visit_expr_str(d) for d in ir_shape]
