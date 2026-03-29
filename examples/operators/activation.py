@@ -8,13 +8,21 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Activation functions using PyPTO language DSL.
+Activation functions (32x128 tiles).
 
 Programs:
-  SiluProgram   — SiLU:   output = x * sigmoid(x)                    (32x128)
-  GeluProgram   — GELU:   output = x * sigmoid(1.702 * x)            (32x128)
-  SwigluProgram — SwiGLU: output = gate * sigmoid(gate) * up         (32x128)
-  GegluProgram  — GeGLU:  output = gate * sigmoid(1.702 * gate) * up (32x128)
+  SiluProgram   -- SiLU:   output = x * sigmoid(x)                    = x / (1 + exp(-x))
+  GeluProgram   -- GELU:   output = x * sigmoid(1.702 * x)            (fast approximation)
+  SwigluProgram -- SwiGLU: output = gate * sigmoid(gate) * up
+  GegluProgram  -- GeGLU:  output = gate * sigmoid(1.702 * gate) * up
+
+Concepts introduced:
+  - pl.exp, pl.recip for building sigmoid from primitives
+  - Chaining element-wise ops for complex activation functions
+  - Two-input activations (SwiGLU, GeGLU) with gate and up projections
+
+Run:  python examples/operators/activation.py
+Next: examples/operators/softmax.py
 """
 
 import pypto.language as pl
@@ -29,13 +37,13 @@ class SiluProgram:
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
-        tile_x: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
-        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, -1.0)
-        exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(x_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
-        sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
-        result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
+        tile_x = pl.load(x, [0, 0], [32, 128])
+        x_neg = pl.mul(tile_x, -1.0)
+        exp_neg = pl.exp(x_neg)
+        denom = pl.add(exp_neg, 1.0)
+        sigmoid = pl.recip(denom)
+        result = pl.mul(tile_x, sigmoid)
+        out = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -57,14 +65,14 @@ class GeluProgram:
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # GELU(x) = x * sigmoid(1.702 * x)  (fast approximation)
-        tile_x: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
-        x_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, 1.702)
-        x_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(x_scaled, -1.0)
-        exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(x_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
-        sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
-        result: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_x, sigmoid)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
+        tile_x = pl.load(x, [0, 0], [32, 128])
+        x_scaled = pl.mul(tile_x, 1.702)
+        x_neg = pl.mul(x_scaled, -1.0)
+        exp_neg = pl.exp(x_neg)
+        denom = pl.add(exp_neg, 1.0)
+        sigmoid = pl.recip(denom)
+        result = pl.mul(tile_x, sigmoid)
+        out = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -87,15 +95,15 @@ class SwigluProgram:
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # SwiGLU(gate, up) = Swish(gate) * up = gate * sigmoid(gate) * up
-        tile_gate: pl.Tile[[32, 128], pl.FP32] = pl.load(gate, [0, 0], [32, 128])
-        tile_up: pl.Tile[[32, 128], pl.FP32] = pl.load(up, [0, 0], [32, 128])
-        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, -1.0)
-        exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(gate_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
-        sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
-        swish: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
-        result: pl.Tile[[32, 128], pl.FP32] = pl.mul(swish, tile_up)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
+        tile_gate = pl.load(gate, [0, 0], [32, 128])
+        tile_up = pl.load(up, [0, 0], [32, 128])
+        gate_neg = pl.mul(tile_gate, -1.0)
+        exp_neg = pl.exp(gate_neg)
+        denom = pl.add(exp_neg, 1.0)
+        sigmoid = pl.recip(denom)
+        swish = pl.mul(tile_gate, sigmoid)
+        result = pl.mul(swish, tile_up)
+        out = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -120,16 +128,16 @@ class GegluProgram:
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         # GeGLU(gate, up) = GELU(gate) * up
         # GELU approximation: gate * sigmoid(1.702 * gate)
-        tile_gate: pl.Tile[[32, 128], pl.FP32] = pl.load(gate, [0, 0], [32, 128])
-        tile_up: pl.Tile[[32, 128], pl.FP32] = pl.load(up, [0, 0], [32, 128])
-        gate_scaled: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, 1.702)
-        gate_neg: pl.Tile[[32, 128], pl.FP32] = pl.mul(gate_scaled, -1.0)
-        exp_neg: pl.Tile[[32, 128], pl.FP32] = pl.exp(gate_neg)
-        denom: pl.Tile[[32, 128], pl.FP32] = pl.add(exp_neg, 1.0)
-        sigmoid: pl.Tile[[32, 128], pl.FP32] = pl.recip(denom)
-        gelu_gate: pl.Tile[[32, 128], pl.FP32] = pl.mul(tile_gate, sigmoid)
-        result: pl.Tile[[32, 128], pl.FP32] = pl.mul(gelu_gate, tile_up)
-        out: pl.Tensor[[32, 128], pl.FP32] = pl.store(result, [0, 0], output)
+        tile_gate = pl.load(gate, [0, 0], [32, 128])
+        tile_up = pl.load(up, [0, 0], [32, 128])
+        gate_scaled = pl.mul(tile_gate, 1.702)
+        gate_neg = pl.mul(gate_scaled, -1.0)
+        exp_neg = pl.exp(gate_neg)
+        denom = pl.add(exp_neg, 1.0)
+        sigmoid = pl.recip(denom)
+        gelu_gate = pl.mul(tile_gate, sigmoid)
+        result = pl.mul(gelu_gate, tile_up)
+        out = pl.store(result, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -141,3 +149,15 @@ class GegluProgram:
     ) -> pl.Tensor[[32, 128], pl.FP32]:
         output = self.kernel_geglu(gate, up, output)
         return output
+
+
+if __name__ == "__main__":
+    for name, prog in [
+        ("SiLU", SiluProgram),
+        ("GELU", GeluProgram),
+        ("SwiGLU", SwigluProgram),
+        ("GeGLU", GegluProgram),
+    ]:
+        print(f"=== {name} ===")
+        print(prog.as_python())
+        print()

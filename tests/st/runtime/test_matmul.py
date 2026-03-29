@@ -23,7 +23,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.language.beginner.matmul import MatmulaccProgram
+from examples.operators.matmul import MatmulaccProgram
 
 
 class TestMatmul(PTOTestCase):

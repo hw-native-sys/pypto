@@ -31,7 +31,7 @@ def _build_tensors(specs: list[TensorSpec]) -> dict[str, torch.Tensor]:
 
 def test_paged_attention_codegen_vs_golden():
     """Torch codegen of paged attention should match the golden reference."""
-    from examples.ir_parser.paged_attention_example import (  # noqa: PLC0415
+    from examples.models.paged_attention import (  # noqa: PLC0415
         build_paged_attention_program,
         build_tensor_specs,
         golden,
@@ -91,7 +91,7 @@ def test_paged_attention_codegen_vs_golden():
 
 def test_dynamic_paged_attention_codegen_vs_golden():
     """Torch codegen of dynamic paged attention should match the golden reference."""
-    from examples.ir_parser.dynamic_paged_attention_example import (  # noqa: PLC0415
+    from examples.models.paged_attention_dynamic import (  # noqa: PLC0415
         build_dynamic_paged_attention_program,
         build_tensor_specs,
         golden,

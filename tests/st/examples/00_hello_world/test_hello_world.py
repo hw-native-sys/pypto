@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.beginner.hello_world import HelloWorldProgram
+from examples.hello_world import HelloWorldProgram
 
 
 class HelloWorldAdd(PTOTestCase):

@@ -30,7 +30,7 @@ Key simplification vs test_llama_7b_full.py:
   - All square projection weights are [64, 64]
   - Score matrix is [16, 16] with single-head (vs 2×[16,16] in full)
 
-Reference: examples/language/intermediate/llama_7b_mini.py
+Reference: examples/models/llama_mini.py
 """
 
 from typing import Any
@@ -39,7 +39,7 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.llm_models.llama_7b_mini import build_llama_mini_program
+from examples.models.llama_mini import build_llama_mini_program
 
 
 class TestLlamaMini(PTOTestCase):

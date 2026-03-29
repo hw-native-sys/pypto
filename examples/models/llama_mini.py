@@ -97,28 +97,24 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, head_dim], pl.FP32]],
         ) -> pl.Tensor[[seq_len, head_dim], pl.FP32]:
             """RMSNorm: x / sqrt(mean(x^2) + eps) across head_dim."""
-            tile_x: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.load(
-                x, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
-            )
+            tile_x = pl.load(x, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec)
 
-            squared: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_x, tile_x)
+            squared = pl.mul(tile_x, tile_x)
 
-            tmp: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.create_tile(
-                [seq_len, head_dim], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-            )
-            mean_sq: pl.Tile[[seq_len, 1], pl.FP32] = pl.row_sum(squared, tmp)
+            tmp = pl.create_tile([seq_len, head_dim], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            mean_sq = pl.row_sum(squared, tmp)
             # [S, 1] is ColMajor; reshape to [1, S] for scalar mul, then back
-            mean_sq_T: pl.Tile[[1, seq_len], pl.FP32] = pl.reshape(mean_sq, [1, seq_len])
+            mean_sq_T = pl.reshape(mean_sq, [1, seq_len])
             mean_sq_T = pl.mul(mean_sq_T, inv_head_dim)
             mean_sq = pl.reshape(mean_sq_T, [seq_len, 1])
 
-            mean_sq_T2: pl.Tile[[1, seq_len], pl.FP32] = pl.reshape(mean_sq, [1, seq_len])
-            rms_T: pl.Tile[[1, seq_len], pl.FP32] = pl.add(mean_sq_T2, 1e-6)
+            mean_sq_T2 = pl.reshape(mean_sq, [1, seq_len])
+            rms_T = pl.add(mean_sq_T2, 1e-6)
             rms_T = pl.sqrt(rms_T)
-            rms: pl.Tile[[seq_len, 1], pl.FP32] = pl.reshape(rms_T, [seq_len, 1])
+            rms = pl.reshape(rms_T, [seq_len, 1])
 
-            normalized: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.row_expand_div(tile_x, rms)
-            out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.store(normalized, [0, 0], output)
+            normalized = pl.row_expand_div(tile_x, rms)
+            out = pl.store(normalized, [0, 0], output)
             return out
 
         # =========================================================================
@@ -188,7 +184,7 @@ def build_llama_mini_program(
             b0 = pl.load(b, [0, 0], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat, transpose=True)
             a0_l = pl.move(a0, target_memory=pl.MemorySpace.Left)
             b0_r = pl.move(b0, target_memory=pl.MemorySpace.Right)
-            acc: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.matmul(a0_l, b0_r)
+            acc = pl.matmul(a0_l, b0_r)
 
             # K-tile 1: columns [k1 : k1+k_tile_width]
             a1 = pl.load(a, [0, k1], [seq_len, k_tile_width], target_memory=pl.MemorySpace.Mat)
@@ -252,23 +248,19 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, seq_len], pl.FP32]],
         ) -> pl.Tensor[[seq_len, seq_len], pl.FP32]:
             """Row-wise numerically stable softmax."""
-            tile_a: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.load(a, [0, 0], [seq_len, seq_len])
+            tile_a = pl.load(a, [0, 0], [seq_len, seq_len])
 
-            max_tmp: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.create_tile(
-                [seq_len, seq_len], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-            )
-            row_max: pl.Tile[[seq_len, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
+            max_tmp = pl.create_tile([seq_len, seq_len], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            row_max = pl.row_max(tile_a, max_tmp)
 
-            shifted: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.row_expand_sub(tile_a, row_max)
-            exp_shifted: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.exp(shifted)
+            shifted = pl.row_expand_sub(tile_a, row_max)
+            exp_shifted = pl.exp(shifted)
 
-            sum_tmp: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.create_tile(
-                [seq_len, seq_len], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-            )
-            row_sum: pl.Tile[[seq_len, 1], pl.FP32] = pl.row_sum(exp_shifted, sum_tmp)
-            result: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.row_expand_div(exp_shifted, row_sum)
+            sum_tmp = pl.create_tile([seq_len, seq_len], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+            row_sum = pl.row_sum(exp_shifted, sum_tmp)
+            result = pl.row_expand_div(exp_shifted, row_sum)
 
-            out: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.store(result, [0, 0], output)
+            out = pl.store(result, [0, 0], output)
             return out
 
         # =========================================================================
@@ -282,9 +274,9 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, seq_len], pl.FP32]],
         ) -> pl.Tensor[[seq_len, seq_len], pl.FP32]:
             """Scale attention scores by 1/sqrt(head_dim)."""
-            tile: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.load(scores, [0, 0], [seq_len, seq_len])
-            scaled: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.mul(tile, attn_scale)
-            out: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.store(scaled, [0, 0], output)
+            tile = pl.load(scores, [0, 0], [seq_len, seq_len])
+            scaled = pl.mul(tile, attn_scale)
+            out = pl.store(scaled, [0, 0], output)
             return out
 
         # =========================================================================
@@ -300,10 +292,10 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, seq_len], pl.FP32]],
         ) -> pl.Tensor[[seq_len, seq_len], pl.FP32]:
             """Element-wise addition [S,S]: output = a + b."""
-            tile_a: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.load(a, [0, 0], [seq_len, seq_len])
-            tile_b: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.load(b, [0, 0], [seq_len, seq_len])
-            result: pl.Tile[[seq_len, seq_len], pl.FP32] = pl.add(tile_a, tile_b)
-            out: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.store(result, [0, 0], output)
+            tile_a = pl.load(a, [0, 0], [seq_len, seq_len])
+            tile_b = pl.load(b, [0, 0], [seq_len, seq_len])
+            result = pl.add(tile_a, tile_b)
+            out = pl.store(result, [0, 0], output)
             return out
 
         # =========================================================================
@@ -319,14 +311,10 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, head_dim], pl.FP32]],
         ) -> pl.Tensor[[seq_len, head_dim], pl.FP32]:
             """Element-wise addition [S,D]: output = a + b."""
-            tile_a: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.load(
-                a, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
-            )
-            tile_b: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.load(
-                b, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
-            )
-            result: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.add(tile_a, tile_b)
-            out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.store(result, [0, 0], output)
+            tile_a = pl.load(a, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec)
+            tile_b = pl.load(b, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec)
+            result = pl.add(tile_a, tile_b)
+            out = pl.store(result, [0, 0], output)
             return out
 
         # =========================================================================
@@ -348,21 +336,21 @@ def build_llama_mini_program(
               x_left  = x[:, :half_dim]   rotated_left  = x_left * cos - x_right * sin
               x_right = x[:, half_dim:]   rotated_right = x_right * cos + x_left * sin
             """
-            x_left: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.load(x, [0, 0], [seq_len, half_dim])
-            x_right: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.load(x, [0, half_dim], [seq_len, half_dim])
-            cos_tile: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.load(cos_emb, [0, 0], [seq_len, half_dim])
-            sin_tile: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.load(sin_emb, [0, 0], [seq_len, half_dim])
+            x_left = pl.load(x, [0, 0], [seq_len, half_dim])
+            x_right = pl.load(x, [0, half_dim], [seq_len, half_dim])
+            cos_tile = pl.load(cos_emb, [0, 0], [seq_len, half_dim])
+            sin_tile = pl.load(sin_emb, [0, 0], [seq_len, half_dim])
 
-            left_cos: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.mul(x_left, cos_tile)
-            right_sin: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.mul(x_right, sin_tile)
-            rotated_left: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.sub(left_cos, right_sin)
+            left_cos = pl.mul(x_left, cos_tile)
+            right_sin = pl.mul(x_right, sin_tile)
+            rotated_left = pl.sub(left_cos, right_sin)
 
-            right_cos: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.mul(x_right, cos_tile)
-            left_sin: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.mul(x_left, sin_tile)
-            rotated_right: pl.Tile[[seq_len, half_dim], pl.FP32] = pl.add(right_cos, left_sin)
+            right_cos = pl.mul(x_right, cos_tile)
+            left_sin = pl.mul(x_left, sin_tile)
+            rotated_right = pl.add(right_cos, left_sin)
 
-            out_left: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.store(rotated_left, [0, 0], output)
-            out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.store(rotated_right, [0, half_dim], out_left)
+            out_left = pl.store(rotated_left, [0, 0], output)
+            out = pl.store(rotated_right, [0, half_dim], out_left)
             return out
 
         # =========================================================================
@@ -378,21 +366,17 @@ def build_llama_mini_program(
             output: pl.Out[pl.Tensor[[seq_len, head_dim], pl.FP32]],
         ) -> pl.Tensor[[seq_len, head_dim], pl.FP32]:
             """SwiGLU: SiLU(gate) * up = gate * sigmoid(gate) * up."""
-            tile_gate: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.load(
-                gate, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
-            )
-            tile_up: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.load(
-                up, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec
-            )
+            tile_gate = pl.load(gate, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec)
+            tile_up = pl.load(up, [0, 0], [seq_len, head_dim], target_memory=pl.MemorySpace.Vec)
 
-            gate_neg: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_gate, -1.0)
-            exp_neg: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.exp(gate_neg)
-            denom: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.add(exp_neg, 1.0)
-            sigmoid: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.recip(denom)
-            swish: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(tile_gate, sigmoid)
-            result: pl.Tile[[seq_len, head_dim], pl.FP32] = pl.mul(swish, tile_up)
+            gate_neg = pl.mul(tile_gate, -1.0)
+            exp_neg = pl.exp(gate_neg)
+            denom = pl.add(exp_neg, 1.0)
+            sigmoid = pl.recip(denom)
+            swish = pl.mul(tile_gate, sigmoid)
+            result = pl.mul(swish, tile_up)
 
-            out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.store(result, [0, 0], output)
+            out = pl.store(result, [0, 0], output)
             return out
 
         # =========================================================================
@@ -438,91 +422,61 @@ def build_llama_mini_program(
             # ===== Decoder Layer =====
 
             # Pre-attention RMSNorm
-            normed: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            normed = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             normed = self.kernel_rms_norm(hidden, normed)
 
             # QKV projections: [S,D] @ [D,D] → [S,D] each
-            q: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
+            q = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             q = self.kernel_matmul(normed, wq, q)
-            k: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
+            k = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             k = self.kernel_matmul(normed, wk, k)
-            v: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
+            v = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             v = self.kernel_matmul(normed, wv, v)
 
             # Apply RoPE to Q and K
-            q_rot: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            q_rot = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             q_rot = self.kernel_rope(q, cos_emb, sin_emb, q_rot)
-            k_rot_buf: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            k_rot_buf = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             k_rot = self.kernel_rope(k, cos_emb, sin_emb, k_rot_buf)
 
             # Scaled causal dot-product attention
-            scores: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.create_tensor(
-                [seq_len, seq_len], dtype=pl.FP32
-            )
+            scores = pl.create_tensor([seq_len, seq_len], dtype=pl.FP32)
             scores = self.kernel_matmul_trans_b(q_rot, k_rot, scores)
-            scaled: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.create_tensor(
-                [seq_len, seq_len], dtype=pl.FP32
-            )
+            scaled = pl.create_tensor([seq_len, seq_len], dtype=pl.FP32)
             scaled = self.kernel_scale_scores(scores, scaled)
-            masked: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.create_tensor(
-                [seq_len, seq_len], dtype=pl.FP32
-            )
+            masked = pl.create_tensor([seq_len, seq_len], dtype=pl.FP32)
             masked = self.kernel_add_scores(scaled, causal_mask, masked)
-            probs: pl.Tensor[[seq_len, seq_len], pl.FP32] = pl.create_tensor(
-                [seq_len, seq_len], dtype=pl.FP32
-            )
+            probs = pl.create_tensor([seq_len, seq_len], dtype=pl.FP32)
             probs = self.kernel_softmax(masked, probs)
-            attn_out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            attn_out = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             attn_out = self.kernel_matmul_attn(probs, v, attn_out)
 
             # Dense projection + first residual
-            dense_out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            dense_out = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             dense_out = self.kernel_matmul(attn_out, w_dense, dense_out)
-            attn_res: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            attn_res = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             attn_res = self.kernel_add(hidden, dense_out, attn_res)
 
             # Pre-MLP RMSNorm
-            normed2: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            normed2 = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             normed2 = self.kernel_rms_norm(attn_res, normed2)
 
             # SwiGLU MLP
-            gate: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            gate = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             gate = self.kernel_matmul(normed2, w_gate, gate)
-            up: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
+            up = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             up = self.kernel_matmul(normed2, w_up, up)
-            swish_up: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            swish_up = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             swish_up = self.kernel_swiglu(gate, up, swish_up)
-            mlp_out: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            mlp_out = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             mlp_out = self.kernel_matmul(swish_up, w_down, mlp_out)
 
             # Second residual → h1
-            h1: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
+            h1 = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             h1 = self.kernel_add(attn_res, mlp_out, h1)
 
             # ===== Final RMSNorm =====
-            h_normed: pl.Tensor[[seq_len, head_dim], pl.FP32] = pl.create_tensor(
-                [seq_len, head_dim], dtype=pl.FP32
-            )
+            h_normed = pl.create_tensor([seq_len, head_dim], dtype=pl.FP32)
             h_normed = self.kernel_rms_norm(h1, h_normed)
 
             # ===== LM Head: [S,D] @ [D,V] → logits [S,V] =====

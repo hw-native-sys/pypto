@@ -18,7 +18,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.language.beginner.concat import TileConcat32x32Program
+from examples.operators.concat import TileConcat32x32Program
 
 
 class TileConcatTestCase(PTOTestCase):

@@ -20,7 +20,7 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.intermediate.softmax import TileSoftmaxProgram
+from examples.operators.softmax import TileSoftmaxProgram
 
 
 class TestTileSoftmax(PTOTestCase):

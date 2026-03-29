@@ -32,7 +32,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.language.beginner.assemble import (
+from examples.operators.assemble import (
     TileAssembleAccMatProgram,
     TileAssembleDoubleLoopBroadcastProgram,
     TileAssembleDoubleLoopProgram,

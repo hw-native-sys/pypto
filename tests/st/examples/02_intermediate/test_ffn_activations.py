@@ -25,7 +25,7 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
 
-from examples.language.intermediate.ffn_activations import (
+from examples.models.ffn import (
     FFNGeluProgram,
     FFNReluProgram,
     FFNSwigluProgram,

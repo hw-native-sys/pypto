@@ -8,13 +8,24 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Basic fused operations using PyPTO language DSL.
+Fused operations: combining multiple ops in a single InCore kernel.
 
-Four fused operation patterns:
-  FusedAddScaleProgram    — c = (a + b) * 2.0
-  FusedAddReluProgram     — c = relu(a + b)
-  FusedMatmulBiasProgram  — c = matmul(a, b) + bias
-  FusedLinearReluProgram  — y = relu(matmul(x, w) + bias)
+Programs:
+  FusedAddScaleProgram   — c = (a + b) * 2.0           (vector only)
+  FusedAddReluProgram    — c = relu(a + b)              (vector only)
+  FusedMatmulBiasProgram — c = matmul(a, b) + bias      (cube + vector)
+  FusedLinearReluProgram — y = relu(matmul(x, w) + bias) (cube + vector)
+
+Concepts introduced:
+  - Scalar operations: pl.mul(tile, 2.0)
+  - Activation functions: pl.relu
+  - Memory spaces: pl.MemorySpace.Mat (L1), Left (L0A), Right (L0B)
+  - pl.move for transferring tiles between memory spaces
+  - pl.matmul for cube unit matrix multiplication
+  - Multi-kernel orchestration: pl.create_tensor for intermediate buffers
+
+Run:  python examples/operators/fused_ops.py
+Next: examples/operators/matmul.py
 """
 
 import pypto.language as pl
@@ -29,12 +40,12 @@ class FusedAddScaleProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Fused: load a, b → add → scale by 2.0 → store c."""
-        tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
-        tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+        """Fused: load a, b -> add -> scale by 2.0 -> store c."""
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.mul(tile_sum, 2.0)
-        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
+        out_c = pl.store(tile_c, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -57,12 +68,12 @@ class FusedAddReluProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Fused: load a, b → add → relu → store c."""
-        tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
-        tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+        """Fused: load a, b -> add -> relu -> store c."""
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.relu(tile_sum)
-        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
+        out_c = pl.store(tile_c, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -86,12 +97,12 @@ class FusedMatmulBiasProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Cube InCore: compute a @ b and store to output."""
-        tile_a_l1 = pl.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=output)
+        out = pl.store(tile_c_l0c, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -102,10 +113,10 @@ class FusedMatmulBiasProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Vector InCore: add bias to x and store to output."""
-        tile_x = pl.load(x, offsets=[0, 0], shapes=[64, 64])
-        tile_bias = pl.load(bias, offsets=[0, 0], shapes=[64, 64])
+        tile_x = pl.load(x, [0, 0], [64, 64])
+        tile_bias = pl.load(bias, [0, 0], [64, 64])
         tile_c = pl.add(tile_x, tile_bias)
-        out = pl.store(tile_c, offsets=[0, 0], output_tensor=output)
+        out = pl.store(tile_c, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -117,7 +128,7 @@ class FusedMatmulBiasProgram:
         c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: c = matmul(a, b) + bias"""
-        mm_out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+        mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
         mm_out = self.matmul_kernel(a, b, mm_out)
         c = self.add_bias_kernel(mm_out, bias, c)
         return c
@@ -133,12 +144,12 @@ class FusedLinearReluProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Cube InCore: compute x @ w and store to output."""
-        tile_x_l1 = pl.load(x, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_w_l1 = pl.load(w, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_x_l1 = pl.load(x, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_w_l1 = pl.load(w, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_x_l0a = pl.move(tile_x_l1, target_memory=pl.MemorySpace.Left)
         tile_w_l0b = pl.move(tile_w_l1, target_memory=pl.MemorySpace.Right)
         tile_out_l0c = pl.matmul(tile_x_l0a, tile_w_l0b)
-        out = pl.store(tile_out_l0c, offsets=[0, 0], output_tensor=output)
+        out = pl.store(tile_out_l0c, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -149,11 +160,11 @@ class FusedLinearReluProgram:
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Vector InCore: fused bias add and relu activation."""
-        tile_x = pl.load(x, offsets=[0, 0], shapes=[64, 64])
-        tile_bias = pl.load(bias, offsets=[0, 0], shapes=[64, 64])
+        tile_x = pl.load(x, [0, 0], [64, 64])
+        tile_bias = pl.load(bias, [0, 0], [64, 64])
         tile_biased = pl.add(tile_x, tile_bias)
         tile_y = pl.relu(tile_biased)
-        out = pl.store(tile_y, offsets=[0, 0], output_tensor=output)
+        out = pl.store(tile_y, [0, 0], output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -165,7 +176,19 @@ class FusedLinearReluProgram:
         y: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: y = relu(matmul(x, w) + bias)"""
-        mm_out: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+        mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
         mm_out = self.matmul_kernel(x, w, mm_out)
         y = self.add_bias_relu_kernel(mm_out, bias, y)
         return y
+
+
+if __name__ == "__main__":
+    for name, prog in [
+        ("FusedAddScale", FusedAddScaleProgram),
+        ("FusedAddRelu", FusedAddReluProgram),
+        ("FusedMatmulBias", FusedMatmulBiasProgram),
+        ("FusedLinearRelu", FusedLinearReluProgram),
+    ]:
+        print(f"=== {name} ===")
+        print(prog.as_python())
+        print()

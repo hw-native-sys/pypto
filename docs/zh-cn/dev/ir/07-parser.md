@@ -84,7 +84,7 @@ else:
 - 根据检测结果返回 `ir.Function` 或 `ir.Program`
 - 每次解析仅限单个函数/程序（否则抛出 `ValueError`）
 - 生成与装饰器相同的 `ir.Function`/`ir.Program` 对象
-- 参见 `examples/ir_parser/parse_from_text.py` 获取示例
+- 参见 `examples/utils/parse_from_text.py` 获取示例
 
 **已弃用的别名**（仍然支持）：
 
@@ -198,7 +198,7 @@ class MathOps:
 - 文本解析：`pl.parse(code)`、`pl.loads(path)`（自动检测程序/函数）
 - 打印：`program.as_python(prefix="pl", concise=False)` 生成有效的 `@pl.program` 类；可通过 `prefix` 指定模块别名，传入 `concise=True` 可省略中间类型标注
 
-**示例**：参见 `examples/ir_parser/program_example.py` 和 `examples/ir_builder/program_builder_example.py`
+**示例**：参见 `examples/utils/cross_function_calls.py`
 
 ## 限制与测试
 

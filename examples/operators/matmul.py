@@ -8,16 +8,20 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Matrix multiplication using PyPTO language DSL (cube unit, 64x64).
+Matrix multiplication on the cube unit (64x64).
 
-Program structure:
-  InCore function  ``matmul``
-    - Loads tiles from GM → L1 (Mat space), then to L0A/L0B.
-    - Computes matrix multiplication on the cube unit.
-    - Stores L0C result directly back to GM.
+Programs:
+  MatmulProgram    — full 64x64 matmul in one shot
+  MatmulaccProgram — K=64 split into two K=32 chunks with matmul + matmul_acc
 
-  Orchestration function  ``orchestrator``
-    - Calls ``matmul`` once for the full 64x64 computation.
+Concepts introduced:
+  - Memory hierarchy: GM -> Mat (L1) -> Left/Right (L0A/L0B) -> matmul -> Acc (L0C)
+  - pl.matmul for cube unit multiplication
+  - pl.matmul_acc for accumulating partial products
+  - K-dimension tiling for large reductions
+
+Run:  python examples/operators/matmul.py
+Next: examples/operators/concat.py
 """
 
 import pypto.language as pl
@@ -32,12 +36,12 @@ class MatmulProgram:
         b: pl.Tensor[[64, 64], pl.FP32],
         c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        tile_a_l1 = pl.load(a, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out_c = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=c)
+        out_c = pl.store(tile_c_l0c, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -53,10 +57,10 @@ class MatmulProgram:
 
 @pl.program
 class MatmulaccProgram:
-    """Matrix multiply with accumulation — K=64 split into two K=32 chunks.
+    """Matrix multiply with accumulation -- K=64 split into two K=32 chunks.
 
     First chunk initialises L0C via ``matmul``; second chunk accumulates via
-    ``matmul_acc``.  The final result equals the full 64×64 matrix product.
+    ``matmul_acc``.  The final result equals the full 64x64 matrix product.
     """
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -66,21 +70,21 @@ class MatmulaccProgram:
         b: pl.Tensor[[64, 64], pl.FP32],
         c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        # First K-chunk: A[:,0:32] @ B[0:32,:] — initialises L0C via matmul
-        tile_a0_l1 = pl.load(a, offsets=[0, 0], shapes=[64, 32], target_memory=pl.MemorySpace.Mat)
-        tile_b0_l1 = pl.load(b, offsets=[0, 0], shapes=[32, 64], target_memory=pl.MemorySpace.Mat)
+        # First K-chunk: A[:,0:32] @ B[0:32,:] -- initialises L0C via matmul
+        tile_a0_l1 = pl.load(a, [0, 0], [64, 32], target_memory=pl.MemorySpace.Mat)
+        tile_b0_l1 = pl.load(b, [0, 0], [32, 64], target_memory=pl.MemorySpace.Mat)
         tile_a0_l0a = pl.move(tile_a0_l1, target_memory=pl.MemorySpace.Left)
         tile_b0_l0b = pl.move(tile_b0_l1, target_memory=pl.MemorySpace.Right)
-        acc = pl.matmul(tile_a0_l0a, tile_b0_l0b)
+        acc: pl.Tile[[64, 64], pl.FP32] = pl.matmul(tile_a0_l0a, tile_b0_l0b)
 
-        # Second K-chunk: A[:,32:64] @ B[32:64,:] — accumulates into existing L0C
-        tile_a1_l1 = pl.load(a, offsets=[0, 32], shapes=[64, 32], target_memory=pl.MemorySpace.Mat)
-        tile_b1_l1 = pl.load(b, offsets=[32, 0], shapes=[32, 64], target_memory=pl.MemorySpace.Mat)
+        # Second K-chunk: A[:,32:64] @ B[32:64,:] -- accumulates into existing L0C
+        tile_a1_l1 = pl.load(a, [0, 32], [64, 32], target_memory=pl.MemorySpace.Mat)
+        tile_b1_l1 = pl.load(b, [32, 0], [32, 64], target_memory=pl.MemorySpace.Mat)
         tile_a1_l0a = pl.move(tile_a1_l1, target_memory=pl.MemorySpace.Left)
         tile_b1_l0b = pl.move(tile_b1_l1, target_memory=pl.MemorySpace.Right)
         acc = pl.matmul_acc(acc, tile_a1_l0a, tile_b1_l0b)
 
-        out_c = pl.store(acc, offsets=[0, 0], output_tensor=c)
+        out_c = pl.store(acc, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -92,3 +96,10 @@ class MatmulaccProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         out_c = self.matmul_acc(a, b, out_c)
         return out_c
+
+
+if __name__ == "__main__":
+    print("=== MatmulProgram ===")
+    print(MatmulProgram.as_python())
+    print("\n=== MatmulaccProgram ===")
+    print(MatmulaccProgram.as_python())

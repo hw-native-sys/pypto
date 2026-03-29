@@ -20,7 +20,7 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.intermediate.layer_norm import LayerNormProgram
+from examples.operators.normalization import LayerNormProgram
 
 
 class TestLayerNormCore(PTOTestCase):
