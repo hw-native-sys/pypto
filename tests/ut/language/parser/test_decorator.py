@@ -280,6 +280,14 @@ class TestScalarParameters:
         with pytest.raises(TypeError, match="multiple values for argument 'shape'"):
             pl.Tensor([1], pl.FP32, shape=[2])
 
+    def test_tensor_legacy_call_notation(self):
+        """Legacy Tensor(shape, dtype) call still produces annotation-only instances."""
+        tensor = pl.Tensor((64, 128), pl.FP16)
+        assert tensor.dtype == pl.FP16
+        assert tensor.shape == (64, 128)
+        with pytest.raises(ValueError, match="annotation-only Tensor"):
+            tensor.unwrap()
+
     def test_tile_ops_with_scalar(self):
         """Test tile operations with scalar parameter."""
 

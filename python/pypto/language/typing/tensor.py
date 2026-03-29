@@ -121,6 +121,10 @@ class TensorMeta(type):
                 "Tensor",
                 type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only),
             )
+
+        if dtype is not None and expr is None and not annotation_only:
+            annotation_only = True
+
         return cast("Tensor", type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only))
 
 
