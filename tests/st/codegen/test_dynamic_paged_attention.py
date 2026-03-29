@@ -28,7 +28,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.ir_parser.dynamic_paged_attention_example import (
+from examples.models.paged_attention_dynamic import (
     build_dynamic_paged_attention_program,
 )
 

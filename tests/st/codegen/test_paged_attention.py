@@ -39,7 +39,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.ir_parser.paged_attention_example import (
+from examples.models.paged_attention import (
     build_paged_attention_program,
     build_paged_attention_unaligned_program,
     kernel_online_update,

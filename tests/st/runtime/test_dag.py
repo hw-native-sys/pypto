@@ -13,7 +13,7 @@ Tests for DAG (Directed Acyclic Graph) operations using PyPTO frontend.
 This test validates complex multi-kernel orchestration with mixed operations,
 ensuring correct code generation and execution for DAG-structured computations.
 
-The program definition is imported from examples/language/intermediate/vector_dag.py
+The program definition is imported from examples/models/vector_dag.py
 to keep a single source of truth and ensure examples are guarded by tests.
 """
 
@@ -24,7 +24,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.language.intermediate.vector_dag import VectorDAGProgram
+from examples.models.vector_dag import VectorDAGProgram
 
 
 class VectorDAGTestCase(PTOTestCase):

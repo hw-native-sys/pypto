@@ -130,9 +130,10 @@ def test_example_transform(self):
 
 The `examples/` directory contains **user-facing examples only:**
 
-- `examples/ir_builder/` - IR builder examples
-- `examples/ir_parser/` - Parser examples
-- `examples/tile-level/` - Tile-level operation examples
+- `examples/hello_world.py` - Entry point, simplest program
+- `examples/operators/` - Single-kernel op examples (easy to hard)
+- `examples/models/` - Multi-kernel model examples (easy to hard)
+- `examples/utils/` - Parsing, cross-function calls, error handling
 
 ### When to Write Examples
 

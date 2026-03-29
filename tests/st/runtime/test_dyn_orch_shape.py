@@ -51,7 +51,7 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
 
-from examples.ir_parser.paged_attention_example import (
+from examples.models.paged_attention import (
     kernel_init_inplace,
     kernel_online_update,
     kernel_pv_matmul,

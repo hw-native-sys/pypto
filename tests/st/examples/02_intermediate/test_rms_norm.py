@@ -20,7 +20,7 @@ import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.language.intermediate.rms_norm import RMSNormProgram
+from examples.operators.normalization import RMSNormProgram
 
 
 class TestRMSNormCore(PTOTestCase):

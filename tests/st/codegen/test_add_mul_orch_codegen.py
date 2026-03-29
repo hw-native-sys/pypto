@@ -19,7 +19,7 @@ Task Graph:
 
 Dependencies: t0->t1, t0->t2, t1->t3, t2->t3
 
-The program definition is imported from examples/ir_parser/orchestration_example.py
+The program definition is imported from examples/models/vector_dag.py
 to keep a single source of truth and ensure examples are guarded by tests.
 """
 
@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
-from examples.ir_parser.orchestration_example import ExampleOrchProgram
+from examples.models.vector_dag import ExampleOrchProgram
 
 
 class TestAddMulOrchestration(PTOTestCase):

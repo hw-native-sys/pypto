@@ -83,24 +83,24 @@ The build system uses scikit-build-core to automatically handle CMake configurat
 
 ### Running Examples
 
-PyPTO includes several examples demonstrating different features:
+PyPTO includes examples organized by complexity:
 
-#### 1. Flash Attention Builder
+#### 1. Hello World (simplest program)
 
 ```bash
-python examples/ir_builder/flash_attention_builder.py
+python examples/hello_world.py
 ```
 
-#### 2. Tile Operations Example
+#### 2. Operator Examples (element-wise, matmul, softmax, ...)
 
 ```bash
-python examples/ir_builder/tile_ops_example.py
+python examples/operators/softmax.py
 ```
 
-#### 3. IR Parser Example
+#### 3. Model Examples (FFN, paged attention, LLaMA, ...)
 
 ```bash
-python examples/ir_parser/flash_attention_parsing.py
+python examples/models/ffn.py
 ```
 
 ### Running Tests

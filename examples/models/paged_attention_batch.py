@@ -412,63 +412,39 @@ def BuildBatchPagedAttentionProgram(
             Config layout: [batch, num_heads, kv_head_num, head_dim,
                             block_size, block_num, scale_bits]
             """
-            batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
-            num_heads_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-            head_dim_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [3])
-            block_size_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
-            block_num_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [5])
+            batch_cfg = pl.tensor.read(config, [0])
+            num_heads_cfg = pl.tensor.read(config, [1])
+            head_dim_cfg = pl.tensor.read(config, [3])
+            block_size_cfg = pl.tensor.read(config, [4])
+            block_num_cfg = pl.tensor.read(config, [5])
 
             q_loop_cfg = (num_heads_cfg + q_tile - 1) // q_tile
 
             # Compute max_bn across all batches (mirrors C++ max_bn loop)
-            max_bn: pl.Scalar[pl.INT64] = pl.yield_(0)
+            max_bn = pl.yield_(0)
             for b in pl.range(batch_cfg):
                 cur_seq_b = pl.tensor.read(context_lens, [b])
                 bn_b = (cur_seq_b + block_size_cfg - 1) // block_size_cfg
-                max_bn = pl.max(max_bn, bn_b)
+                max_bn = pl.max(max_bn, bn_b)  # type: ignore[reportArgumentType]
 
             for q_idx in pl.range(q_loop_cfg):
                 q_offset = q_idx * q_tile
 
                 # Batch-sized accumulators (mirrors C++ oi_batch/li_batch/mi_batch)
-                oi_batch: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                    [batch_cfg * q_tile, head_dim_cfg],
-                    dtype=pl.FP32,
-                )
-                li_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
-                    [batch_cfg * q_tile, 1],
-                    dtype=pl.FP32,
-                )
-                mi_batch: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
-                    [batch_cfg * q_tile, 1],
-                    dtype=pl.FP32,
-                )
+                oi_batch = pl.create_tensor([batch_cfg * q_tile, head_dim_cfg], dtype=pl.FP32)
+                li_batch = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
+                mi_batch = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
 
                 # Zero-init accumulators via AIV hub (FUNC_AIV_HUB)
                 oi_batch, li_batch, mi_batch = self.KernelAivHub(oi_batch, li_batch, mi_batch)
 
                 for bn in pl.range(max_bn):
                     # Batch-sized intermediate tensors (mirrors C++ sij_b/pij_b/etc.)
-                    sij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(
-                        [batch_cfg * q_tile, block_size_cfg],
-                        dtype=pl.FP32,
-                    )
-                    pij_b: pl.Tensor[[batch_cfg * q_tile, block_size_cfg], pl.FP16] = pl.create_tensor(
-                        [batch_cfg * q_tile, block_size_cfg],
-                        dtype=pl.FP16,
-                    )
-                    mij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [batch_cfg * q_tile, 1],
-                        dtype=pl.FP32,
-                    )
-                    lij_b: pl.Tensor[[batch_cfg * q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [batch_cfg * q_tile, 1],
-                        dtype=pl.FP32,
-                    )
-                    oi_new_b: pl.Tensor[[batch_cfg * q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                        [batch_cfg * q_tile, head_dim_cfg],
-                        dtype=pl.FP32,
-                    )
+                    sij_b = pl.create_tensor([batch_cfg * q_tile, block_size_cfg], dtype=pl.FP32)
+                    pij_b = pl.create_tensor([batch_cfg * q_tile, block_size_cfg], dtype=pl.FP16)
+                    mij_b = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
+                    lij_b = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
+                    oi_new_b = pl.create_tensor([batch_cfg * q_tile, head_dim_cfg], dtype=pl.FP32)
 
                     # Stage 1: QK matmul (FUNC_QK_MATMUL, AIC / CUBE)
                     sij_b = self.KernelQkMatmul(
@@ -508,13 +484,13 @@ def BuildBatchPagedAttentionProgram(
 
                     # Conditional flags (mirrors C++ is_first/is_last)
                     if bn == 0:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                        is_first = pl.yield_(1)
                     else:
-                        is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                        is_first = pl.yield_(0)
                     if bn == max_bn - 1:
-                        is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
+                        is_last = pl.yield_(1)
                     else:
-                        is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
+                        is_last = pl.yield_(0)
 
                     # Stage 4: Online update (FUNC_ONLINE_UPDATE, AIV / VECTOR)
                     mi_batch, li_batch, oi_batch, out = self.KernelOnlineUpdate(

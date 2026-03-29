@@ -34,7 +34,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.ir_parser.paged_attention_multi_config_example import (
+from examples.models.paged_attention_multi_config import (
     BLOCK_SIZE,
     HEAD_DIM,
     N_UNROLL,

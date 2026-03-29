@@ -84,7 +84,7 @@ Parse DSL code from strings or files for dynamic code generation:
 - Returns `ir.Function` or `ir.Program` based on what's found
 - Single function/program per parse (raises `ValueError` otherwise)
 - Produces identical `ir.Function`/`ir.Program` objects as decorators
-- See `examples/ir_parser/parse_from_text.py` for examples
+- See `examples/utils/parse_from_text.py` for examples
 
 **Deprecated aliases** (still supported):
 
@@ -198,7 +198,7 @@ class MathOps:
 - Text parsing: `pl.parse(code)`, `pl.loads(path)` (auto-detects program/function)
 - Printing: `program.as_python()` generates valid `@pl.program` class; pass `concise=True` to omit intermediate type annotations
 
-**Examples**: See `examples/ir_parser/program_example.py` and `examples/ir_builder/program_builder_example.py`
+**Examples**: See `examples/utils/cross_function_calls.py`
 
 ## Limitations and Testing
 

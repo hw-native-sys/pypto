@@ -8,16 +8,17 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Hello World: element-wise tensor addition using PyPTO language DSL.
+The simplest PyPTO program: element-wise tensor addition.
 
-Program structure:
-  InCore function  ``tile_add``
-    - Loads tile_a and tile_b from global memory (GM) into registers (UB).
-    - Computes tile_c = tile_a + tile_b using the vector unit.
-    - Stores tile_c back to the output tensor in GM.
+Concepts introduced:
+  - @pl.program / @pl.function decorators
+  - InCore function: load tiles from global memory, compute, store back
+  - Orchestration function: calls InCore kernels on full tensors
+  - pl.Out[] marks output tensor parameters
+  - Tensor (global memory) vs Tile (on-chip register) types
 
-  Orchestration function  ``orchestrator``
-    - Calls ``tile_add`` once to process the whole tensor in one shot.
+Run:  python examples/hello_world.py
+Next: examples/operators/elementwise.py
 """
 
 import pypto.language as pl
@@ -32,10 +33,10 @@ class HelloWorldProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
-        tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+        tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, tile_b)
-        out_c = pl.store(tile_c, offsets=[0, 0], output_tensor=c)
+        out_c = pl.store(tile_c, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -47,3 +48,7 @@ class HelloWorldProgram:
     ) -> pl.Tensor[[128, 128], pl.FP32]:
         out_c = self.tile_add(a, b, out_c)
         return out_c
+
+
+if __name__ == "__main__":
+    print(HelloWorldProgram.as_python())

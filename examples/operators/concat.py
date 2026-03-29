@@ -11,7 +11,14 @@
 Tile column-wise concatenation: c[:, :16] = a, c[:, 16:] = b.
 
 Programs:
-  TileConcat32x32Program — c[32,32] = concat(a[32,16], b[32,16])
+  TileConcat32x32Program -- c[32,32] = concat(a[32,16], b[32,16])
+
+Concepts introduced:
+  - pl.concat for column-wise tile concatenation
+  - Orchestration with pl.create_tensor (output allocated in orchestration)
+
+Run:  python examples/operators/concat.py
+Next: examples/operators/activation.py
 """
 
 import pypto.language as pl
@@ -26,16 +33,20 @@ class TileConcat32x32Program:
         b: pl.Tensor[[32, 16], pl.FP32],
         c: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 16])
-        tile_b = pl.load(b, offsets=[0, 0], shapes=[32, 16])
-        tile_out = pl.concat(tile_a, tile_b)
-        out_c = pl.store(tile_out, offsets=[0, 0], output_tensor=c)
+        tile_a = pl.load(a, [0, 0], [32, 16])
+        tile_b = pl.load(b, [0, 0], [32, 16])
+        tile_out: pl.Tile[[32, 32], pl.FP32] = pl.concat(tile_a, tile_b)
+        out_c = pl.store(tile_out, [0, 0], c)
         return out_c
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
         self, a: pl.Tensor[[32, 16], pl.FP32], b: pl.Tensor[[32, 16], pl.FP32]
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        out_c: pl.Tensor[[32, 32], pl.FP32] = pl.create_tensor([32, 32], dtype=pl.FP32)
+        out_c = pl.create_tensor([32, 32], dtype=pl.FP32)
         out_c = self.tile_concat(a, b, out_c)
         return out_c
+
+
+if __name__ == "__main__":
+    print(TileConcat32x32Program.as_python())

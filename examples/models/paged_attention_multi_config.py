@@ -109,7 +109,7 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
             local_max = pl.row_max(scaled, tmp_tile)
 
             if i == 0:
-                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(local_max, [0, 0], mi_out_iter)
+                mi_out_updated = pl.store(local_max, [0, 0], mi_out_iter)
             else:
                 global_max = pl.load(
                     mi_out_iter,
@@ -120,7 +120,7 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
                 gm_nd = pl.reshape(global_max, [1, q_tile])
                 lm_nd = pl.reshape(local_max, [1, q_tile])
                 new_max = pl.reshape(pl.maximum(gm_nd, lm_nd), [q_tile, 1])
-                mi_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(new_max, [0, 0], mi_out_iter)
+                mi_out_updated = pl.store(new_max, [0, 0], mi_out_iter)
             (mi_out_carry,) = pl.yield_(mi_out_updated)
 
         # Pass 2: exp(s - global_max), cast to bf16, row_sum accumulation
@@ -153,12 +153,12 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
             li_local_nd = pl.reshape(li_local, [1, q_tile])
 
             if i == 0:
-                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(li_local, [0, 0], li_out_iter)
+                li_out_updated = pl.store(li_local, [0, 0], li_out_iter)
             else:
                 li_acc = pl.load(li_out_iter, [0, 0], [q_tile, 1])
                 li_acc_nd = pl.reshape(li_acc, [1, q_tile])
                 li_sum = pl.reshape(pl.add(li_acc_nd, li_local_nd), [q_tile, 1])
-                li_out_updated: pl.Tensor[[q_tile, 1], pl.FP32] = pl.store(li_sum, [0, 0], li_out_iter)
+                li_out_updated = pl.store(li_sum, [0, 0], li_out_iter)
             pij_buf_carry, li_out_carry = pl.yield_(pij_buf_updated, li_out_updated)
 
         return pij_buf_carry, mi_out_carry, li_out_carry
@@ -479,25 +479,12 @@ def build_paged_attention_multi_config_program(
                 for q_idx in pl.range(q_loop_static):
                     cur_offset = b_idx * num_heads + q_idx * q_tile
 
-                    oi: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
-                        [q_tile, head_dim],
-                        dtype=pl.FP32,
-                    )
-                    li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [q_tile, 1],
-                        dtype=pl.FP32,
-                    )
-                    mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [q_tile, 1],
-                        dtype=pl.FP32,
-                    )
+                    oi = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
+                    li_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    mi_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                     oi, li_update, mi_update = _hub(oi, li_update, mi_update)
 
-                    qi: pl.Tensor[[q_tile, head_dim], pl.BF16] = pl.slice(
-                        query,
-                        [q_tile, head_dim],
-                        [cur_offset, 0],
-                    )
+                    qi = pl.slice(query, [q_tile, head_dim], [cur_offset, 0])
 
                     # ── n_unroll loop over KV blocks ──────────
                     for bn in pl.range(0, max_bn, n_unroll):
@@ -505,17 +492,10 @@ def build_paged_attention_multi_config_program(
                         bt_offset = b_idx * max_num_blocks_per_req + bn
 
                         # Pre-extract block indices from block_table (multi-config)
-                        block_indices: pl.Tensor[[n_unroll], pl.INT32] = pl.slice(
-                            block_table,
-                            [n_unroll],
-                            [bt_offset],
-                        )
+                        block_indices = pl.slice(block_table, [n_unroll], [bt_offset])
 
                         # 1. QK matmul (CUBE)
-                        sij_buf: pl.Tensor[[n_unroll_q, block_size], pl.FP32] = pl.create_tensor(
-                            [n_unroll_q, block_size],
-                            dtype=pl.FP32,
-                        )
+                        sij_buf = pl.create_tensor([n_unroll_q, block_size], dtype=pl.FP32)
                         sij_buf = _qk(
                             qi,
                             key_cache,
@@ -525,18 +505,9 @@ def build_paged_attention_multi_config_program(
                         )
 
                         # 2. Softmax prepare (VECTOR)
-                        pij_buf: pl.Tensor[[n_unroll_q, block_size], pl.BF16] = pl.create_tensor(
-                            [n_unroll_q, block_size],
-                            dtype=pl.BF16,
-                        )
-                        mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                            [q_tile, 1],
-                            dtype=pl.FP32,
-                        )
-                        li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                            [q_tile, 1],
-                            dtype=pl.FP32,
-                        )
+                        pij_buf = pl.create_tensor([n_unroll_q, block_size], dtype=pl.BF16)
+                        mi = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        li = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                         pij_buf, mi, li = _sf(
                             sij_buf,
                             1.0,
@@ -547,10 +518,7 @@ def build_paged_attention_multi_config_program(
                         )
 
                         # 3. PV matmul (CUBE)
-                        oi_new: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
-                            [q_tile, head_dim],
-                            dtype=pl.FP32,
-                        )
+                        oi_new = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
                         oi_new = _pv(
                             pij_buf,
                             value_cache,
@@ -561,20 +529,16 @@ def build_paged_attention_multi_config_program(
 
                         # 4. Online update flags
                         if bn == 0:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_first = pl.yield_(1)
                         else:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_first = pl.yield_(0)
                         if bn + n_blocks == max_bn:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_last = pl.yield_(1)
                         else:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_last = pl.yield_(0)
 
                         # 5. Online update (VECTOR)
-                        out_view: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.slice(
-                            out,
-                            [q_tile, head_dim],
-                            [cur_offset, 0],
-                        )
+                        out_view = pl.slice(out, [q_tile, head_dim], [cur_offset, 0])
                         mi_update, li_update, oi, out_view = _up(
                             mi,
                             li,

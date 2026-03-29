@@ -38,7 +38,7 @@ from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-from examples.ir_parser.batch_paged_attention_example import BuildBatchPagedAttentionProgram
+from examples.models.paged_attention_batch import BuildBatchPagedAttentionProgram
 
 DEFAULT_SCALE = 1.0
 

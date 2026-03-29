@@ -266,14 +266,14 @@ def build_dynamic_paged_attention_program(
             block_num = block_table.dim(0) // batch,
             block_size = value_cache.dim(0) // block_table.dim(0).
             """
-            batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.dim(context_lens, 0)
-            query_rows: pl.Scalar[pl.INT64] = pl.tensor.dim(query, 0)
-            head_dim_cfg: pl.Scalar[pl.INT64] = pl.tensor.dim(query, 1)
-            value_cache_rows: pl.Scalar[pl.INT64] = pl.tensor.dim(value_cache, 0)
-            block_table_size: pl.Scalar[pl.INT64] = pl.tensor.dim(block_table, 0)
-            num_heads_cfg: pl.Scalar[pl.INT64] = query_rows // batch_cfg
-            block_size_cfg: pl.Scalar[pl.INT64] = value_cache_rows // block_table_size
-            block_num_cfg: pl.Scalar[pl.INT64] = block_table_size // batch_cfg
+            batch_cfg = pl.tensor.dim(context_lens, 0)
+            query_rows = pl.tensor.dim(query, 0)
+            head_dim_cfg = pl.tensor.dim(query, 1)
+            value_cache_rows = pl.tensor.dim(value_cache, 0)
+            block_table_size = pl.tensor.dim(block_table, 0)
+            num_heads_cfg = query_rows // batch_cfg
+            block_size_cfg = value_cache_rows // block_table_size
+            block_num_cfg = block_table_size // batch_cfg
 
             q_head_num = num_heads_cfg
             # ceil-divide: number of q_tile-sized chunks needed to cover all query heads
@@ -288,28 +288,15 @@ def build_dynamic_paged_attention_program(
                     cur_offset = b_idx * q_head_num + q_idx * q_tile
 
                     # Allocate zero-initialised accumulators for the online softmax state
-                    oi_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                        [q_tile, head_dim_cfg],
-                        dtype=pl.FP32,
-                    )
-                    li_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [q_tile, 1],
-                        dtype=pl.FP32,
-                    )
-                    mi_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                        [q_tile, 1],
-                        dtype=pl.FP32,
-                    )
+                    oi_buf = pl.create_tensor([q_tile, head_dim_cfg], dtype=pl.FP32)
+                    li_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    mi_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                     # Bind concrete tensor shapes to dynamic type annotations (no-op passthrough)
                     oi, li_update, mi_update = dyn_kernel_init_inplace(oi_buf, li_buf, mi_buf)
 
                     for bn in pl.range(bn_this_batch):
                         # Slice the query tile for this head-tile and batch entry
-                        qi: pl.Tensor[[q_tile, head_dim_cfg], pl.BF16] = pl.slice(
-                            query,
-                            [q_tile, head_dim_cfg],
-                            [cur_offset, 0],
-                        )
+                        qi = pl.slice(query, [q_tile, head_dim_cfg], [cur_offset, 0])
 
                         # Look up the physical block index in the page table
                         cur_block_idx = pl.tensor.read(block_table, [b_idx * block_num_cfg + bn])
@@ -319,46 +306,22 @@ def build_dynamic_paged_attention_program(
                         kv_block_row = cur_block_idx * block_size_cfg
 
                         # Slice the key block: key_cache is [KV_rows, head_dim]
-                        kj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
-                            key_cache,
-                            [block_size_cfg, head_dim_cfg],
-                            [kv_block_row, 0],
-                        )
+                        kj = pl.slice(key_cache, [block_size_cfg, head_dim_cfg], [kv_block_row, 0])
                         # Slice the value block: value_cache is stored as [KV_rows, head_dim]
-                        vj: pl.Tensor[[block_size_cfg, head_dim_cfg], pl.BF16] = pl.slice(
-                            value_cache,
-                            [block_size_cfg, head_dim_cfg],
-                            [kv_block_row, 0],
-                        )
+                        vj = pl.slice(value_cache, [block_size_cfg, head_dim_cfg], [kv_block_row, 0])
 
                         # Stage 1: QK matmul — sij[q_tile, block_size] = qi @ kj.T
-                        sij_buf: pl.Tensor[[q_tile, block_size_cfg], pl.FP32] = pl.create_tensor(
-                            [q_tile, block_size_cfg],
-                            dtype=pl.FP32,
-                        )
+                        sij_buf = pl.create_tensor([q_tile, block_size_cfg], dtype=pl.FP32)
                         sij = dyn_kernel_qk_matmul(qi, kj, sij_buf)
 
                         # Mask out padding columns beyond valid_len to avoid
                         # including out-of-range tokens in the softmax
-                        sij_valid: pl.Tensor[[q_tile, valid_len], pl.FP32] = pl.slice(
-                            sij,
-                            [q_tile, valid_len],
-                            [0, 0],
-                        )
+                        sij_valid = pl.slice(sij, [q_tile, valid_len], [0, 0])
 
                         # Stage 2: softmax prepare — scale, row_max (mi), exp, row_sum (li)
-                        pij_f16_buf: pl.Tensor[[q_tile, block_size_cfg], pl.BF16] = pl.create_tensor(
-                            [q_tile, block_size_cfg],
-                            dtype=pl.BF16,
-                        )
-                        mi_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                            [q_tile, 1],
-                            dtype=pl.FP32,
-                        )
-                        li_sm_buf: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
-                            [q_tile, 1],
-                            dtype=pl.FP32,
-                        )
+                        pij_f16_buf = pl.create_tensor([q_tile, block_size_cfg], dtype=pl.BF16)
+                        mi_sm_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        li_sm_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                         pij_f16, mi, li = dyn_kernel_softmax_prepare(
                             sij_valid,
                             1.0,
@@ -368,29 +331,22 @@ def build_dynamic_paged_attention_program(
                         )
 
                         # Stage 3: PV matmul — oi_tmp[q_tile, head_dim] = pij @ vj
-                        oi_tmp_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.create_tensor(
-                            [q_tile, head_dim_cfg],
-                            dtype=pl.FP32,
-                        )
+                        oi_tmp_buf = pl.create_tensor([q_tile, head_dim_cfg], dtype=pl.FP32)
                         oi_tmp = dyn_kernel_pv_matmul(pij_f16, vj, oi_tmp_buf)
 
                         # Determine position flags for the online softmax update kernel
                         if bn == 0:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_first = pl.yield_(1)
                         else:
-                            is_first: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_first = pl.yield_(0)
                         if bn == bn_this_batch - 1:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(1)
+                            is_last = pl.yield_(1)
                         else:
-                            is_last: pl.Scalar[pl.INT64] = pl.yield_(0)
+                            is_last = pl.yield_(0)
 
                         # Stage 4: online update — merge (mij, lij, oi_new) into (mi, li, oi)
                         # and write final normalised output on the last block
-                        out_view_buf: pl.Tensor[[q_tile, head_dim_cfg], pl.FP32] = pl.slice(
-                            out,
-                            [q_tile, head_dim_cfg],
-                            [cur_offset, 0],
-                        )
+                        out_view_buf = pl.slice(out, [q_tile, head_dim_cfg], [cur_offset, 0])
                         mi_update, li_update, oi, out_view = dyn_kernel_online_update(
                             mi,
                             li,
