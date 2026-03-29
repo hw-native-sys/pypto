@@ -149,7 +149,7 @@ def create(
     # create C++ binding accepts Sequence[int]; Expr elements from Scalar
     # unwrapping are valid at DSL parse time (parser reads the AST).
     call_expr = _ir_ops.create(
-        _normalize_intlike(shape),  # type: ignore[reportArgumentType]
+        _normalize_intlike(shape),
         dtype,
         target_memory,
     )

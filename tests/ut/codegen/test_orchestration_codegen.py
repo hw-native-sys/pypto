@@ -370,9 +370,9 @@ class TestOrchestration:
                 c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 c = self.kernel_add(a, b, c)
                 d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                d = self.kernel_add_scalar(c, 1.0, d)  # type: ignore[reportArgumentType]
+                d = self.kernel_add_scalar(c, 1.0, d)
                 e: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
+                e = self.kernel_add_scalar(c, 2.0, e)
                 g: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
                 g = self.kernel_mul(d, e, g)
                 f = self.kernel_add(g, c, f)

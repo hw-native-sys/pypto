@@ -511,7 +511,7 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
                             )
                             pij_f16, mi, li = kernel_softmax_prepare(
                                 sij_valid,
-                                1.0,  # type: ignore[reportArgumentType]
+                                1.0,
                                 pij_f16_buf,
                                 mi_sm_buf,
                                 li_sm_buf,

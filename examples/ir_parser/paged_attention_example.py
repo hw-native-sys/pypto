@@ -370,7 +370,7 @@ def build_paged_attention_program(
                         # Softmax prepare (VECTOR) via shared module-level InCore kernel
                         pij_f16, mi, li = kernel_softmax_prepare(
                             sij_valid,
-                            1.0,  # type: ignore[reportArgumentType]
+                            1.0,
                             pij_f16_buf,
                             mi_sm_buf,
                             li_sm_buf,
@@ -512,7 +512,7 @@ def build_paged_attention_unaligned_program(
                         )
                         pij_f16, mi, li = kernel_softmax_prepare_unaligned(
                             sij,
-                            1.0,  # type: ignore[reportArgumentType]
+                            1.0,
                             valid_len,
                             pij_f16_buf,
                             mi_sm_buf,

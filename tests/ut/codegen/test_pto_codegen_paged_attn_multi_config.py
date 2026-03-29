@@ -351,64 +351,64 @@ def build_paged_attention_multi_config_program(
 
                     oi: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
                         [q_tile, head_dim],
-                        dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,
                     )
                     li_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
-                        dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,
                     )
                     mi_update: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                         [q_tile, 1],
-                        dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                        dtype=pl.FP32,
                     )
                     oi, li_update, mi_update = _hub(oi, li_update, mi_update)
 
                     qi: pl.Tensor[[q_tile, head_dim], pl.BF16] = pl.slice(
                         query,
-                        [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                        [q_tile, head_dim],
                         [cur_offset, 0],
                     )
 
-                    for bn in pl.range(0, max_bn, n_unroll):  # type: ignore[reportArgumentType]
-                        n_blocks = pl.min(n_unroll, max_bn - bn)  # type: ignore[reportArgumentType]
+                    for bn in pl.range(0, max_bn, n_unroll):
+                        n_blocks = pl.min(n_unroll, max_bn - bn)
                         bt_offset = b_idx * max_num_blocks_per_req + bn
 
                         block_indices: pl.Tensor[[n_unroll], pl.INT32] = pl.slice(
                             block_table,
-                            [n_unroll],  # type: ignore[reportArgumentType]
+                            [n_unroll],
                             [bt_offset],
                         )
 
                         sij_buf: pl.Tensor[[n_unroll_q, block_size], pl.FP32] = pl.create_tensor(
                             [n_unroll_q, block_size],
-                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
                         )
                         sij_buf = _qk(qi, key_cache, sij_buf, block_indices, n_blocks)
 
                         pij_buf: pl.Tensor[[n_unroll_q, block_size], pl.BF16] = pl.create_tensor(
                             [n_unroll_q, block_size],
-                            dtype=pl.BF16,  # type: ignore[reportArgumentType]
+                            dtype=pl.BF16,
                         )
                         mi: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
-                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
                         )
                         li: pl.Tensor[[q_tile, 1], pl.FP32] = pl.create_tensor(
                             [q_tile, 1],
-                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
                         )
                         pij_buf, mi, li = _sf(
                             sij_buf,
-                            1.0,  # type: ignore[reportArgumentType]
+                            1.0,
                             pij_buf,
                             mi,
-                            li,  # type: ignore[reportArgumentType]
-                            n_blocks,  # type: ignore[reportArgumentType]
+                            li,
+                            n_blocks,
                         )
 
                         oi_new: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.create_tensor(
                             [q_tile, head_dim],
-                            dtype=pl.FP32,  # type: ignore[reportArgumentType]
+                            dtype=pl.FP32,
                         )
                         oi_new = _pv(pij_buf, value_cache, oi_new, block_indices, n_blocks)
 
@@ -423,7 +423,7 @@ def build_paged_attention_multi_config_program(
 
                         out_view: pl.Tensor[[q_tile, head_dim], pl.FP32] = pl.slice(
                             out,
-                            [q_tile, head_dim],  # type: ignore[reportArgumentType]
+                            [q_tile, head_dim],
                             [cur_offset, 0],
                         )
                         mi_update, li_update, oi, out_view = _up(

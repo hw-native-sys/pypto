@@ -489,7 +489,7 @@ def BuildBatchPagedAttentionProgram(
                         pij_b,
                         mij_b,
                         lij_b,
-                        1.0,  # type: ignore[reportArgumentType]
+                        1.0,
                         context_lens,
                         batch_cfg,
                         bn,

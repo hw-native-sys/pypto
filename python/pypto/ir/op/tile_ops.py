@@ -82,7 +82,7 @@ def _create_tile_binary_call(
 
 
 def create(
-    shape: Sequence[int] | _ir_core.MakeTuple,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
     span: Span | None = None,
@@ -338,7 +338,7 @@ def get_block_idx(span: Span | None = None) -> Call:
 
 
 def full(
-    shape: Sequence[int] | _ir_core.MakeTuple,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
     value: int | float,
     span: Span | None = None,

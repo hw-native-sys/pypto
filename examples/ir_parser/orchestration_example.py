@@ -104,11 +104,11 @@ class ExampleOrchProgram:
 
         # Task 1: d = c + 1 (call kernel_add_scalar with output buffer d)
         d: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-        d = self.kernel_add_scalar(c, 1.0, d)  # type: ignore[reportArgumentType]
+        d = self.kernel_add_scalar(c, 1.0, d)
 
         # Task 2: e = c + 2 (call kernel_add_scalar with output buffer e)
         e: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-        e = self.kernel_add_scalar(c, 2.0, e)  # type: ignore[reportArgumentType]
+        e = self.kernel_add_scalar(c, 2.0, e)
 
         # Task 3: f = d * e (call kernel_mul with output buffer)
         f_result = self.kernel_mul(d, e, f_result)
