@@ -221,7 +221,7 @@ def test_tile_matmul_acc():
     assign = ir.AssignStmt(out, call, _span())
     func = _simple_function("f", [acc, a, b], assign)
     code = torch_codegen(func)
-    assert "acc + torch.matmul(a, b)" in code
+    assert "acc + torch.matmul(a, b).float()" in code
 
 
 def test_tile_cmp():

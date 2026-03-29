@@ -63,11 +63,23 @@ _pipes = {'to_aiv': deque(), 'to_aic': deque()}
 
 def _tile_load(tensor, offsets, shapes):
     slices = tuple(slice(o, o + s) for o, s in zip(offsets, shapes))
-    return tensor[slices].clone()
+    tile = tensor[slices].clone()
+    # Pad to requested shape if source is smaller (mirrors hardware valid_shapes)
+    if tile.shape != tuple(shapes):
+        padded = torch.zeros(shapes, dtype=tile.dtype)
+        pad_slices = tuple(slice(0, s) for s in tile.shape)
+        padded[pad_slices] = tile
+        return padded
+    return tile
 
 def _tile_store(tile, offsets, output_tensor):
     slices = tuple(slice(o, o + s) for o, s in zip(offsets, tile.shape))
     output_tensor[slices] = tile
+    return output_tensor
+
+def _tensor_slice(tensor, offsets, shapes):
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets, shapes))
+    return tensor[slices]
 """
 
 # ---------------------------------------------------------------------------
@@ -171,7 +183,8 @@ def _handle_reduction(torch_fn: str) -> OpHandler:
 
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
     # args: [tensor_or_tile, shape_tuple, offset_tuple, ...]
-    return f"_tile_load({a[0]}, {a[2]}, {a[1]})"
+    # Use view (not clone) so writes propagate back to the original tensor.
+    return f"_tensor_slice({a[0]}, {a[2]}, {a[1]})"
 
 
 # Build the dispatch table
@@ -229,6 +242,18 @@ def _register_ops() -> None:
         # scatter_update
         m[f"{prefix}.scatter_update"] = lambda a, kw: f"{a[0]}.scatter_(-2, {a[1]}.expand_as({a[2]}), {a[2]})"
 
+        # broadcast ops - torch broadcasting handles these naturally
+        m[f"{prefix}.row_expand_add"] = _binop("+")
+        m[f"{prefix}.row_expand_sub"] = _binop("-")
+        m[f"{prefix}.row_expand_mul"] = _binop("*")
+        m[f"{prefix}.row_expand_div"] = _binop("/")
+        m[f"{prefix}.col_expand_mul"] = _binop("*")
+        m[f"{prefix}.col_expand_sub"] = _binop("-")
+        m[f"{prefix}.col_expand_div"] = _binop("/")
+        m[f"{prefix}.col_expand"] = _identity()
+        m[f"{prefix}.row_expand"] = _identity()
+        m[f"{prefix}.expands"] = lambda a, _kw: f"torch.full_like({a[0]}, {a[1]})"
+
     # --- Tensor-only ops ---
     m["tensor.matmul"] = _handle_tensor_matmul
     m["tensor.matmul_acc"] = _handle_tensor_matmul_acc
@@ -238,18 +263,6 @@ def _register_ops() -> None:
     m["tensor.slice"] = _handle_slice
     m["tensor.read"] = lambda a, _kw: f"{a[0]}[{a[1]}]"
     m["tensor.write"] = lambda a, _kw: f"{a[0]}.__setitem__({a[1]}, {a[2]})"
-
-    # tensor broadcast ops - torch broadcasting handles these naturally
-    m["tensor.row_expand_add"] = _binop("+")
-    m["tensor.row_expand_sub"] = _binop("-")
-    m["tensor.row_expand_mul"] = _binop("*")
-    m["tensor.row_expand_div"] = _binop("/")
-    m["tensor.col_expand_mul"] = _binop("*")
-    m["tensor.col_expand_sub"] = _binop("-")
-    m["tensor.col_expand_div"] = _binop("/")
-    m["tensor.col_expand"] = _identity()
-    m["tensor.row_expand"] = _identity()
-    m["tensor.expands"] = lambda a, _kw: f"torch.full_like({a[0]}, {a[1]})"
 
     # --- Tile-only ops ---
     m["tile.load"] = _handle_tile_load
@@ -283,13 +296,13 @@ def _register_ops() -> None:
     m["tile.cmp"] = _handle_cmp
     m["tile.cmps"] = _handle_cmp
 
-    # tile matmul variants
-    m["tile.matmul"] = _torch_fn("matmul", 2)
-    m["tile.matmul_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}))"
-    m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}) + {a[2]})"
-    m["tile.gemv"] = _torch_fn("matmul", 2)
-    m["tile.gemv_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}))"
-    m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}) + {a[2]})"
+    # tile matmul variants — .float() to match hardware FP32 accumulation output
+    m["tile.matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    m["tile.matmul_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
+    m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
+    m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    m["tile.gemv_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
+    m["tile.gemv_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
 
     # tile reductions with axis kwarg
     m["tile.sum"] = _handle_reduction("sum")
@@ -376,7 +389,7 @@ _BINARY_OP_STR: dict[type, str] = {
 class TorchCodegen(_ir.IRVisitor):
     """Emit executable PyTorch code from PyPTO IR."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, check_shapes: bool = False) -> None:
         super().__init__()
         self._lines: list[str] = []
         self._indent: int = 0
@@ -384,6 +397,7 @@ class TorchCodegen(_ir.IRVisitor):
         self._var_names: dict[int, str] = {}  # id(Var) -> unique name
         self._name_counter: dict[str, int] = {}
         self._yield_targets: list[str] = []  # names to assign on yield
+        self._check_shapes: bool = check_shapes
 
     # -- helpers --
 
@@ -440,6 +454,10 @@ class TorchCodegen(_ir.IRVisitor):
         params = [self._name_of(p) for p in func.params]
         self._emit(f"def {func.name}({', '.join(params)}):")
         self._indent += 1
+        if self._check_shapes:
+            for p in func.params:
+                # Params may receive partial tiles, so only check dtype.
+                self._emit_shape_dtype_check(self._name_of(p), p.type, shape=False)
         n_before = len(self._lines)
         self.visit_stmt(func.body)
         if len(self._lines) == n_before:
@@ -522,10 +540,64 @@ class TorchCodegen(_ir.IRVisitor):
 
     # -- statement visitors --
 
+    def _emit_shape_dtype_check(self, var_name: str, var_type: _ir.Type, *, shape: bool = True) -> None:
+        """Emit runtime assertions for tensor/tile shape and dtype.
+
+        Args:
+            var_name: The Python variable name to check.
+            var_type: The IR type annotation.
+            shape: If True, also check shape (not just dtype).  Function
+                parameters may receive partial tiles so shape checks are
+                skipped for them.
+        """
+        if not isinstance(var_type, (_ir.TensorType, _ir.TileType)):
+            return
+
+        ir_shape = var_type.shape
+        dtype = var_type.dtype
+        torch_dt = _torch_dtype(dtype)
+
+        self._emit(
+            f"assert isinstance({var_name}, torch.Tensor), "
+            f'f"Expected {var_name} to be a Tensor, got {{type({var_name}).__name__}}"'
+        )
+        if shape:
+            # Check if all dimensions are resolvable (ConstInt or locally-scoped
+            # Vars).  Dimensions from pl.dynamic() are Vars whose names are not
+            # in the generated scope, so we fall back to an ndim-only check.
+            all_static = all(isinstance(d, _ir.ConstInt) for d in ir_shape)
+            if all_static:
+                dim_strs = [self._visit_expr_str(d) for d in ir_shape]
+                shape_expr = f"({', '.join(dim_strs)},)" if len(dim_strs) == 1 else f"({', '.join(dim_strs)})"
+                self._emit(
+                    f"assert {var_name}.shape == {shape_expr}, "
+                    f'f"Shape mismatch for {var_name}: expected {shape_expr}, got {{{var_name}.shape}}"'
+                )
+            else:
+                # At least one dynamic dim — only check rank and static dims
+                ndim = len(ir_shape)
+                self._emit(
+                    f"assert {var_name}.ndim == {ndim}, "
+                    f'f"Rank mismatch for {var_name}: expected {ndim}D, got {{{var_name}.ndim}}D"'
+                )
+                for i, d in enumerate(ir_shape):
+                    if isinstance(d, _ir.ConstInt):
+                        self._emit(
+                            f"assert {var_name}.shape[{i}] == {d.value}, "
+                            f'f"Dim {i} mismatch for {var_name}: expected {d.value}, '
+                            f'got {{{var_name}.shape[{i}]}}"'
+                        )
+        self._emit(
+            f"assert {var_name}.dtype == {torch_dt}, "
+            f'f"Dtype mismatch for {var_name}: expected {torch_dt}, got {{{var_name}.dtype}}"'
+        )
+
     def visit_assign_stmt(self, op: _ir.AssignStmt) -> None:
         name = self._name_of(op.var)
         val = self._visit_expr_str(op.value)
         self._emit(f"{name} = {val}")
+        if self._check_shapes:
+            self._emit_shape_dtype_check(name, op.var.type)
 
     def visit_eval_stmt(self, op: _ir.EvalStmt) -> None:
         val = self._visit_expr_str(op.expr)
@@ -626,12 +698,46 @@ class TorchCodegen(_ir.IRVisitor):
         return "\n".join(self._lines)
 
 
+# The C++ IRVisitor dispatches to specific visit_add, visit_mul, etc. rather
+# than the generic visit_binary_expr / visit_unary_expr.  Generate thin
+# delegates so the codegen in those generic methods is actually reached.
+for _method_name in (
+    "visit_add",
+    "visit_sub",
+    "visit_mul",
+    "visit_floor_div",
+    "visit_floor_mod",
+    "visit_float_div",
+    "visit_min",
+    "visit_max",
+    "visit_pow",
+    "visit_eq",
+    "visit_ne",
+    "visit_lt",
+    "visit_le",
+    "visit_gt",
+    "visit_ge",
+    "visit_and",
+    "visit_or",
+    "visit_xor",
+    "visit_bit_and",
+    "visit_bit_or",
+    "visit_bit_xor",
+    "visit_bit_shift_left",
+    "visit_bit_shift_right",
+):
+    setattr(TorchCodegen, _method_name, TorchCodegen.visit_binary_expr)
+
+for _method_name in ("visit_neg", "visit_not", "visit_bit_not", "visit_abs", "visit_cast"):
+    setattr(TorchCodegen, _method_name, TorchCodegen.visit_unary_expr)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def torch_codegen(node: _ir.Program | _ir.Function) -> str:
+def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = False) -> str:
     """Emit executable PyTorch code from a PyPTO IR Program or Function.
 
     The generated code can be exec()'d with torch available to numerically
@@ -639,11 +745,13 @@ def torch_codegen(node: _ir.Program | _ir.Function) -> str:
 
     Args:
         node: A Program or Function IR node
+        check_shapes: If True, emit runtime assertions to verify that every
+            tensor/tile variable's shape and dtype match the IR type annotations.
 
     Returns:
         String of executable Python/PyTorch code
     """
-    cg = TorchCodegen()
+    cg = TorchCodegen(check_shapes=check_shapes)
     lines = [_PREAMBLE]
 
     if isinstance(node, _ir.Program):
