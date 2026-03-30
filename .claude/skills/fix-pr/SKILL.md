@@ -60,8 +60,8 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }' > /tmp/threads.json
 
-# Count unresolved threads (use whitespace-tolerant pattern)
-grep -Ec '"isResolved":[[:space:]]*false' /tmp/threads.json
+# Count unresolved threads (use grep -o to count all occurrences, not lines)
+grep -o '"isResolved":[[:space:]]*false' /tmp/threads.json | wc -l
 
 # Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
 
