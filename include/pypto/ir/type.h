@@ -314,8 +314,7 @@ class ShapedType : public Type {
    * @param dtype Element data type
    * @param shape Shape dimensions
    */
-  ShapedType(DataType dtype, std::vector<ExprPtr> shape)
-      : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}
+  ShapedType(DataType dtype, std::vector<ExprPtr> shape);
 
   /**
    * @brief Create a shaped type with constant shape
@@ -332,8 +331,7 @@ class ShapedType : public Type {
    * @param shape Shape dimensions
    * @param memref Memory reference (shared pointer)
    */
-  ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr memref)
-      : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+  ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr memref);
 
   /**
    * @brief Create a shaped type with optional memory reference (shared_ptr)
@@ -342,8 +340,7 @@ class ShapedType : public Type {
    * @param shape Shape dimensions
    * @param memref Optional memory reference (shared pointer)
    */
-  ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
-      : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+  ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ShapedType; }
   [[nodiscard]] std::string TypeName() const override { return "ShapedType"; }

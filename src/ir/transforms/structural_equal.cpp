@@ -39,10 +39,31 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+std::optional<TileView> NormalizePrintedTileView(const TileTypePtr& tile_type) {
+  if (!tile_type || !tile_type->tile_view_.has_value()) {
+    return std::nullopt;
+  }
+  if (tile_view_semantics::IsImplicitPrintedTileView(tile_type->tile_view_.value(), tile_type->shape_,
+                                                     tile_type->memory_space_)) {
+    return std::nullopt;
+  }
+  return tile_type->tile_view_;
+}
+
+bool AreForSyntaxScalarDtypesEquivalent(const DataType& lhs, const DataType& rhs) {
+  return (lhs == DataType::INT64 && rhs == DataType::INDEX) ||
+         (lhs == DataType::INDEX && rhs == DataType::INT64);
+}
+
+}  // namespace
 
 /**
  * @brief Unified structural equality checker for IR nodes
@@ -559,6 +580,9 @@ class StructuralEqualImpl {
   // names so that their vector/map element accessors ([i] / ['key']) attach directly
   // to the parent field name, producing paths like body[1] instead of body.stmts[1].
   void PushFieldName(const char* name) {
+    if (transparent_depth_ == 0) {
+      field_name_stack_.emplace_back(name);
+    }
     if constexpr (AssertMode) {
       if (transparent_depth_ == 0) {
         path_.emplace_back(name);  // No dot prefix — ThrowMismatch adds '.' separators
@@ -567,6 +591,9 @@ class StructuralEqualImpl {
   }
 
   void PopFieldName() {
+    if (transparent_depth_ == 0) {
+      field_name_stack_.pop_back();
+    }
     if constexpr (AssertMode) {
       if (transparent_depth_ == 0) {
         path_.pop_back();
@@ -586,6 +613,13 @@ class StructuralEqualImpl {
   bool EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs);
   bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
   bool EqualType(const TypePtr& lhs, const TypePtr& rhs);
+  bool IsLoopVarFieldContext() const {
+    return !field_name_stack_.empty() && field_name_stack_.back() == "loop_var";
+  }
+  bool IsConstIntTypeContext() const {
+    return !node_type_stack_.empty() && node_type_stack_.back() == "ConstInt" && !field_name_stack_.empty() &&
+           field_name_stack_.back() == "type";
+  }
 
   /**
    * @brief Generic field-based equality check for IR nodes using FieldIterator
@@ -667,25 +701,25 @@ class StructuralEqualImpl {
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
   std::vector<std::string> path_;  // Only used in assert mode
-  int transparent_depth_ = 0;      // Depth inside transparent containers (Program/SeqStmts)
+  std::vector<std::string> field_name_stack_;
+  std::vector<std::string> node_type_stack_;
+  int transparent_depth_ = 0;  // Depth inside transparent containers (Program/SeqStmts)
 };
 
 // Type dispatch macro for generic field-based comparison.
 // Saves and resets transparent_depth_ to 0 before entering EqualWithFields so that
 // field names of this (non-transparent) node are always pushed into the path, even
 // when Equal() is called recursively from within a transparent container's field visit.
-#define EQUAL_DISPATCH(Type)                                               \
-  if (auto lhs_##Type = As<Type>(lhs)) {                                   \
-    auto rhs_##Type = As<Type>(rhs);                                       \
-    if constexpr (AssertMode) {                                            \
-      int saved_depth = transparent_depth_;                                \
-      transparent_depth_ = 0;                                              \
-      bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
-      transparent_depth_ = saved_depth;                                    \
-      return result;                                                       \
-    } else {                                                               \
-      return rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type);        \
-    }                                                                      \
+#define EQUAL_DISPATCH(Type)                                             \
+  if (auto lhs_##Type = As<Type>(lhs)) {                                 \
+    auto rhs_##Type = As<Type>(rhs);                                     \
+    node_type_stack_.emplace_back(#Type);                                \
+    int saved_depth = transparent_depth_;                                \
+    transparent_depth_ = 0;                                              \
+    bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
+    transparent_depth_ = saved_depth;                                    \
+    node_type_stack_.pop_back();                                         \
+    return result;                                                       \
   }
 
 // Dispatch macro for transparent container nodes (Program, SeqStmts).
@@ -694,10 +728,12 @@ class StructuralEqualImpl {
 // parent field name: e.g., body[1] instead of body.stmts[1].
 #define EQUAL_DISPATCH_TRANSPARENT(Type)                                 \
   if (auto lhs_##Type = As<Type>(lhs)) {                                 \
-    if constexpr (AssertMode) transparent_depth_++;                      \
+    transparent_depth_++;                                                \
     auto rhs_##Type = As<Type>(rhs);                                     \
+    node_type_stack_.emplace_back(#Type);                                \
     bool result = rhs_##Type && EqualWithFields(lhs_##Type, rhs_##Type); \
-    if constexpr (AssertMode) transparent_depth_--;                      \
+    node_type_stack_.pop_back();                                         \
+    transparent_depth_--;                                                \
     return result;                                                       \
   }
 
@@ -787,6 +823,10 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         ThrowMismatch("Type cast failed for ScalarType", IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
+    }
+    if ((IsLoopVarFieldContext() || IsConstIntTypeContext()) &&
+        AreForSyntaxScalarDtypesEquivalent(lhs_scalar->dtype_, rhs_scalar->dtype_)) {
+      return true;
     }
     if (lhs_scalar->dtype_ != rhs_scalar->dtype_) {
       if constexpr (AssertMode) {
@@ -904,15 +944,17 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!Equal(lhs_tile->shape_[i], rhs_tile->shape_[i])) return false;
     }
     // Compare tile_view
-    if (lhs_tile->tile_view_.has_value() != rhs_tile->tile_view_.has_value()) {
+    auto lhs_tile_view = NormalizePrintedTileView(lhs_tile);
+    auto rhs_tile_view = NormalizePrintedTileView(rhs_tile);
+    if (lhs_tile_view.has_value() != rhs_tile_view.has_value()) {
       if constexpr (AssertMode) {
         ThrowMismatch("TileType tile_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }
-    if (lhs_tile->tile_view_.has_value()) {
-      const auto& lhs_tv = lhs_tile->tile_view_.value();
-      const auto& rhs_tv = rhs_tile->tile_view_.value();
+    if (lhs_tile_view.has_value()) {
+      const auto& lhs_tv = lhs_tile_view.value();
+      const auto& rhs_tv = rhs_tile_view.value();
       // Compare valid_shape
       if (lhs_tv.valid_shape.size() != rhs_tv.valid_shape.size()) {
         if constexpr (AssertMode) {

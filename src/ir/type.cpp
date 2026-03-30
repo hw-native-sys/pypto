@@ -56,6 +56,9 @@ bool operator==(const TileView& lhs, const TileView& rhs) {
 
 bool operator!=(const TileView& lhs, const TileView& rhs) { return !(lhs == rhs); }
 
+ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape)
+    : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}
+
 std::string TensorLayoutToString(TensorLayout layout) {
   switch (layout) {
     case TensorLayout::ND:
@@ -110,6 +113,12 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
     shape_.push_back(std::make_shared<ConstInt>(dim, DataType::INDEX, Span::unknown()));
   }
 }
+
+ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr memref)
+    : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
+
+ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, std::optional<MemRefPtr> memref)
+    : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
 
 TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
                    std::optional<TileView> tile_view, std::optional<MemorySpace> memory_space)

@@ -272,6 +272,26 @@ class TestTensorTypeWithMemRef:
         assert tensor_var.type.memref is not None
         assert tensor_var.type.memory_space == ir.MemorySpace.DDR
 
+    def test_tensor_type_preserves_const_shape_dim_dtype(self):
+        """TensorType preserves the original dtype of Expr-based shape dims."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(10, DataType.INT64, span),
+            ir.ConstInt(20, DataType.INT32, span),
+        ]
+
+        tensor_type = ir.TensorType(shape, DataType.FP32)
+
+        assert len(tensor_type.shape) == 2
+        # Original dtypes are preserved; INT64/INDEX equivalence is handled by
+        # structural_equal, not by mutating the IR at construction time.
+        assert isinstance(tensor_type.shape[0], ir.ConstInt)
+        assert isinstance(tensor_type.shape[0].type, ir.ScalarType)
+        assert tensor_type.shape[0].type.dtype == DataType.INT64
+        assert isinstance(tensor_type.shape[1], ir.ConstInt)
+        assert isinstance(tensor_type.shape[1].type, ir.ScalarType)
+        assert tensor_type.shape[1].type.dtype == DataType.INT32
+
 
 class TestTileTypeWithMemRef:
     """Tests for TileType with MemRef and TileView."""
@@ -289,6 +309,26 @@ class TestTileTypeWithMemRef:
         assert len(tile_type.shape) == 2
         assert tile_type.memref is None
         assert tile_type.tile_view is None
+
+    def test_tile_type_preserves_const_shape_dim_dtype(self):
+        """TileType preserves the original dtype of Expr-based shape dims."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(32, DataType.INT32, span),
+        ]
+
+        tile_type = ir.TileType(shape, DataType.FP32)
+
+        assert len(tile_type.shape) == 2
+        # Original dtypes are preserved; INT64/INDEX equivalence is handled by
+        # structural_equal, not by mutating the IR at construction time.
+        assert isinstance(tile_type.shape[0], ir.ConstInt)
+        assert isinstance(tile_type.shape[0].type, ir.ScalarType)
+        assert tile_type.shape[0].type.dtype == DataType.INT64
+        assert isinstance(tile_type.shape[1], ir.ConstInt)
+        assert isinstance(tile_type.shape[1].type, ir.ScalarType)
+        assert tile_type.shape[1].type.dtype == DataType.INT32
 
     def test_tile_type_with_memref(self):
         """Test TileType creation with MemRef."""

@@ -36,10 +36,33 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+
+std::optional<TileView> NormalizePrintedTileView(const TileTypePtr& tile_type) {
+  if (!tile_type || !tile_type->tile_view_.has_value()) {
+    return std::nullopt;
+  }
+  if (tile_view_semantics::IsImplicitPrintedTileView(tile_type->tile_view_.value(), tile_type->shape_,
+                                                     tile_type->memory_space_)) {
+    return std::nullopt;
+  }
+  return tile_type->tile_view_;
+}
+
+DataType CanonicalizeForSyntaxScalarDtype(const DataType& dtype) {
+  if (dtype == DataType::INT64 || dtype == DataType::INDEX) {
+    return DataType::INDEX;
+  }
+  return dtype;
+}
+
+}  // namespace
 
 /**
  * @brief Hash combine using Boost-inspired algorithm
@@ -124,9 +147,16 @@ class StructuralHasher {
     visit_op();
   }
 
-  // No-op path tracking hooks (path tracking is only needed in StructuralEqualImpl<true>)
-  void PushFieldName([[maybe_unused]] const char* name) {}
-  void PopFieldName() {}
+  void PushFieldName(const char* name) {
+    if (transparent_depth_ == 0) {
+      field_name_stack_.emplace_back(name);
+    }
+  }
+  void PopFieldName() {
+    if (transparent_depth_ == 0) {
+      field_name_stack_.pop_back();
+    }
+  }
 
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
@@ -267,6 +297,13 @@ class StructuralHasher {
  private:
   result_type HashNode(const IRNodePtr& node);
   result_type HashType(const TypePtr& type);
+  bool IsLoopVarFieldContext() const {
+    return !field_name_stack_.empty() && field_name_stack_.back() == "loop_var";
+  }
+  bool IsConstIntTypeContext() const {
+    return !node_type_stack_.empty() && node_type_stack_.back() == "ConstInt" && !field_name_stack_.empty() &&
+           field_name_stack_.back() == "type";
+  }
 
   template <typename NodePtr>
   result_type HashNodeImpl(const NodePtr& node);
@@ -274,6 +311,9 @@ class StructuralHasher {
   bool enable_auto_mapping_;
   std::unordered_map<IRNodePtr, result_type> hash_value_map_;
   int64_t free_var_counter_ = 0;
+  std::vector<std::string> field_name_stack_;
+  std::vector<std::string> node_type_stack_;
+  int transparent_depth_ = 0;
 };
 
 template <typename NodePtr>
@@ -282,6 +322,20 @@ StructuralHasher::result_type StructuralHasher::HashNodeImpl(const NodePtr& node
 
   // Start with type discriminator
   result_type h = static_cast<result_type>(std::hash<std::string>{}(node->TypeName()));
+  node_type_stack_.emplace_back(node->TypeName());
+
+  // Mirror EQUAL_DISPATCH / EQUAL_DISPATCH_TRANSPARENT from structural_equal.cpp:
+  // - Transparent containers (Program, SeqStmts) suppress their own field names by
+  //   incrementing transparent_depth_, so PushFieldName skips them.
+  // - Non-transparent nodes reset transparent_depth_ to 0 so their fields are always
+  //   tracked, even when visited from within a transparent container.
+  constexpr bool is_transparent = std::is_same_v<NodeType, Program> || std::is_same_v<NodeType, SeqStmts>;
+  int saved_depth = transparent_depth_;
+  if constexpr (is_transparent) {
+    transparent_depth_++;
+  } else {
+    transparent_depth_ = 0;
+  }
 
   // Visit all fields using reflection
   auto descriptors = NodeType::GetFieldDescriptors();
@@ -293,6 +347,9 @@ StructuralHasher::result_type StructuralHasher::HashNodeImpl(const NodePtr& node
       },
       descriptors);
 
+  transparent_depth_ = saved_depth;
+  node_type_stack_.pop_back();
+
   return hash_combine(h, fields_hash);
 }
 
@@ -300,7 +357,11 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
   INTERNAL_CHECK(type) << "structural_hash encountered null TypePtr";
   result_type h = static_cast<result_type>(std::hash<std::string>{}(type->TypeName()));
   if (auto scalar_type = As<ScalarType>(type)) {
-    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(scalar_type->dtype_.Code())));
+    DataType dtype = scalar_type->dtype_;
+    if (IsLoopVarFieldContext() || IsConstIntTypeContext()) {
+      dtype = CanonicalizeForSyntaxScalarDtype(dtype);
+    }
+    h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(dtype.Code())));
   } else if (auto tensor_type = As<TensorType>(type)) {
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tensor_type->dtype_.Code())));
     h = hash_combine(h, static_cast<result_type>(tensor_type->shape_.size()));
@@ -339,8 +400,9 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       h = hash_combine(h, HashNode(dim));
     }
     // Hash tile_view if present
-    if (tile_type->tile_view_.has_value()) {
-      const auto& tv = tile_type->tile_view_.value();
+    auto tile_view = NormalizePrintedTileView(tile_type);
+    if (tile_view.has_value()) {
+      const auto& tv = tile_view.value();
       h = hash_combine(h, static_cast<result_type>(1));  // indicate presence
       // Hash valid_shape
       h = hash_combine(h, static_cast<result_type>(tv.valid_shape.size()));
