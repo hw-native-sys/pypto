@@ -19,6 +19,7 @@ hits the three constructs whose pyright typing was fixed:
 
 import pypto.language as pl
 import pytest
+from pypto import ir
 
 
 class TestSoftmaxRescaleDSL:
@@ -43,10 +44,9 @@ class TestSoftmaxRescaleDSL:
                 r1: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(oi, [0, 0], ret1_out)
                 return r0, r1
 
-        assert SoftmaxInit is not None
-        code = SoftmaxInit.as_python()
-        assert "tile.full" in code
-        assert "tile.store" in code
+        printed = SoftmaxInit.as_python()
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(SoftmaxInit, reparsed)
 
     def test_softmax_rescale_branch_on_index(self):
         """Incore function that branches on Scalar == 0 (if idx == 0)."""
@@ -81,9 +81,9 @@ class TestSoftmaxRescaleDSL:
                 r1: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(oi_phi, [0, 0], ret1_out)
                 return r0, r1
 
-        assert SoftmaxBranch is not None
-        code = SoftmaxBranch.as_python()
-        assert "idx == 0" in code
+        printed = SoftmaxBranch.as_python()
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(SoftmaxBranch, reparsed)
 
     def test_softmax_rescale_orchestration_with_tuple_return(self):
         """Orchestration that calls incore and indexes the Tuple result."""
@@ -120,8 +120,9 @@ class TestSoftmaxRescaleDSL:
                 oi: pl.Tensor[[16, 128], pl.FP32] = ret[1]
                 return oi
 
-        assert SoftmaxOrch is not None
-        assert len(SoftmaxOrch.functions) == 2
+        printed = SoftmaxOrch.as_python()
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(SoftmaxOrch, reparsed)
 
     def test_alloc_memref_directly_in_dsl(self):
         """pl.tile.alloc and pl.MemRefType used directly, as the pass dump emits them."""
@@ -143,7 +144,12 @@ class TestSoftmaxRescaleDSL:
                 r: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(t2, [0, 0], out)
                 return r
 
-        assert AllocProg is not None
+        # Round-trip: print → parse succeeds.
+        # Note: memref info in Tile annotations is lost during re-parse (see #791),
+        # so we verify parsing succeeds rather than full structural equality.
+        printed = AllocProg.as_python()
+        reparsed = pl.parse_program(printed)
+        assert reparsed is not None
 
 
 if __name__ == "__main__":
