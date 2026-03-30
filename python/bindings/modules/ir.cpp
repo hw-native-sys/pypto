@@ -460,6 +460,24 @@ void BindIR(nb::module_& m) {
   auto memref_class =
       nb::class_<MemRef, Var>(ir, "MemRef", "Memory reference variable for shaped types (inherits from Var)");
   memref_class
+      .def(
+          "__init__",
+          [](MemRef* self, int64_t addr, uint64_t size, uint64_t id, const Span& span) {
+            auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INT64, span);
+            new (self) MemRef(addr_expr, size, id, span);
+          },
+          nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
+          "Create a memory reference with integer addr, size, id, and span")
+      .def(
+          "__init__",
+          [](MemRef* self, MemorySpace memory_space, int64_t addr, uint64_t size, uint64_t id,
+             const Span& span) {
+            auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INT64, span);
+            new (self) MemRef(memory_space, addr_expr, size, id, span);
+          },
+          nb::arg("memory_space"), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
+          nb::arg("span") = Span::unknown(),
+          "Create a memory reference with legacy memory_space, integer addr, size, id, and span.")
       .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("memory_space"),
            nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
            "Create a memory reference with legacy memory_space, addr, size, id, and span."

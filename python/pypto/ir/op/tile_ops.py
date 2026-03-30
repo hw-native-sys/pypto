@@ -266,9 +266,10 @@ def assemble(
 
 def scatter_update(
     input: Expr,
-    dim: int,
-    index: Expr,
-    src: Expr,
+    *args: Expr | int,
+    dim: int | Expr | None = None,
+    index: Expr | None = None,
+    src: Expr | None = None,
     span: Span | None = None,
 ) -> Call:
     """Update tile rows at positions specified by 2D index tile with values from src.
@@ -276,6 +277,10 @@ def scatter_update(
     Supports two variants based on input/src rank:
     - 2D: input [rows, d], src [b*s, d], index [b, s]
     - 4D: input [blockNum, blockSize, 1, d], src [b, s, 1, d], index [b, s]
+
+    Accepts both call forms:
+    - scatter_update(input, dim, index, src)
+    - scatter_update(input, index, src, dim=-2)
 
     Args:
         input: Destination tile (TileType, 2D or 4D)
@@ -287,11 +292,37 @@ def scatter_update(
     Returns:
         Call expression returning a TileType with the same shape/dtype as input
     """
+    if len(args) == 3 and dim is None and index is None and src is None:
+        dim, index, src = args
+    elif len(args) == 2 and dim is not None and index is None and src is None:
+        index, src = args
+    elif len(args) == 1 and dim is None and index is not None and src is not None:
+        # (input, dim, index=..., src=...) — dim passed positionally
+        dim = args[0]
+    elif len(args) != 0:
+        raise TypeError(
+            "scatter_update expects (input, dim, index, src), "
+            "(input, index, src, dim=...), or (input, dim, index=..., src=...)"
+        )
+
+    if dim is None or index is None or src is None:
+        raise TypeError("scatter_update requires input, dim, index, and src")
+
     actual_span = _get_span_or_capture(span)
-    # dim may arrive as a ConstInt when called from the DSL parser — extract the int value
-    dim_val = int(dim.value) if isinstance(dim, ConstInt) else int(dim)
+    if isinstance(dim, ConstInt):
+        dim_val = int(dim.value)
+    elif isinstance(dim, int):
+        dim_val = dim
+    else:
+        raise TypeError(f"dim must be int or ConstInt, got {type(dim)}")
+
+    if not isinstance(index, Expr):
+        raise TypeError(f"index must be Expr, got {type(index)}")
+    if not isinstance(src, Expr):
+        raise TypeError(f"src must be Expr, got {type(src)}")
+    op_args: list[Expr] = [input, index, src]
     kwargs: dict[str, Any] = {"dim": dim_val}
-    return _ir_core.create_op_call("tile.scatter_update", [input, index, src], kwargs, actual_span)
+    return _ir_core.create_op_call("tile.scatter_update", op_args, kwargs, actual_span)
 
 
 def concat(

@@ -167,6 +167,44 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     return ir.python_print_type(lhs) == ir.python_print_type(rhs)
 
 
+def _normalize_inferred_type_for_annotation(
+    annotation_type: ir.Type,
+    value_expr: ir.Expr,
+) -> ir.Type:
+    """Normalize inferred type before comparing it with an explicit annotation.
+
+    For some printer-emitted forms, the explicit annotation carries result-type
+    information that the RHS syntax does not fully encode.  A key example is
+    ``FlattenTileNdTo2D`` output:
+
+    - LHS annotation prints the flattened 2D tile shape
+    - RHS ``pl.tile.load(...)`` / ``pl.tile.create(...)`` still carries the
+      original ND tensor-region operands
+
+    In that case the annotation is the only place where the flattened result
+    shape is visible in Python syntax, so roundtrip parsing must trust it.
+    """
+    inferred_type = _normalize_type_for_syntax_match(value_expr.type)
+    assert inferred_type is not None
+    if not (
+        isinstance(annotation_type, ir.TileType)
+        and isinstance(inferred_type, ir.TileType)
+        and isinstance(value_expr, ir.Call)
+        and value_expr.op.name in {"tile.load", "tile.create"}
+        and len(annotation_type.shape) <= 2
+        and len(inferred_type.shape) > 2
+    ):
+        return inferred_type
+
+    return ir.TileType(
+        annotation_type.shape,
+        inferred_type.dtype,
+        inferred_type.memref,
+        inferred_type.tile_view,
+        inferred_type.memory_space,
+    )
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -449,6 +487,24 @@ class ASTParser:
                 span=self.span_tracker.get_span(stmt),
                 hint="Provide a value for the assignment",
             )
+        is_memref_type_annotation = (
+            isinstance(stmt.annotation, ast.Attribute)
+            and isinstance(stmt.annotation.value, ast.Name)
+            and stmt.annotation.value.id == "pl"
+            and stmt.annotation.attr == "MemRefType"
+        ) or (isinstance(stmt.annotation, ast.Name) and stmt.annotation.id == "MemRefType")
+
+        if (
+            is_memref_type_annotation
+            and isinstance(stmt.value, ast.Call)
+            and self._is_printed_tile_alloc_call(stmt.value)
+        ):
+            value_expr = self._parse_printed_tile_alloc_call(stmt.value)
+            memref_var = self._build_memref_from_alloc_call(var_name, value_expr, span)
+            self.builder.emit(ir.AssignStmt(memref_var, value_expr, span))
+            self.scope_manager.define_var(var_name, memref_var, span=span)
+            return
+
         value_expr = self.parse_expression(stmt.value)
 
         # Validate annotation against inferred type; use annotation as override only for memref
@@ -457,7 +513,6 @@ class ASTParser:
             # Skip annotations the resolver can't handle:
             # - String forward refs (e.g. "SomeType")
             # - pl.UnknownType (emitted by printer for unrepresentable types)
-            # - pl.MemRefType (emitted by printer for tile.alloc results)
             ann = stmt.annotation
             is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
                 isinstance(ann, ast.Attribute)
@@ -470,21 +525,36 @@ class ASTParser:
             else:
                 resolved = self.type_resolver.resolve_type(ann)
             if resolved is not None and not isinstance(resolved, list):
-                self.type_resolver.validate_annotation_consistency(resolved, value_expr.type, var_name, span)
+                inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
+                self.type_resolver.validate_annotation_consistency(
+                    resolved, inferred_for_validation, var_name, span
+                )
                 if isinstance(value_expr.type, ir.UnknownType):
                     # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
                     override_type = resolved
                 elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
+                    normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
+                    assert isinstance(normalized_inferred, ir.TileType)
                     # Merge annotation metadata with inferred type: annotation fields
                     # take priority, but inferred fields fill gaps the annotation doesn't specify.
                     # This handles memref, memory_space, and tile_view in a single path.
                     ann_ms = resolved.memory_space
                     ann_tv = resolved.tile_view
-                    inf_ms = value_expr.type.memory_space
+                    inf_ms = normalized_inferred.memory_space
+                    # Use the actual (non-stripped) tile_view from the inferred type so that
+                    # implicit TileViews set by C++ type inference (e.g. col_major for [N,1] Vec)
+                    # are preserved in the merged override type.  normalized_inferred strips
+                    # implicit TileViews for syntax-level comparison only; we must not use
+                    # that stripped value for the merge.
                     inf_tv = value_expr.type.tile_view
                     merged_ms = ann_ms if ann_ms is not None else inf_ms
                     merged_tv = ann_tv if ann_tv is not None else inf_tv
-                    if resolved.memref is not None or merged_ms is not None or merged_tv is not None:
+                    if (
+                        resolved.memref is not None
+                        or merged_ms is not None
+                        or merged_tv is not None
+                        or not _shape_exprs_match(resolved.shape, normalized_inferred.shape)
+                    ):
                         override_type = ir.TileType(
                             resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
                         )
@@ -499,15 +569,20 @@ class ASTParser:
                     and value_expr.type.dtype == DataType.INDEX
                 ):
                     override_type = resolved
-        # If the annotation resolved to a TileType and the value is a tpop call
-        # with UnknownType, reconstruct the Call carrying the resolved TileType
-        # so that codegen can emit SSA-result tpop without a separate alloc_tile.
+        # If annotation syntax determines the result type more precisely than the
+        # raw call inference, rebuild the Call with that type so structural
+        # equality sees the same IR after print→parse.
         if (
             override_type is not None
-            and isinstance(override_type, ir.TileType)
             and isinstance(value_expr, ir.Call)
-            and isinstance(value_expr.type, ir.UnknownType)
-            and value_expr.op.name in ("tile.tpop_from_aiv", "tile.tpop_from_aic")
+            and (
+                (
+                    isinstance(override_type, ir.TileType)
+                    and isinstance(value_expr.type, ir.UnknownType)
+                    and value_expr.op.name in ("tile.tpop_from_aiv", "tile.tpop_from_aic")
+                )
+                or not _types_match(value_expr.type, override_type)
+            )
         ):
             value_expr = ir.Call(
                 value_expr.op, value_expr.args, value_expr.kwargs, override_type, value_expr.span
@@ -524,6 +599,35 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
+
+    def _build_memref_from_alloc_call(self, var_name: str, alloc_call: ir.Call, span: ir.Span) -> ir.MemRef:
+        """Build a MemRef variable from a printer-emitted ``tile.alloc`` call."""
+        if len(alloc_call.args) != 4:
+            raise ParserTypeError(
+                f"tile.alloc for '{var_name}' must have 4 positional arguments",
+                span=span,
+                hint="Use tile.alloc(memory_space, addr, size, id)",
+            )
+
+        memory_space_expr, addr_expr, size_expr, id_expr = alloc_call.args
+        if not isinstance(size_expr, ir.ConstInt) or not isinstance(id_expr, ir.ConstInt):
+            raise ParserTypeError(
+                f"tile.alloc for '{var_name}' requires constant size/id in printed IR",
+                span=span,
+                hint="Use constant integer size/id for tile.alloc",
+            )
+
+        if isinstance(memory_space_expr, ir.ConstInt):
+            try:
+                memory_space = ir.MemorySpace(memory_space_expr.value)
+            except Exception as exc:  # pragma: no cover - defensive enum fallback
+                raise ParserTypeError(
+                    f"Invalid memory space value in tile.alloc for '{var_name}': {memory_space_expr.value}",
+                    span=span,
+                ) from exc
+            return ir.MemRef(memory_space, addr_expr, size_expr.value, id_expr.value, span)
+
+        return ir.MemRef(addr_expr, size_expr.value, id_expr.value, span)
 
     def _assign_or_let(
         self,
@@ -789,18 +893,17 @@ class ASTParser:
                 hint="Use: for i, (var1,) in pl.range(n, init_values=(val1,)) to include iter_args",
             )
 
-        if iterator_type == "unroll" and range_args["init_values"]:
-            raise ParserSyntaxError(
-                "pl.unroll() cannot be combined with init_values",
-                span=self.span_tracker.get_span(iter_call),
-                hint="Unrolled loops do not support loop-carried values (init_values)",
-            )
-
         # For pl.unroll(), require compile-time constant integer bounds
         # and reject step=0. Fail early with clear parser errors instead of
         # later generic failures in the UnrollLoops C++ pass.
         # Note: negative literals like -1 become ir.Neg(ir.ConstInt(1)).
         if iterator_type == "unroll":
+            if range_args["init_values"]:
+                raise ParserSyntaxError(
+                    "pl.unroll() cannot be combined with init_values",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint="Use pl.range() to carry state across iterations.",
+                )
             for _bound_name in ("start", "stop", "step"):
                 _bound_value = range_args.get(_bound_name)
                 if _bound_value is not None and not _is_const_int(_bound_value):
@@ -825,16 +928,28 @@ class ASTParser:
 
         kind = self._ITERATOR_TO_KIND[iterator_type]
         # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
-        # If bounds use a non-default integer dtype (e.g. INT32), use that for the loop var
-        # rather than always defaulting to INDEX. This ensures print-parse roundtrip is exact.
+        # Bare Python ints still map to INDEX, but explicitly typed INT64 bounds
+        # should rebuild an INT64 loop var when the printer emitted them that way.
         _loop_var_dtype = DataType.INDEX
+        saw_index_bound = False
+        saw_int64_bound = False
         for _bound in (range_args.get("start"), range_args.get("stop"), range_args.get("step")):
-            if isinstance(_bound, ir.ConstInt) and _bound.dtype not in (DataType.INDEX, DataType.INT64):
-                _loop_var_dtype = _bound.dtype
-                break
+            if isinstance(_bound, ir.ConstInt):
+                if _bound.dtype == DataType.INDEX:
+                    saw_index_bound = True
+                elif _bound.dtype == DataType.INT64:
+                    saw_int64_bound = True
+                else:
+                    _loop_var_dtype = _bound.dtype
+                    break
+        if _loop_var_dtype == DataType.INDEX and saw_int64_bound and not saw_index_bound:
+            _loop_var_dtype = DataType.INT64
         loop_var = self.builder.var(loop_var_name, ir.ScalarType(_loop_var_dtype))
         span = self.span_tracker.get_span(stmt)
         loop_output_vars: list[str] = []
+        prev_loop_builder = self.current_loop_builder
+        prev_in_for_loop = self.in_for_loop
+        prev_in_while_loop = self.in_while_loop
 
         with self.builder.for_loop(
             loop_var,
@@ -877,9 +992,10 @@ class ASTParser:
 
             should_leak = is_simple_for and not loop_output_vars
             self.scope_manager.exit_scope(leak_vars=should_leak)
-            self.in_for_loop = False
             self._loop_kind_stack.pop()
-            self.current_loop_builder = None
+            self.in_for_loop = prev_in_for_loop
+            self.in_while_loop = prev_in_while_loop
+            self.current_loop_builder = prev_loop_builder
 
         if not is_simple_for:
             loop_result = loop.get_result()
@@ -1271,13 +1387,23 @@ class ASTParser:
             assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
             return self._current_yield_vars[:]
 
-    def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
+    def _register_while_outputs(
+        self, loop: Any, iter_args_node: ast.Tuple, loop_output_vars: list[str]
+    ) -> None:
         """Register output variables from pl.while_() loop."""
         loop_result = loop.get_result()
         if hasattr(loop_result, "return_vars") and loop_result.return_vars and loop_output_vars:
+            for i, iter_arg_node in enumerate(iter_args_node.elts):
+                if i >= len(loop_result.return_vars):
+                    break
+                if isinstance(iter_arg_node, ast.Name):
+                    self.scope_manager.define_var(
+                        iter_arg_node.id, loop_result.return_vars[i], allow_redef=True
+                    )
+
             for i, var_name in enumerate(loop_output_vars):
                 if i < len(loop_result.return_vars):
-                    self.scope_manager.define_var(var_name, loop_result.return_vars[i])
+                    self.scope_manager.define_var(var_name, loop_result.return_vars[i], allow_redef=True)
 
     def _parse_while_as_for(self, stmt: ast.For, while_call: ast.Call) -> None:
         """Parse while loop using for...in pl.while_() pattern.
@@ -1298,6 +1424,9 @@ class ASTParser:
 
         span = self.span_tracker.get_span(stmt)
         placeholder_condition = ir.ConstBool(True, span)
+        prev_loop_builder = self.current_loop_builder
+        prev_in_for_loop = self.in_for_loop
+        prev_in_while_loop = self.in_while_loop
 
         with self.builder.while_loop(placeholder_condition, span) as loop:
             self.current_loop_builder = loop
@@ -1332,12 +1461,13 @@ class ASTParser:
                 loop.return_var(var_name)
 
             self.scope_manager.exit_scope(leak_vars=False)
-            self.in_while_loop = False
             self._loop_kind_stack.pop()
-            self.current_loop_builder = None
+            self.in_for_loop = prev_in_for_loop
+            self.in_while_loop = prev_in_while_loop
+            self.current_loop_builder = prev_loop_builder
 
         # Register output variables
-        self._register_while_outputs(loop, loop_output_vars)
+        self._register_while_outputs(loop, iter_args_node, loop_output_vars)
 
     def parse_while_loop(self, stmt: ast.While) -> None:
         """Parse natural while loop syntax.
@@ -1353,6 +1483,9 @@ class ASTParser:
         # Parse natural while syntax: while condition:
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
+        prev_loop_builder = self.current_loop_builder
+        prev_in_for_loop = self.in_for_loop
+        prev_in_while_loop = self.in_while_loop
 
         with self.builder.while_loop(condition, span) as loop:
             self.current_loop_builder = loop
@@ -1366,9 +1499,10 @@ class ASTParser:
 
             # Variables leak to outer scope (ConvertToSSA will handle)
             self.scope_manager.exit_scope(leak_vars=True)
-            self.in_while_loop = False
             self._loop_kind_stack.pop()
-            self.current_loop_builder = None
+            self.in_for_loop = prev_in_for_loop
+            self.in_while_loop = prev_in_while_loop
+            self.current_loop_builder = prev_loop_builder
 
     def parse_if_statement(self, stmt: ast.If) -> None:
         """Parse if statement with phi nodes.
@@ -2065,6 +2199,19 @@ class ASTParser:
         # Emit yield statement
         self.builder.emit(ir.YieldStmt(yield_exprs, span))
 
+        # Bare top-level loop/while yields carry the loop output vars directly.
+        # Record their names so pl.while_()/init_values and similar printed forms
+        # can be parsed back into return_vars without requiring assignment-form
+        # yields.
+        if (
+            self._current_yield_vars is not None
+            and not self.in_if_stmt
+            and (self.in_for_loop or self.in_while_loop)
+        ):
+            for expr in yield_exprs:
+                if isinstance(expr, ir.Var):
+                    self._track_yield_var(expr.name_hint, [expr])
+
         # Track yielded variables for if statement processing
         # This is for single assignment like: var = pl.yield_(expr)
         # We'll return a placeholder that gets resolved when if statement completes
@@ -2077,7 +2224,11 @@ class ASTParser:
         if len(yield_exprs) == 1:
             return yield_exprs[0]
 
-        # For multiple yields, this should be handled as tuple assignment
+        # Bare yield statements may legally yield multiple loop-carried values;
+        # expression contexts still require assignment-form unpacking.
+        if self.in_for_loop or self.in_while_loop or self.in_if_stmt:
+            return None  # type: ignore[return-value]
+
         raise ParserSyntaxError(
             "Multiple yields should use tuple unpacking assignment",
             span=self.span_tracker.get_span(call),
@@ -2465,7 +2616,37 @@ class ASTParser:
 
     def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tile operation."""
+        if op_name == "alloc":
+            return self._parse_printed_tile_alloc_call(call)
         return self._dispatch_op(ir_op.tile, "tile", op_name, call)
+
+    @staticmethod
+    def _is_printed_tile_alloc_call(call: ast.Call) -> bool:
+        """Return whether the AST call matches printer-emitted ``pl.tile.alloc(...)``."""
+        func = call.func
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "alloc"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "tile"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "pl"
+        )
+
+    def _parse_printed_tile_alloc_call(self, call: ast.Call) -> ir.Call:
+        """Parse printer-emitted ``pl.tile.alloc(...)`` into a raw IR call."""
+        if call.keywords:
+            raise InvalidOperationError(
+                "tile.alloc in printed IR must use positional arguments only",
+                span=self.span_tracker.get_span(call),
+            )
+        args = [self.parse_expression(arg) for arg in call.args]
+        if len(args) != 4:
+            raise InvalidOperationError(
+                f"tile.alloc in printed IR expects 4 positional arguments, got {len(args)}",
+                span=self.span_tracker.get_span(call),
+            )
+        return ir.create_op_call("tile.alloc", args, {}, self.span_tracker.get_span(call))
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""

@@ -1218,10 +1218,10 @@ class TestPythonSyntaxPrinting:
         printed = ir.python_print_type(tile_type)
 
         assert "pl.TileView" in printed
-        assert "blayout=" in printed
-        assert "pl.TileLayout.col_major" in printed
-        assert "slayout=" in printed
-        assert "pl.TileLayout.row_major" in printed
+        # blayout=col_major and slayout=row_major are implicit for Left memory space
+        # and are omitted by the memory-space-aware printer.
+        assert "blayout=" not in printed
+        assert "slayout=" not in printed
         assert "fractal=1024" in printed
         assert "pad=" in printed
         assert "pl.PadValue.zero" in printed

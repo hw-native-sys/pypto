@@ -358,6 +358,7 @@ class TypeResolver:
         - `pl.TileView(...)`
         - `pl.Mem.<space>` / `pl.MemorySpace.<space>`
         - `pl.MemRef(...)`
+        - a previously defined `pl.MemRefType` variable name
 
         Constraint:
         - If `pl.MemRef(...)` is present, an explicit memory-space argument is required.
@@ -367,11 +368,11 @@ class TypeResolver:
         memory_space_node: ast.expr | None = None
 
         for node in extra_nodes:
-            if self._is_memref_node(node):
+            if self._is_memref_node(node) or self._resolve_memref_var_ref(node) is not None:
                 if memref_node is not None:
                     raise ParserTypeError(
-                        "Tile annotation can contain at most one pl.MemRef(...)",
-                        hint="Remove the duplicate pl.MemRef(...) argument",
+                        "Tile annotation can contain at most one memref argument",
+                        hint="Remove the duplicate pl.MemRef(...) or MemRefType variable argument",
                     )
                 memref_node = node
                 continue
@@ -394,12 +395,6 @@ class TypeResolver:
                 memory_space_node = node
                 continue
 
-            # Bare name referencing a tile.alloc variable (e.g. mem_vec_0) emitted
-            # by the printer after InitMemRef / AllocateMemoryAddr.  These carry
-            # no information the parser needs — silently skip them.
-            if isinstance(node, ast.Name) and node.id.startswith("mem_"):
-                continue
-
             if self._is_layout_node(node):
                 raise ParserTypeError(
                     f"Tile does not accept layouts like {ast.unparse(node)}",
@@ -408,21 +403,36 @@ class TypeResolver:
 
             raise ParserTypeError(
                 f"Unsupported Tile annotation argument: {ast.unparse(node)}",
-                hint="Use pl.TileView(...), pl.Mem.<space>, and/or pl.MemRef(...)",
+                hint="Use pl.TileView(...), pl.Mem.<space>, pl.MemRef(...), and/or a MemRefType variable",
             )
 
         if memref_node is not None and memory_space_node is None:
             raise ParserTypeError(
-                "Tile annotation with pl.MemRef(...) must also specify explicit memory space",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(addr, size, id), pl.Mem.Vec]",
+                "Tile annotation with a memref argument must also specify explicit memory space",
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(addr, size, id), pl.Mem.Vec] or "
+                "pl.Tile[[shape], dtype, memref_var, pl.Mem.Vec]",
             )
 
-        memref = self.resolve_memref(memref_node) if memref_node is not None else None
+        if memref_node is None:
+            memref = None
+        elif self._is_memref_node(memref_node):
+            memref = self.resolve_memref(memref_node)
+        else:
+            memref = self._resolve_memref_var_ref(memref_node)
         tile_view = self._resolve_tileview(tile_view_node, shape) if tile_view_node is not None else None
         memory_space = (
             self._resolve_memory_space(memory_space_node) if memory_space_node is not None else None
         )
         return ir.TileType(shape, dtype, memref, tile_view, memory_space)
+
+    def _resolve_memref_var_ref(self, node: ast.expr) -> "ir.MemRef | None":
+        """Resolve a previously bound MemRef variable used in a Tile annotation."""
+        if not isinstance(node, ast.Name) or self.scope_lookup is None:
+            return None
+        var = self.scope_lookup(node.id)
+        if isinstance(var, ir.MemRef):
+            return var
+        return None
 
     def _resolve_tuple_type(self, subscript_node: ast.Subscript) -> list[ir.Type]:
         """Resolve tuple[T1, T2, ...] return type annotation.

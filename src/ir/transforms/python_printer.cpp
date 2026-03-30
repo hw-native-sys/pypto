@@ -18,6 +18,7 @@
 #include <ios>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -45,6 +46,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -298,7 +300,8 @@ class IRPythonPrinter : public IRVisitor {
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
-  std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape);
+  std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
+                            const std::optional<MemorySpace>& memory_space = std::nullopt);
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
 
@@ -396,7 +399,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
 
     // Add optional tile_view parameter if present and non-trivial.
     if (tile_type->tile_view_.has_value()) {
-      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_);
+      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
       if (!tv_str.empty()) {
         oss << ", " << tv_str;
       }
@@ -869,9 +872,11 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // range(start, stop) when step==1, range(start, stop, step) otherwise.
   auto is_const_int = [](const ExprPtr& expr, int64_t value) -> bool {
     if (auto ci = As<ConstInt>(expr)) {
-      // Only elide for canonical loop-bound dtypes to preserve round-trip fidelity.
-      return ci->value_ == value &&
-             (ci->dtype() == DataType::DEFAULT_CONST_INT || ci->dtype() == DataType::INDEX);
+      // Only elide for integer types that round-trip as the same value.
+      // INDEX and INT64 are structurally equivalent (structural_equal.cpp).
+      // Non-standard dtypes (e.g. INT32) are preserved to maintain fidelity.
+      return ci->value_ == value && (ci->dtype() == DataType::DEFAULT_CONST_INT ||
+                                     ci->dtype() == DataType::INDEX || ci->dtype() == DataType::INT64);
     }
     return false;
   };
@@ -1073,6 +1078,10 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
     }
   } else if (auto seq_stmts = As<SeqStmts>(body)) {
     // Process each statement in sequence
+    if (seq_stmts->stmts_.empty()) {
+      stream_ << GetIndent() << "pass";
+      return;
+    }
     for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
       auto stmt = seq_stmts->stmts_[i];
 
@@ -1559,8 +1568,13 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   return oss.str();
 }
 
-std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
-                                           const std::vector<ExprPtr>& tile_shape) {
+std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
+                                           const std::optional<MemorySpace>& memory_space) {
+  // If the tile_view matches the implicit semantics for this shape+memory_space, omit entirely.
+  if (tile_view_semantics::IsImplicitPrintedTileView(tile_view, tile_shape, memory_space)) {
+    return "";
+  }
+
   std::ostringstream oss;
   oss << prefix_ << ".TileView(";
 
@@ -1570,24 +1584,11 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     first = false;
   };
 
+  // Compute the implicit view so we can elide fields that match it.
+  TileView implicit_view = tile_view_semantics::GetImplicitTileView(tile_shape, memory_space);
+
   // valid_shape — omit if it matches the parent tile's shape
-  bool valid_shape_matches = (tile_view.valid_shape.size() == tile_shape.size());
-  if (valid_shape_matches) {
-    for (size_t i = 0; i < tile_shape.size(); ++i) {
-      const auto& vs_expr = tile_view.valid_shape[i];
-      const auto& ts_expr = tile_shape[i];
-
-      // Fast path: identical ExprPtr (handles symbolic shapes)
-      if (vs_expr == ts_expr) continue;
-
-      auto vs = As<ConstInt>(vs_expr);
-      auto ts = As<ConstInt>(ts_expr);
-      if (!vs || !ts || vs->value_ != ts->value_) {
-        valid_shape_matches = false;
-        break;
-      }
-    }
-  }
+  bool valid_shape_matches = tile_view_semantics::ShapeExprListsEquivalent(tile_view.valid_shape, tile_shape);
   if (!valid_shape_matches) {
     maybe_comma();
     oss << "valid_shape=[";
@@ -1616,8 +1617,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     oss << PrintExprForType(tile_view.start_offset);
   }
 
-  // blayout — omit if row_major (default)
-  if (tile_view.blayout != TileLayout::row_major) {
+  // blayout — omit if matches the implicit view for this shape+memory_space
+  if (tile_view.blayout != implicit_view.blayout) {
     maybe_comma();
     oss << "blayout=" << prefix_ << ".TileLayout.";
     switch (tile_view.blayout) {
@@ -1633,8 +1634,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     }
   }
 
-  // slayout — omit if none_box (default)
-  if (tile_view.slayout != TileLayout::none_box) {
+  // slayout — omit if matches the implicit view for this shape+memory_space
+  if (tile_view.slayout != implicit_view.slayout) {
     maybe_comma();
     oss << "slayout=" << prefix_ << ".TileLayout.";
     switch (tile_view.slayout) {
@@ -1650,8 +1651,8 @@ std::string IRPythonPrinter::PrintTileView(const TileView& tile_view,
     }
   }
 
-  // fractal — omit if at default value
-  if (tile_view.fractal != TileView{}.fractal) {
+  // fractal — omit if matches the implicit view for this shape+memory_space
+  if (tile_view.fractal != implicit_view.fractal) {
     maybe_comma();
     oss << "fractal=" << tile_view.fractal;
   }

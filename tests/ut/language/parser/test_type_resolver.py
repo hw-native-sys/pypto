@@ -36,6 +36,10 @@ _DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY = [
     ("pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc, pl.TileView()]", ir.MemorySpace.Acc),
 ]
 _DEFAULT_TILEVIEW_ANNOTATIONS = [annotation for annotation, _ in _DEFAULT_TILEVIEW_ANNOTATIONS_WITH_MEMORY]
+# Memory spaces where TileView() raw defaults == implicit defaults → printer omits them.
+_IMPLICIT_TILEVIEW_ANNOTATIONS = [
+    "pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()]",
+]
 _NON_DEFAULT_TILEVIEW_ANNOTATION = (
     "pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[16, 64])]"
 )
@@ -180,9 +184,14 @@ class TestTypeResolver:
         assert resolved.tile_view is not None
         assert resolved.memref is None
 
-    @pytest.mark.parametrize("annotation", _DEFAULT_TILEVIEW_ANNOTATIONS)
+    @pytest.mark.parametrize("annotation", _IMPLICIT_TILEVIEW_ANNOTATIONS)
     def test_explicit_empty_tileview_prints_as_canonical_implicit_form(self, annotation: str):
-        """Redundant explicit TileView() prints back as canonical omitted syntax."""
+        """Redundant explicit TileView() prints back as canonical omitted syntax.
+
+        Only Vec (and Bias when present) have TileView() raw defaults == implicit defaults.
+        Mat/Left/Right/Acc have memory-space-specific implicit defaults that differ from
+        raw TileView() defaults, so TileView() for those spaces prints explicitly.
+        """
         resolver = _make_resolver()
         resolved = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
         assert isinstance(resolved, ir.TileType)

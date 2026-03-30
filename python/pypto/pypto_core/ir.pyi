@@ -853,16 +853,16 @@ class MemRef(Var):
     """Unique identifier for this MemRef instance."""
 
     @overload
-    def __init__(self, addr: Expr, size: int, id: int, span: Span = ...) -> None: ...
+    def __init__(self, addr: Expr | int, size: int, id: int, span: Span = ...) -> None: ...
     @overload
     def __init__(
-        self, memory_space: MemorySpace, addr: Expr, size: int, id: int, span: Span = ...
+        self, memory_space: MemorySpace, addr: Expr | int, size: int, id: int, span: Span = ...
     ) -> None: ...
     def __init__(self, *args, **kwargs) -> None:
         """Create a memory reference with addr, size, id, and span.
 
         Args:
-            addr: Starting address expression
+            addr: Starting address expression or integer address literal
             size: Size in bytes
             id: Unique identifier for this MemRef instance
             span: Source location (defaults to Span.unknown())
