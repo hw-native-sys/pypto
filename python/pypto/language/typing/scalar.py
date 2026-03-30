@@ -199,6 +199,21 @@ class Scalar(metaclass=ScalarMeta):
     # Comparison operators — return Scalar wrapping the IR comparison node.
     # ------------------------------------------------------------------
 
+    def __eq__(self, other: object) -> "Scalar":  # type: ignore[override]
+        if not isinstance(other, (Scalar, int, float)):
+            return NotImplemented  # type: ignore[return-value]
+        return Scalar(expr=self.unwrap() == (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __ne__(self, other: object) -> "Scalar":  # type: ignore[override]
+        if not isinstance(other, (Scalar, int, float)):
+            return NotImplemented  # type: ignore[return-value]
+        return Scalar(expr=self.unwrap() != (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __hash__(self) -> int:
+        # Required when __eq__ is overridden. Scalar wraps a symbolic expression,
+        # so we fall back to identity-based hashing.
+        return id(self)
+
     def __lt__(self, other: "int | float | Scalar") -> "Scalar":
         return Scalar(expr=self.unwrap() < (other.unwrap() if isinstance(other, Scalar) else other))
 

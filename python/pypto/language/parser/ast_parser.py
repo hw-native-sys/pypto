@@ -457,6 +457,7 @@ class ASTParser:
             # Skip annotations the resolver can't handle:
             # - String forward refs (e.g. "SomeType")
             # - pl.UnknownType (emitted by printer for unrepresentable types)
+            # - pl.MemRefType (emitted by printer for tile.alloc results)
             ann = stmt.annotation
             is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
                 isinstance(ann, ast.Attribute)

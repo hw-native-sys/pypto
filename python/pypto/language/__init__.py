@@ -88,6 +88,7 @@ from .op.system_ops import (
 )
 from .op.tensor_ops import assemble, create_tensor, dim, full, scatter_update
 from .op.tile_ops import (
+    MemRefType,
     abs,
     addc,
     addsc,
@@ -334,6 +335,7 @@ __all__ = [
     "MemRef",
     "Role",
     "Mem",
+    "MemRefType",
     "MemorySpace",
     "PipeType",
     "TensorLayout",

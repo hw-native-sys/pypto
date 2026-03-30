@@ -19,6 +19,8 @@ from collections.abc import Sequence
 from typing import overload
 
 __all__ = [
+    "MemRefType",
+    "alloc",
     "create_tile",
     "create",
     "read",
@@ -119,6 +121,42 @@ from .system_ops import (  # noqa: F401
     tpush_to_aic,
     tpush_to_aiv,
 )
+
+
+class MemRefType:
+    """Opaque sentinel type for tile.alloc results in printed IR.
+
+    tile.alloc is an internal IR operation created by the InitMemRef and
+    AllocateMemoryAddr passes.  It has no user-facing DSL constructor — this
+    class exists solely so that the Python code emitted by the C++ printer
+    (``mem_vec_0: pl.MemRefType = pl.tile.alloc(...)``) is valid Python that
+    pyright and the text-parser can process.
+    """
+
+
+def alloc(
+    memory_space: MemorySpace,
+    addr: int,
+    size: int,
+    alloc_id: int,  # pyright: ignore[reportUnusedParameter]
+) -> MemRefType:
+    """Stub for the internal ``tile.alloc`` IR operation.
+
+    This function is never called in user-written DSL code.  It is emitted
+    by the C++ python-printer after the InitMemRef / AllocateMemoryAddr
+    passes and must be importable so that the printed source is valid Python
+    that the text-parser can ``exec()``.
+
+    Args:
+        memory_space: Target memory space (e.g. ``pl.Mem.Vec``)
+        addr: Starting byte address
+        size: Allocation size in bytes
+        alloc_id: MemRef identifier
+
+    Returns:
+        Opaque MemRefType sentinel (unused at runtime)
+    """
+    return MemRefType()
 
 
 def _unwrap_rhs(rhs: int | float | Expr | Tile | Scalar) -> int | float | Expr:

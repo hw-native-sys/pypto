@@ -394,6 +394,12 @@ class TypeResolver:
                 memory_space_node = node
                 continue
 
+            # Bare name referencing a tile.alloc variable (e.g. mem_vec_0) emitted
+            # by the printer after InitMemRef / AllocateMemoryAddr.  These carry
+            # no information the parser needs — silently skip them.
+            if isinstance(node, ast.Name) and node.id.startswith("mem_"):
+                continue
+
             if self._is_layout_node(node):
                 raise ParserTypeError(
                     f"Tile does not accept layouts like {ast.unparse(node)}",

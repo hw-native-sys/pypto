@@ -81,6 +81,37 @@ def _create_tile_binary_call(
 # ============================================================================
 
 
+def alloc(
+    memory_space: int | Expr,
+    addr: int | Expr,
+    size: int | Expr,
+    alloc_id: int | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Allocate memory for a MemRef object.
+
+    Internal op emitted by InitMemRef / AllocateMemoryAddr passes.
+
+    Args:
+        memory_space: Memory space enum value
+        addr: Starting address
+        size: Size in bytes
+        alloc_id: MemRef identifier
+        span: Optional source span
+
+    Returns:
+        Call node representing the tile.alloc operation
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [
+        _normalize_expr(memory_space, actual_span),
+        _normalize_expr(addr, actual_span),
+        _normalize_expr(size, actual_span),
+        _normalize_expr(alloc_id, actual_span),
+    ]
+    return _ir_core.create_op_call("tile.alloc", args, {}, actual_span)
+
+
 def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
