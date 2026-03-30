@@ -988,14 +988,22 @@ void BindIR(nb::module_& m) {
           // Store as nb::object to prevent garbage collection of the Python callback
           nb::object stored_cb = nb::borrow(cb);
           RegisterFormatCallback([stored_cb](const std::string& code) -> std::string {
-            return nb::cast<std::string>(stored_cb(code));
+            try {
+              nb::gil_scoped_acquire guard;
+              return nb::cast<std::string>(stored_cb(code));
+            } catch (...) {
+              // Best-effort: return raw output on any failure
+              return code;
+            }
           });
         }
       },
       nb::arg("callback"),
       "Register a Python callable to post-process printed IR output.\n\n"
       "The callback receives a code string and returns the formatted code.\n"
-      "Pass None to unregister and revert to raw output.");
+      "Pass None to unregister and revert to raw output.\n\n"
+      "Note: Must be called during module initialization (single-threaded).\n"
+      "The GIL is acquired automatically when the callback is invoked from C++.");
 
   // operator functions for Var (wrapped in Python for span capture and normalization)
   // Using standalone C++ API functions from scalar_expr.h

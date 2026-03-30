@@ -91,11 +91,14 @@ __all__ = [
 ]  # fmt: skip
 
 # Register ruff as the format callback for IR printing (best-effort: no-op if ruff is unavailable)
-if _shutil.which("ruff"):
-    from pypto.ir.formatter import ruff_format as _ruff_format
-    from pypto.pypto_core import ir as _ir_core
+try:
+    if _shutil.which("ruff"):
+        from pypto.ir.formatter import ruff_format as _ruff_format
+        from pypto.pypto_core import ir as _ir_core
 
-    _ir_core.register_format_callback(_ruff_format)
-    del _ruff_format, _ir_core
+        _ir_core.register_format_callback(_ruff_format)
+        del _ruff_format, _ir_core
+except Exception:  # noqa: BLE001
+    pass  # Best-effort: formatting is optional
 
 del _shutil

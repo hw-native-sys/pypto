@@ -1767,10 +1767,15 @@ FormatCallback g_format_callback;  // set once at import time, read-only after
 void RegisterFormatCallback(FormatCallback callback) { g_format_callback = std::move(callback); }
 
 std::string ApplyFormatCallback(const std::string& code) {
-  if (g_format_callback) {
-    return g_format_callback(code);
+  if (!g_format_callback) {
+    return code;
   }
-  return code;
+  try {
+    return g_format_callback(code);
+  } catch (...) {
+    // Best-effort: return raw output on any failure (e.g., Python exception in ruff)
+    return code;
+  }
 }
 
 }  // namespace ir
