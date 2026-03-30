@@ -479,30 +479,14 @@ std::string GenerateIncludes() {
   return oss.str();
 }
 
-std::string GenerateHelperFunctions() {
-  std::ostringstream oss;
-  oss << "// Helper to encode float as uint64_t for scalar params\n";
-  oss << "static uint64_t float_to_u64(float f) {\n";
-  oss << "    union {\n";
-  oss << "        float f32;\n";
-  oss << "        uint64_t u64;\n";
-  oss << "    } conv;\n";
-  oss << "    conv.u64 = 0;  // Clear upper bits\n";
-  oss << "    conv.f32 = f;\n";
-  oss << "    return conv.u64;\n";
-  oss << "}\n\n";
-  return oss.str();
-}
-
 // Generate scalar variable declaration from ChipStorageTaskArgs scalar slot.
-// Uses union-based type punning to reinterpret the uint64_t scalar as the target C type.
+// Uses from_u64<T>() from data_type.h to safely reinterpret the uint64_t scalar as the target C type.
 std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
                                  const ScalarTypePtr& scalar_type) {
   std::ostringstream oss;
   std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-  oss << "    union { uint64_t u64; " << cpp_type << " val; } " << var_name << "_conv;\n";
-  oss << "    " << var_name << "_conv.u64 = orch_args.scalar(" << scalar_index << ");\n";
-  oss << "    " << cpp_type << " " << var_name << " = " << var_name << "_conv.val;\n";
+  oss << "    " << cpp_type << " " << var_name << " = from_u64<" << cpp_type << ">(orch_args.scalar("
+      << scalar_index << "));\n";
   return oss.str();
 }
 
@@ -851,7 +835,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
           if (cpp_type == "float") {
-            params.push_back({"add_scalar", "float_to_u64(" + var_name + ")", ""});
+            params.push_back({"add_scalar", "to_u64(" + var_name + ")", ""});
           } else {
             params.push_back({"add_scalar", var_name, ""});
           }
@@ -888,7 +872,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
         if (cpp_type == "float") {
-          params.push_back({"add_scalar", "float_to_u64(" + value + "f)", ""});
+          params.push_back({"add_scalar", "to_u64(" + value + "f)", ""});
         } else {
           params.push_back({"add_scalar", "(uint64_t)" + value, ""});
         }
@@ -1377,9 +1361,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // 1. Includes
   oss << GenerateIncludes();
-
-  // 2. Helper functions
-  oss << GenerateHelperFunctions();
 
   // 3. extern "C" block
   oss << "extern \"C\" {\n\n";

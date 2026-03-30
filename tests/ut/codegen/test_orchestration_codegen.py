@@ -98,17 +98,6 @@ class TestOrchestration:
 
             #include "pto_orchestration_api.h"
 
-            // Helper to encode float as uint64_t for scalar params
-            static uint64_t float_to_u64(float f) {
-                union {
-                    float f32;
-                    uint64_t u64;
-                } conv;
-                conv.u64 = 0;  // Clear upper bits
-                conv.f32 = f;
-                return conv.u64;
-            }
-
             extern "C" {
 
             __attribute__((visibility("default")))
@@ -382,17 +371,6 @@ class TestOrchestration:
 
             #include "pto_orchestration_api.h"
 
-            // Helper to encode float as uint64_t for scalar params
-            static uint64_t float_to_u64(float f) {
-                union {
-                    float f32;
-                    uint64_t u64;
-                } conv;
-                conv.u64 = 0;  // Clear upper bits
-                conv.f32 = f;
-                return conv.u64;
-            }
-
             extern "C" {
 
             __attribute__((visibility("default")))
@@ -460,7 +438,7 @@ class TestOrchestration:
                     Arg params_t1;
                     params_t1.add_input(c);
                     params_t1.add_output(d_ci);
-                    params_t1.add_scalar(float_to_u64(1.000000f));
+                    params_t1.add_scalar(to_u64(1.000000f));
                     TaskOutputTensors outs_t1 = pto2_rt_submit_aiv_task(1, params_t1);
                     d = outs_t1.get_ref(0);
                     uint32_t e_ci_shapes[2] = {16, 16};
@@ -471,7 +449,7 @@ class TestOrchestration:
                     Arg params_t2;
                     params_t2.add_input(c);
                     params_t2.add_output(e_ci);
-                    params_t2.add_scalar(float_to_u64(2.000000f));
+                    params_t2.add_scalar(to_u64(2.000000f));
                     TaskOutputTensors outs_t2 = pto2_rt_submit_aiv_task(1, params_t2);
                     e = outs_t2.get_ref(0);
                     uint32_t g_ci_shapes[2] = {16, 16};
@@ -802,17 +780,6 @@ class TestOrchestration:
             #include <stdio.h>
 
             #include "pto_orchestration_api.h"
-
-            // Helper to encode float as uint64_t for scalar params
-            static uint64_t float_to_u64(float f) {
-                union {
-                    float f32;
-                    uint64_t u64;
-                } conv;
-                conv.u64 = 0;  // Clear upper bits
-                conv.f32 = f;
-                return conv.u64;
-            }
 
             extern "C" {
 
@@ -1478,7 +1445,7 @@ class TestOrchestration:
         assert "add_output(ret0)" not in code
 
     def test_scalar_taskarg(self):
-        """Scalar params get ChipStorageTaskArgs scalar slots (0-indexed) with union-based type punning."""
+        """Scalar params get ChipStorageTaskArgs scalar slots (0-indexed) via from_u64<T>()."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1514,9 +1481,9 @@ class TestOrchestration:
         # Tensors at orch_args.tensor(0..1), scalars at orch_args.scalar(0..2)
         assert "from_tensor_arg(orch_args.tensor(0))" in code
         assert "from_tensor_arg(orch_args.tensor(1))" in code
-        assert "factor_conv.u64 = orch_args.scalar(0);" in code
-        assert "count_conv.u64 = orch_args.scalar(1);" in code
-        assert "scale_conv.u64 = orch_args.scalar(2);" in code
+        assert "from_u64<int64_t>(orch_args.scalar(0))" in code
+        assert "from_u64<int32_t>(orch_args.scalar(1))" in code
+        assert "from_u64<float>(orch_args.scalar(2))" in code
         assert ".expected_arg_count = 5," in code
 
 
