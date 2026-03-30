@@ -18,8 +18,8 @@ Concepts introduced:
   - pl.mul for element-wise multiplication
   - Multiple programs in one file
 
-Run:  python examples/operators/elementwise.py
-Next: examples/operators/fused_ops.py
+Run:  python examples/kernels/01_elementwise.py
+Next: examples/kernels/02_fused_ops.py
 """
 
 import pypto.language as pl

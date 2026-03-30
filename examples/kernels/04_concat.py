@@ -17,8 +17,8 @@ Concepts introduced:
   - pl.concat for column-wise tile concatenation
   - Orchestration with pl.create_tensor (output allocated in orchestration)
 
-Run:  python examples/operators/concat.py
-Next: examples/operators/activation.py
+Run:  python examples/kernels/04_concat.py
+Next: examples/kernels/05_activation.py
 """
 
 import pypto.language as pl

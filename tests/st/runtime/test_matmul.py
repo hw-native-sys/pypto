@@ -19,11 +19,10 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from examples.kernels.matmul import MatmulaccProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-
-from examples.operators.matmul import MatmulaccProgram
 
 
 class TestMatmul(PTOTestCase):

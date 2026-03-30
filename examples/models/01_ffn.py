@@ -22,8 +22,8 @@ Concepts introduced:
   - Multi-kernel orchestration: matmul -> activation -> matmul pipeline
   - Direct call to module-level kernels (no self. prefix)
 
-Run:  python examples/models/ffn.py
-Next: examples/models/vector_dag.py
+Run:  python examples/models/01_ffn.py
+Next: examples/models/02_vector_dag.py
 """
 
 import pypto.language as pl

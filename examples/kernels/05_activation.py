@@ -21,8 +21,8 @@ Concepts introduced:
   - Chaining element-wise ops for complex activation functions
   - Two-input activations (SwiGLU, GeGLU) with gate and up projections
 
-Run:  python examples/operators/activation.py
-Next: examples/operators/softmax.py
+Run:  python examples/kernels/05_activation.py
+Next: examples/kernels/06_softmax.py
 """
 
 import pypto.language as pl

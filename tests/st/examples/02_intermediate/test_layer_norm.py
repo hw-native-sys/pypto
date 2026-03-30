@@ -18,9 +18,8 @@ from typing import Any
 
 import pytest
 import torch
+from examples.kernels.normalization import LayerNormProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
-from examples.operators.normalization import LayerNormProgram
 
 
 class TestLayerNormCore(PTOTestCase):

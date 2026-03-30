@@ -10,10 +10,10 @@
 """
 PyPTO Examples — organized from easy to hard.
 
-  0. hello_world.py  — simplest program: 128x128 add (start here)
-  1. operators/      — single-kernel programs demonstrating individual ops
-  2. models/         — multi-kernel programs with orchestration
-  3. utils/          — parsing, cross-function calls, error handling
+  0. hello_world.py — simplest program: 128x128 add (start here)
+  1. kernels/       — single-kernel programs (elementwise, matmul, softmax, ...)
+  2. models/        — multi-kernel programs with orchestration (FFN, attention, ...)
+  3. utils/         — parsing, cross-function calls, error handling
 
 See each folder's __init__.py for detailed reading order within.
 """

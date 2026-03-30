@@ -28,8 +28,8 @@ Concepts introduced:
   - golden() reference for runtime verification
   - run() for end-to-end compilation and execution
 
-Run:  python examples/models/vector_dag.py  (requires hardware)
-Next: examples/models/flash_attention.py
+Run:  python examples/models/02_vector_dag.py  (requires hardware)
+Next: examples/models/03_flash_attention.py
 """
 
 import pypto.language as pl

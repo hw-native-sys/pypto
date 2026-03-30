@@ -10,7 +10,7 @@
 """
 Basic Fused Operations System Tests for PyPTO.
 
-Corresponds to examples/operators/fused_ops.py, implemented using the PyPTO
+Corresponds to examples/kernels/fused_ops.py, implemented using the PyPTO
 language DSL (@pl.program / pl.tile).
 
 Four fused operation patterns are demonstrated:
@@ -24,14 +24,13 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
-from examples.operators.fused_ops import (
+from examples.kernels.fused_ops import (
     FusedAddReluProgram,
     FusedAddScaleProgram,
     FusedLinearReluProgram,
     FusedMatmulBiasProgram,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 
 class FusedAddScale(PTOTestCase):

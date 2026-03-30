@@ -18,9 +18,8 @@ from typing import Any
 
 import pytest
 import torch
+from examples.kernels.normalization import RMSNormProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
-from examples.operators.normalization import RMSNormProgram
 
 
 class TestRMSNormCore(PTOTestCase):

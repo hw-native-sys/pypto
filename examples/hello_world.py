@@ -18,7 +18,7 @@ Concepts introduced:
   - Tensor (global memory) vs Tile (on-chip register) types
 
 Run:  python examples/hello_world.py
-Next: examples/operators/elementwise.py
+Next: examples/kernels/01_elementwise.py
 """
 
 import pypto.language as pl

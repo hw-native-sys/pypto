@@ -131,8 +131,8 @@ def test_example_transform(self):
 The `examples/` directory contains **user-facing examples only:**
 
 - `examples/hello_world.py` - Entry point, simplest program
-- `examples/operators/` - Single-kernel op examples (easy to hard)
-- `examples/models/` - Multi-kernel model examples (easy to hard)
+- `examples/kernels/` - Single-kernel op examples, numbered by difficulty (01_elementwise.py through 08_assemble.py)
+- `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 03_flash_attention.py)
 - `examples/utils/` - Parsing, cross-function calls, error handling
 
 ### When to Write Examples

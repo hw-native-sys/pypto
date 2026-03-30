@@ -24,8 +24,8 @@ Concepts introduced:
   - pl.matmul for cube unit matrix multiplication
   - Multi-kernel orchestration: pl.create_tensor for intermediate buffers
 
-Run:  python examples/operators/fused_ops.py
-Next: examples/operators/matmul.py
+Run:  python examples/kernels/02_fused_ops.py
+Next: examples/kernels/03_matmul.py
 """
 
 import pypto.language as pl

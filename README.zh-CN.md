@@ -94,13 +94,13 @@ python examples/hello_world.py
 #### 2. 算子示例（逐元素、矩阵乘、softmax 等）
 
 ```bash
-python examples/operators/softmax.py
+python examples/kernels/06_softmax.py
 ```
 
 #### 3. 模型示例（FFN、paged attention、LLaMA 等）
 
 ```bash
-python examples/models/ffn.py
+python examples/models/01_ffn.py
 ```
 
 ### 运行测试

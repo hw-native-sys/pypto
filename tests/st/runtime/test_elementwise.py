@@ -19,16 +19,15 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
-from examples.operators.elementwise import (
+from examples.kernels.elementwise import (
     TileAdd64Program,
     TileAdd128Program,
     TileMul64Program,
     TileMul128Program,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TileAddTestCase(PTOTestCase):

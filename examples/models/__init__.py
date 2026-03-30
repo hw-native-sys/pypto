@@ -8,15 +8,33 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Model examples — multi-kernel programs with orchestration.
+Model examples — multi-kernel programs with orchestration, ordered by complexity.
 
-Suggested reading order:
-  1. ffn.py                        — FFN modules with shared matmul_kernel
-  2. vector_dag.py                 — multi-kernel task DAG
-  3. flash_attention.py            — flash attention with loop iter_args
-  4. paged_attention.py            — standard paged attention + runtime
-  5. paged_attention_batch.py      — batch variant
-  6. paged_attention_dynamic.py    — dynamic shapes
-  7. paged_attention_multi_config.py — multi-config variant
-  8. llama_mini.py                 — single-head LLaMA 7B
+  01_ffn.py                         — FFN modules with shared matmul_kernel
+  02_vector_dag.py                  — multi-kernel task DAG
+  03_flash_attention.py             — flash attention with loop iter_args
+  04_paged_attention.py             — standard paged attention + runtime
+  05_paged_attention_batch.py       — batch variant
+  06_paged_attention_dynamic.py     — dynamic shapes
+  07_paged_attention_multi_config.py — multi-config variant
+  08_llama_mini.py                  — single-head LLaMA 7B
 """
+
+import importlib
+import sys
+
+_ALIASES = {
+    "ffn": "01_ffn",
+    "vector_dag": "02_vector_dag",
+    "flash_attention": "03_flash_attention",
+    "paged_attention": "04_paged_attention",
+    "paged_attention_batch": "05_paged_attention_batch",
+    "paged_attention_dynamic": "06_paged_attention_dynamic",
+    "paged_attention_multi_config": "07_paged_attention_multi_config",
+    "llama_mini": "08_llama_mini",
+}
+
+for _alias, _numbered in _ALIASES.items():
+    _mod = importlib.import_module(f".{_numbered}", __package__)
+    globals()[_alias] = _mod
+    sys.modules[f"{__package__}.{_alias}"] = _mod

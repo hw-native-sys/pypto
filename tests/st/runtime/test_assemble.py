@@ -28,11 +28,7 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
-from examples.operators.assemble import (
+from examples.kernels.assemble import (
     TileAssembleAccMatProgram,
     TileAssembleDoubleLoopBroadcastProgram,
     TileAssembleDoubleLoopProgram,
@@ -40,6 +36,9 @@ from examples.operators.assemble import (
     TileAssembleRowByRowProgram,
     TileAssembleVecProgram,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 # ---------------------------------------------------------------------------
 # Acc→Mat (NZ mode): matmul result assembled into a Mat target

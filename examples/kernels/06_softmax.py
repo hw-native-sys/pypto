@@ -18,8 +18,8 @@ Concepts introduced:
   - Row broadcast ops: pl.row_expand_sub, pl.row_expand_div
   - Numerically stable softmax algorithm
 
-Run:  python examples/operators/softmax.py
-Next: examples/operators/normalization.py
+Run:  python examples/kernels/06_softmax.py
+Next: examples/kernels/07_normalization.py
 """
 
 import pypto.language as pl

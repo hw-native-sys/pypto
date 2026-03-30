@@ -91,16 +91,16 @@ PyPTO includes examples organized by complexity:
 python examples/hello_world.py
 ```
 
-#### 2. Operator Examples (element-wise, matmul, softmax, ...)
+#### 2. Kernel Examples (element-wise, matmul, softmax, ...)
 
 ```bash
-python examples/operators/softmax.py
+python examples/kernels/06_softmax.py
 ```
 
 #### 3. Model Examples (FFN, paged attention, LLaMA, ...)
 
 ```bash
-python examples/models/ffn.py
+python examples/models/01_ffn.py
 ```
 
 ### Running Tests

@@ -47,8 +47,8 @@ Programs (one representative per distinct pattern):
   TileAssembleLoopColBroadcastProgram   -- Vec->Vec: loop with column broadcast (no slice)
   TileAssembleDoubleLoopBroadcastProgram -- Vec->Vec: nested loops, quadrant broadcast
 
-Run:  python examples/operators/assemble.py
-Next: examples/models/ffn.py
+Run:  python examples/kernels/08_assemble.py
+Next: examples/models/01_ffn.py
 """
 
 import pypto.language as pl

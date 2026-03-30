@@ -20,8 +20,8 @@ Concepts introduced:
   - pl.matmul_acc for accumulating partial products
   - K-dimension tiling for large reductions
 
-Run:  python examples/operators/matmul.py
-Next: examples/operators/concat.py
+Run:  python examples/kernels/03_matmul.py
+Next: examples/kernels/04_concat.py
 """
 
 import pypto.language as pl

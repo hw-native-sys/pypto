@@ -23,8 +23,8 @@ Algorithm:
     Oi = update(Oi, pij @ Vj)
   Return Oi / li (final normalization)
 
-Run:  python examples/models/flash_attention.py
-Next: examples/models/paged_attention.py
+Run:  python examples/models/03_flash_attention.py
+Next: (end of examples)
 """
 
 import pypto.language as pl

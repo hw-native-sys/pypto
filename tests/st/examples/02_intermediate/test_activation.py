@@ -21,16 +21,15 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
-from examples.operators.activation import (
+from examples.kernels.activation import (
     GegluProgram,
     GeluProgram,
     SiluProgram,
     SwigluProgram,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class BaseActivationTest(PTOTestCase):

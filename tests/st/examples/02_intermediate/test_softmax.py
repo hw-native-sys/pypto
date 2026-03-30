@@ -18,9 +18,8 @@ from typing import Any
 
 import pytest
 import torch
+from examples.kernels.softmax import TileSoftmaxProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
-from examples.operators.softmax import TileSoftmaxProgram
 
 
 class TestTileSoftmax(PTOTestCase):
