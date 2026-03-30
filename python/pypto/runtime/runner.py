@@ -271,6 +271,8 @@ def _execute_on_device(work_dir: Path, golden_path: Path, platform: str, device_
 
     code_runner_cls = importlib.import_module("code_runner").CodeRunner
 
+
+    #pto-isa = a6528046c30dbe974ee8eaf249d6a73056c651bf
     code_runner_cls(
         kernels_dir=str(work_dir),
         golden_path=str(golden_path),
