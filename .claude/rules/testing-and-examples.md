@@ -132,7 +132,7 @@ The `examples/` directory contains **user-facing examples only:**
 
 - `examples/hello_world.py` - Entry point, simplest program
 - `examples/kernels/` - Single-kernel op examples, numbered by difficulty (01_elementwise.py through 08_assemble.py)
-- `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 03_flash_attention.py)
+- `examples/models/` - Multi-kernel model examples, numbered by difficulty (01_ffn.py through 08_llama_mini.py)
 - `examples/utils/` - Parsing, cross-function calls, error handling
 
 ### When to Write Examples

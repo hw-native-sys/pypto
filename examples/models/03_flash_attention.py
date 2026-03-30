@@ -24,7 +24,7 @@ Algorithm:
   Return Oi / li (final normalization)
 
 Run:  python examples/models/03_flash_attention.py
-Next: (end of examples)
+Next: examples/models/04_paged_attention.py
 """
 
 import pypto.language as pl
