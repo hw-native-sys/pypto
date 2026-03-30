@@ -37,9 +37,8 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
 from examples.models.llama_mini import build_llama_mini_program
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 
 class TestLlamaMini(PTOTestCase):

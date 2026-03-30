@@ -35,10 +35,6 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
 from examples.models.paged_attention import (
     build_paged_attention_program,
     build_paged_attention_unaligned_program,
@@ -48,6 +44,9 @@ from examples.models.paged_attention import (
     kernel_softmax_prepare,
     kernel_softmax_prepare_unaligned,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 DEFAULT_SCALE = 0.0884
 

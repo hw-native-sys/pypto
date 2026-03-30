@@ -20,11 +20,10 @@ to keep a single source of truth and ensure examples are guarded by tests.
 from typing import Any
 
 import pytest
+from examples.models.vector_dag import VectorDAGProgram
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-
-from examples.models.vector_dag import VectorDAGProgram
 
 
 class VectorDAGTestCase(PTOTestCase):

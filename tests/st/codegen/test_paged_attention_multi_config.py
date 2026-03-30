@@ -30,10 +30,6 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
 from examples.models.paged_attention_multi_config import (
     BLOCK_SIZE,
     HEAD_DIM,
@@ -47,6 +43,9 @@ from examples.models.paged_attention_multi_config import (
     make_kernel_pv_matmul,
     make_kernel_qk_matmul,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class AivHubTestCase(PTOTestCase):

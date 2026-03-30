@@ -46,11 +46,6 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime.runner import RunConfig
-
 from examples.models.paged_attention import (
     kernel_init_inplace,
     kernel_online_update,
@@ -58,6 +53,10 @@ from examples.models.paged_attention import (
     kernel_qk_matmul,
     kernel_softmax_prepare,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime.runner import RunConfig
 
 M = pl.dynamic("M")
 N = pl.dynamic("N")

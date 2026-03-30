@@ -24,13 +24,12 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-
 from examples.models.paged_attention_dynamic import (
     build_dynamic_paged_attention_program,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
 
 # ---------------------------------------------------------------------------
 # Test Case — DynamicPagedAttentionTestCase

@@ -20,16 +20,15 @@ from typing import Any
 
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime.runner import RunConfig
-
 from examples.models.ffn import (
     FFNGeluProgram,
     FFNReluProgram,
     FFNSwigluProgram,
 )
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.runtime.runner import RunConfig
 
 
 class BaseFFNTest(PTOTestCase):
