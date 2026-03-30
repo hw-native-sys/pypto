@@ -276,7 +276,7 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
         c_type = param.type.dtype.to_c_type_string()
         lines.append(f"    // Unpack tensor: {param_name}")
         lines.append(
-            f"    __gm__ TensorData* {param_name}_tensor = reinterpret_cast<__gm__ TensorData*>(args[{i}]);"
+            f"    __gm__ Tensor* {param_name}_tensor = reinterpret_cast<__gm__ Tensor*>(args[{i}]);"
         )
         lines.append(
             f"    __gm__ {c_type}* {param_name} = "

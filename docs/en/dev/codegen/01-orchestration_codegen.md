@@ -4,8 +4,8 @@
 
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
-- Wraps device memory pointers (via `TaskArg`) into `Tensor` objects
-- Builds `PTOParam` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
+- Wraps device memory pointers (via `ChipStorageTaskArgs`) into `Tensor` objects
+- Builds `Arg` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
 - Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `pto2_rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
 
@@ -78,33 +78,32 @@ static inline Tensor make_tensor_2d_dn(...) { ... }
 
 ```cpp
 // Phase 3: Config function — returns expected argument count
-PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
 // Phase 4: Entry function signature
-// A2/A3:
-void aicpu_orchestration_entry(TaskArg* orch,
-    int arg_count, int orch_thread_num, int orch_thread_index) {
-// A5 (Ascend950): PTO2Runtime* rt prepended
-// void aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
+    int orch_thread_num, int orch_thread_index) {
 ```
 
 ### Phase 5–6: Tensor Setup
 
 ```cpp
-// Phase 5: External tensors — ND layout via from_task_arg()
-Tensor ext_a = from_task_arg(orch[0]);
-Tensor ext_b = from_task_arg(orch[1]);
+// Phase 5: External tensors — ND layout via from_tensor_arg()
+Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
+Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
 
 // DN layout: pass logical shape — make_tensor_external_2d_dn handles axis transposition internally
-uint32_t dn_shapes[2] = {orch[2].tensor.shapes[0], orch[2].tensor.shapes[1]};
-Tensor ext_dn = make_tensor_external_2d_dn(orch[2].data<void>(), dn_shapes, 2, DataType::FLOAT32);
+uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shapes[1]};
+Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
 
 // Phase 6: Internal tensors (from pl.create_tensor — intermediates only)
-uint32_t tmp_shapes[2] = {16, 16};
-Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
+// Two declarations are emitted: a TensorCreateInfo for add_output, and a null-addr Tensor placeholder.
+uint32_t tmp_ci_shapes[2] = {16, 16};
+TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
+Tensor tmp = make_tensor_external(nullptr, tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
 ### Phase 7–9: Task Submission and Control Flow
@@ -112,16 +111,13 @@ Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 All task submission is wrapped in a top-level `PTO2_SCOPE()`:
 
 ```cpp
-// Phase 7–9: Top-level PTO2_SCOPE wraps all task submissions
-// A2/A3: PTO2_SCOPE()   A5: PTO2_SCOPE(rt)
 PTO2_SCOPE() {
-    PTOParam params_t0;
+    Arg params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
-    params_t0.add_output(ext_output);
-    // A2/A3: pto2_rt_submit_aiv_task(0, params_t0)
-    // A5:    pto2_rt_submit_aiv_task(rt, 0, params_t0)
-    pto2_rt_submit_aiv_task(0, params_t0);
+    params_t0.add_output(tmp_ci);            // add_output takes TensorCreateInfo for internal tensors
+    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
+    tmp = outs_t0.get_ref(0);               // copy-assign from ring buffer allocation
 
     // ForStmt example — plain for loop, no nested PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -136,11 +132,11 @@ PTO2_SCOPE() {
 
 | Type | Source | C++ Construction | Naming |
 | ---- | ------ | ---------------- | ------ |
-| External (ND) | Function parameters (`In`/`Out`/`InOut`) | `from_task_arg(orch[N])` | `ext_<name>` |
-| External (DN) | Function parameters, DN layout | `make_tensor_external_2d_dn(orch[N].data<void>(), {orch[N].tensor.shapes[0], orch[N].tensor.shapes[1]}, ...)` — axis ordering handled internally | `ext_<name>` |
-| Internal | `pl.create_tensor(...)` in function body | `make_tensor(shapes, ndims, dtype)` | `<name>` (no prefix) |
+| External (ND) | Function parameters (`In`/`Out`/`InOut`) | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
+| External (DN) | Function parameters, DN layout | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
+| Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | `<name>` (no prefix) |
 
-External tensors wrap device memory pointers passed from the host via `TaskArg`. Internal tensors are temporary workspace allocated by the runtime.
+External tensors wrap device memory pointers passed from the host via `ChipStorageTaskArgs`. Internal tensors are allocated by the runtime from a ring buffer when passed to `add_output(var_ci)`.
 
 ### Parameter Direction
 
@@ -149,9 +145,25 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 | Direction | Python Annotation | C++ Task Param | Semantics |
 | --------- | ----------------- | -------------- | --------- |
 | `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only |
-| `Out` | `pl.Out[pl.Tensor[...]]` | `params.add_output(ext_x)` | Write-only |
+| `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_inout(ext_x)` | Pre-allocated buffer |
+| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `x = outs.get_ref(i)` | Runtime ring-buffer alloc |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
-| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (after all tensors) |
+| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (separate scalar slot) |
+
+When `add_output` is used, the submit call returns `TaskOutputTensors` and each internal output
+tensor is copy-assigned from `outs.get_ref(i)` to bind the runtime-allocated address.
+
+### Scalar Parameter Encoding
+
+Scalar params occupy `ChipStorageTaskArgs` scalar slots (0-indexed, separate from tensor slots).
+Float scalars use `float_to_u64(f)` (bit-cast). Other integer/bool scalars are cast to `uint64_t`.
+At the receiving end, union-based type punning is used to reinterpret the `uint64_t` as the target C type:
+
+```cpp
+union { uint64_t u64; float val; } scale_conv;
+scale_conv.u64 = orch_args.scalar(0);
+float scale = scale_conv.val;
+```
 
 ### Alias Generation
 
@@ -164,25 +176,13 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 
 ```cpp
 // Generated C++
-PTOParam params_t0;
-params_t0.add_output(ext_output);
+Arg params_t0;
+params_t0.add_inout(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
-If the return name matches the `Out`/`InOut` arg name, no alias is needed. `InOut` params are never aliased — they are already the external tensor.
-
-### Backend Differences (A5 / Ascend950)
-
-When targeting Ascend950 (`BackendType::Ascend950`), the generated C++ differs in three ways:
-
-| Element | A2/A3 | A5 |
-| ------- | ----- | -- |
-| Entry function | `aicpu_orchestration_entry(TaskArg* orch, ...)` | `aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)` |
-| Scope macro | `PTO2_SCOPE()` | `PTO2_SCOPE(rt)` |
-| Submit calls | `pto2_rt_submit_aiv_task(id, params)` | `pto2_rt_submit_aiv_task(rt, id, params)` |
-
-The `rt` parameter is an explicit `PTO2Runtime*` pointer that A5 passes through the call chain instead of relying on thread-local storage.
+If the return name matches the `Out`/`InOut` arg name, no alias is needed.
 
 ### Core Type Inference
 
@@ -204,11 +204,11 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 
 ```cpp
 // Generated C++ — tensors first, then scalars
-PTOParam params_t0;
+Arg params_t0;
 params_t0.add_input(ext_sij);
-params_t0.add_output(ext_pij);
-params_t0.add_output(ext_mij);
-params_t0.add_output(ext_lij);
+params_t0.add_inout(ext_pij);
+params_t0.add_inout(ext_mij);
+params_t0.add_inout(ext_lij);
 params_t0.add_scalar(float_to_u64(scale));  // scalar after all tensors
 pto2_rt_submit_aiv_task(0, params_t0);
 ```
@@ -219,11 +219,9 @@ When a kernel uses both AIC and AIV cores (mixed kernel), the codegen generates 
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-PTOParam params_t0;
-// ... add_input / add_output / add_scalar calls ...
+Arg params_t0;
+// ... add_input / add_inout / add_scalar calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-// A2/A3: pto2_rt_submit_task(mixed_0, params_t0)
-// A5:    pto2_rt_submit_task(rt, mixed_0, params_t0)
 pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
@@ -231,11 +229,11 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR Operation | C++ Codegen | Description |
 | ------------ | ----------- | ----------- |
-| `tensor.create` | `make_tensor(shapes, ndims, dtype)` | Allocate internal tensor |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | Ring-buffer alloc info + null-addr placeholder |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
-| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch[N].tensor.shapes[axis]` | Runtime dimension from TaskArg |
+| `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | Runtime dimension from ChipStorageTaskArgs |
 
 ## Complete Example
 
@@ -268,43 +266,40 @@ static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 
-PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(TaskArg* orch,
-    int arg_count, int orch_thread_num, int orch_thread_index) {
-    // Note: A5 adds PTO2Runtime* rt as the first parameter
-    (void)arg_count;
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
+    int orch_thread_num, int orch_thread_index) {
     (void)orch_thread_num;
     (void)orch_thread_index;
 
-    // External tensors (from TaskArg)
-    Tensor ext_a = from_task_arg(orch[0]);
-    Tensor ext_b = from_task_arg(orch[1]);
-    Tensor ext_d = from_task_arg(orch[2]);
+    // External tensors (from ChipStorageTaskArgs)
+    Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
+    Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
+    Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
-    // Internal tensor (intermediate)
-    uint32_t c_shapes[2] = {16, 16};
-    Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
+    // Internal tensor (intermediate) — TensorCreateInfo for add_output, null-addr Tensor for input uses
+    uint32_t c_ci_shapes[2] = {16, 16};
+    TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
+    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
-    // A2/A3: PTO2_SCOPE()   A5: PTO2_SCOPE(rt)
     PTO2_SCOPE() {
         // Task 0: kernel_add (a + b → c)
-        PTOParam params_t0;
+        Arg params_t0;
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
-        params_t0.add_output(c);
-        // A2/A3: pto2_rt_submit_aiv_task(0, params_t0)
-        // A5:    pto2_rt_submit_aiv_task(rt, 0, params_t0)
-        pto2_rt_submit_aiv_task(0, params_t0);
+        params_t0.add_output(c_ci);
+        TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
+        c = outs_t0.get_ref(0);
 
         // Task 1: kernel_add (c + b → d)
-        PTOParam params_t1;
+        Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
-        params_t1.add_output(ext_d);
+        params_t1.add_inout(ext_d);
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }
@@ -332,8 +327,11 @@ names in the output), but never for identity decisions.
 | ------ | ------- | ------- |
 | External tensor | `ext_<name>` | `ext_a` |
 | Internal tensor | `<name>` (no prefix) | `c` |
+| Internal TensorCreateInfo | `<name>_ci` | `c_ci` |
 | Task params | `params_t<N>` | `params_t0` |
-| TaskArg index | `orch[N]` (N-th tensor parameter) | `orch[0]` |
+| TaskOutputTensors | `outs_t<N>` | `outs_t0` |
+| Tensor arg index | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
+| Scalar arg index | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 
 ## Control Flow Generation
 
@@ -349,8 +347,8 @@ for i in pl.range(0, 4):
 // Generated C++ (inside top-level PTO2_SCOPE)
 Tensor acc = ext_acc;  // iter_arg initialization
 for (int64_t i = 0; i < 4; i += 1) {
-    PTOParam params_t0;
-    // ... add_input / add_output calls ...
+    Arg params_t0;
+    // ... add_input / add_inout calls ...
     pto2_rt_submit_aiv_task(0, params_t0);
 }
 ```
@@ -370,16 +368,15 @@ else:
 ```cpp
 // Generated C++
 if (condition) {
-    // A2/A3: PTO2_SCOPE()   A5: PTO2_SCOPE(rt)
     PTO2_SCOPE() {
-        PTOParam params_t0;
-        // ... add_input / add_output calls ...
+        Arg params_t0;
+        // ... add_input / add_inout calls ...
         pto2_rt_submit_aiv_task(0, params_t0);
     }
 } else {
     PTO2_SCOPE() {
-        PTOParam params_t1;
-        // ... add_input / add_output calls ...
+        Arg params_t1;
+        // ... add_input / add_inout calls ...
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }

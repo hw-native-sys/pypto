@@ -485,8 +485,8 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
     - ``KernelCompiler.compile_orchestration``: caches at
       ``work_dir/cache/orch_{stem}.bin``
       (derived from ``work_dir/orchestration/{name}.cpp``).
-    - ``RuntimeBuilder.build``: caches at
-      ``build_output/binary_cache/runtimes/{name}_{platform}_{target}.bin``
+    - ``RuntimeBuilder.get_binaries``: caches at
+      ``build_output/binary_cache/runtimes/{name}_{platform}_{host|aicpu|aicore}.bin``
       (global, shared across all test cases).
 
     Idempotent — safe to call multiple times. Cache miss triggers compilation
@@ -494,6 +494,8 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
     """
     if _binary_cache_patched[0]:
         return
+
+    RuntimeBinaries = getattr(sys.modules[RuntimeBuilder.__module__], "RuntimeBinaries")
 
     # --- KernelCompiler.compile_incore ---
     orig_incore = KernelCompiler.compile_incore
@@ -533,26 +535,23 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
 
     KernelCompiler.compile_orchestration = _patched_orch
 
-    # --- RuntimeBuilder.build ---
-    orig_build = RuntimeBuilder.build
+    # --- RuntimeBuilder.get_binaries ---
+    orig_get_binaries = RuntimeBuilder.get_binaries
 
-    def _patched_build(self, name, build_dir=None):
+    def _patched_get_binaries(self, name, build=False):
         cache_dir = _BINARY_RUNTIME_CACHE / _get_simpler_stamp()
         host_file = cache_dir / f"{name}_{self.platform}_host.bin"
         aicpu_file = cache_dir / f"{name}_{self.platform}_aicpu.bin"
         aicore_file = cache_dir / f"{name}_{self.platform}_aicore.bin"
-        host = _load_binary(host_file)
-        aicpu = _load_binary(aicpu_file)
-        aicore = _load_binary(aicore_file)
-        if host is not None and aicpu is not None and aicore is not None:
-            return (host, aicpu, aicore)
-        result = orig_build(self, name, build_dir)
-        _save_binary(result[0], host_file)
-        _save_binary(result[1], aicpu_file)
-        _save_binary(result[2], aicore_file)
+        if host_file.exists() and aicpu_file.exists() and aicore_file.exists():
+            return RuntimeBinaries(host_path=host_file, aicpu_path=aicpu_file, aicore_path=aicore_file)
+        result = orig_get_binaries(self, name, build=build)
+        _save_binary(result.host_path.read_bytes(), host_file)
+        _save_binary(result.aicpu_path.read_bytes(), aicpu_file)
+        _save_binary(result.aicore_path.read_bytes(), aicore_file)
         return result
 
-    RuntimeBuilder.build = _patched_build
+    RuntimeBuilder.get_binaries = _patched_get_binaries
     _binary_cache_patched[0] = True
 
 

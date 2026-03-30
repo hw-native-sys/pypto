@@ -59,7 +59,10 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create -> uint32_t var_shapes[N] = {...}; Tensor var = make_tensor(var_shapes, N, DataType::XX);
+  // tensor.create emits:
+  //   1. TensorCreateInfo var_ci(...) — used for add_output() in kernel dispatch
+  //   2. Tensor var = make_tensor_external(nullptr, ...) — initial null-addr tensor for add_input() uses
+  //      After an add_output() submit, the Tensor is updated via: var = outs.get_ref(i);
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
@@ -67,21 +70,27 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   size_t ndim = result_type->shape_.size();
 
   std::ostringstream oss;
-  oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
+  oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
     oss << codegen.GenerateExprString(result_type->shape_[i]);
   }
   oss << "};\n";
 
-  // check layout DN
-  std::string runtime_func = "make_tensor";
-  if (result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN) {
+  std::string dtype_str = codegen.GetRuntimeDataTypeString(result_type->dtype_);
+  oss << "TensorCreateInfo " << result_var << "_ci(" << result_var << "_ci_shapes, " << ndim << ", " << dtype_str
+      << ");\n";
+
+  // Also declare a null-addr Tensor for input uses and as target for copy-assignment after output submit.
+  bool is_dn = result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN;
+  if (is_dn) {
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
-    runtime_func = "make_tensor_2d_dn";
+    oss << "Tensor " << result_var << " = make_tensor_2d_dn(" << result_var << "_ci_shapes, " << ndim << ", "
+        << dtype_str << ");";
+  } else {
+    oss << "Tensor " << result_var << " = make_tensor_external(nullptr, " << result_var << "_ci_shapes, " << ndim
+        << ", " << dtype_str << ");";
   }
-  oss << "Tensor " << result_var << " = " << runtime_func << "(" << result_var << "_shapes, " << ndim << ", "
-      << codegen.GetRuntimeDataTypeString(result_type->dtype_) << ");";
   return oss.str();
 }
 

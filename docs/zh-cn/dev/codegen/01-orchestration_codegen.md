@@ -4,8 +4,8 @@
 
 编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
 
-- 将设备内存指针（通过 `TaskArg`）封装为 `Tensor` 对象
-- 构建 `PTOParam` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
+- 将设备内存指针（通过 `ChipStorageTaskArgs`）封装为 `Tensor` 对象
+- 构建 `Arg` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
 - 通过 `pto2_rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
 - 处理控制流（循环、条件分支），使用 `PTO2_SCOPE`
 
@@ -78,33 +78,32 @@ static inline Tensor make_tensor_2d_dn(...) { ... }
 
 ```cpp
 // 阶段 3：配置函数 — 返回期望的参数数量
-PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
 // 阶段 4：入口函数签名
-// A2/A3：
-void aicpu_orchestration_entry(TaskArg* orch,
-    int arg_count, int orch_thread_num, int orch_thread_index) {
-// A5（Ascend950）：在参数列表前增加 PTO2Runtime* rt
-// void aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
+    int orch_thread_num, int orch_thread_index) {
 ```
 
 ### 阶段 5–6：张量设置
 
 ```cpp
-// 阶段 5：外部张量 — ND 布局直接调用 from_task_arg()
-Tensor ext_a = from_task_arg(orch[0]);
-Tensor ext_b = from_task_arg(orch[1]);
+// 阶段 5：外部张量 — ND 布局调用 from_tensor_arg()
+Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
+Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
 
 // DN 布局：传入逻辑形状 — make_tensor_external_2d_dn 内部处理轴转置
-uint32_t dn_shapes[2] = {orch[2].tensor.shapes[0], orch[2].tensor.shapes[1]};
-Tensor ext_dn = make_tensor_external_2d_dn(orch[2].data<void>(), dn_shapes, 2, DataType::FLOAT32);
+uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shapes[1]};
+Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
 
 // 阶段 6：内部张量（来自 pl.create_tensor — 仅中间变量）
-uint32_t tmp_shapes[2] = {16, 16};
-Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
+// 生成两条声明：TensorCreateInfo 用于 add_output，空地址 Tensor 作为占位符。
+uint32_t tmp_ci_shapes[2] = {16, 16};
+TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
+Tensor tmp = make_tensor_external(nullptr, tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
 ### 阶段 7–9：任务提交与控制流
@@ -112,16 +111,13 @@ Tensor tmp = make_tensor(tmp_shapes, 2, DataType::FLOAT32);
 所有任务提交包裹在顶层 `PTO2_SCOPE()` 中：
 
 ```cpp
-// 阶段 7–9：顶层 PTO2_SCOPE 包裹所有任务提交
-// A2/A3：PTO2_SCOPE()   A5：PTO2_SCOPE(rt)
 PTO2_SCOPE() {
-    PTOParam params_t0;
+    Arg params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
-    params_t0.add_output(ext_output);
-    // A2/A3：pto2_rt_submit_aiv_task(0, params_t0)
-    // A5：   pto2_rt_submit_aiv_task(rt, 0, params_t0)
-    pto2_rt_submit_aiv_task(0, params_t0);
+    params_t0.add_output(tmp_ci);            // add_output 接受 TensorCreateInfo（内部张量）
+    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
+    tmp = outs_t0.get_ref(0);               // 从环形缓冲区分配结果赋值回 Tensor
 
     // ForStmt 示例 — 普通 for 循环，不嵌套独立的 PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -136,11 +132,11 @@ PTO2_SCOPE() {
 
 | 类型 | 来源 | C++ 构造方式 | 命名 |
 | ---- | ---- | ------------ | ---- |
-| 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `from_task_arg(orch[N])` | `ext_<name>` |
-| 外部（DN） | 函数参数，DN 布局 | `make_tensor_external_2d_dn(orch[N].data<void>(), {orch[N].tensor.shapes[0], orch[N].tensor.shapes[1]}, ...)` — 轴排序由函数内部处理 | `ext_<name>` |
-| 内部（Internal） | 函数体中的 `pl.create_tensor(...)` | `make_tensor(shapes, ndims, dtype)` | `<name>`（无前缀） |
+| 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
+| 外部（DN） | 函数参数，DN 布局 | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
+| 内部（Internal） | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | `<name>`（无前缀） |
 
-外部张量封装从主机通过 `TaskArg` 传入的设备内存指针。内部张量是运行时分配的临时工作空间。
+外部张量封装从主机通过 `ChipStorageTaskArgs` 传入的设备内存指针。内部张量在传入 `add_output(var_ci)` 时由运行时从环形缓冲区分配。
 
 ### 参数方向
 
@@ -149,9 +145,24 @@ PTO2_SCOPE() {
 | 方向 | Python 注解 | C++ 任务参数 | 语义 |
 | ---- | ----------- | ------------ | ---- |
 | `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读 |
-| `Out` | `pl.Out[pl.Tensor[...]]` | `params.add_output(ext_x)` | 只写 |
+| `Out`（外部） | `pl.Out[pl.Tensor[...]]`（参数） | `params.add_inout(ext_x)` | 预分配缓冲区 |
+| `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `x = outs.get_ref(i)` | 运行时环形缓冲区分配 |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
-| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（所有张量之后） |
+| Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（独立 scalar 槽位） |
+
+使用 `add_output` 时，提交调用返回 `TaskOutputTensors`，每个内部输出张量通过 `outs.get_ref(i)` 拷贝赋值以绑定运行时分配的地址。
+
+### 标量参数编码
+
+标量参数占用 `ChipStorageTaskArgs` 的 scalar 槽位（从 0 开始独立索引，与张量槽位分离）。
+浮点标量使用 `float_to_u64(f)` 进行位转换，其他整数/bool 标量强制转换为 `uint64_t`。
+接收端使用联合体（union）进行类型双关，将 `uint64_t` 重新解释为目标 C 类型：
+
+```cpp
+union { uint64_t u64; float val; } scale_conv;
+scale_conv.u64 = orch_args.scalar(0);
+float scale = scale_conv.val;
+```
 
 ### 别名生成
 
@@ -164,25 +175,13 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 
 ```cpp
 // 生成的 C++
-PTOParam params_t0;
-params_t0.add_output(ext_output);
+Arg params_t0;
+params_t0.add_inout(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
 Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
 
-如果返回名称与 `Out`/`InOut` 参数名称匹配，则不需要别名。`InOut` 参数永不生成别名 — 其本身已是外部张量。
-
-### 后端差异（A5 / Ascend950）
-
-针对 Ascend950（`BackendType::Ascend950`）时，生成的 C++ 在三处有所不同：
-
-| 元素 | A2/A3 | A5 |
-| ---- | ----- | -- |
-| 入口函数 | `aicpu_orchestration_entry(TaskArg* orch, ...)` | `aicpu_orchestration_entry(PTO2Runtime* rt, TaskArg* orch, ...)` |
-| Scope 宏 | `PTO2_SCOPE()` | `PTO2_SCOPE(rt)` |
-| 提交调用 | `pto2_rt_submit_aiv_task(id, params)` | `pto2_rt_submit_aiv_task(rt, id, params)` |
-
-`rt` 参数是显式的 `PTO2Runtime*` 指针，A5 通过调用链传递，而非依赖线程局部存储。
+如果返回名称与 `Out`/`InOut` 参数名称匹配，则不需要别名。
 
 ### 核心类型推断
 
@@ -204,11 +203,11 @@ pij, mij, lij = self.kernel_softmax(sij, scale, pij, mij, lij)
 
 ```cpp
 // 生成的 C++ — 先张量后标量
-PTOParam params_t0;
+Arg params_t0;
 params_t0.add_input(ext_sij);
-params_t0.add_output(ext_pij);
-params_t0.add_output(ext_mij);
-params_t0.add_output(ext_lij);
+params_t0.add_inout(ext_pij);
+params_t0.add_inout(ext_mij);
+params_t0.add_inout(ext_lij);
 params_t0.add_scalar(float_to_u64(scale));  // 标量在所有张量之后
 pto2_rt_submit_aiv_task(0, params_t0);
 ```
@@ -219,11 +218,9 @@ pto2_rt_submit_aiv_task(0, params_t0);
 
 ```cpp
 // Group: mixed_kernel (AIC + AIV)
-PTOParam params_t0;
-// ... add_input / add_output / add_scalar 调用 ...
+Arg params_t0;
+// ... add_input / add_inout / add_scalar 调用 ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-// A2/A3：pto2_rt_submit_task(mixed_0, params_t0)
-// A5：   pto2_rt_submit_task(rt, mixed_0, params_t0)
 pto2_rt_submit_task(mixed_0, params_t0);
 ```
 
@@ -231,11 +228,11 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR 操作 | C++ 代码生成 | 描述 |
 | ------- | ------------ | ---- |
-| `tensor.create` | `make_tensor(shapes, ndims, dtype)` | 分配内部张量 |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | 环形缓冲区分配信息 + 空地址占位符 |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
-| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch[N].tensor.shapes[axis]` | 从 TaskArg 获取运行时维度 |
+| `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度 |
 
 ## 完整示例
 
@@ -268,43 +265,40 @@ static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 
-PTO2OrchestrationConfig aicpu_orchestration_config(TaskArg* orch_args) {
+PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(TaskArg* orch,
-    int arg_count, int orch_thread_num, int orch_thread_index) {
-    // 注意：A5 在参数列表前增加 PTO2Runtime* rt
-    (void)arg_count;
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
+    int orch_thread_num, int orch_thread_index) {
     (void)orch_thread_num;
     (void)orch_thread_index;
 
-    // 外部张量（来自 TaskArg）
-    Tensor ext_a = from_task_arg(orch[0]);
-    Tensor ext_b = from_task_arg(orch[1]);
-    Tensor ext_d = from_task_arg(orch[2]);
+    // 外部张量（来自 ChipStorageTaskArgs）
+    Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
+    Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
+    Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
-    // 内部张量（中间变量）
-    uint32_t c_shapes[2] = {16, 16};
-    Tensor c = make_tensor(c_shapes, 2, DataType::FLOAT32);
+    // 内部张量（中间变量）— TensorCreateInfo 用于 add_output，空地址 Tensor 用于输入及赋值目标
+    uint32_t c_ci_shapes[2] = {16, 16};
+    TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
+    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
-    // A2/A3：PTO2_SCOPE()   A5：PTO2_SCOPE(rt)
     PTO2_SCOPE() {
         // 任务 0: kernel_add (a + b → c)
-        PTOParam params_t0;
+        Arg params_t0;
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
-        params_t0.add_output(c);
-        // A2/A3：pto2_rt_submit_aiv_task(0, params_t0)
-        // A5：   pto2_rt_submit_aiv_task(rt, 0, params_t0)
-        pto2_rt_submit_aiv_task(0, params_t0);
+        params_t0.add_output(c_ci);
+        TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
+        c = outs_t0.get_ref(0);
 
         // 任务 1: kernel_add (c + b → d)
-        PTOParam params_t1;
+        Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
-        params_t1.add_output(ext_d);
+        params_t1.add_inout(ext_d);
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }
@@ -331,8 +325,11 @@ void aicpu_orchestration_entry(TaskArg* orch,
 | ---- | ---- | ---- |
 | 外部张量 | `ext_<name>` | `ext_a` |
 | 内部张量 | `<name>`（无前缀） | `c` |
+| 内部 TensorCreateInfo | `<name>_ci` | `c_ci` |
 | 任务参数 | `params_t<N>` | `params_t0` |
-| TaskArg 索引 | `orch[N]`（第 N 个张量参数） | `orch[0]` |
+| TaskOutputTensors | `outs_t<N>` | `outs_t0` |
+| 张量参数索引 | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
+| 标量参数索引 | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 
 ## 控制流生成
 
@@ -348,8 +345,8 @@ for i in pl.range(0, 4):
 // 生成的 C++（位于顶层 PTO2_SCOPE 内部）
 Tensor acc = ext_acc;  // 迭代参数初始化
 for (int64_t i = 0; i < 4; i += 1) {
-    PTOParam params_t0;
-    // ... add_input / add_output 调用 ...
+    Arg params_t0;
+    // ... add_input / add_inout 调用 ...
     pto2_rt_submit_aiv_task(0, params_t0);
 }
 ```
@@ -369,16 +366,15 @@ else:
 ```cpp
 // 生成的 C++
 if (condition) {
-    // A2/A3：PTO2_SCOPE()   A5：PTO2_SCOPE(rt)
     PTO2_SCOPE() {
-        PTOParam params_t0;
-        // ... add_input / add_output 调用 ...
+        Arg params_t0;
+        // ... add_input / add_inout 调用 ...
         pto2_rt_submit_aiv_task(0, params_t0);
     }
 } else {
     PTO2_SCOPE() {
-        PTOParam params_t1;
-        // ... add_input / add_output 调用 ...
+        Arg params_t1;
+        // ... add_input / add_inout 调用 ...
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }
