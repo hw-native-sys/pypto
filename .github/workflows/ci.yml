@@ -87,6 +87,7 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       SIMPLER_ROOT: ${{ github.workspace }}/simpler
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTOAS_VERSION: v0.16
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -110,9 +111,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
+      - name: Cache ptoas
+        id: cache-ptoas
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ptoas-bin
+          key: ptoas-${{ env.PTOAS_VERSION }}-aarch64
+
       - name: Install ptoas
+        if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
-          PTOAS_VERSION=v0.16
           PTOAS_SHA256=276e9a81dacffe269bf528eff0bbdf6b3acfe7bf93a26b16a4356135482e61e4
           curl --fail --location --retry 3 --retry-all-errors \
             https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
@@ -126,7 +134,7 @@ jobs:
       - name: Add Ascend tools to PATH
         run: echo "/usr/local/Ascend/cann-8.5.0/bin" >> $GITHUB_PATH
 
-      - name: Clone and install simpler repository (pinned)
+      - name: Clone and install simpler repository (stable)
         run: |
           git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
           cd $GITHUB_WORKSPACE/simpler
@@ -150,7 +158,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
-      - name: Clone and install simpler repository (pinned)
+      - name: Clone and install simpler repository (stable)
         run: |
           git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
           cd $GITHUB_WORKSPACE/simpler
