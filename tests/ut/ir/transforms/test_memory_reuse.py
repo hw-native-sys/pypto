@@ -808,6 +808,64 @@ class TestYieldFixup:
                 "if_result should share MemRef with tile_b after YieldFixupMutator patches it"
             )
 
+    def test_if_stmt_tile_move_when_branch_memrefs_differ(self):
+        """When IfStmt branches yield tiles with different MemRefs,
+        tile.move is inserted in the else-branch to unify to the then-branch's MemRef."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                input_b: pl.Tensor[[64, 64], pl.FP32],
+                cond_param: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_b, [0, 0], [64, 64])
+                if cond_param < 2:
+                    # then branch: alias (shares tile_a's memref)
+                    alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = tile_a
+                    if_result = pl.yield_(alias_a)
+                else:
+                    # else branch: chain of ops where tile_a stays alive,
+                    # so the yield value can't share tile_a's memref.
+                    t1: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(tile_a, tile_b)
+                    t2: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(t1, tile_a)
+                    t3: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(t2, tile_a)
+                    if_result = pl.yield_(t3)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
+                return result
+
+        func = _run_memory_reuse(Before)
+
+        # Find the IfStmt and check return_var + else-branch tile.move
+        def _find_if_stmt(stmt):
+            if isinstance(stmt, ir.IfStmt):
+                return stmt
+            if isinstance(stmt, ir.SeqStmts):
+                for child in stmt.stmts:
+                    r = _find_if_stmt(child)
+                    if r:
+                        return r
+            return None
+
+        if_stmt = _find_if_stmt(func.body)
+        assert if_stmt is not None
+        assert if_stmt.else_body is not None
+        assert len(if_stmt.return_vars) == 1
+
+        rv = if_stmt.return_vars[0]
+        assert isinstance(rv.type, ir.TileType)
+
+        # return_var should share MemRef with then-branch yield (alias_a = tile_a)
+        alias_a_type = _get_var_type(func, "alias_a")
+        assert alias_a_type is not None
+        assert rv.type.shares_memref_with(alias_a_type), (
+            "return_var should share MemRef with then-branch yield"
+        )
+
 
 class TestControlFlow:
     """Tests for correct lifetime analysis across control flow boundaries."""

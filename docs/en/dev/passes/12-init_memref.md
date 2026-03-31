@@ -120,7 +120,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` is called internally before MemRef initialization
 - `InitMemRefMutator` reads `memory_space` from `TileType` and creates MemRef objects
-  - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), and ForStmt/IfStmt yield values
+  - Handles MemRef sharing for view ops, reuse-input ops (`tile.store`, `matmul_acc`, `gemv_acc`), tile aliases (`a = b`), and ForStmt/IfStmt yield values
 - `NonDDRMemRefCollector` collects unique non-DDR MemRefs
 - `CreateAllocStatement` / `InsertAllocsIntoBody` create and insert alloc ops
 

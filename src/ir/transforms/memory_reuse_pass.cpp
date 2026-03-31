@@ -719,21 +719,9 @@ class YieldFixupMutator : public IRMutator {
 
       // MemRef mismatch — create tile.move to copy yield value into initValue's buffer
       auto target_memory = init_tile->GetMemorySpace();
-      INTERNAL_CHECK(target_memory.has_value())
-          << "Internal error: initValue TileType must have memory_space";
+      auto [moved_var, move_stmt] = CreateTileMove(yield_var, init_memref, target_memory);
 
-      auto& op_reg = OpRegistry::GetInstance();
-      std::vector<std::pair<std::string, std::any>> kwargs = {
-          {"target_memory", std::any(target_memory.value())}};
-      auto move_call = op_reg.Create("tile.move", {yield_var}, kwargs, yield_var->span_);
-
-      // Create moved var with initValue's MemRef
-      auto moved_type = CloneTypeWithMemRefAndRemapExprs(
-          yield_var->GetType(), init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-          target_memory);
-      auto moved_var = std::make_shared<Var>(yield_var->name_hint_ + "_mv", moved_type, yield_var->span_);
-
-      move_stmts.emplace_back(std::make_shared<AssignStmt>(moved_var, move_call, yield_var->span_));
+      move_stmts.emplace_back(std::move(move_stmt));
       moves_to_insert.emplace_back(i, moved_var);
     }
 
@@ -772,48 +760,93 @@ class YieldFixupMutator : public IRMutator {
     // Find yield statements in each branch
     auto then_yield = FindYieldStmt(if_stmt->then_body_);
     auto else_yield = if_stmt->else_body_.has_value() ? FindYieldStmt(if_stmt->else_body_.value()) : nullptr;
+    if (!then_yield && !else_yield) return result;
 
-    // Patch return_vars to match yield value's MemRef
-    bool changed = false;
+    // For each return_var position, check if the two branches yield tiles
+    // with different MemRefs.  When they differ, insert tile.move in the
+    // branch whose MemRef ≠ the canonical target (then-branch is canonical).
+    bool body_changed = false;
+    std::vector<std::pair<size_t, VarPtr>> else_moves;
+    std::vector<StmtPtr> else_move_stmts;
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
-      // Get yield value's MemRef — try then-branch first, fall back to else-branch
-      VarPtr yield_var = nullptr;
-      if (then_yield && i < then_yield->value_.size()) {
-        yield_var = As<Var>(then_yield->value_[i]);
-      }
-      if (!yield_var && else_yield && i < else_yield->value_.size()) {
-        yield_var = As<Var>(else_yield->value_[i]);
-      }
-      if (!yield_var) continue;
+      VarPtr then_var =
+          (then_yield && i < then_yield->value_.size()) ? As<Var>(then_yield->value_[i]) : nullptr;
+      VarPtr else_var =
+          (else_yield && i < else_yield->value_.size()) ? As<Var>(else_yield->value_[i]) : nullptr;
 
-      auto yield_tile = GetTileTypeWithMemRef(yield_var->GetType());
-      if (!yield_tile) continue;
-      auto yield_memref = GetDefinedMemRef(yield_tile);
+      auto then_tile = then_var ? GetTileTypeWithMemRef(then_var->GetType()) : nullptr;
+      auto else_tile = else_var ? GetTileTypeWithMemRef(else_var->GetType()) : nullptr;
+      if (!then_tile && !else_tile) continue;
 
+      // Use then-branch MemRef as canonical target (fall back to else if then absent)
+      auto target_tile = then_tile ? then_tile : else_tile;
+      auto target_memref = GetDefinedMemRef(target_tile);
+      auto target_memory = target_tile->GetMemorySpace();
+
+      // Check else branch: if MemRef differs from target, insert tile.move
+      if (then_tile && else_tile) {
+        auto else_memref = GetDefinedMemRef(else_tile);
+        if (else_memref.get() != target_memref.get()) {
+          auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
+          else_move_stmts.emplace_back(std::move(move_stmt));
+          else_moves.emplace_back(i, moved_var);
+          body_changed = true;
+        }
+      }
+
+      // Patch return_var to share target MemRef
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
-      if (!rv_tile || !rv_tile->memref_.has_value()) continue;
-      auto rv_memref = GetDefinedMemRef(rv_tile);
-
-      if (rv_memref.get() != yield_memref.get()) {
-        auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
-            rv_tile, yield_memref, [this](const ExprPtr& e) { return VisitExpr(e); },
-            yield_tile->GetMemorySpace());
-        new_return_vars[i] =
-            std::make_shared<Var>(new_return_vars[i]->name_hint_, new_rv_type, new_return_vars[i]->span_);
-        var_remap_[if_stmt->return_vars_[i].get()] = new_return_vars[i];
-        changed = true;
+      if (rv_tile && rv_tile->memref_.has_value()) {
+        auto rv_memref = GetDefinedMemRef(rv_tile);
+        if (rv_memref.get() != target_memref.get()) {
+          auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
+              rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
+          new_return_vars[i] =
+              std::make_shared<Var>(new_return_vars[i]->name_hint_, new_rv_type, new_return_vars[i]->span_);
+          var_remap_[if_stmt->return_vars_[i].get()] = new_return_vars[i];
+          body_changed = true;
+        }
       }
     }
 
-    if (!changed) return result;
+    if (!body_changed) return result;
 
-    return std::make_shared<IfStmt>(if_stmt->condition_, if_stmt->then_body_, if_stmt->else_body_,
+    // Rebuild else body with tile.move stmts inserted before yield
+    auto new_else_body = if_stmt->else_body_;
+    if (!else_moves.empty() && else_yield && if_stmt->else_body_.has_value()) {
+      std::vector<ExprPtr> new_else_yield_values = else_yield->value_;
+      for (const auto& [idx, moved_var] : else_moves) {
+        new_else_yield_values[idx] = moved_var;
+      }
+      auto new_yield = std::make_shared<YieldStmt>(new_else_yield_values, else_yield->span_);
+      new_else_body = InsertMovesAndReplaceYield(if_stmt->else_body_.value(), new_yield, else_move_stmts);
+    }
+
+    return std::make_shared<IfStmt>(if_stmt->condition_, if_stmt->then_body_, new_else_body,
                                     std::move(new_return_vars), if_stmt->span_);
   }
 
  private:
+  // Create a tile.move operation that copies source into target_memref's buffer.
+  // Returns (moved_var, move_assign_stmt).
+  std::pair<VarPtr, StmtPtr> CreateTileMove(const VarPtr& source, const MemRefPtr& target_memref,
+                                            std::optional<MemorySpace> target_memory) {
+    INTERNAL_CHECK(target_memory.has_value())
+        << "Internal error: target TileType must have memory_space for tile.move";
+    auto& op_reg = OpRegistry::GetInstance();
+    std::vector<std::pair<std::string, std::any>> kwargs = {
+        {"target_memory", std::any(target_memory.value())}};
+    auto move_call = op_reg.Create("tile.move", {source}, kwargs, source->span_);
+    auto moved_type = CloneTypeWithMemRefAndRemapExprs(
+        source->GetType(), target_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
+        target_memory);
+    auto moved_var = std::make_shared<Var>(source->name_hint_ + "_mv", moved_type, source->span_);
+    auto move_stmt = std::make_shared<AssignStmt>(moved_var, move_call, source->span_);
+    return {moved_var, move_stmt};
+  }
+
   // Patch iter_args and return_vars to share initValue's MemRef.
   // Returns the original ForStmt if no patching is needed.
   StmtPtr PatchIterArgsAndReturnVars(const ForStmtPtr& for_stmt, const YieldStmtPtr& yield_stmt) {

@@ -1604,6 +1604,99 @@ class TestNestedControlFlow:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_iter_arg_return_stores_to_inout_param(self):
+        """When InCore returns feed back as iter-args via ForStmt, tile.store targets
+        the existing In param (promoted to InOut) instead of adding a new Out param.
+
+        Pattern:
+          orchestration: for i, (a, b) in range(N, init=(a0, b0)):
+                           result = incore(a, b, n)
+                           new_a, new_b = result[0], result[1]
+                           yield_(new_a, new_b)
+          incore:        if n==0: yield_(a, b)      # alias pass-through
+                         else:    yield_(add(a,b), mul(a,b))
+                         return phi_a, phi_b
+
+        Expected: store to In params (InOut), no Out params, no tensor.create at call site.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                b: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                if n == 0:
+                    ra: pl.Tensor[[64], pl.FP32] = a
+                    rb: pl.Tensor[[64], pl.FP32] = b
+                    phi_a, phi_b = pl.yield_(ra, rb)
+                else:
+                    ra: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                    rb: pl.Tensor[[64], pl.FP32] = pl.mul(a, b)
+                    phi_a, phi_b = pl.yield_(ra, rb)
+                return phi_a, phi_b
+
+            @pl.function
+            def main(
+                self,
+                a0: pl.Tensor[[64], pl.FP32],
+                b0: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                for i, (a, b) in pl.range(3, init_values=(a0, b0)):
+                    result: tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]] = self.main_incore_0(
+                        a, b, n
+                    )
+                    new_a: pl.Tensor[[64], pl.FP32] = result[0]
+                    new_b: pl.Tensor[[64], pl.FP32] = result[1]
+                    out_a, out_b = pl.yield_(new_a, new_b)
+                return out_a, out_b
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                b: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                n: pl.Scalar[pl.INT64],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                a_tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
+                b_tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
+                if n == 0:
+                    ra_tile: pl.Tile[[64], pl.FP32] = a_tile
+                    rb_tile: pl.Tile[[64], pl.FP32] = b_tile
+                    phi_a, phi_b = pl.yield_(ra_tile, rb_tile)
+                else:
+                    ra_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(a_tile, b_tile)
+                    rb_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(a_tile, b_tile)
+                    phi_a, phi_b = pl.yield_(ra_tile, rb_tile)
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(phi_a, [0], a)
+                ret1__store: pl.Tensor[[64], pl.FP32] = pl.store(phi_b, [0], b)
+                return ret0__store, ret1__store
+
+            @pl.function
+            def main(
+                self,
+                a0: pl.Tensor[[64], pl.FP32],
+                b0: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                for i, (a, b) in pl.range(3, init_values=(a0, b0)):
+                    result: tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]] = self.main_incore_0(
+                        a, b, n
+                    )
+                    new_a: pl.Tensor[[64], pl.FP32] = result[0]
+                    new_b: pl.Tensor[[64], pl.FP32] = result[1]
+                    out_a, out_b = pl.yield_(new_a, new_b)
+                return out_a, out_b
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestGmLocalTensorConversion:
     """Test gm_tensor vs local_tensor differentiated conversion."""

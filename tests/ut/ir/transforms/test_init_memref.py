@@ -425,6 +425,40 @@ class TestYieldMemRef:
         assert isinstance(then_var.type, ir.TileType)
         assert cast(ir.TileType, rv.type).shares_memref_with(cast(ir.TileType, then_var.type))
 
+    def test_tile_alias_shares_source_memref(self):
+        """Tile alias (a = b) shares MemRef with source tile, not a fresh one."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                cond: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                if cond < 2:
+                    alias_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = tile_a
+                    if_result = pl.yield_(alias_a)
+                else:
+                    tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(tile_a, tile_a)
+                    if_result = pl.yield_(tile_b)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(if_result, [0, 0], output)
+                return result
+
+        After = passes.init_mem_ref()(Before)
+        func = _first_function(After)
+
+        tile_types = _get_tile_types(func)
+        assert "tile_a" in tile_types
+        assert "alias_a" in tile_types
+
+        # alias_a must share MemRef with tile_a (not get a fresh one)
+        assert tile_types["alias_a"].shares_memref_with(tile_types["tile_a"])
+
 
 class TestEdgeCases:
     """Edge cases requiring raw IR construction."""

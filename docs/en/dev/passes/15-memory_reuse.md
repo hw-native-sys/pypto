@@ -138,7 +138,7 @@ Pass MemoryReuse();
 - `ComputeLifetimes` builds MemRef sharing groups and lifetime intervals
 - `IdentifyReuseOpportunities` finds reuse candidates
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
-- `YieldFixupMutator` fixes ForStmt/IfStmt yield/return_var MemRef mismatches after reuse
+- `YieldFixupMutator` fixes ForStmt/IfStmt yield/return_var MemRef mismatches after reuse (inserts `tile.move` when needed)
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
 - `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from `SeqStmts`
 

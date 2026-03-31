@@ -215,6 +215,187 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
   return {};
 }
 
+// ============================================================================
+// Iter-arg mapping: return_index → call_arg_index for InCore functions
+// called inside ForStmt loops.
+// ============================================================================
+
+/**
+ * @brief Per-InCore function mapping: which return indices correspond to which
+ * call argument indices (iter-args that get yielded back).
+ *
+ * For example, if return[0] feeds back to iter_arg whose init is call arg[2],
+ * then return_to_arg[0] = 2.
+ */
+using IterArgMapping = std::unordered_map<size_t, size_t>;  // return_index → call_arg_index
+
+/**
+ * @brief Scan orchestration functions to build iter-arg mappings for InCore calls.
+ *
+ * For each ForStmt containing an InCore call, determines which call arguments are
+ * iter-args and which return values feed back to those iter-args via yield.
+ *
+ * Pattern recognized:
+ *   for idx, (a, b, c) in pl.range(N, init_values=(a0, b0, c0)):
+ *       result = incore_func(..., a, b, c, ...)
+ *       new_a = result[0]; new_b = result[1]; new_c = result[2]
+ *       yield_(new_a, new_b, new_c)
+ *
+ * Here result[0] → a (arg position of a), result[1] → b, result[2] → c.
+ */
+std::unordered_map<std::string, IterArgMapping> AnalyzeIterArgMappings(
+    const std::vector<FunctionPtr>& functions) {
+  std::unordered_map<std::string, IterArgMapping> result;
+
+  // Pre-build set of InCore function names for O(1) lookups
+  std::unordered_set<std::string> incore_func_names;
+  for (const auto& func : functions) {
+    if (func->func_type_ == FunctionType::InCore) {
+      incore_func_names.insert(func->name_);
+    }
+  }
+
+  for (const auto& func : functions) {
+    if (func->func_type_ == FunctionType::InCore) continue;
+
+    // Walk all ForStmts recursively using a stack of statement lists
+    std::vector<std::vector<StmtPtr>> worklist;
+    worklist.push_back(FlattenToStmts(func->body_));
+
+    while (!worklist.empty()) {
+      auto stmts = std::move(worklist.back());
+      worklist.pop_back();
+
+      for (const auto& stmt : stmts) {
+        // Recurse into nested control flow
+        if (auto seq = As<SeqStmts>(stmt)) {
+          worklist.push_back(seq->stmts_);
+          continue;
+        }
+        if (auto scope = As<ScopeStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(scope->body_));
+          continue;
+        }
+        if (auto if_stmt = As<IfStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(if_stmt->then_body_));
+          if (if_stmt->else_body_.has_value()) {
+            worklist.push_back(FlattenToStmts(*if_stmt->else_body_));
+          }
+          continue;
+        }
+
+        auto for_stmt = As<ForStmt>(stmt);
+        if (!for_stmt) {
+          if (auto while_stmt = As<WhileStmt>(stmt)) {
+            worklist.push_back(FlattenToStmts(while_stmt->body_));
+          }
+          continue;
+        }
+
+        // Flatten the ForStmt body once, reuse for both worklist and analysis
+        auto body_stmts = FlattenToStmts(for_stmt->body_);
+
+        // Always recurse into this ForStmt's body for nested loops
+        worklist.push_back(body_stmts);
+
+        if (for_stmt->iter_args_.empty()) continue;
+
+        // Collect ALL InCore call assignments in this ForStmt body.
+        // A loop body may contain multiple InCore calls (e.g. incore_2, _3, _4, _5
+        // in flash_attention's sb loop), and only the one whose returns feed back
+        // through yield to iter-args should get the mapping.
+        std::vector<AssignStmtPtr> incore_call_assigns;
+        for (const auto& body_stmt : body_stmts) {
+          auto assign = As<AssignStmt>(body_stmt);
+          if (!assign) continue;
+          auto call = As<Call>(assign->value_);
+          if (!call) continue;
+          auto gvar = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+          if (!gvar) continue;
+          if (incore_func_names.count(gvar->name_) > 0) {
+            incore_call_assigns.push_back(assign);
+          }
+        }
+        if (incore_call_assigns.empty()) continue;
+
+        // Build map: iter_arg pointer → iter_arg index
+        std::unordered_map<const Var*, size_t> iter_arg_index;
+        for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+          iter_arg_index[for_stmt->iter_args_[i].get()] = i;
+        }
+
+        // Find the yield in the loop body
+        auto yield = transform_utils::FindYieldStmt(for_stmt->body_);
+        if (!yield) continue;
+
+        // Build map: call result tuple var → set of (tuple_index, dest_var)
+        std::unordered_map<const Var*, std::unordered_map<size_t, const Var*>> tuple_extracts;
+        for (const auto& body_stmt : body_stmts) {
+          auto assign = As<AssignStmt>(body_stmt);
+          if (!assign) continue;
+          auto tgi = As<TupleGetItemExpr>(assign->value_);
+          if (!tgi) continue;
+          if (auto src_var = As<Var>(tgi->tuple_)) {
+            tuple_extracts[src_var.get()][static_cast<size_t>(tgi->index_)] = assign->var_.get();
+          }
+        }
+
+        // Try each InCore call to find one whose returns feed back as iter-args
+        for (const auto& call_assign : incore_call_assigns) {
+          auto call = As<Call>(call_assign->value_);
+          auto gvar = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+
+          // Find which call arg positions correspond to iter_args
+          std::unordered_map<size_t, size_t> iter_idx_to_arg;  // iter_arg_index → call_arg_index
+          for (size_t arg_i = 0; arg_i < call->args_.size(); ++arg_i) {
+            const Var* raw_ptr = nullptr;
+            if (auto var = As<Var>(call->args_[arg_i])) {
+              raw_ptr = var.get();
+            } else if (auto ia = As<IterArg>(call->args_[arg_i])) {
+              raw_ptr = ia.get();
+            }
+            if (raw_ptr) {
+              auto it = iter_arg_index.find(raw_ptr);
+              if (it != iter_arg_index.end()) {
+                iter_idx_to_arg[it->second] = arg_i;
+              }
+            }
+          }
+
+          // Check yield values: yield[j] should be result[i] from this call
+          IterArgMapping mapping;
+          auto call_result_var = call_assign->var_.get();
+
+          for (size_t yield_i = 0; yield_i < yield->value_.size(); ++yield_i) {
+            auto yielded = As<Var>(yield->value_[yield_i]);
+            if (!yielded) continue;
+
+            auto extract_it = tuple_extracts.find(call_result_var);
+            if (extract_it == tuple_extracts.end()) continue;
+
+            for (const auto& [ret_idx, dest_var] : extract_it->second) {
+              if (dest_var == yielded.get()) {
+                auto arg_it = iter_idx_to_arg.find(yield_i);
+                if (arg_it != iter_idx_to_arg.end()) {
+                  mapping[ret_idx] = arg_it->second;
+                }
+                break;
+              }
+            }
+          }
+
+          if (!mapping.empty()) {
+            result[gvar->name_] = std::move(mapping);
+            break;  // Found the right InCore call for this ForStmt
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
 /**
  * @brief Info about a tensor.slice result that feeds into a tensor.matmul/tensor.matmul_acc operand.
  *
@@ -1291,7 +1472,8 @@ struct IncoreTransformResult {
   size_t num_added_outputs;
 };
 
-IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
+IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
+                                              const IterArgMapping& iter_arg_mapping) {
   auto& conv_registry = OpConversionRegistry::GetInstance();
   auto& op_registry = OpRegistry::GetInstance();
   const auto& span = func->span_;
@@ -1364,6 +1546,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
 
+    // Phase 3: Process each return value
     for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
       auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
 
@@ -1375,6 +1558,25 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         INTERNAL_CHECK(orig_tensor_type)
             << "Internal error: return type " << i << " should be TensorType but got "
             << func->return_types_[i]->TypeName();
+
+        // Check if this return value has an iter-arg mapping: store to the
+        // existing In param (auto-promoted to InOut) instead of adding a new Out param.
+        auto map_it = iter_arg_mapping.find(i);
+        if (map_it != iter_arg_mapping.end()) {
+          size_t arg_idx = map_it->second;
+          INTERNAL_CHECK(arg_idx < new_params.size())
+              << "Internal error: iter-arg mapping arg_idx " << arg_idx << " exceeds param count "
+              << new_params.size();
+
+          auto in_param = new_params[arg_idx];
+          auto offsets = MakeZeroOffsets(orig_tensor_type->shape_.size(), span);
+          auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, in_param}, span);
+          auto store_var = std::make_shared<Var>(MakeStoreResultName(i), store_call->GetType(), span);
+          new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          new_return_types.push_back(store_call->GetType());
+          new_return_exprs.push_back(store_var);
+          continue;
+        }
 
         // Add output tensor parameter
         std::string out_name = MakeOutParamName(num_added_outputs);
@@ -1770,14 +1972,25 @@ namespace pass {
 
 Pass ConvertTensorToTileOps() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Phase 0: Analyze iter-arg mappings from orchestration call sites
+    std::vector<FunctionPtr> all_funcs;
+    all_funcs.reserve(program->functions_.size());
+    for (const auto& [gvar, func] : program->functions_) {
+      all_funcs.push_back(func);
+    }
+    auto iter_arg_mappings = AnalyzeIterArgMappings(all_funcs);
+
     // Phase 1: Transform InCore functions
     std::unordered_map<std::string, size_t> incore_added_outputs;
     std::unordered_map<std::string, FunctionPtr> transformed_incore_funcs;
     std::vector<FunctionPtr> functions_phase1;
+    const IterArgMapping empty_mapping;
 
     for (const auto& [gvar, func] : program->functions_) {
       if (func->func_type_ == FunctionType::InCore) {
-        auto result = TransformIncoreFunction(func);
+        auto mapping_it = iter_arg_mappings.find(func->name_);
+        const auto& mapping = (mapping_it != iter_arg_mappings.end()) ? mapping_it->second : empty_mapping;
+        auto result = TransformIncoreFunction(func, mapping);
         incore_added_outputs[func->name_] = result.num_added_outputs;
         transformed_incore_funcs[func->name_] = result.func;
         functions_phase1.push_back(result.func);

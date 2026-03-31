@@ -120,7 +120,7 @@ Pass InitMemRef();
 
 - `NormalizeStmtStructure` 在 MemRef 初始化之前被内部调用
 - `InitMemRefMutator` 从 `TileType` 读取 `memory_space` 并创建 MemRef 对象
-  - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
+  - 处理 view 操作、复用输入操作（`tile.store`、`matmul_acc`、`gemv_acc`）、tile 别名（`a = b`）以及 ForStmt/IfStmt yield 值的 MemRef 共享
 - `NonDDRMemRefCollector` 收集唯一的非 DDR MemRef
 - `CreateAllocStatement` / `InsertAllocsIntoBody` 创建并插入 alloc 操作
 

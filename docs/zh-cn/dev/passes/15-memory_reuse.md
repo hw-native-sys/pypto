@@ -123,7 +123,7 @@ Pass MemoryReuse();
 - `ComputeLifetimes` 构建 MemRef 共享组和生命周期区间
 - `IdentifyReuseOpportunities` 查找复用候选
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
-- `YieldFixupMutator` 修复 ForStmt/IfStmt 在复用后的 yield/return_var MemRef 不一致
+- `YieldFixupMutator` 修复 ForStmt/IfStmt 在复用后的 yield/return_var MemRef 不一致（必要时插入 `tile.move`）
 - `UsedMemRefCollector` 收集共享后仍被引用的 MemRef 指针
 - `RemoveUnusedAllocStatements` 从 `SeqStmts` 中过滤掉冗余的 `tile.alloc` 语句
 

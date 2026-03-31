@@ -201,6 +201,24 @@ class InitMemRefMutator : public IRMutator {
     return std::static_pointer_cast<const Expr>(GetNewVar(var_ptr));
   }
 
+  /**
+   * @brief Share a MemRef from a source expression to the LHS variable of an assignment.
+   *
+   * Returns a new AssignStmt with the LHS type updated to share the source's MemRef,
+   * or nullptr if the source has no MemRef.
+   */
+  StmtPtr ShareMemRefFrom(const ExprPtr& source, const AssignStmtPtr& op, const ExprPtr& new_value) {
+    auto shared_memref = GetTypeMemRef(source->GetType());
+    if (!shared_memref.has_value()) return nullptr;
+
+    auto source_ms = ExtractMemorySpaceFromType(source->GetType());
+    TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
+        op->var_->GetType(), shared_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, source_ms);
+    VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
+    var_map_[op->var_] = new_var;
+    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // First visit the value (RHS)
     auto new_value = VisitExpr(op->value_);
@@ -216,25 +234,12 @@ class InitMemRefMutator : public IRMutator {
         // Get the input tile (first argument) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call) {
-          auto input_tile_arg = new_call->args_[0];
-
-          // Extract MemRef from input tile
-          auto shared_memref = GetTypeMemRef(input_tile_arg->GetType());
-
-          // Create new variable with shared MemRef
-          if (shared_memref.has_value()) {
+          auto result = ShareMemRefFrom(new_call->args_[0], op, new_value);
+          if (result) {
             LOG_DEBUG << "Sharing MemRef from input tile to " << op->var_->name_hint_;
-            auto source_memory_space = ExtractMemorySpaceFromType(input_tile_arg->GetType());
-            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
-                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-                source_memory_space);
-            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
-            var_map_[op->var_] = new_var;
-
-            return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
-          } else {
-            LOG_DEBUG << "Input tile has no MemRef yet";
+            return result;
           }
+          LOG_DEBUG << "Input tile has no MemRef yet";
         }
       }
 
@@ -243,20 +248,23 @@ class InitMemRefMutator : public IRMutator {
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && *reuse_arg_idx < new_call->args_.size()) {
-          auto input_arg = new_call->args_[*reuse_arg_idx];
-          auto shared_memref = GetTypeMemRef(input_arg->GetType());
-          if (shared_memref.has_value()) {
+          auto result = ShareMemRefFrom(new_call->args_[*reuse_arg_idx], op, new_value);
+          if (result) {
             LOG_DEBUG << "Reusing MemRef from input arg " << *reuse_arg_idx << " for "
                       << op->var_->name_hint_;
-            auto source_memory_space = ExtractMemorySpaceFromType(input_arg->GetType());
-            TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
-                op->var_->GetType(), shared_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
-                source_memory_space);
-            VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
-            var_map_[op->var_] = new_var;
-            return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+            return result;
           }
         }
+      }
+    }
+
+    // Tile alias: a = b where b is a tile Var — share b's MemRef.
+    // Without this, the alias gets a fresh MemRef that is never written to,
+    // breaking IfStmt return_vars that inherit the alias's empty MemRef.
+    if (auto value_var = As<Var>(new_value)) {
+      if (As<TileType>(op->var_->GetType())) {
+        auto result = ShareMemRefFrom(value_var, op, new_value);
+        if (result) return result;
       }
     }
 
