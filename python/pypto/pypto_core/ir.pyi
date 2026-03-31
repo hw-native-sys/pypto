@@ -1725,6 +1725,18 @@ class ScopeKind(enum.Enum):
     Hierarchy = 3
     """Distributed hierarchy scope (uses level/role on ScopeStmt)."""
 
+class SplitMode(enum.Enum):
+    """Split mode for cross-core data transfer."""
+
+    NONE = 0
+    """No split."""
+
+    UP_DOWN = 1
+    """Split vertically (height halved)."""
+
+    LEFT_RIGHT = 2
+    """Split horizontally (width halved)."""
+
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context."""
 
@@ -1737,6 +1749,9 @@ class ScopeStmt(Stmt):
     role: Final[Role | None]
     """Function role (None for non-Hierarchy scopes)."""
 
+    split: Final[SplitMode | None]
+    """Split mode for cross-core transfer (None for no split)."""
+
     body: Final[Stmt]
     """The nested statements."""
 
@@ -1747,6 +1762,7 @@ class ScopeStmt(Stmt):
         span: Span,
         level: Level | None = None,
         role: Role | None = None,
+        split: SplitMode | None = None,
     ) -> None:
         """Create a scope statement.
 
@@ -1756,6 +1772,7 @@ class ScopeStmt(Stmt):
             span: Source location
             level: Hierarchy level (for Hierarchy scopes)
             role: Function role (for Hierarchy scopes)
+            split: Split mode for cross-core transfer (for AutoInCore scopes)
         """
 
 class SeqStmts(Stmt):
@@ -1848,6 +1865,9 @@ class Function(IRNode):
     role: Final[Role | None]
     """Function role (None = unspecified)."""
 
+    split: Final[SplitMode | None]
+    """Split mode for cross-core transfer (None = no split)."""
+
     params: Final[list[Var]]
     """Parameter variables."""
 
@@ -1870,6 +1890,7 @@ class Function(IRNode):
         type: FunctionType = FunctionType.Opaque,
         level: Level | None = None,
         role: Role | None = None,
+        split: SplitMode | None = None,
     ) -> None:
         """Create a function definition.
 
@@ -1882,6 +1903,7 @@ class Function(IRNode):
             type: Function type (default: Opaque)
             level: Hierarchy level (default: None — unspecified)
             role: Function role (default: None — unspecified)
+            split: Split mode for cross-core transfer (default: None)
         """
 
     def __str__(self) -> str:

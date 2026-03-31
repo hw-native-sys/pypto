@@ -584,9 +584,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   seed_tpop_remap(aic_map, aic_tpop_remap);
   auto [aic_cloned_body, aic_clone_map_unused] = DeepClone(MakeBody(aic_final, func->span_), aic_map);
   (void)aic_clone_map_unused;
-  auto aic_func =
-      std::make_shared<Function>(aic_name, aic_params, func->param_directions_, std::vector<TypePtr>{},
-                                 aic_cloned_body, func->span_, FunctionType::AIC);
+  auto aic_func = std::make_shared<Function>(aic_name, aic_params, func->param_directions_,
+                                             std::vector<TypePtr>{}, aic_cloned_body, func->span_,
+                                             FunctionType::AIC, std::nullopt, std::nullopt, func->split_);
 
   // Create AIV function with deep clone (fresh Vars for all params and locals,
   // ensuring no shared Var pointers with AIC for structural equality)
@@ -723,9 +723,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(MakeBody(aiv_final, func->span_), aiv_map);
   (void)aiv_clone_map_unused;
-  auto aiv_func =
-      std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_, func->return_types_,
-                                 aiv_cloned_body, func->span_, FunctionType::AIV);
+  auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_,
+                                             func->return_types_, aiv_cloned_body, func->span_,
+                                             FunctionType::AIV, std::nullopt, std::nullopt, func->split_);
 
   if (!create_group) {
     return {aic_func, aiv_func, std::nullopt};
@@ -905,7 +905,8 @@ Pass ExpandMixedKernel() {
         // Not mixed — convert InCore to the corresponding AIC or AIV type
         FunctionType new_type = (combined == CoreAffinity::CUBE) ? FunctionType::AIC : FunctionType::AIV;
         auto converted = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                                    func->return_types_, func->body_, func->span_, new_type);
+                                                    func->return_types_, func->body_, func->span_, new_type,
+                                                    std::nullopt, std::nullopt, func->split_);
         new_functions.push_back(converted);
         continue;
       }

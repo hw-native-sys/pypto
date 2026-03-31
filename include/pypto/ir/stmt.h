@@ -143,6 +143,55 @@ enum class ScopeKind : uint8_t {
 };
 
 /**
+ * @brief Split mode for cross-core data transfer
+ *
+ * Controls how tile data is split when transferred between AIC and AIV cores:
+ * - None: No splitting, full tile transferred
+ * - UpDown: Split vertically (height halved, width unchanged)
+ * - LeftRight: Split horizontally (height unchanged, width halved)
+ */
+enum class SplitMode : uint8_t {
+  None = 0,       ///< No split
+  UpDown = 1,     ///< Split vertically (height halved)
+  LeftRight = 2,  ///< Split horizontally (width halved)
+};
+
+/**
+ * @brief Convert SplitMode to string
+ * @param mode The split mode
+ * @return String representation ("None", "UpDown", or "LeftRight")
+ */
+inline std::string SplitModeToString(SplitMode mode) {
+  switch (mode) {
+    case SplitMode::None:
+      return "None";
+    case SplitMode::UpDown:
+      return "UpDown";
+    case SplitMode::LeftRight:
+      return "LeftRight";
+  }
+  throw pypto::TypeError("Unknown SplitMode");
+}
+
+/**
+ * @brief Convert string to SplitMode
+ * @param str String representation
+ * @return SplitMode enum value
+ * @throws pypto::TypeError if string is not recognized
+ */
+inline SplitMode StringToSplitMode(const std::string& str) {
+  if (str == "None") {
+    return SplitMode::None;
+  } else if (str == "UpDown") {
+    return SplitMode::UpDown;
+  } else if (str == "LeftRight") {
+    return SplitMode::LeftRight;
+  } else {
+    throw pypto::TypeError("Unknown SplitMode: " + str);
+  }
+}
+
+/**
  * @brief Convert ForKind to string
  * @param kind The for loop kind
  * @return String representation ("Sequential", "Parallel", or "Unroll")
@@ -631,17 +680,23 @@ class ScopeStmt : public Stmt {
       : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)) {}
 
   /**
-   * @brief Create a scope statement with hierarchy level and role
+   * @brief Create a scope statement with hierarchy level, role, and split mode
    *
    * @param scope_kind The kind of scope
    * @param body The nested statements
    * @param span Source location
    * @param level Hierarchy level (for Hierarchy scopes)
    * @param role Function role (for Hierarchy scopes)
+   * @param split Split mode for cross-core transfer (for AutoInCore scopes)
    */
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
-            std::optional<Role> role = std::nullopt)
-      : Stmt(std::move(span)), scope_kind_(scope_kind), body_(std::move(body)), level_(level), role_(role) {
+            std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt)
+      : Stmt(std::move(span)),
+        scope_kind_(scope_kind),
+        body_(std::move(body)),
+        level_(level),
+        role_(role),
+        split_(split) {
     CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
   }
 
@@ -651,21 +706,23 @@ class ScopeStmt : public Stmt {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (scope_kind, level, role, and body as USUAL fields)
+   * @return Tuple of field descriptors (scope_kind, level, role, split, and body as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&ScopeStmt::scope_kind_, "scope_kind"),
                                           reflection::UsualField(&ScopeStmt::level_, "level"),
                                           reflection::UsualField(&ScopeStmt::role_, "role"),
+                                          reflection::UsualField(&ScopeStmt::split_, "split"),
                                           reflection::UsualField(&ScopeStmt::body_, "body")));
   }
 
  public:
-  ScopeKind scope_kind_;        // The kind of scope (e.g., InCore, Hierarchy)
-  std::optional<Level> level_;  // Hierarchy level (nullopt for non-Hierarchy scopes)
-  std::optional<Role> role_;    // Function role (nullopt for non-Hierarchy scopes)
-  StmtPtr body_;                // The nested statements
+  ScopeKind scope_kind_;            // The kind of scope (e.g., InCore, Hierarchy)
+  std::optional<Level> level_;      // Hierarchy level (nullopt for non-Hierarchy scopes)
+  std::optional<Role> role_;        // Function role (nullopt for non-Hierarchy scopes)
+  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
+  StmtPtr body_;                    // The nested statements
 };
 
 using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;

@@ -598,10 +598,10 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function (propagate level/role from ScopeStmt for Hierarchy scopes)
-    auto outlined_func =
-        std::make_shared<Function>(outlined_func_name, input_params, input_param_directions, return_types,
-                                   outlined_body, op->span_, outlined_func_type_, op->level_, op->role_);
+    // Register the outlined function (propagate level/role/split from ScopeStmt)
+    auto outlined_func = std::make_shared<Function>(outlined_func_name, input_params, input_param_directions,
+                                                    return_types, outlined_body, op->span_,
+                                                    outlined_func_type_, op->level_, op->role_, op->split_);
     outlined_functions_.push_back(outlined_func);
 
     // Build the call site in the parent function

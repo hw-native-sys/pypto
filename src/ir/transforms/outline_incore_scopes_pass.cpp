@@ -81,9 +81,9 @@ Pass OutlineIncoreScopes() {
       // If any InCore scopes were outlined, promote Opaque -> Orchestration.
       const auto& outlined = outliner.GetOutlinedFunctions();
       FunctionType new_func_type = outlined.empty() ? func->func_type_ : FunctionType::Orchestration;
-      auto new_func =
-          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                     new_body, func->span_, new_func_type, func->level_, func->role_);
+      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                                 func->return_types_, new_body, func->span_, new_func_type,
+                                                 func->level_, func->role_, func->split_);
       new_functions.push_back(new_func);
 
       // Collect outlined functions (prepend before parent so inner functions come first)

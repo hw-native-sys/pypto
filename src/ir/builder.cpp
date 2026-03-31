@@ -37,14 +37,15 @@ IRBuilder::IRBuilder() = default;
 // ========== Function Building ==========
 
 void IRBuilder::BeginFunction(const std::string& name, const Span& span, FunctionType type,
-                              std::optional<Level> level, std::optional<Role> role) {
+                              std::optional<Level> level, std::optional<Role> role,
+                              std::optional<SplitMode> split) {
   if (InFunction()) {
     throw pypto::RuntimeError("Cannot begin function '" + name + "': already inside function '" +
                               static_cast<FunctionContext*>(CurrentContext())->GetName() + "' at " +
                               CurrentContext()->GetBeginSpan().to_string());
   }
 
-  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type, level, role));
+  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type, level, role, split));
 }
 
 VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span,
@@ -76,9 +77,10 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create function
-  auto func = std::make_shared<Function>(
-      func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(), func_ctx->GetReturnTypes(),
-      body, combined_span, func_ctx->GetFuncType(), func_ctx->GetLevel(), func_ctx->GetRole());
+  auto func =
+      std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(),
+                                 func_ctx->GetReturnTypes(), body, combined_span, func_ctx->GetFuncType(),
+                                 func_ctx->GetLevel(), func_ctx->GetRole(), func_ctx->GetSplit());
 
   // Pop context
   context_stack_.pop_back();
@@ -284,12 +286,12 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 // ========== Scope Building ==========
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
-                           std::optional<Role> role) {
+                           std::optional<Role> role, std::optional<SplitMode> split) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
-  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role));
+  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -308,8 +310,9 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create scope statement
-  auto scope_stmt = std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span,
-                                                scope_ctx->GetLevel(), scope_ctx->GetRole());
+  auto scope_stmt =
+      std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span, scope_ctx->GetLevel(),
+                                  scope_ctx->GetRole(), scope_ctx->GetSplit());
 
   // Pop context
   context_stack_.pop_back();

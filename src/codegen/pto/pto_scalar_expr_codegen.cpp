@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -46,13 +47,61 @@ std::string PTOCodegen::EmitArithCmpi(const std::string& predicate, const std::s
   return result;
 }
 
+std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::string& wanted_mlir_type) {
+  CHECK(!wanted_mlir_type.empty()) << "EmitArithOperand: empty wanted_mlir_type";
+
+  if (wanted_mlir_type == "index") {
+    if (auto ci = As<ir::ConstInt>(expr)) {
+      return GetOrEmitIndexConstant(ci->value_);
+    }
+  } else if (wanted_mlir_type == "i64") {
+    if (auto ci = As<ir::ConstInt>(expr)) {
+      return GetOrEmitI64Constant(ci->value_);
+    }
+  } else if (wanted_mlir_type == "i32") {
+    if (auto ci = As<ir::ConstInt>(expr)) {
+      return GetOrEmitI32Constant(static_cast<int32_t>(ci->value_));
+    }
+  }
+
+  VisitExpr(expr);
+  std::string ssa = fs_.current_expr_value;
+
+  const ::pypto::DataType dt = ir::GetScalarDtype(expr);
+  if (dt.IsFloat()) {
+    CHECK(wanted_mlir_type == GetTypeString(dt)) << "EmitArithOperand: float type mismatch (want "
+                                                 << wanted_mlir_type << ", have " << dt.ToString() << ")";
+    return ssa;
+  }
+
+  std::string have_mlir = (dt == ::pypto::DataType::INDEX) ? "index" : GetTypeString(dt);
+  if (have_mlir == wanted_mlir_type) {
+    return ssa;
+  }
+
+  std::string casted = NewTemp();
+  if (have_mlir == "index") {
+    Emit(casted + " = arith.index_cast " + ssa + " : index to " + wanted_mlir_type);
+    return casted;
+  }
+  if (wanted_mlir_type == "index") {
+    Emit(casted + " = arith.index_cast " + ssa + " : " + have_mlir + " to index");
+    return casted;
+  }
+  if (have_mlir == "i32" && wanted_mlir_type == "i64") {
+    Emit(casted + " = arith.extsi " + ssa + " : i32 to i64");
+    return casted;
+  }
+  if (have_mlir == "i64" && wanted_mlir_type == "i32") {
+    Emit(casted + " = arith.trunci " + ssa + " : i64 to i32");
+    return casted;
+  }
+  CHECK(false) << "EmitArithOperand: unsupported cast from " << have_mlir << " to " << wanted_mlir_type;
+  return ssa;
+}
+
 void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string& int_op,
                                       const std::string& float_op) {
-  VisitExpr(op->left_);
-  std::string lhs = fs_.current_expr_value;
-  VisitExpr(op->right_);
-  std::string rhs = fs_.current_expr_value;
-
   std::string result_type = "index";
   std::string mlir_op = int_op;
   if (auto scalar_type = As<ScalarType>(op->GetType())) {
@@ -63,15 +112,22 @@ void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string
       result_type = GetTypeString(scalar_type->dtype_);
     }
   }
+
+  if (mlir_op == float_op) {
+    VisitExpr(op->left_);
+    std::string lhs = fs_.current_expr_value;
+    VisitExpr(op->right_);
+    std::string rhs = fs_.current_expr_value;
+    fs_.current_expr_value = EmitArithBinaryOp(mlir_op, lhs, rhs, result_type);
+    return;
+  }
+
+  std::string lhs = EmitArithOperand(op->left_, result_type);
+  std::string rhs = EmitArithOperand(op->right_, result_type);
   fs_.current_expr_value = EmitArithBinaryOp(mlir_op, lhs, rhs, result_type);
 }
 
 void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predicate) {
-  VisitExpr(op->left_);
-  std::string lhs = fs_.current_expr_value;
-  VisitExpr(op->right_);
-  std::string rhs = fs_.current_expr_value;
-
   std::string operand_type = "index";
   bool is_float = false;
   if (auto scalar_type = As<ScalarType>(op->left_->GetType())) {
@@ -84,6 +140,10 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
   }
 
   if (is_float) {
+    VisitExpr(op->left_);
+    std::string lhs = fs_.current_expr_value;
+    VisitExpr(op->right_);
+    std::string rhs = fs_.current_expr_value;
     static const std::map<std::string, std::string> pred_map = {
         {"eq", "oeq"}, {"ne", "one"}, {"slt", "olt"}, {"sle", "ole"}, {"sgt", "ogt"}, {"sge", "oge"}};
     auto it = pred_map.find(predicate);
@@ -94,6 +154,8 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
     Emit(result + " = arith.cmpf " + float_pred + ", " + lhs + ", " + rhs + " : " + operand_type);
     fs_.current_expr_value = result;
   } else {
+    std::string lhs = EmitArithOperand(op->left_, operand_type);
+    std::string rhs = EmitArithOperand(op->right_, operand_type);
     fs_.current_expr_value = EmitArithCmpi(predicate, lhs, rhs, operand_type);
   }
 }

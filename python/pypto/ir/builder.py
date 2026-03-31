@@ -61,6 +61,7 @@ class IRBuilder:
         type: ir.FunctionType = ir.FunctionType.Opaque,
         level: ir.Level | None = None,
         role: ir.Role | None = None,
+        split: ir.SplitMode | None = None,
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -70,6 +71,7 @@ class IRBuilder:
             type: Function type (default: Opaque)
             level: Hierarchy level (default: None)
             role: Function role (default: None)
+            split: Split mode for cross-core transfer (default: None)
 
         Yields:
             FunctionBuilder: Helper object for building the function
@@ -87,7 +89,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(name, begin_span, type, level, role)
+        self._builder.begin_function(name, begin_span, type, level, role, split)
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj
@@ -248,6 +250,7 @@ class IRBuilder:
         span: ir.Span | None = None,
         level: ir.Level | None = None,
         role: ir.Role | None = None,
+        split: ir.SplitMode | None = None,
     ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
@@ -256,6 +259,7 @@ class IRBuilder:
             span: Optional explicit span. If None, automatically captured.
             level: Hierarchy level (for ScopeKind.Hierarchy)
             role: Function role (for ScopeKind.Hierarchy)
+            split: Split mode for cross-core transfer (for AutoInCore scopes)
 
         Yields:
             ScopeBuilder: Helper object for building the scope statement
@@ -270,7 +274,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_scope(scope_kind, begin_span, level, role)
+        self._builder.begin_scope(scope_kind, begin_span, level, role, split)
         builder_obj = ScopeBuilder(self)
         try:
             yield builder_obj

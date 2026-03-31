@@ -204,14 +204,15 @@ static bool NeedsInCoreWrapping(const StmtPtr& stmt) {
  *
  * Control flow statements (YieldStmt, ReturnStmt) are never wrapped.
  */
-static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& span) {
+static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& span,
+                                               std::optional<SplitMode> split = std::nullopt) {
   // When a ForStmt contains InCore scopes in its body (e.g. a pl.range loop
   // wrapping interchanged parallel chunks), recurse into it so that non-InCore
   // statements *inside* the loop body also get wrapped.
   auto maybe_recurse_into_compound = [&](const StmtPtr& s) -> StmtPtr {
     auto fs = std::dynamic_pointer_cast<const ForStmt>(s);
     if (fs && ContainsInCoreScope(fs->body_)) {
-      auto new_body = WrapNonIncoreStatementsInInCore(fs->body_, span);
+      auto new_body = WrapNonIncoreStatementsInInCore(fs->body_, span, split);
       if (new_body.get() != fs->body_.get()) {
         return std::make_shared<ForStmt>(fs->loop_var_, fs->start_, fs->stop_, fs->step_, fs->iter_args_,
                                          new_body, fs->return_vars_, fs->span_, fs->kind_, fs->chunk_size_,
@@ -224,7 +225,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
   if (!seq) {
     if (NeedsInCoreWrapping(body)) {
-      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span);
+      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span, std::nullopt, std::nullopt, split);
     }
     return maybe_recurse_into_compound(body);
   }
@@ -251,7 +252,8 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   auto flush = [&]() {
     if (pending.empty()) return;
     StmtPtr content = SeqStmts::Flatten(std::vector<StmtPtr>(pending), span);
-    result.push_back(std::make_shared<ScopeStmt>(ScopeKind::InCore, content, span));
+    result.push_back(
+        std::make_shared<ScopeStmt>(ScopeKind::InCore, content, span, std::nullopt, std::nullopt, split));
     pending.clear();
   };
 
@@ -298,12 +300,15 @@ class InterchangeChunkLoopsMutator : public IRMutator {
   StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
     if (op->scope_kind_ == ScopeKind::AutoInCore) {
       bool prev = inside_auto_incore_;
+      auto prev_split = current_split_;
       inside_auto_incore_ = true;
+      current_split_ = op->split_;
       auto new_body = VisitStmt(op->body_);
       inside_auto_incore_ = prev;
+      current_split_ = prev_split;
       // Consume the AutoInCore wrapper — return body directly.
-      // Wrap any statements that lack InCore coverage.
-      new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_);
+      // Wrap any statements that lack InCore coverage, propagating split.
+      new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_, op->split_);
       return new_body;
     }
     return IRMutator::VisitStmt_(op);
@@ -354,6 +359,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
  private:
   bool inside_auto_incore_ = false;
+  std::optional<SplitMode> current_split_;
   std::unordered_map<const Var*, ExprPtr> substitution_map_;
 
   /**
@@ -483,7 +489,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     auto new_body = VisitStmt(op->body_);
 
     // Wrap standalone parallel ChunkRemainder sub-loops in InCore
-    new_body = WrapSubRemainderLoopsInInCore(new_body, op->span_);
+    new_body = WrapSubRemainderLoopsInInCore(new_body, op->span_, current_split_);
 
     if (new_body.get() == op->body_.get() && !iter_args_changed) {
       return op;
@@ -500,7 +506,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
    * Scans top-level statements in body and wraps each ChunkRemainder loop that is
    * Parallel and whose body doesn't already contain InCore.
    */
-  static StmtPtr WrapSubRemainderLoopsInInCore(const StmtPtr& body, const Span& span) {
+  static StmtPtr WrapSubRemainderLoopsInInCore(const StmtPtr& body, const Span& span,
+                                               std::optional<SplitMode> split = std::nullopt) {
     auto should_wrap = [](const StmtPtr& s) -> bool {
       auto fs = std::dynamic_pointer_cast<const ForStmt>(s);
       return fs && fs->loop_origin_ == LoopOrigin::ChunkRemainder && fs->kind_ == ForKind::Parallel &&
@@ -513,7 +520,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       bool changed = false;
       for (const auto& s : seq->stmts_) {
         if (should_wrap(s)) {
-          new_stmts.push_back(std::make_shared<ScopeStmt>(ScopeKind::InCore, s, span));
+          new_stmts.push_back(
+              std::make_shared<ScopeStmt>(ScopeKind::InCore, s, span, std::nullopt, std::nullopt, split));
           changed = true;
         } else {
           new_stmts.push_back(s);
@@ -525,7 +533,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
     // Single statement
     if (should_wrap(body)) {
-      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span);
+      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span, std::nullopt, std::nullopt, split);
     }
     return body;
   }
@@ -572,7 +580,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     }
 
     // Wrap in InCore
-    current = std::make_shared<ScopeStmt>(ScopeKind::InCore, current, span);
+    current = std::make_shared<ScopeStmt>(ScopeKind::InCore, current, span, std::nullopt, std::nullopt,
+                                          current_split_);
 
     // Build outers inside-out, preserving the original ForKind.
     for (int i = static_cast<int>(outers.size()) - 1; i >= 0; --i) {
@@ -722,7 +731,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
             incore_content = SeqStmts::Flatten(std::move(incore_stmts), span);
           }
 
-          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_content, span);
+          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_content, span,
+                                                          std::nullopt, std::nullopt, current_split_);
           auto new_body = SeqStmts::Flatten(std::vector<StmtPtr>{incore_scope, last_stmt}, span);
 
           current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
@@ -731,7 +741,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
                                               std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
         } else {
           // No yield, wrap entire body
-          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_body, span);
+          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_body, span, std::nullopt,
+                                                          std::nullopt, current_split_);
           current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
                                               outer_for->step_, outer_for->iter_args_, incore_scope,
                                               outer_for->return_vars_, outer_for->span_, outer_for->kind_,
@@ -762,9 +773,9 @@ FunctionPtr TransformInterchangeChunkLoops(const FunctionPtr& func) {
     return func;
   }
 
-  auto result =
-      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                 new_body, func->span_, func->func_type_, func->level_, func->role_);
+  auto result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                           func->return_types_, new_body, func->span_, func->func_type_,
+                                           func->level_, func->role_, func->split_);
   return result;
 }
 

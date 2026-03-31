@@ -172,7 +172,8 @@ class ChunkedLoopSplitter : public IRMutator {
       if (new_body.get() == op->body_.get()) {
         return op;
       }
-      return std::make_shared<ScopeStmt>(op->scope_kind_, new_body, op->span_);
+      return std::make_shared<ScopeStmt>(op->scope_kind_, new_body, op->span_, op->level_, op->role_,
+                                         op->split_);
     }
     return IRMutator::VisitStmt_(op);
   }
@@ -576,9 +577,9 @@ FunctionPtr TransformSplitChunkedLoops(const FunctionPtr& func) {
     return func;
   }
 
-  auto result =
-      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                 new_body, func->span_, func->func_type_, func->level_, func->role_);
+  auto result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                           func->return_types_, new_body, func->span_, func->func_type_,
+                                           func->level_, func->role_, func->split_);
   return result;
 }
 

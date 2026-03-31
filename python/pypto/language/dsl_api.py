@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from pypto.language.typing import Scalar, Tensor, Tile
     from pypto.pypto_core import ir
 
+from pypto.pypto_core.ir import SplitMode
+
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
 
@@ -571,6 +573,9 @@ class AutoIncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(AutoInCore).
     """
 
+    def __init__(self, split: SplitMode = SplitMode.NONE) -> None:
+        self.split = split
+
     def __enter__(self) -> None:
         """Enter the AutoInCore scope context."""
         pass
@@ -580,11 +585,14 @@ class AutoIncoreContext:
         pass
 
 
-def auto_incore() -> AutoIncoreContext:
+def auto_incore(split: SplitMode = SplitMode.NONE) -> AutoIncoreContext:
     """Mark a region of code for automatic incore chunking.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.AutoInCore.
+
+    Args:
+        split: Split mode for cross-core data transfer (default: SplitMode.NONE)
 
     Returns:
         Context manager for AutoInCore scope
@@ -593,8 +601,11 @@ def auto_incore() -> AutoIncoreContext:
         >>> with pl.auto_incore():
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
+        >>> with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
+        ...     for i in pl.parallel(0, 8, 1, chunk=4):
+        ...         x = pl.add(x, x)
     """
-    return AutoIncoreContext()
+    return AutoIncoreContext(split=split)
 
 
 def incore() -> IncoreContext:

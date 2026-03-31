@@ -518,8 +518,9 @@ std::vector<StmtPtr> TransformIncoreBody(const std::vector<StmtPtr>& stmts,
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformIncoreBody(body_stmts, tensor_to_tile, conv_registry, op_registry, span);
-      result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
+                                                   SeqStmts::Flatten(std::move(inner), scope->body_->span_),
+                                                   scope->span_, scope->level_, scope->role_, scope->split_));
       continue;
     }
 
@@ -1628,8 +1629,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
   UpgradeWrittenTensorParamDirections(new_stmts, new_params, new_param_directions);
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
-  auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
-                                             new_body, span, FunctionType::InCore);
+  auto new_func =
+      std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types, new_body,
+                                 span, FunctionType::InCore, func->level_, func->role_, func->split_);
 
   return {new_func, num_added_outputs};
 }
@@ -1691,8 +1693,9 @@ std::vector<StmtPtr> UpdateCallSitesBody(
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = UpdateCallSitesBody(body_stmts, var_map, incore_added_outputs, transformed_incore_funcs,
                                        op_registry, span, changed);
-      result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
+                                                   SeqStmts::Flatten(std::move(inner), scope->body_->span_),
+                                                   scope->span_, scope->level_, scope->role_, scope->split_));
       continue;
     }
 
@@ -1963,7 +1966,8 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, span, func->func_type_, func->level_, func->role_);
+                                    new_body, span, func->func_type_, func->level_, func->role_,
+                                    func->split_);
 }
 
 }  // namespace

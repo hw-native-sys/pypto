@@ -492,6 +492,10 @@ class PTOCodegen : public CodegenBase {
   std::string EmitArithCmpi(const std::string& predicate, const std::string& lhs, const std::string& rhs,
                             const std::string& operand_type);
 
+  /// Emit @p expr as an SSA suitable for arith.*i with result/operand type @p wanted_mlir_type
+  /// (e.g. "index", "i64"): integer literals use typed constants; index↔int uses arith.index_cast.
+  std::string EmitArithOperand(const ir::ExprPtr& expr, const std::string& wanted_mlir_type);
+
   /// Helper for binary expression visitors
   void VisitBinaryArithExpr(const ir::BinaryExprPtr& op, const std::string& int_op,
                             const std::string& float_op);

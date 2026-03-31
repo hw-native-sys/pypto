@@ -332,11 +332,12 @@ class Function : public IRNode {
    * @param type Function type (default: Opaque)
    * @param level Hierarchy level (default: nullopt — unspecified)
    * @param role Function role (default: nullopt)
+   * @param split Split mode for cross-core transfer (default: nullopt)
    */
   Function(std::string name, std::vector<VarPtr> params, std::vector<ParamDirection> param_directions,
            std::vector<TypePtr> return_types, StmtPtr body, Span span,
            FunctionType type = FunctionType::Opaque, std::optional<Level> level = std::nullopt,
-           std::optional<Role> role = std::nullopt)
+           std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt)
       : IRNode(std::move(span)),
         name_(std::move(name)),
         params_(std::move(params)),
@@ -345,7 +346,8 @@ class Function : public IRNode {
         body_(std::move(body)),
         func_type_(type),
         level_(level),
-        role_(role) {
+        role_(role),
+        split_(split) {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
@@ -357,7 +359,7 @@ class Function : public IRNode {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (params as DEF field, func_type, level, role,
+   * @return Tuple of field descriptors (params as DEF field, func_type, level, role, split,
    *         return_types and body as USUAL fields, name as an IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
@@ -368,17 +370,19 @@ class Function : public IRNode {
                         reflection::UsualField(&Function::func_type_, "func_type"),
                         reflection::UsualField(&Function::level_, "level"),
                         reflection::UsualField(&Function::role_, "role"),
+                        reflection::UsualField(&Function::split_, "split"),
                         reflection::UsualField(&Function::return_types_, "return_types"),
                         reflection::UsualField(&Function::body_, "body"),
                         reflection::IgnoreField(&Function::name_, "name")));
   }
 
  public:
-  std::string name_;            // Function name
-  FunctionType func_type_;      // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
-  std::optional<Level> level_;  // Hierarchy level (nullopt = infer from func_type)
-  std::optional<Role> role_;    // Function role (nullopt = default per level)
-  std::vector<VarPtr> params_;  // Parameter variables
+  std::string name_;                // Function name
+  FunctionType func_type_;          // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
+  std::optional<Level> level_;      // Hierarchy level (nullopt = infer from func_type)
+  std::optional<Role> role_;        // Function role (nullopt = default per level)
+  std::optional<SplitMode> split_;  // Split mode for cross-core transfer (nullopt = no split)
+  std::vector<VarPtr> params_;      // Parameter variables
   std::vector<ParamDirection> param_directions_;  // Parameter directions (same length as params_)
   std::vector<TypePtr> return_types_;             // Return types
   StmtPtr body_;                                  // Function body statement

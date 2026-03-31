@@ -28,7 +28,7 @@ from .diagnostics import (
     UnsupportedFeatureError,
     concise_error_message,
 )
-from .enum_utils import LEVEL_MAP, ROLE_MAP, extract_enum_value
+from .enum_utils import LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
@@ -302,6 +302,7 @@ class ASTParser:
         func_type: ir.FunctionType = ir.FunctionType.Opaque,
         func_level: ir.Level | None = None,
         func_role: ir.Role | None = None,
+        func_split: ir.SplitMode | None = None,
     ) -> ir.Function:
         """Parse function definition and build IR.
 
@@ -310,6 +311,7 @@ class ASTParser:
             func_type: Function type (default: Opaque)
             func_level: Hierarchy level (default: None)
             func_role: Function role (default: None)
+            func_split: Split mode (default: None)
 
         Returns:
             IR Function object
@@ -323,7 +325,7 @@ class ASTParser:
 
         # Begin building function
         with self.builder.function(
-            func_name, func_span, type=func_type, level=func_level, role=func_role
+            func_name, func_span, type=func_type, level=func_level, role=func_role, split=func_split
         ) as f:
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:
@@ -1612,12 +1614,17 @@ class ASTParser:
             )
         return level, role
 
+    def _eval_split_mode(self, value: ast.expr, stmt: ast.With) -> "ir.SplitMode":
+        """Extract SplitMode enum value from AST expression."""
+        return extract_enum_value(value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
         Currently supports:
         - with pl.incore(): ... (creates ScopeStmt with InCore scope)
         - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
+        - with pl.auto_incore(split=pl.SplitMode.UP_DOWN): ... (with split mode)
         - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
         - with pl.at(level=..., role=...): ... (creates ScopeStmt with Hierarchy scope)
 
@@ -1649,7 +1656,24 @@ class ASTParser:
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
                 if func.attr in _SCOPE_KIND_MAP:
-                    if context_expr.args or context_expr.keywords:
+                    split_mode = None
+                    if func.attr == "auto_incore":
+                        if context_expr.args:
+                            raise ParserSyntaxError(
+                                "pl.auto_incore() does not accept positional arguments",
+                                span=self.span_tracker.get_span(stmt),
+                                hint="Use 'with pl.auto_incore(split=pl.SplitMode.UP_DOWN):'",
+                            )
+                        for kw in context_expr.keywords:
+                            if kw.arg == "split":
+                                split_mode = self._eval_split_mode(kw.value, stmt)
+                            else:
+                                raise ParserSyntaxError(
+                                    f"pl.auto_incore() got unexpected keyword argument '{kw.arg}'",
+                                    span=self.span_tracker.get_span(stmt),
+                                    hint="Only 'split' keyword is supported",
+                                )
+                    elif context_expr.args or context_expr.keywords:
                         raise ParserSyntaxError(
                             f"pl.{func.attr}() does not accept arguments",
                             span=self.span_tracker.get_span(stmt),
@@ -1658,7 +1682,7 @@ class ASTParser:
                     scope_kind = _SCOPE_KIND_MAP[func.attr]
                     span = self.span_tracker.get_span(stmt)
 
-                    with self.builder.scope(scope_kind, span):
+                    with self.builder.scope(scope_kind, span, split=split_mode):
                         with self._scope_kind_context(scope_kind):
                             self.scope_manager.enter_scope("scope")
                             for body_stmt in stmt.body:

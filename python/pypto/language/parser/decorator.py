@@ -22,7 +22,7 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
-from .enum_utils import LEVEL_MAP, ROLE_MAP, extract_enum_value
+from .enum_utils import LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 
 
 @dataclasses.dataclass
@@ -308,6 +308,27 @@ def _extract_function_level_role_from_decorator(
     return None, None
 
 
+def _extract_function_split_from_decorator(node: ast.FunctionDef) -> ir.SplitMode | None:
+    """Extract split mode from @pl.function(split=...) decorator."""
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+
+        is_function_call = (
+            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
+        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
+
+        if not is_function_call:
+            continue
+
+        for keyword in decorator.keywords:
+            if keyword.arg == "split":
+                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                    return None
+                return extract_enum_value(keyword.value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+    return None
+
+
 def _prescan_reserve_buffers(
     func_def: ast.FunctionDef, buffer_name_meta: dict[tuple[str, str], dict[str, Any]]
 ) -> None:
@@ -529,6 +550,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
+    split: ir.SplitMode | None = None,
     strict_ssa: bool = False,
 ) -> ir.Function: ...
 
@@ -540,6 +562,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
+    split: ir.SplitMode | None = None,
     strict_ssa: bool = False,
 ) -> FunctionDecorator: ...
 
@@ -550,6 +573,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
+    split: ir.SplitMode | None = None,
     strict_ssa: bool = False,
 ) -> ir.Function | FunctionDecorator:
     """Decorator that parses a DSL function and returns IR Function.
@@ -797,9 +821,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             dyn_var_cache: dict[str, ir.Var] = {}
 
             for func_def in func_defs:
-                # Extract function type and level/role from decorator
+                # Extract function type, level/role, and split from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
                 func_level, func_role = _extract_function_level_role_from_decorator(func_def)
+                func_split = _extract_function_split_from_decorator(func_def)
 
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = _strip_self_parameter(func_def)
@@ -820,7 +845,11 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
 
                 try:
                     ir_func = parser.parse_function(
-                        func_def_to_parse, func_type=func_type, func_level=func_level, func_role=func_role
+                        func_def_to_parse,
+                        func_type=func_type,
+                        func_level=func_level,
+                        func_role=func_role,
+                        func_split=func_split,
                     )
                 except ParserError:
                     raise

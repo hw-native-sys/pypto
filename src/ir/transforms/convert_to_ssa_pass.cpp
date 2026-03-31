@@ -260,7 +260,7 @@ class SSAConverter {
     StmtPtr new_body = func->body_ ? ConvertStmt(func->body_) : nullptr;
 
     return std::make_shared<Function>(func->name_, new_params, new_dirs, func->return_types_, new_body,
-                                      func->span_, func->func_type_, func->level_, func->role_);
+                                      func->span_, func->func_type_, func->level_, func->role_, func->split_);
   }
 
  private:
@@ -830,9 +830,9 @@ class SSAConverter {
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
     auto body = ConvertStmt(op->body_);
-    return body != op->body_
-               ? std::make_shared<ScopeStmt>(op->scope_kind_, body, op->span_, op->level_, op->role_)
-               : op;
+    return body != op->body_ ? std::make_shared<ScopeStmt>(op->scope_kind_, body, op->span_, op->level_,
+                                                           op->role_, op->split_)
+                             : op;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

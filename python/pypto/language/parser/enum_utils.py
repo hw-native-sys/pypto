@@ -42,6 +42,12 @@ ROLE_MAP: dict[str, ir.Role] = {
     "Worker": ir.Role.Worker,
 }
 
+SPLIT_MODE_MAP: dict[str, ir.SplitMode] = {
+    "NONE": ir.SplitMode.NONE,
+    "UP_DOWN": ir.SplitMode.UP_DOWN,
+    "LEFT_RIGHT": ir.SplitMode.LEFT_RIGHT,
+}
+
 
 def extract_enum_value(
     value: ast.expr,

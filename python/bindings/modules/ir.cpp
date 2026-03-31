@@ -803,13 +803,21 @@ void BindIR(nb::module_& m) {
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .export_values();
 
+  // SplitMode enum
+  nb::enum_<SplitMode>(ir, "SplitMode", "Split mode for cross-core data transfer")
+      .value("NONE", SplitMode::None, "No split")
+      .value("UP_DOWN", SplitMode::UpDown, "Split vertically (height halved)")
+      .value("LEFT_RIGHT", SplitMode::LeftRight, "Split horizontally (width halved)")
+      .export_values();
+
   // ScopeStmt - const shared_ptr
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
-  scope_stmt_class.def(
-      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>>(),
-      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
-      nb::arg("role") = nb::none(), "Create a scope statement");
+  scope_stmt_class.def(nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>,
+                                std::optional<Role>, std::optional<SplitMode>>(),
+                       nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
+                       nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
+                       "Create a scope statement");
   BindFields<ScopeStmt>(scope_stmt_class);
 
   // SeqStmts - const shared_ptr
@@ -908,7 +916,7 @@ void BindIR(nb::module_& m) {
       "__init__",
       [](Function* self, const std::string& name, const nb::list& params,
          const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
-         std::optional<Level> level, std::optional<Role> role) {
+         std::optional<Level> level, std::optional<Role> role, std::optional<SplitMode> split) {
         std::vector<VarPtr> param_vars;
         std::vector<ParamDirection> param_dirs;
         param_vars.reserve(nb::len(params));
@@ -928,11 +936,11 @@ void BindIR(nb::module_& m) {
           }
         }
         new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
-                            type, level, role);
+                            type, level, role, split);
       },
       nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
       nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
-      "Create a function definition");
+      nb::arg("split") = nb::none(), "Create a function definition");
   BindFields<Function>(function_class);
 
   // Program - const shared_ptr

@@ -64,7 +64,9 @@ void BindPass(nb::module_& m) {
              "Break/continue only in sequential/while loops")
       .value("UseAfterDef", IRProperty::UseAfterDef, "All variable uses are dominated by a definition")
       .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
-             "No BreakStmt/ContinueStmt — only structured control flow");
+             "No BreakStmt/ContinueStmt — only structured control flow")
+      .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
+             "AIV functions with split mode have tpop shapes and store offsets adjusted");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -273,6 +275,9 @@ void BindPass(nb::module_& m) {
              "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
+  passes.def("split_vector_kernel", &pass::SplitVectorKernel,
+             "Create a pass that splits vector kernels based on SplitMode "
+             "(adjusts tpush/tpop split, halves tpop shapes, adjusts store offsets)");
   passes.def("simplify_expr", &pass::SimplifyExpr,
              "Create a pass that simplifies scalar expressions using algebraic rules and bound analysis");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,

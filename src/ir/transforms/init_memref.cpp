@@ -509,7 +509,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   auto result_func = std::make_shared<Function>(
       normalized_func->name_, new_params, normalized_func->param_directions_, normalized_func->return_types_,
       new_body, normalized_func->span_, normalized_func->func_type_, normalized_func->level_,
-      normalized_func->role_);
+      normalized_func->role_, normalized_func->split_);
 
   // Step 3: Collect non-DDR MemRefs and create alloc statements
   NonDDRMemRefCollector collector;
@@ -532,7 +532,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
   return std::make_shared<Function>(result_func->name_, new_params, result_func->param_directions_,
                                     result_func->return_types_, final_body, result_func->span_,
-                                    result_func->func_type_, result_func->level_, result_func->role_);
+                                    result_func->func_type_, result_func->level_, result_func->role_,
+                                    result_func->split_);
 }
 
 }  // namespace

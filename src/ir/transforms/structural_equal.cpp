@@ -423,6 +423,30 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const SplitMode& lhs, const SplitMode& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("SplitMode mismatch", IRNodePtr(), IRNodePtr(), SplitModeToString(lhs),
+                      SplitModeToString(rhs));
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::optional<SplitMode>& lhs, const std::optional<SplitMode>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("SplitMode optional presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs.has_value()) {
+      return VisitLeafField(*lhs, *rhs);
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const ParamDirection& lhs, const ParamDirection& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {

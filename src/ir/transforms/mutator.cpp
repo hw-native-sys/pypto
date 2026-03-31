@@ -570,7 +570,7 @@ StmtPtr IRMutator::VisitStmt_(const ScopeStmtPtr& op) {
   INTERNAL_CHECK(new_body) << "ScopeStmt body mutated to null";
   if (new_body.get() != op->body_.get()) {
     return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
-                                             op->role_);
+                                             op->role_, op->split_);
   }
   return op;
 }

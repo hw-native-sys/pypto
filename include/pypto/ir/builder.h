@@ -87,7 +87,8 @@ class IRBuilder {
    * @throws RuntimeError if already inside a function (no nested functions allowed)
    */
   void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque,
-                     std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt);
+                     std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
+                     std::optional<SplitMode> split = std::nullopt);
 
   /**
    * @brief Add a function parameter
@@ -299,7 +300,7 @@ class IRBuilder {
    * @throws RuntimeError if not inside a function or loop
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
-                  std::optional<Role> role = std::nullopt);
+                  std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt);
 
   /**
    * @brief End building a scope statement
@@ -532,12 +533,14 @@ class BuildContext {
 class FunctionContext : public BuildContext {
  public:
   FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque,
-                  std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt)
+                  std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
+                  std::optional<SplitMode> split = std::nullopt)
       : BuildContext(Type::FUNCTION, std::move(span)),
         name_(std::move(name)),
         func_type_(func_type),
         level_(level),
-        role_(role) {}
+        role_(role),
+        split_(split) {}
 
   void AddParam(const VarPtr& param, ParamDirection direction = ParamDirection::In) {
     params_.push_back(param);
@@ -553,12 +556,14 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] FunctionType GetFuncType() const { return func_type_; }
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
+  [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
 
  private:
   std::string name_;
   FunctionType func_type_;
   std::optional<Level> level_;
   std::optional<Role> role_;
+  std::optional<SplitMode> split_;
   std::vector<VarPtr> params_;
   std::vector<ParamDirection> param_directions_;
   std::vector<TypePtr> return_types_;
@@ -668,20 +673,26 @@ class IfStmtContext : public BuildContext {
 class ScopeContext : public BuildContext {
  public:
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
-               std::optional<Role> role = std::nullopt)
-      : BuildContext(Type::SCOPE, std::move(span)), scope_kind_(scope_kind), level_(level), role_(role) {}
+               std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt)
+      : BuildContext(Type::SCOPE, std::move(span)),
+        scope_kind_(scope_kind),
+        level_(level),
+        role_(role),
+        split_(split) {}
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
 
   [[nodiscard]] ScopeKind GetScopeKind() const { return scope_kind_; }
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
+  [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
  private:
   ScopeKind scope_kind_;
   std::optional<Level> level_;
   std::optional<Role> role_;
+  std::optional<SplitMode> split_;
   std::vector<StmtPtr> stmts_;
 };
 

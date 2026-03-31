@@ -77,9 +77,9 @@ Pass OutlineHierarchyScopes() {
       auto new_body = outliner.VisitStmt(func->body_);
 
       // Preserve parent function type (don't promote — hierarchy is orthogonal to FunctionType)
-      auto new_func =
-          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                     new_body, func->span_, func->func_type_, func->level_, func->role_);
+      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                                 func->return_types_, new_body, func->span_, func->func_type_,
+                                                 func->level_, func->role_, func->split_);
       new_functions.push_back(new_func);
 
       const auto& outlined = outliner.GetOutlinedFunctions();

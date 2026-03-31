@@ -271,8 +271,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformBody(body_stmts, ctx, op_registry, span);
-      result.push_back(std::make_shared<ScopeStmt>(
-          scope->scope_kind_, SeqStmts::Flatten(std::move(inner), scope->body_->span_), scope->span_));
+      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
+                                                   SeqStmts::Flatten(std::move(inner), scope->body_->span_),
+                                                   scope->span_, scope->level_, scope->role_, scope->split_));
       continue;
     }
 
@@ -657,7 +658,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   // and this pass only flattens tile ops. Tensor types are never modified.
   auto result =
       std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                 new_body, span, func->func_type_, func->level_, func->role_);
+                                 new_body, span, func->func_type_, func->level_, func->role_, func->split_);
   return result;
 }
 

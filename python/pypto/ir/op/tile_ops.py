@@ -399,6 +399,21 @@ def get_block_idx(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.get_block_idx", [], {}, actual_span)
 
 
+def get_subblock_idx(span: Span | None = None) -> Call:
+    """Get the current sub-block (vector core) index.
+
+    Returns the index of the current vector core within a split execution.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an INT64 scalar representing the sub-block index
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.get_subblock_idx", [], {}, actual_span)
+
+
 def full(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,

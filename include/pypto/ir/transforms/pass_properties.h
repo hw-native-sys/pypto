@@ -120,6 +120,12 @@ inline const PassProperties kExpandMixedKernelProperties{
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure}};
 
+// -- Split vector kernel pass -------------------------------------------------
+
+inline const PassProperties kSplitVectorKernelProperties{
+    .required = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded},
+    .produced = {IRProperty::SSAForm, IRProperty::VectorKernelSplit, IRProperty::NormalizedStmtStructure}};
+
 // -- Memory / codegen passes --------------------------------------------------
 
 inline const PassProperties kInitMemRefProperties{

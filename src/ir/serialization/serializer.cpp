@@ -96,6 +96,8 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const Role& field);
   result_type VisitLeafField(const std::optional<Level>& field);
   result_type VisitLeafField(const std::optional<Role>& field);
+  result_type VisitLeafField(const SplitMode& field);
+  result_type VisitLeafField(const std::optional<SplitMode>& field);
   result_type VisitLeafField(const ParamDirection& field);
   result_type VisitLeafField(const std::vector<ParamDirection>& field);
   result_type VisitLeafField(const TypePtr& field);
@@ -565,6 +567,17 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<Level
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<Role>& field) {
+  if (field.has_value()) {
+    return msgpack::object(static_cast<uint8_t>(*field), zone_);
+  }
+  return msgpack::object();  // null
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const SplitMode& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<SplitMode>& field) {
   if (field.has_value()) {
     return msgpack::object(static_cast<uint8_t>(*field), zone_);
   }

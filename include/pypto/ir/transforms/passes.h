@@ -335,6 +335,18 @@ Pass ResolveBackendOpLayouts();
 Pass ExpandMixedKernel();
 
 /**
+ * @brief Split vector kernel pass
+ *
+ * For AIV/AIC functions with a non-None split mode:
+ * 1. Sets the split kwarg on tpush/tpop operations
+ * 2. Halves the tpop result tile shape in the split dimension
+ * 3. Adjusts tile.store offsets for tiles originating from tpop
+ *
+ * Must run after ExpandMixedKernel.
+ */
+Pass SplitVectorKernel();
+
+/**
  * @brief Create a verifier pass with opt-in property verification
  *
  * @param properties Properties to verify. Pass GetDefaultVerifyProperties() for the default set.

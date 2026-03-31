@@ -537,10 +537,17 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
     role = static_cast<Role>(role_obj->via.u64);
   }
 
+  // Deserialize optional split mode
+  std::optional<SplitMode> split = std::nullopt;
+  auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
+  if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
+    split = static_cast<SplitMode>(split_obj->via.u64);
+  }
+
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role);
+  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split);
 }
 
 // Deserialize SeqStmts
@@ -646,10 +653,17 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     role = static_cast<Role>(role_obj->via.u64);
   }
 
+  // Deserialize optional split mode
+  std::optional<SplitMode> split = std::nullopt;
+  auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
+  if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
+    split = static_cast<SplitMode>(split_obj->via.u64);
+  }
+
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type,
-                                    level, role);
+                                    level, role, split);
 }
 
 // Deserialize Program

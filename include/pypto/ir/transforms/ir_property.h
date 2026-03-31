@@ -47,6 +47,7 @@ enum class IRProperty : uint64_t {
   UseAfterDef,              ///< All variable uses are dominated by a definition
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
+  VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   kCount                    ///< Sentinel (must be last)
 };
 

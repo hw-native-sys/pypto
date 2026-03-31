@@ -34,6 +34,7 @@ __all__ = [
     "full",
     "fillpad",
     "get_block_idx",
+    "get_subblock_idx",
     "add",
     "sub",
     "mul",
@@ -421,6 +422,19 @@ def get_block_idx() -> Scalar:
         >>>     ...
     """
     call_expr = _ir_ops.get_block_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_subblock_idx() -> Scalar:
+    """Get the current sub-block (vector core) index.
+
+    Returns the index of the current vector core within a split execution.
+    Core 0 returns 0, core 1 returns 1.
+
+    Returns:
+        Scalar wrapping the get_subblock_idx operation (INT64 type)
+    """
+    call_expr = _ir_ops.get_subblock_idx()
     return Scalar(expr=call_expr)
 
 

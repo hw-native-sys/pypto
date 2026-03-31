@@ -57,6 +57,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "HierarchyOutlined";
     case IRProperty::StructuredCtrlFlow:
       return "StructuredCtrlFlow";
+    case IRProperty::VectorKernelSplit:
+      return "VectorKernelSplit";
     default:
       return "Unknown";
   }
