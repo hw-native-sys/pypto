@@ -74,7 +74,7 @@ Backtrace::Backtrace() {
 }
 
 void Backtrace::ErrorCallback(void* data, const char* msg, int errnum) {
-  // Log errors in backtrace generation to stderr for debugging
+  // Always report libbacktrace errors to stderr so failures in backtrace generation are not silent
   if (msg) {
     fprintf(stderr, "libbacktrace error: %s (errno: %d)\n", msg, errnum);
   }
