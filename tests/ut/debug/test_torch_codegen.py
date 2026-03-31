@@ -13,6 +13,7 @@ import pytest
 import torch
 from pypto import DataType, ir
 from pypto.debug import torch_codegen
+from pypto.debug.torch_codegen import TorchCodegen
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -241,7 +242,7 @@ def test_tile_cmp():
 def test_tile_reduction_with_axis():
     """tile.sum with axis kwarg should emit .sum(dim=axis)."""
     a = _tile_var("a", [64, 128])
-    out = _tile_var("out", [64, 128])
+    out = _tile_var("out", [64, 1])
 
     call = _op_call("tile.sum", [a], {"axis": -1, "keepdim": True})
     assign = ir.AssignStmt(out, call, _span())
@@ -542,6 +543,203 @@ def test_unsupported_op_raises():
     func = _simple_function("f", [a], assign)
     with pytest.raises(ValueError, match="Unsupported op 'fake.nonexistent_op'"):
         torch_codegen(func)
+
+
+# ---------------------------------------------------------------------------
+# Test: write ops return container (not None)
+# ---------------------------------------------------------------------------
+
+
+def test_tile_write_returns_tile():
+    """tile.write in AssignStmt context should return the tile, not None."""
+    tile = _tile_var("tile", [64, 64])
+    idx = _make_tuple(_int(0), _int(0))
+    val = _float(1.0)
+    result = _tile_var("result", [64, 64])
+
+    call = _op_call("tile.write", [tile, idx, val])
+    assign = ir.AssignStmt(result, call, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [tile], body, [ir.TileType([64, 64], DataType.FP32)])
+    code = torch_codegen(func)
+
+    assert "_write_and_return" in code
+    # Execute and verify the result is the tile, not None
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.zeros(64, 64)
+    result_val = ns["f"](t)
+    assert isinstance(result_val, torch.Tensor)
+    assert result_val.shape == (64, 64)
+    assert result_val[0, 0] == 1.0
+
+
+def test_tensor_write_returns_tensor():
+    """tensor.write in AssignStmt context should return the tensor, not None."""
+    tensor = _tensor_var("t", [4, 4])
+    idx = _make_tuple(_int(1), _int(2))
+    val = _float(42.0)
+    result = _tensor_var("result", [4, 4])
+
+    call = _op_call("tensor.write", [tensor, idx, val])
+    assign = ir.AssignStmt(result, call, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [tensor], body, [ir.TensorType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    assert "_write_and_return" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.zeros(4, 4)
+    result_val = ns["f"](t)
+    assert result_val is not None
+    assert result_val[1, 2] == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Test: assemble applies source write
+# ---------------------------------------------------------------------------
+
+
+def test_tile_assemble_writes_source():
+    """tile.assemble should write source into target at offset."""
+    target = _tile_var("target", [8, 8])
+    source = _tile_var("source", [4, 4])
+    offset = _make_tuple(_int(2), _int(2))
+    result = _tile_var("result", [8, 8])
+
+    call = _op_call("tile.assemble", [target, source, offset])
+    assign = ir.AssignStmt(result, call, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [target, source], body, [ir.TileType([8, 8], DataType.FP32)])
+    code = torch_codegen(func)
+
+    assert "_assemble" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    tgt = torch.zeros(8, 8)
+    src = torch.ones(4, 4)
+    result_val = ns["f"](tgt, src)
+    # Source should be written at offset [2:6, 2:6]
+    assert result_val[2, 2] == 1.0
+    assert result_val[5, 5] == 1.0
+    # Outside the write region should be zero
+    assert result_val[0, 0] == 0.0
+    assert result_val[7, 7] == 0.0
+
+
+def test_tensor_assemble_writes_source():
+    """tensor.assemble should write source into target at offset."""
+    target = _tensor_var("target", [8, 8])
+    source = _tensor_var("source", [4, 4])
+    offset = _make_tuple(_int(0), _int(0))
+    result = _tensor_var("result", [8, 8])
+
+    call = _op_call("tensor.assemble", [target, source, offset])
+    assign = ir.AssignStmt(result, call, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [target, source], body, [ir.TensorType([8, 8], DataType.FP32)])
+    code = torch_codegen(func)
+
+    assert "_assemble" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    tgt = torch.zeros(8, 8)
+    src = torch.ones(4, 4) * 5
+    result_val = ns["f"](tgt, src)
+    assert result_val[0, 0] == 5.0
+    assert result_val[3, 3] == 5.0
+    assert result_val[4, 4] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test: valid_shapes masking in tile.load
+# ---------------------------------------------------------------------------
+
+
+def test_tile_load_valid_shapes_masks_invalid():
+    """tile.load should zero out data beyond valid_shapes."""
+    tensor = _tensor_var("t", [8, 8])
+    offsets = _make_tuple(_int(0), _int(0))
+    shapes = _make_tuple(_int(8), _int(8))
+    valid_shapes = _make_tuple(_int(4), _int(4))
+    tile = _tile_var("tile", [8, 8])
+
+    call = _op_call(
+        "tile.load",
+        [tensor, offsets, shapes, valid_shapes],
+        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+    )
+    assign = ir.AssignStmt(tile, call, _span())
+    ret = ir.ReturnStmt([tile], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [tensor], body, [ir.TileType([8, 8], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.ones(8, 8)
+    result = ns["f"](t)
+    # Valid region [0:4, 0:4] should have ones
+    assert result[0, 0] == 1.0
+    assert result[3, 3] == 1.0
+    # Invalid region should be masked to zero
+    assert result[4, 4] == 0.0
+    assert result[7, 7] == 0.0
+
+
+def test_tile_load_passes_valid_shapes():
+    """tile.load codegen should pass valid_shapes as 4th arg to _tile_load."""
+    tensor = _tensor_var("t", [64, 64])
+    offsets = _make_tuple(_int(0), _int(0))
+    shapes = _make_tuple(_int(32), _int(32))
+    valid_shapes = _make_tuple(_int(16), _int(16))
+    tile = _tile_var("tile", [32, 32])
+
+    call = _op_call(
+        "tile.load",
+        [tensor, offsets, shapes, valid_shapes],
+        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+    )
+    assign = ir.AssignStmt(tile, call, _span())
+    func = _simple_function("f", [tensor], assign)
+    code = torch_codegen(func)
+    # Should pass all 4 args including valid_shapes
+    assert "_tile_load(t, (0, 0), (32, 32), (16, 16))" in code
+
+
+# ---------------------------------------------------------------------------
+# Test: variable name sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_variable_name_sanitization():
+    """Variable names with invalid Python chars should be sanitized."""
+    cg = TorchCodegen()
+    # Names with double underscores (from BuildName) should be collapsed
+    name1 = cg._unique_name("x__y")
+    assert "__" not in name1
+    assert name1.isidentifier()
+
+    # Names starting with digits
+    name2 = cg._unique_name("0abc")
+    assert not name2[0].isdigit()
+    assert name2.isidentifier()
+
+    # Python keywords
+    name3 = cg._unique_name("for")
+    assert name3 != "for"
+    assert name3.isidentifier()
+
+    # Names with special chars
+    name4 = cg._unique_name("a.b-c")
+    assert "." not in name4
+    assert "-" not in name4
+    assert name4.isidentifier()
 
 
 if __name__ == "__main__":
