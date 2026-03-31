@@ -819,9 +819,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   struct ParamEntry {
-    std::string kind;     // "add_input", "add_output", "add_inout", "add_scalar"
-    std::string value;    // expression passed to the method
-    std::string out_var;  // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
+    std::string kind;              // "add_input", "add_output", "add_inout", "add_scalar"
+    std::string value;             // expression passed to the method
+    std::string out_var;           // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
+    bool out_var_is_new_decl = false;  // true: emit "const Tensor& var = get_ref()" (non-DN);
+                                       // false: emit "var = get_ref()" (DN, pre-declared placeholder)
   };
 
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
@@ -854,16 +856,31 @@ class OrchestrationStmtCodegen : public CodegenBase {
           if (tensor_create_var_names_.count(var_name)) {
             // Internal tensor.create tensor (has TensorCreateInfo var_ci):
             // runtime allocates memory from ring buffer via add_output.
-            params.push_back({"add_output", var_name + "_ci", var_name});
+            // DN tensors have a pre-declared null placeholder (copy-assign at submit).
+            // Non-DN tensors declare const Tensor& at the submit site.
+            bool is_dn = false;
+            if (auto tt = As<TensorType>(arg->GetType())) {
+              is_dn = tt->tensor_view_.has_value() && tt->tensor_view_->layout == TensorLayout::DN;
+            }
+            params.push_back({"add_output", var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn});
           } else {
             // External tensor (from orch args) or view tensor (already has address):
             // use add_inout since the buffer is pre-allocated.
-            params.push_back({"add_inout", ext_name, ""});
+            params.push_back({"add_inout", ext_name, "", false});
           }
         } else if (dir == ParamDirection::InOut) {
           params.push_back({"add_inout", ext_name, ""});
         } else {
-          params.push_back({"add_input", ext_name, ""});
+          // Input direction: tensor.create vars still need runtime memory allocation.
+          if (tensor_create_var_names_.count(var_name)) {
+            bool is_dn = false;
+            if (auto tt = As<TensorType>(arg->GetType())) {
+              is_dn = tt->tensor_view_.has_value() && tt->tensor_view_->layout == TensorLayout::DN;
+            }
+            params.push_back({"add_output", var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn});
+          } else {
+            params.push_back({"add_input", ext_name, ""});
+          }
         }
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
@@ -1004,10 +1021,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // Collect internal Out tensors that need to be bound from TaskOutputTensors.
-    std::vector<std::string> internal_out_vars;
+    struct InternalOutVar {
+      std::string name;
+      bool is_new_decl;
+    };
+    std::vector<InternalOutVar> internal_out_vars;
     for (const auto& p : params) {
       if (p.kind == "add_output" && !p.out_var.empty()) {
-        internal_out_vars.push_back(p.out_var);
+        internal_out_vars.push_back({p.out_var, p.out_var_is_new_decl});
       }
     }
 
@@ -1016,13 +1037,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (internal_out_vars.empty()) {
       code_ << ind << submit_expr << ";\n";
     } else {
-      // Capture TaskOutputTensors and copy-assign each internal output tensor.
-      // Copy-assignment updates the existing null-addr Tensor declared by tensor.create
-      // with the runtime-allocated address from the ring buffer.
+      // Capture TaskOutputTensors and bind each internal output tensor.
+      // Non-DN: declare const Tensor& at submit site (no prior null placeholder).
+      // DN: copy-assign to pre-declared null placeholder.
       std::string outs_var = "outs_t" + std::to_string(task_counter_);
       code_ << ind << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
       for (size_t i = 0; i < internal_out_vars.size(); ++i) {
-        code_ << ind << internal_out_vars[i] << " = " << outs_var << ".get_ref(" << i << ");\n";
+        const auto& ov = internal_out_vars[i];
+        if (ov.is_new_decl) {
+          code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        } else {
+          code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        }
+        // Mark as bound: subsequent uses should use add_input, not add_output.
+        tensor_create_var_names_.erase(ov.name);
       }
     }
 
@@ -1072,10 +1100,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << ", INVALID_KERNEL_ID};\n";
 
     // Collect internal Out tensors that need to be bound from TaskOutputTensors.
-    std::vector<std::string> internal_out_vars;
+    struct InternalOutVar {
+      std::string name;
+      bool is_new_decl;
+    };
+    std::vector<InternalOutVar> internal_out_vars;
     for (const auto& p : params) {
       if (p.kind == "add_output" && !p.out_var.empty()) {
-        internal_out_vars.push_back(p.out_var);
+        internal_out_vars.push_back({p.out_var, p.out_var_is_new_decl});
       }
     }
 
@@ -1087,7 +1119,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string outs_var = "outs_t" + std::to_string(task_counter_);
       code_ << ind << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
       for (size_t i = 0; i < internal_out_vars.size(); ++i) {
-        code_ << ind << internal_out_vars[i] << " = " << outs_var << ".get_ref(" << i << ");\n";
+        const auto& ov = internal_out_vars[i];
+        if (ov.is_new_decl) {
+          code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        } else {
+          code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        }
+        // Mark as bound: subsequent uses should use add_input, not add_output.
+        tensor_create_var_names_.erase(ov.name);
       }
     }
 
@@ -1108,11 +1147,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return out_indices;
   }
 
-  // Emit "Tensor& alias = ext_source;" when alias differs from source.
+  // Emit "const Tensor& alias = ext_source;" when alias differs from source.
   void EmitTensorAlias(const std::string& alias_name, const CallPtr& call, size_t arg_idx) {
     std::string out_arg = TryGetVarName(call->args_[arg_idx]);
     if (!out_arg.empty() && alias_name != out_arg) {
-      code_ << Indent() << "Tensor& " << alias_name << " = " << GetExternalTensorName(out_arg) << ";\n";
+      code_ << Indent() << "const Tensor& " << alias_name << " = " << GetExternalTensorName(out_arg) << ";\n";
     }
   }
 

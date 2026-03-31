@@ -59,10 +59,11 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create emits:
-  //   1. TensorCreateInfo var_ci(...) — used for add_output() in kernel dispatch
-  //   2. Tensor var = make_tensor_external(nullptr, ...) — initial null-addr tensor for add_input() uses
-  //      After an add_output() submit, the Tensor is updated via: var = outs.get_ref(i);
+  // tensor.create emits TensorCreateInfo for runtime memory allocation via add_output().
+  // For non-DN tensors, the Tensor binding is emitted at the task submission site:
+  //   const Tensor& var = outs_tN.get_ref(i);
+  // For DN tensors, a null-addr placeholder with view transformation is pre-declared here,
+  // and copy-assigned at the submission site (unchanged behavior).
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
@@ -79,18 +80,16 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
 
   std::string dtype_str = codegen.GetRuntimeDataTypeString(result_type->dtype_);
   oss << "TensorCreateInfo " << result_var << "_ci(" << result_var << "_ci_shapes, " << ndim << ", "
-      << dtype_str << ");\n";
+      << dtype_str << ");";
 
-  // Also declare a null-addr Tensor for input uses and as target for copy-assignment after output submit.
+  // DN layout: pre-declare null Tensor with logical view (copy-assigned after submit).
   bool is_dn = result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN;
   if (is_dn) {
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
-    oss << "Tensor " << result_var << " = make_tensor_2d_dn(" << result_var << "_ci_shapes, " << ndim << ", "
-        << dtype_str << ");";
-  } else {
-    oss << "Tensor " << result_var << " = make_tensor_external(nullptr, " << result_var << "_ci_shapes, "
-        << ndim << ", " << dtype_str << ");";
+    oss << "\nTensor " << result_var << " = make_tensor_2d_dn(" << result_var << "_ci_shapes, " << ndim
+        << ", " << dtype_str << ");";
   }
+  // Non-DN: no placeholder; const Tensor& var declared at submit site via outs_tN.get_ref(i).
   return oss.str();
 }
 

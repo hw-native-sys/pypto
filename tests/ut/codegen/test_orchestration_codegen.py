@@ -148,7 +148,6 @@ class TestOrchestration:
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-                    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
                     // Task 0: kernel_add
                     Arg params_t0;
@@ -156,7 +155,7 @@ class TestOrchestration:
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c_ci);
                     TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-                    c = outs_t0.get_ref(0);
+                    const Tensor& c = outs_t0.get_ref(0);
 
                     // Task 1: kernel_add
                     Arg params_t1;
@@ -421,7 +420,6 @@ class TestOrchestration:
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-                    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
                     // Task 0: kernel_add
                     Arg params_t0;
@@ -429,10 +427,9 @@ class TestOrchestration:
                     params_t0.add_input(ext_b);
                     params_t0.add_output(c_ci);
                     TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-                    c = outs_t0.get_ref(0);
+                    const Tensor& c = outs_t0.get_ref(0);
                     uint32_t d_ci_shapes[2] = {16, 16};
                     TensorCreateInfo d_ci(d_ci_shapes, 2, DataType::FLOAT32);
-                    Tensor d = make_tensor_external(nullptr, d_ci_shapes, 2, DataType::FLOAT32);
 
                     // Task 1: kernel_add_scalar
                     Arg params_t1;
@@ -440,10 +437,9 @@ class TestOrchestration:
                     params_t1.add_output(d_ci);
                     params_t1.add_scalar(to_u64(1.000000f));
                     TaskOutputTensors outs_t1 = pto2_rt_submit_aiv_task(1, params_t1);
-                    d = outs_t1.get_ref(0);
+                    const Tensor& d = outs_t1.get_ref(0);
                     uint32_t e_ci_shapes[2] = {16, 16};
                     TensorCreateInfo e_ci(e_ci_shapes, 2, DataType::FLOAT32);
-                    Tensor e = make_tensor_external(nullptr, e_ci_shapes, 2, DataType::FLOAT32);
 
                     // Task 2: kernel_add_scalar
                     Arg params_t2;
@@ -451,10 +447,9 @@ class TestOrchestration:
                     params_t2.add_output(e_ci);
                     params_t2.add_scalar(to_u64(2.000000f));
                     TaskOutputTensors outs_t2 = pto2_rt_submit_aiv_task(1, params_t2);
-                    e = outs_t2.get_ref(0);
+                    const Tensor& e = outs_t2.get_ref(0);
                     uint32_t g_ci_shapes[2] = {16, 16};
                     TensorCreateInfo g_ci(g_ci_shapes, 2, DataType::FLOAT32);
-                    Tensor g = make_tensor_external(nullptr, g_ci_shapes, 2, DataType::FLOAT32);
 
                     // Task 3: kernel_mul
                     Arg params_t3;
@@ -462,7 +457,7 @@ class TestOrchestration:
                     params_t3.add_input(e);
                     params_t3.add_output(g_ci);
                     TaskOutputTensors outs_t3 = pto2_rt_submit_aiv_task(2, params_t3);
-                    g = outs_t3.get_ref(0);
+                    const Tensor& g = outs_t3.get_ref(0);
 
                     // Task 4: kernel_add
                     Arg params_t4;
@@ -709,11 +704,12 @@ class TestOrchestration:
 
         code = _generate_orch_code(TensorCreateProgram)
 
-        # tensor.create generates TensorCreateInfo + null-addr Tensor
+        # tensor.create generates TensorCreateInfo; const Tensor& binding emitted at submit site
         # FP16 = DataType::FLOAT16
         assert "uint32_t buf_ci_shapes[2] = {32, 32};" in code
         assert "TensorCreateInfo buf_ci(buf_ci_shapes, 2, DataType::FLOAT16)" in code
-        assert "Tensor buf = make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" in code
+        assert "const Tensor& buf = " in code
+        assert "make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" not in code
 
     def test_inplace_tensor(self):
         """Test inplace tensors use make_inout_param when a tensor is both input and output.
@@ -1316,7 +1312,8 @@ class TestOrchestration:
         code = _generate_orch_code(transformed)
 
         assert "TensorCreateInfo row_ci(row_ci_shapes, 2, DataType::FLOAT32);" in code
-        assert "Tensor row = make_tensor_external(nullptr, row_ci_shapes, 2, DataType::FLOAT32);" in code
+        assert "const Tensor& row = " in code
+        assert "make_tensor_external(nullptr, row_ci_shapes, 2, DataType::FLOAT32)" not in code
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" not in code
 
     def test_tensor_assemble_slice_source_does_not_require_view_fast_path(self):
@@ -1440,8 +1437,8 @@ class TestOrchestration:
         assert code.count("TensorCreateInfo ret0__out_1_ci(") == 1
         assert "params_t0.add_output(ret0__out_ci)" in code
         assert "params_t1.add_output(ret0__out_1_ci)" in code
-        assert "Tensor& first = ret0__out;" in code
-        assert "Tensor& second = ret0__out_1;" in code
+        assert "const Tensor& first = ret0__out;" in code
+        assert "const Tensor& second = ret0__out_1;" in code
         assert "add_output(ret0)" not in code
 
     def test_scalar_taskarg(self):
