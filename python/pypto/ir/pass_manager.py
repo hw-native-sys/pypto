@@ -159,7 +159,9 @@ class PassManager:
         frontend_path = os.path.join(output_dir, "00_frontend.py")
         with open(frontend_path, "w") as f:
             content = python_print(input_ir, prefix=prefix)
-            f.write(content if content.endswith("\n") else content + "\n")
+            f.write(content)
+            if not content.endswith("\n"):
+                f.write("\n")
 
         # Use instrument for IR dumping -- verification handled by C++ pipeline.
         # We index self.pass_names (Python-side names from _register_passes) rather than
@@ -172,7 +174,9 @@ class PassManager:
             dump_path = os.path.join(output_dir, f"{pass_index + 1:02d}_after_{pass_name}.py")
             with open(dump_path, "w") as f:
                 content = python_print(program, prefix=prefix)
-                f.write(content if content.endswith("\n") else content + "\n")
+                f.write(content)
+                if not content.endswith("\n"):
+                    f.write("\n")
             pass_index += 1
 
         dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")

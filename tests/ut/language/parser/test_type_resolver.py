@@ -1726,8 +1726,16 @@ class TestTensorViewResolution:
         reparsed = resolver.resolve_type(node)
 
         assert isinstance(reparsed, ir.TensorType)
-        assert reparsed.tensor_view is not None
-        assert len(reparsed.tensor_view.valid_shape) == 2
+        assert len(reparsed.shape) == 2
+        assert reparsed.dtype == DataType.FP32
+        tv = reparsed.tensor_view
+        assert tv is not None
+        assert tv.layout == ir.TensorLayout.ND
+        assert len(tv.valid_shape) == 2
+        assert isinstance(tv.valid_shape[0], ir.ConstInt)
+        assert tv.valid_shape[0].value == 8
+        assert isinstance(tv.valid_shape[1], ir.ConstInt)
+        assert tv.valid_shape[1].value == 32
 
     def test_tensorview_with_memref_four_args(self):
         """Tensor with TensorView and MemRef as 4-arg form."""
@@ -1773,13 +1781,16 @@ class TestTensorViewIntegration:
         reparsed = resolver.resolve_type(node)
 
         assert isinstance(reparsed, ir.TensorType)
+        assert len(reparsed.shape) == 2
+        assert reparsed.dtype == DataType.FP32
         tv = reparsed.tensor_view
         assert tv is not None
+        assert tv.layout == ir.TensorLayout.ND
         assert len(tv.valid_shape) == 2
         assert isinstance(tv.valid_shape[0], ir.ConstInt)
+        assert tv.valid_shape[0].value == 8
         assert isinstance(tv.valid_shape[1], ir.Var)
         assert tv.valid_shape[1].name_hint == "valid_n"
-        assert tv.layout == ir.TensorLayout.ND
 
 
 if __name__ == "__main__":
