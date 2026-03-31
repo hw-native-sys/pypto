@@ -721,25 +721,24 @@ def test_variable_name_sanitization():
     """Variable names with invalid Python chars should be sanitized."""
     cg = TorchCodegen()
     # Names with double underscores (from BuildName) should be collapsed
-    name1 = cg._unique_name("x__y")
-    assert "__" not in name1
-    assert name1.isidentifier()
+    assert cg._unique_name("x__y") == "x_y"
 
     # Names starting with digits
-    name2 = cg._unique_name("0abc")
-    assert not name2[0].isdigit()
-    assert name2.isidentifier()
+    assert cg._unique_name("0abc") == "v_0abc"
 
     # Python keywords
-    name3 = cg._unique_name("for")
-    assert name3 != "for"
-    assert name3.isidentifier()
+    assert cg._unique_name("for") == "for_v"
 
     # Names with special chars
-    name4 = cg._unique_name("a.b-c")
-    assert "." not in name4
-    assert "-" not in name4
-    assert name4.isidentifier()
+    assert cg._unique_name("a.b-c") == "a_b_c"
+
+
+def test_variable_name_uniquing():
+    """Repeated name hints should produce unique suffixed names."""
+    cg = TorchCodegen()
+    assert cg._unique_name("a") == "a"
+    assert cg._unique_name("a") == "a_1"
+    assert cg._unique_name("a") == "a_2"
 
 
 if __name__ == "__main__":

@@ -87,11 +87,9 @@ def _tile_store(tile, offsets, output_tensor):
     output_tensor[slices] = tile
     return output_tensor
 
-def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
+def _tensor_slice(tensor, offsets, shapes):
     slices = tuple(slice(o, o + s) for o, s in zip(offsets, shapes))
-    result = tensor[slices]
-    # When valid_shapes differs, clone into a masked tensor (breaks view semantics)
-    return _mask_valid_region(result, shapes, valid_shapes)
+    return tensor[slices]
 
 def _write_and_return(container, index, value):
     container[index] = value
@@ -203,11 +201,8 @@ def _handle_reduction(torch_fn: str) -> OpHandler:
 
 
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
-    # args: [tensor/tile, shapes_tuple, offsets_tuple] or [..., valid_shapes_tuple]
-    # Note: when valid_shapes is provided and differs from shapes, the returned
-    # tensor is a clone (not a view), so in-place writes won't propagate back.
-    if len(a) > 3:
-        return f"_tensor_slice({a[0]}, {a[2]}, {a[1]}, {a[3]})"
+    # Slice returns a view — valid_shapes is metadata only and must not
+    # trigger masking, otherwise in-place writes won't propagate back.
     return f"_tensor_slice({a[0]}, {a[2]}, {a[1]})"
 
 
