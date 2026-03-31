@@ -19,6 +19,49 @@ from pypto.pypto_core import DataType, ir
 from .diagnostics import ParserTypeError
 from .expr_evaluator import ExprEvaluator
 
+
+def _const_int_value(value: object) -> int | None:
+    """Extract integer value from a compile-time constant, or None."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, ir.ConstInt):
+        return value.value
+    if isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt):
+        return -value.operand.value
+    return None
+
+
+def _infer_implicit_tile_layout_from_shape(shape: "Sequence[ir.Expr | int]") -> "ir.TileLayout":
+    """Infer the block layout represented by omitted TileView syntax."""
+    if len(shape) != 2:
+        return ir.TileLayout.row_major
+    rows_value = _const_int_value(shape[0])
+    cols_value = _const_int_value(shape[1])
+    if rows_value is None or cols_value is None:
+        return ir.TileLayout.row_major
+    return ir.TileLayout.col_major if cols_value == 1 and rows_value > 1 else ir.TileLayout.row_major
+
+
+def _implicit_tile_view_defaults(
+    shape: "Sequence[ir.Expr | int]",
+    memory_space: "ir.MemorySpace | None" = None,
+) -> "tuple[ir.TileLayout, ir.TileLayout, int]":
+    """Return (blayout, slayout, fractal) implicit defaults for a given shape + memory space."""
+    default_blayout = _infer_implicit_tile_layout_from_shape(shape)
+    default_slayout = ir.TileLayout.none_box
+    default_fractal = ir.TileView().fractal
+    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+    elif memory_space == ir.MemorySpace.Right:
+        default_slayout = ir.TileLayout.col_major
+    elif memory_space == ir.MemorySpace.Acc:
+        default_blayout = ir.TileLayout.col_major
+        default_slayout = ir.TileLayout.row_major
+        default_fractal = 1024
+    return default_blayout, default_slayout, default_fractal
+
+
 if TYPE_CHECKING:
     from .span_tracker import SpanTracker
 
@@ -419,9 +462,24 @@ class TypeResolver:
             memref = self.resolve_memref(memref_node)
         else:
             memref = self._resolve_memref_var_ref(memref_node)
-        tile_view = self._resolve_tileview(tile_view_node, shape) if tile_view_node is not None else None
+        # Resolve memory_space first so it can be passed to _resolve_tileview for
+        # memory-space-aware implicit blayout/slayout/fractal defaults.
+        #
+        # Known limitation: when the annotation omits memory_space but the inferred
+        # RHS type provides it (merged later in ast_parser.py), the TileView defaults
+        # here use the annotation-local memory_space (which may be None).  In practice
+        # this does not affect roundtrip because the printer always emits the memory
+        # space annotation when one is present.  User code that writes
+        # ``pl.Tile[..., pl.TileView(fractal=1024)]`` without ``pl.Mem.Acc`` would get
+        # shape-based blayout/slayout defaults instead of Acc defaults for unspecified
+        # fields — a known edge case that requires a larger refactor to fix properly.
         memory_space = (
             self._resolve_memory_space(memory_space_node) if memory_space_node is not None else None
+        )
+        tile_view = (
+            self._resolve_tileview(tile_view_node, shape, memory_space)
+            if tile_view_node is not None
+            else None
         )
         return ir.TileType(shape, dtype, memref, tile_view, memory_space)
 
@@ -1053,13 +1111,22 @@ class TypeResolver:
         )
 
     def _resolve_tileview(  # noqa: PLR0912
-        self, node: ast.expr, tile_shape: "Sequence[int | ir.Expr] | None" = None
+        self,
+        node: ast.expr,
+        tile_shape: "Sequence[int | ir.Expr] | None" = None,
+        memory_space: "ir.MemorySpace | None" = None,
     ) -> "ir.TileView":
         """Resolve a pl.TileView(...) AST call to ir.TileView.
 
         Args:
             node: AST Call node for pl.TileView(...)
             tile_shape: Optional tile shape to use as default valid_shape when not explicit.
+            memory_space: Optional memory space used to fill implicit blayout/slayout/fractal
+                defaults for fields not explicitly specified in the annotation.  This mirrors
+                the printer's memory-space-aware omission logic so that a round-tripped
+                annotation like ``pl.TileView(fractal=512)`` inside ``pl.Mem.Acc`` recovers
+                the correct col_major/row_major layouts rather than the Python constructor
+                defaults.
 
         Returns:
             ir.TileView instance
@@ -1079,6 +1146,9 @@ class TypeResolver:
             )
         tv = ir.TileView()
         has_explicit_valid_shape = False
+        has_explicit_blayout = False
+        has_explicit_slayout = False
+        has_explicit_fractal = False
         for kw in node.keywords:
             if kw.arg == "valid_shape":
                 tv.valid_shape = self._parse_tileview_expr_list(kw.value)
@@ -1089,8 +1159,10 @@ class TypeResolver:
                 tv.start_offset = self._parse_tileview_expr(kw.value)
             elif kw.arg == "blayout":
                 tv.blayout = self._resolve_tilelayout(kw.value)
+                has_explicit_blayout = True
             elif kw.arg == "slayout":
                 tv.slayout = self._resolve_tilelayout(kw.value)
+                has_explicit_slayout = True
             elif kw.arg == "fractal":
                 val = self._try_resolve_int(kw.value)
                 if val is None:
@@ -1098,6 +1170,7 @@ class TypeResolver:
                         f"TileView fractal must be an integer, got: {ast.unparse(kw.value)}",
                     )
                 tv.fractal = val
+                has_explicit_fractal = True
             elif kw.arg == "pad":
                 tv.pad = self._resolve_padvalue(kw.value)
             else:
@@ -1108,6 +1181,19 @@ class TypeResolver:
         # If valid_shape was not explicitly given, inherit from tile_shape so roundtrip is stable
         if not has_explicit_valid_shape and tile_shape is not None:
             tv.valid_shape = self._tile_shape_to_expr_list(tile_shape)
+        # Apply implicit defaults for any field NOT explicitly set.  The printer omits
+        # fields matching the memory-space-aware implicit defaults; the parser must
+        # recover them from the same rules — regardless of whether memory_space is
+        # present, since shape-derived defaults (e.g. col_major for [N,1]) also apply.
+        impl_blayout, impl_slayout, impl_fractal = _implicit_tile_view_defaults(
+            tv.valid_shape if tv.valid_shape else (tile_shape or []), memory_space
+        )
+        if not has_explicit_blayout:
+            tv.blayout = impl_blayout
+        if not has_explicit_slayout:
+            tv.slayout = impl_slayout
+        if not has_explicit_fractal:
+            tv.fractal = impl_fractal
         return tv
 
     def _tile_shape_to_expr_list(self, shape: "Sequence[int | ir.Expr]") -> "list[ir.Expr]":

@@ -1264,22 +1264,26 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   IncreaseIndent();
   if (func->body_) {
     if (auto seq_stmts = As<SeqStmts>(func->body_)) {
-      for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
-        // Convert yield to return in function context
-        if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
-          stream_ << GetIndent() << "return";
-          if (!yield_stmt->value_.empty()) {
-            stream_ << " ";
-            for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
-              if (j > 0) stream_ << ", ";
-              VisitExpr(yield_stmt->value_[j]);
+      if (seq_stmts->stmts_.empty()) {
+        stream_ << GetIndent() << "pass";
+      } else {
+        for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+          // Convert yield to return in function context
+          if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
+            stream_ << GetIndent() << "return";
+            if (!yield_stmt->value_.empty()) {
+              stream_ << " ";
+              for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
+                if (j > 0) stream_ << ", ";
+                VisitExpr(yield_stmt->value_[j]);
+              }
             }
+          } else {
+            PrintStmtBlock(seq_stmts->stmts_[i]);
           }
-        } else {
-          PrintStmtBlock(seq_stmts->stmts_[i]);
-        }
-        if (i < seq_stmts->stmts_.size() - 1) {
-          stream_ << "\n";
+          if (i < seq_stmts->stmts_.size() - 1) {
+            stream_ << "\n";
+          }
         }
       }
     } else if (auto yield_stmt = As<YieldStmt>(func->body_)) {

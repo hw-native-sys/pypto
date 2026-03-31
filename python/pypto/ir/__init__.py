@@ -35,6 +35,9 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 
+# Import roundtrip instrument factory
+from .instruments import make_roundtrip_instrument
+
 # Import op conversion utilities
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 
@@ -88,6 +91,7 @@ __all__ = [
     "ConversionContext",
     "op_conversion",
     "register_op_conversion",
+    "make_roundtrip_instrument",
 ]  # fmt: skip
 
 # Register ruff as the format callback for IR printing (best-effort: no-op if ruff is unavailable)

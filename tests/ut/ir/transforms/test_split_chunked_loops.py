@@ -233,6 +233,7 @@ class TestChunkingWithKind:
 
         ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
 
+    @pytest.mark.filterwarnings("ignore:.*RoundtripInstrument.*IR not printable:UserWarning")
     def test_unroll_chunk(self):
         """Chunk an unroll loop: both inner and outer loops are Unroll.
 

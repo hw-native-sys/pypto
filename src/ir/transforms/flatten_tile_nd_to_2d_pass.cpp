@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -466,10 +467,12 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // Create a 2D tile_view and preserve memory_space for type consistency
         // with downstream ops (op_registry always adds tile_view + memory_space).
         auto flat_shape_exprs = Make2DShapeExprs(merged, last, span);
-        std::optional<TileView> flat_tile_view;
-        if (result_tile->tile_view_.has_value()) {
-          flat_tile_view = TileView(flat_shape_exprs, /*stride=*/{}, /*start_offset=*/nullptr);
-        }
+        // Assign the implicit TileView for the flattened 2D shape+memory_space.
+        // This ensures print→parse roundtrip stability: the printer omits TileView
+        // fields that match the implicit defaults, and C++ type inference on reparse
+        // produces the same implicit TileView, so structural_equal sees identical types.
+        auto flat_tile_view = std::make_optional(
+            tile_view_semantics::GetImplicitTileView(flat_shape_exprs, result_tile->memory_space_));
         auto flat_tile_type = std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_, std::nullopt,
                                                          flat_tile_view, result_tile->memory_space_);
         auto flat_call =

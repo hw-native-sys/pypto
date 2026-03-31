@@ -182,6 +182,34 @@ with passes.PassContext([instrument]):
 
 `compile()` 会自动创建 `ReportInstrument`，在 `build_output/<name>/report/` 目录中生成内存报告。
 
+### RoundtripInstrument
+
+打印→解析 roundtrip 验证插桩。每次 Pass 执行后：
+
+1. 通过 `python_print()` 将结果 IR 打印为 Python DSL 文本
+2. 通过 `parse()` 将文本解析回 IR `Program`
+3. 断言 `structural_equal(original, reparsed)` —— 失败则说明 printer 或 parser 无法忠实表示该 Pass 输出的 IR
+
+```python
+from pypto.pypto_core import passes
+from pypto.ir.instruments import make_roundtrip_instrument
+
+with passes.PassContext([make_roundtrip_instrument()]):
+    result = passes.convert_to_ssa()(program)
+```
+
+**已知的非致命情况**（插桩跳过检查，不报错）：
+
+| 情况 | 行为 | 原因 |
+| ---- | ---- | ---- |
+| Printer `InternalError`（如 `ForKind::Unroll` + SSA `iter_args`） | `UserWarning`，跳过 roundtrip | 该过渡状态无合法 DSL 语法 |
+| 原始 IR 中的 `UnknownType`（手动 `ir.Call(ir.Op(...))` 构造） | 静默跳过 | 解析时 C++ 推断出具体类型，属于类型改善而非 bug |
+| `tensor.add(x, scalar)` → roundtrip 后变为 `tensor.adds` | 静默跳过 | Python API 会自动将标量 RHS dispatch 到 `tensor.adds` |
+| `tile.load` 3-arg → roundtrip 后变为 4-arg | 静默跳过 | C++ 要求 4 个参数；手动构造 3-arg 由 printer 规范化 |
+| 动态 shape Var 在 return types 中的指针不匹配 | 静默跳过 | `structural_equal` 无法在函数体外追踪 Var |
+
+**单元测试中默认开启**，通过 `tests/ut/conftest.py`（见下方[测试Fixture](#测试fixture)）。可通过 `PYPTO_VERIFY_LEVEL=basic` 或 `PYPTO_VERIFY_LEVEL=none` 关闭。
+
 ### PassContext
 
 线程局部上下文栈，支持 `with` 风格的嵌套。同时持有插桩和 Pass 配置（如验证级别）：
@@ -220,14 +248,29 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### 测试Fixture
 
-所有单元测试通过 `tests/ut/conftest.py` 自动在 BEFORE_AND_AFTER 验证模式下运行：
+所有单元测试通过 `tests/ut/conftest.py` 自动启用属性验证**和 roundtrip 验证**。roundtrip 在测试中默认开启，以便自动发现 printer/parser 不对称问题。
 
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    level_str = os.environ.get("PYPTO_VERIFY_LEVEL", "roundtrip").lower()
+    instruments = []
+    if level_str != "none":
+        instruments.append(passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER))
+    if level_str == "roundtrip":
+        from pypto.ir.instruments import make_roundtrip_instrument
+        instruments.append(make_roundtrip_instrument())
+    with passes.PassContext(instruments):
         yield
 ```
+
+通过环境变量控制：
+
+| `PYPTO_VERIFY_LEVEL` | 属性验证 | Roundtrip |
+| -------------------- | -------- | --------- |
+| `roundtrip`（测试默认值） | ✅ BEFORE_AND_AFTER | ✅ |
+| `basic` | ✅ BEFORE_AND_AFTER | ❌ |
+| `none` | ❌ | ❌ |
 
 ### PassPipeline (C++)
 
@@ -277,7 +320,7 @@ with passes.PassContext([], passes.VerificationLevel.NONE):
 # Or per-compilation
 ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 
-# Environment variable (default when no PassContext): PYPTO_VERIFY_LEVEL=none|basic
+# Environment variable (default when no PassContext): PYPTO_VERIFY_LEVEL=none|basic|roundtrip
 ```
 
 **验证级别的确定方式**：

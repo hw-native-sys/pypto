@@ -182,6 +182,34 @@ with passes.PassContext([instrument]):
 
 `compile()` automatically creates a `ReportInstrument` that generates memory reports to `build_output/<name>/report/`.
 
+### RoundtripInstrument
+
+Print→parse roundtrip verification instrument. After every pass, it:
+
+1. Prints the resulting IR to Python DSL text via `python_print()`
+2. Parses the text back to an IR `Program` via `parse()`
+3. Asserts `structural_equal(original, reparsed)` — a failure means the printer or parser cannot faithfully represent the IR produced by that pass
+
+```python
+from pypto.pypto_core import passes
+from pypto.ir.instruments import make_roundtrip_instrument
+
+with passes.PassContext([make_roundtrip_instrument()]):
+    result = passes.convert_to_ssa()(program)
+```
+
+**Known non-fatal cases** (instrument skips the check without failing):
+
+| Case | Behaviour | Reason |
+| ---- | --------- | ------ |
+| Printer `InternalError` (e.g. `ForKind::Unroll` + SSA `iter_args`) | `UserWarning`, roundtrip skipped | No valid DSL syntax for this transitional state |
+| `UnknownType` in original IR (manually built via `ir.Call(ir.Op(...))`) | Silent skip | Parsing infers a concrete type; this is a type improvement, not a bug |
+| `tensor.add(x, scalar)` → `tensor.adds` after roundtrip | Silent skip | Python API dispatches scalar RHS to `tensor.adds`; manual construction used wrong op name |
+| `tile.load` 3-arg → 4-arg after roundtrip | Silent skip | C++ requires 4 args; manually constructed IR with 3 args is normalised by the printer |
+| Variable pointer mismatch (dynamic-shape Vars in return types) | Silent skip | `structural_equal` without `enable_auto_mapping` cannot track Vars outside the function body |
+
+**Enabled by default in unit tests** via `tests/ut/conftest.py` (see [Test Fixture](#test-fixture) below). Disable with `PYPTO_VERIFY_LEVEL=basic` or `PYPTO_VERIFY_LEVEL=none`.
+
 ### PassContext
 
 Thread-local context stack with `with`-style nesting. Holds both instruments and pass configuration (e.g., verification level):
@@ -220,14 +248,29 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 ### Test Fixture
 
-All unit tests automatically run with BEFORE_AND_AFTER verification via `tests/ut/conftest.py`:
+All unit tests automatically run with property verification **and roundtrip verification** via `tests/ut/conftest.py`. Roundtrip is the default for tests so that printer/parser asymmetries are caught automatically.
 
 ```python
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+    level_str = os.environ.get("PYPTO_VERIFY_LEVEL", "roundtrip").lower()
+    instruments = []
+    if level_str != "none":
+        instruments.append(passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER))
+    if level_str == "roundtrip":
+        from pypto.ir.instruments import make_roundtrip_instrument
+        instruments.append(make_roundtrip_instrument())
+    with passes.PassContext(instruments):
         yield
 ```
+
+Override via environment variable:
+
+| `PYPTO_VERIFY_LEVEL` | Property verification | Roundtrip |
+| -------------------- | --------------------- | --------- |
+| `roundtrip` (default for tests) | ✅ BEFORE_AND_AFTER | ✅ |
+| `basic` | ✅ BEFORE_AND_AFTER | ❌ |
+| `none` | ❌ | ❌ |
 
 ### PassPipeline (C++)
 
@@ -277,7 +320,7 @@ with passes.PassContext([], passes.VerificationLevel.NONE):
 # Or per-compilation
 ir.compile(program, verification_level=ir.VerificationLevel.NONE)
 
-# Environment variable (default when no PassContext): PYPTO_VERIFY_LEVEL=none|basic
+# Environment variable (default when no PassContext): PYPTO_VERIFY_LEVEL=none|basic|roundtrip
 ```
 
 **How the level is determined**:

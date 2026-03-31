@@ -32,7 +32,11 @@ from .enum_utils import LEVEL_MAP, ROLE_MAP, extract_enum_value
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
-from .type_resolver import TypeResolver
+from .type_resolver import (
+    TypeResolver,
+    _const_int_value,  # noqa: PLC2701
+    _implicit_tile_view_defaults,  # noqa: PLC2701
+)
 
 if TYPE_CHECKING:
     from .decorator import InlineFunction
@@ -46,17 +50,6 @@ def _is_const_int(value: object) -> bool:
     if isinstance(value, (int, ir.ConstInt)):
         return True
     return isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt)
-
-
-def _const_int_value(value: object) -> int | None:
-    """Extract integer value from a compile-time constant, or None."""
-    if isinstance(value, int):
-        return value
-    if isinstance(value, ir.ConstInt):
-        return value.value
-    if isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt):
-        return -value.operand.value
-    return None
 
 
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
@@ -80,37 +73,6 @@ def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
         if lhs_value is None or rhs_value is None or lhs_value != rhs_value:
             return False
     return True
-
-
-def _infer_implicit_tile_layout_from_shape(shape: Sequence[ir.Expr]) -> ir.TileLayout:
-    """Infer the block layout represented by omitted TileView syntax."""
-    if len(shape) != 2:
-        return ir.TileLayout.row_major
-    rows_value = _const_int_value(shape[0])
-    cols_value = _const_int_value(shape[1])
-    if rows_value is None or cols_value is None:
-        return ir.TileLayout.row_major
-    return ir.TileLayout.col_major if cols_value == 1 and rows_value > 1 else ir.TileLayout.row_major
-
-
-def _implicit_tile_view_defaults(
-    shape: Sequence[ir.Expr],
-    memory_space: ir.MemorySpace | None = None,
-) -> tuple[ir.TileLayout, ir.TileLayout, int]:
-    """Return the layout/fractal defaults implied by omitted TileView syntax."""
-    default_blayout = _infer_implicit_tile_layout_from_shape(shape)
-    default_slayout = ir.TileLayout.none_box
-    default_fractal = ir.TileView().fractal
-    if memory_space in (ir.MemorySpace.Mat, ir.MemorySpace.Left):
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-    elif memory_space == ir.MemorySpace.Right:
-        default_slayout = ir.TileLayout.col_major
-    elif memory_space == ir.MemorySpace.Acc:
-        default_blayout = ir.TileLayout.col_major
-        default_slayout = ir.TileLayout.row_major
-        default_fractal = 1024
-    return default_blayout, default_slayout, default_fractal
 
 
 def _has_printable_tile_view(
@@ -541,12 +503,21 @@ class ASTParser:
                     ann_ms = resolved.memory_space
                     ann_tv = resolved.tile_view
                     inf_ms = normalized_inferred.memory_space
-                    # Use the actual (non-stripped) tile_view from the inferred type so that
-                    # implicit TileViews set by C++ type inference (e.g. col_major for [N,1] Vec)
-                    # are preserved in the merged override type.  normalized_inferred strips
-                    # implicit TileViews for syntax-level comparison only; we must not use
-                    # that stripped value for the merge.
-                    inf_tv = value_expr.type.tile_view
+                    # For the ND→2D flattening case (FlattenTileNdTo2D), the call infers
+                    # an ND TileType whose tile_view.valid_shape is also ND.  Merging that
+                    # into a 2D type would produce an inconsistent valid_shape.  Detect this
+                    # by comparing dimensionality: if normalized_inferred (which carries the
+                    # annotation's 2D shape for ND→2D) has fewer dims than value_expr.type,
+                    # we're in the ND→2D case and must NOT use the ND tile_view.
+                    # For the 2D→2D case (fresh compilation), the C++ inferred tile_view
+                    # (e.g. col_major for [N,1] Vec) must be preserved so downstream passes
+                    # can see the correct layout.
+                    if len(normalized_inferred.shape) != len(value_expr.type.shape):
+                        # ND→2D: avoid carrying ND valid_shape into 2D type
+                        inf_tv = normalized_inferred.tile_view
+                    else:
+                        # 2D→2D: preserve the actual C++ inferred tile_view
+                        inf_tv = value_expr.type.tile_view
                     merged_ms = ann_ms if ann_ms is not None else inf_ms
                     merged_tv = ann_tv if ann_tv is not None else inf_tv
                     if (
