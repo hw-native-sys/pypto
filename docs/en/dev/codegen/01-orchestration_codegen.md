@@ -100,10 +100,11 @@ uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shap
 Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
 
 // Phase 6: Internal tensors (from pl.create_tensor — intermediates only)
-// Two declarations are emitted: a TensorCreateInfo for add_output, and a null-addr Tensor placeholder.
+// Only TensorCreateInfo is emitted here. The Tensor variable is bound at the submit site:
+//   non-DN: const Tensor& tmp = outs_t0.get_ref(0);   (declared at submit)
+//   DN:     Tensor tmp = make_tensor_2d_dn(...);        (declared here, copy-assigned at submit)
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
-Tensor tmp = make_tensor_external(nullptr, tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
 ### Phase 7–9: Task Submission and Control Flow
@@ -117,7 +118,7 @@ PTO2_SCOPE() {
     params_t0.add_input(ext_b);
     params_t0.add_output(tmp_ci);            // add_output takes TensorCreateInfo for internal tensors
     TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-    tmp = outs_t0.get_ref(0);               // copy-assign from ring buffer allocation
+    const Tensor& tmp = outs_t0.get_ref(0); // non-DN: bind const ref at submit site
 
     // ForStmt example — plain for loop, no nested PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -134,7 +135,8 @@ PTO2_SCOPE() {
 | ---- | ------ | ---------------- | ------ |
 | External (ND) | Function parameters (`In`/`Out`/`InOut`) | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
 | External (DN) | Function parameters, DN layout | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
-| Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | `<name>` (no prefix) |
+| Internal (non-DN) | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `const Tensor& var` bound at submit | `<name>` (no prefix) |
+| Internal (DN) | `pl.create_tensor(...)` with DN layout | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_2d_dn(...)` | `<name>` (no prefix) |
 
 External tensors wrap device memory pointers passed from the host via `ChipStorageTaskArgs`. Internal tensors are allocated by the runtime from a ring buffer when passed to `add_output(var_ci)`.
 
@@ -144,14 +146,16 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 
 | Direction | Python Annotation | C++ Task Param | Semantics |
 | --------- | ----------------- | -------------- | --------- |
-| `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only |
+| `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only; if the tensor is from `pl.create_tensor`, uses `add_output` for first-time allocation |
 | `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_inout(ext_x)` | Pre-allocated buffer |
-| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `x = outs.get_ref(i)` | Runtime ring-buffer alloc |
+| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` (non-DN) or `x = outs.get_ref(i)` (DN) | Runtime ring-buffer alloc |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (separate scalar slot) |
 
-When `add_output` is used, the submit call returns `TaskOutputTensors` and each internal output
-tensor is copy-assigned from `outs.get_ref(i)` to bind the runtime-allocated address.
+When `add_output` is used, the submit call returns `TaskOutputTensors`. For non-DN tensors,
+a `const Tensor& var = outs.get_ref(i)` binding is declared at the submit site. For DN tensors,
+a `Tensor var = make_tensor_2d_dn(...)` placeholder (null data pointer, with logical view) is
+pre-declared at the `tensor.create` site and copy-assigned after submit.
 
 ### Scalar Parameter Encoding
 
@@ -179,7 +183,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 Arg params_t0;
 params_t0.add_inout(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
-Tensor& result = ext_output;  // alias — result refers to ext_output
+const Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
 If the return name matches the `Out`/`InOut` arg name, no alias is needed.
@@ -229,7 +233,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR Operation | C++ Codegen | Description |
 | ------------ | ----------- | ----------- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | Ring-buffer alloc info + null-addr placeholder |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` | Ring-buffer alloc info; non-DN: `const Tensor& var` bound at submit; DN: `Tensor var = make_tensor_2d_dn(...)` declared before submit |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
@@ -281,10 +285,9 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
     Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
     Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
-    // Internal tensor (intermediate) — TensorCreateInfo for add_output, null-addr Tensor for input uses
+    // Internal tensor (intermediate) — only TensorCreateInfo declared here
     uint32_t c_ci_shapes[2] = {16, 16};
     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
     PTO2_SCOPE() {
         // Task 0: kernel_add (a + b → c)
@@ -293,7 +296,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
         params_t0.add_input(ext_b);
         params_t0.add_output(c_ci);
         TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-        c = outs_t0.get_ref(0);
+        const Tensor& c = outs_t0.get_ref(0);  // non-DN: bind const ref at submit site
 
         // Task 1: kernel_add (c + b → d)
         Arg params_t1;

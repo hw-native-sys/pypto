@@ -100,10 +100,11 @@ uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shap
 Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
 
 // 阶段 6：内部张量（来自 pl.create_tensor — 仅中间变量）
-// 生成两条声明：TensorCreateInfo 用于 add_output，空地址 Tensor 作为占位符。
+// 此处仅生成 TensorCreateInfo。Tensor 变量在提交处绑定：
+//   non-DN: const Tensor& tmp = outs_t0.get_ref(0);  （提交处声明）
+//   DN:     Tensor tmp = make_tensor_2d_dn(...);       （此处声明，提交后 copy-assign）
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
-Tensor tmp = make_tensor_external(nullptr, tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
 ### 阶段 7–9：任务提交与控制流
@@ -117,7 +118,7 @@ PTO2_SCOPE() {
     params_t0.add_input(ext_b);
     params_t0.add_output(tmp_ci);            // add_output 接受 TensorCreateInfo（内部张量）
     TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-    tmp = outs_t0.get_ref(0);               // 从环形缓冲区分配结果赋值回 Tensor
+    const Tensor& tmp = outs_t0.get_ref(0); // non-DN：在提交处绑定 const 引用
 
     // ForStmt 示例 — 普通 for 循环，不嵌套独立的 PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -134,7 +135,8 @@ PTO2_SCOPE() {
 | ---- | ---- | ------------ | ---- |
 | 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
 | 外部（DN） | 函数参数，DN 布局 | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
-| 内部（Internal） | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | `<name>`（无前缀） |
+| 内部（non-DN） | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + 提交处 `const Tensor& var` 绑定 | `<name>`（无前缀） |
+| 内部（DN） | 函数体中的 `pl.create_tensor(...)`，DN 布局 | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_2d_dn(...)` | `<name>`（无前缀） |
 
 外部张量封装从主机通过 `ChipStorageTaskArgs` 传入的设备内存指针。内部张量在传入 `add_output(var_ci)` 时由运行时从环形缓冲区分配。
 
@@ -144,13 +146,15 @@ PTO2_SCOPE() {
 
 | 方向 | Python 注解 | C++ 任务参数 | 语义 |
 | ---- | ----------- | ------------ | ---- |
-| `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读 |
+| `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读；若为 `pl.create_tensor` 变量，首次使用改用 `add_output` 分配内存 |
 | `Out`（外部） | `pl.Out[pl.Tensor[...]]`（参数） | `params.add_inout(ext_x)` | 预分配缓冲区 |
-| `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `x = outs.get_ref(i)` | 运行时环形缓冲区分配 |
+| `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)`（non-DN）或 `x = outs.get_ref(i)`（DN） | 运行时环形缓冲区分配 |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（独立 scalar 槽位） |
 
-使用 `add_output` 时，提交调用返回 `TaskOutputTensors`，每个内部输出张量通过 `outs.get_ref(i)` 拷贝赋值以绑定运行时分配的地址。
+使用 `add_output` 时，提交调用返回 `TaskOutputTensors`。non-DN 张量在提交处声明
+`const Tensor& var = outs.get_ref(i)` 绑定；DN 张量在 `tensor.create` 处预先声明
+`Tensor var = make_tensor_2d_dn(...)`（空数据指针，附带逻辑视图），提交后 copy-assign。
 
 ### 标量参数编码
 
@@ -178,7 +182,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 Arg params_t0;
 params_t0.add_inout(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
-Tensor& result = ext_output;  // 别名 — result 引用 ext_output
+const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
 
 如果返回名称与 `Out`/`InOut` 参数名称匹配，则不需要别名。
@@ -228,7 +232,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR 操作 | C++ 代码生成 | 描述 |
 | ------- | ------------ | ---- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_external(nullptr, ...)` | 环形缓冲区分配信息 + 空地址占位符 |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` | 环形缓冲区分配信息；non-DN: 提交处 `const Tensor& var` 绑定；DN: 此处声明 `Tensor var = make_tensor_2d_dn(...)` |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
@@ -280,10 +284,9 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
     Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
     Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
-    // 内部张量（中间变量）— TensorCreateInfo 用于 add_output，空地址 Tensor 用于输入及赋值目标
+    // 内部张量（中间变量）— 此处仅声明 TensorCreateInfo
     uint32_t c_ci_shapes[2] = {16, 16};
     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-    Tensor c = make_tensor_external(nullptr, c_ci_shapes, 2, DataType::FLOAT32);
 
     PTO2_SCOPE() {
         // 任务 0: kernel_add (a + b → c)
@@ -292,7 +295,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
         params_t0.add_input(ext_b);
         params_t0.add_output(c_ci);
         TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-        c = outs_t0.get_ref(0);
+        const Tensor& c = outs_t0.get_ref(0);  // non-DN：提交处绑定 const 引用
 
         // 任务 1: kernel_add (c + b → d)
         Arg params_t1;
