@@ -54,6 +54,19 @@ namespace ir {
 
 namespace {
 
+/// Convert SplitMode to Python enum member name (UP_DOWN, LEFT_RIGHT).
+std::string SplitModeToPythonString(SplitMode mode) {
+  switch (mode) {
+    case SplitMode::None:
+      return "NONE";
+    case SplitMode::UpDown:
+      return "UP_DOWN";
+    case SplitMode::LeftRight:
+      return "LEFT_RIGHT";
+  }
+  throw pypto::TypeError("Unknown SplitMode");
+}
+
 /// Convert cast round mode integer to its string name for printing.
 /// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
@@ -1008,7 +1021,7 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     if (op->scope_kind_ == ScopeKind::AutoInCore && op->split_.has_value() &&
         op->split_.value() != SplitMode::None) {
       stream_ << "with " << prefix_ << "." << it->second << "(split=" << prefix_ << ".SplitMode."
-              << SplitModeToString(op->split_.value()) << "):\n";
+              << SplitModeToPythonString(op->split_.value()) << "):\n";
     } else {
       stream_ << "with " << prefix_ << "." << it->second << "():\n";
     }
@@ -1223,7 +1236,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
       }
       if (has_split) {
         if (!first) stream_ << ", ";
-        stream_ << "split=" << prefix_ << ".SplitMode." << SplitModeToString(func->split_.value());
+        stream_ << "split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(func->split_.value());
       }
       stream_ << ")";
     }
