@@ -48,6 +48,7 @@ from pypto.pypto_core.ir import (
     PipeType,
     Role,
     TensorLayout,
+    TensorView,
     TileLayout,
     TileView,
 )
@@ -341,6 +342,7 @@ __all__ = [
     "TensorLayout",
     "TileLayout",
     "PadValue",
+    "TensorView",
     "TileView",
     "ND",
     "DN",

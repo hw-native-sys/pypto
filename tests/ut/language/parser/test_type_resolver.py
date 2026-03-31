@@ -1605,5 +1605,182 @@ class TestValidateAnnotationConsistency:
             resolver.validate_annotation_consistency(ann, inf, "x", None)
 
 
+class TestTensorViewResolution:
+    """Tests for TensorView resolution in Tensor type annotations."""
+
+    def test_resolve_tensor_with_empty_tensorview(self):
+        """Tensor with TensorView() (all defaults) creates TensorType with empty tensor_view."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.TensorView()]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert len(result.tensor_view.stride) == 0
+        assert len(result.tensor_view.valid_shape) == 0
+        assert result.tensor_view.layout == ir.TensorLayout.ND
+
+    def test_resolve_tensor_with_tensorview_valid_shape(self):
+        """TensorView with valid_shape creates correct tensor_view."""
+        resolver = _make_resolver()
+        ann = (
+            "pl.Tensor[[8, 64], pl.FP32,"
+            " pl.TensorView(valid_shape=[8, 32], stride=[], layout=pl.TensorLayout.ND)]"
+        )
+        node = ast.parse(ann, mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert len(tv.valid_shape) == 2
+        assert len(tv.stride) == 0
+        assert tv.layout == ir.TensorLayout.ND
+
+    def test_resolve_tensor_with_tensorview_stride(self):
+        """TensorView with stride creates correct tensor_view."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[8, 64], pl.FP32, pl.TensorView(stride=[64, 1], layout=pl.TensorLayout.ND)]",
+            mode="eval",
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert len(tv.stride) == 2
+        assert tv.layout == ir.TensorLayout.ND
+
+    def test_resolve_tensor_with_tensorview_nz_layout(self):
+        """TensorView with NZ layout."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[8, 64], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)]",
+            mode="eval",
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_resolve_tensor_with_tensorview_dynamic_valid_shape(self):
+        """TensorView with dynamic variable in valid_shape."""
+        resolver = _make_resolver(closure_vars={"valid_len": DynVar("valid_len")})
+        ann = (
+            "pl.Tensor[[8, 64], pl.FP32,"
+            " pl.TensorView(valid_shape=[8, valid_len], stride=[], layout=pl.TensorLayout.ND)]"
+        )
+        node = ast.parse(ann, mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        tv = result.tensor_view
+        assert tv is not None
+        assert len(tv.valid_shape) == 2
+        # First dim is constant 8
+        assert isinstance(tv.valid_shape[0], ir.ConstInt)
+        # Second dim is dynamic variable
+        assert isinstance(tv.valid_shape[1], ir.Var)
+        assert tv.valid_shape[1].name_hint == "valid_len"
+
+    def test_resolve_tensor_with_tensorview_unknown_kwarg_raises(self):
+        """Unknown keyword argument in TensorView raises error."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[8, 64], pl.FP32, pl.TensorView(foo=[1, 2])]",
+            mode="eval",
+        ).body
+
+        with pytest.raises(ParserTypeError, match="Unknown TensorView keyword"):
+            resolver.resolve_type(node)
+
+    def test_resolve_tensor_with_tensorview_positional_args_raises(self):
+        """Positional arguments in TensorView raises error."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[8, 64], pl.FP32, pl.TensorView([1, 2])]",
+            mode="eval",
+        ).body
+
+        with pytest.raises(ParserTypeError, match="does not accept positional arguments"):
+            resolver.resolve_type(node)
+
+    def test_tensorview_printer_roundtrip(self):
+        """Print TensorType with TensorView, then re-parse — must produce equivalent type."""
+        span = ir.Span.unknown()
+        tensor_view = ir.TensorView()
+        tensor_view.valid_shape = [
+            ir.ConstInt(8, DataType.INDEX, span),
+            ir.ConstInt(32, DataType.INDEX, span),
+        ]
+        tensor_view.layout = ir.TensorLayout.ND
+        original = ir.TensorType([8, 64], DataType.FP32, tensor_view=tensor_view)
+
+        printed = ir.python_print_type(original)
+        assert "pl.TensorView(" in printed
+
+        node = ast.parse(printed, mode="eval").body
+        resolver = _make_resolver()
+        reparsed = resolver.resolve_type(node)
+
+        assert isinstance(reparsed, ir.TensorType)
+        assert reparsed.tensor_view is not None
+        assert len(reparsed.tensor_view.valid_shape) == 2
+
+    def test_tensorview_with_memref_four_args(self):
+        """Tensor with TensorView and MemRef as 4-arg form."""
+        resolver = _make_resolver()
+        ann = (
+            "pl.Tensor[[64, 128], pl.FP32,"
+            " pl.TensorView(stride=[], layout=pl.TensorLayout.ND), pl.MemRef(0, 256, 1)]"
+        )
+        node = ast.parse(ann, mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert result.memref is not None
+
+
+class TestTensorViewIntegration:
+    """End-to-end tests: decorator + TensorView annotations and program round-trip."""
+
+    def test_tensorview_with_dynvar_print_and_resolve(self):
+        """Build TensorType with dynamic valid_shape, print it, re-parse via TypeResolver.
+
+        This mirrors the real round-trip path: passes produce TensorView in type
+        annotations, the printer emits pl.TensorView(...), and the parser resolves
+        it from AST (not via exec evaluation).
+        """
+        span = ir.Span.unknown()
+        valid_n = ir.Var("valid_n", ir.ScalarType(DataType.INDEX), span)
+
+        tensor_view = ir.TensorView()
+        tensor_view.valid_shape = [ir.ConstInt(8, DataType.INDEX, span), valid_n]
+        tensor_view.layout = ir.TensorLayout.ND
+
+        original = ir.TensorType([8, 64], DataType.FP32, tensor_view=tensor_view)
+
+        printed = ir.python_print_type(original)
+        assert "pl.TensorView(" in printed
+        assert "valid_n" in printed
+
+        node = ast.parse(printed, mode="eval").body
+        resolver = _make_resolver()
+        reparsed = resolver.resolve_type(node)
+
+        assert isinstance(reparsed, ir.TensorType)
+        tv = reparsed.tensor_view
+        assert tv is not None
+        assert len(tv.valid_shape) == 2
+        assert isinstance(tv.valid_shape[0], ir.ConstInt)
+        assert isinstance(tv.valid_shape[1], ir.Var)
+        assert tv.valid_shape[1].name_hint == "valid_n"
+        assert tv.layout == ir.TensorLayout.ND
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
