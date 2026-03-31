@@ -465,30 +465,6 @@ class ScopeOutliner : public IRMutator {
       }
     }
 
-    // --- Detect IterArg InOut parameters ---
-    // A tensor input whose base name matches a non-store output's base name
-    // represents a loop-carried variable (SSA pattern: input "acc" → body
-    // IterArg → output "acc__ssa_v0").  Mark the input as InOut so downstream
-    // passes (ConvertTensorToTileOps) store back to the same buffer.
-    // Note: store-target InOut is already handled by UpgradeWrittenTensorParamDirections
-    // in ConvertTensorToTileOps, so we only detect the IterArg case here.
-    std::unordered_map<std::string, const Var*> input_by_base;
-    for (const auto& in_var : input_vars) {
-      std::string base = auto_name::GetBaseName(in_var->name_hint_);
-      if (!base.empty()) {
-        input_by_base[base] = in_var.get();
-      }
-    }
-    std::unordered_set<const Var*> inout_set;
-    for (const auto& out_var : output_vars) {
-      if (store_output_set.count(out_var.get())) continue;  // skip store targets
-      std::string out_base = auto_name::GetBaseName(out_var->name_hint_);
-      auto it = input_by_base.find(out_base);
-      if (it != input_by_base.end()) {
-        inout_set.insert(it->second);
-      }
-    }
-
     std::sort(output_vars.begin(), output_vars.end(),
               [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
@@ -537,8 +513,7 @@ class ScopeOutliner : public IRMutator {
     for (const auto& input_var : input_vars) {
       auto param_var = std::make_shared<Var>(input_var->name_hint_, input_var->GetType(), op->span_);
       input_params.push_back(param_var);
-      input_param_directions.push_back(inout_set.count(input_var.get()) ? ParamDirection::InOut
-                                                                        : ParamDirection::In);
+      input_param_directions.push_back(ParamDirection::In);
       var_substitution_map[input_var.get()] = param_var;
     }
 

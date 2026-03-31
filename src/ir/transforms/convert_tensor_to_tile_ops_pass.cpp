@@ -1361,16 +1361,6 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   std::vector<TypePtr> new_return_types;
   size_t num_added_outputs = 0;
 
-  // Collect InOut tensor params by base name for matching with return values.
-  // IterArg InOut returns are stored back to the existing InOut param instead
-  // of creating a new Out param.
-  std::unordered_map<std::string, VarPtr> inout_param_by_base;
-  for (size_t i = 0; i < func->params_.size(); ++i) {
-    if (func->param_directions_[i] == ParamDirection::InOut && As<TensorType>(func->params_[i]->GetType())) {
-      inout_param_by_base[auto_name::GetBaseName(func->params_[i]->name_hint_)] = func->params_[i];
-    }
-  }
-
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
 
@@ -1386,26 +1376,11 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
             << "Internal error: return type " << i << " should be TensorType but got "
             << func->return_types_[i]->TypeName();
 
-        // Determine target param: reuse existing InOut param or create new Out param.
-        VarPtr out_param;
-        bool is_inout_return = false;
-        auto orig_ret_var = As<Var>(return_stmt->value_[i]);
-        if (orig_ret_var) {
-          std::string ret_base = auto_name::GetBaseName(orig_ret_var->name_hint_);
-          auto inout_it = inout_param_by_base.find(ret_base);
-          if (inout_it != inout_param_by_base.end()) {
-            out_param = inout_it->second;
-            is_inout_return = true;
-            inout_param_by_base.erase(inout_it);
-          }
-        }
-        if (!is_inout_return) {
-          // Add new output tensor parameter
-          std::string out_name = MakeOutParamName(num_added_outputs);
-          out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
-          new_params.push_back(out_param);
-          new_param_directions.push_back(ParamDirection::Out);
-        }
+        // Add output tensor parameter
+        std::string out_name = MakeOutParamName(num_added_outputs);
+        auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
+        new_params.push_back(out_param);
+        new_param_directions.push_back(ParamDirection::Out);
 
         if (auto loop_rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,
                                                                    orig_tensor_type, op_registry)) {
@@ -1416,7 +1391,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
           }
           new_return_types.push_back(orig_tensor_type);
           new_return_exprs.push_back(loop_rewrite->new_return_var);
-          if (!is_inout_return) ++num_added_outputs;
+          ++num_added_outputs;
           continue;
         }
 
@@ -1424,12 +1399,13 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
         auto offsets = MakeZeroOffsets(tile_type->shape_.size(), span);
         auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, span);
 
-        auto store_var = std::make_shared<Var>(MakeStoreResultName(i), store_call->GetType(), span);
+        auto store_var =
+            std::make_shared<Var>(MakeStoreResultName(num_added_outputs), store_call->GetType(), span);
         new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
 
         new_return_types.push_back(store_call->GetType());
         new_return_exprs.push_back(store_var);
-        if (!is_inout_return) ++num_added_outputs;
+        ++num_added_outputs;
       } else {
         // Non-tile return values pass through
         new_return_types.push_back(ret_expr->GetType());

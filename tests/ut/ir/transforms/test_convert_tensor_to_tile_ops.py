@@ -2349,42 +2349,5 @@ class TestTensorFullConversion:
         assert "tensor.full" not in ir_str
 
 
-class TestInOutParamHandling:
-    """Tests for InOut parameter handling in ConvertTensorToTileOps."""
-
-    def test_inout_param_reuses_existing_param_for_tile_store(self):
-        """InOut param from outlining: tile.store targets existing InOut param, no new Out param.
-
-        End-to-end: outline detects IterArg InOut, then convert reuses the
-        InOut param for tile.store instead of adding a new Out param.
-        """
-
-        @pl.program
-        class Input:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
-                    for i in pl.range(10):
-                        x = pl.add(x, x)
-                return x
-
-        # Run outline (which marks x as InOut), then convert
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-        with ctx:
-            prog = passes.convert_to_ssa()(Input)
-            prog = passes.outline_incore_scopes()(prog)
-            prog = passes.ctrl_flow_transform()(prog)
-            After = passes.convert_tensor_to_tile_ops()(prog)
-
-        incore_func = After.get_function("main_incore_0")
-        assert incore_func is not None
-
-        # The InOut param should remain — no additional Out param added
-        inout_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.InOut)
-        out_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.Out)
-        assert inout_count == 1, f"Expected 1 InOut param, got {inout_count}"
-        assert out_count == 0, f"Expected 0 Out params (reused InOut), got {out_count}"
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

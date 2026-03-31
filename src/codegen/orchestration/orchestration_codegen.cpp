@@ -1115,10 +1115,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
           << " (has " << out_indices.size() << " Out/InOut params)";
       size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
+      // InOut params are already the external tensor (modified in-place); no alias needed.
+      if (callee->param_directions_[param_idx] == ParamDirection::InOut) {
+        continue;
+      }
       std::string elem_name = ReserveVarEmitName(elem.var);
-      // EmitTensorAlias skips self-aliases (alias_name == out_arg), so InOut
-      // params that already match the output name emit nothing, while
-      // auto-outlined InOut returns get the alias they need.
       EmitTensorAlias(elem_name, call, param_idx);
     }
   }

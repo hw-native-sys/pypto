@@ -2029,7 +2029,7 @@ def test_pipeline_integration():
     @pl.program
     class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
-        def main_incore_0(self, x_0: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        def main_incore_0(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
