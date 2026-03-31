@@ -128,13 +128,12 @@ jobs:
 
       - name: Clone and install simpler repository (pinned)
         run: |
-          git clone --branch main https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
+          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
           cd $GITHUB_WORKSPACE/simpler
-          git checkout fe63325094dabed918eafa63edb1a2fc40c3be6f
           pip install -v .
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=012a8c22fd0121c59ec2462da2146c260266f63b
+        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest
@@ -153,9 +152,8 @@ jobs:
 
       - name: Clone and install simpler repository (pinned)
         run: |
-          git clone --branch main https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
+          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
           cd $GITHUB_WORKSPACE/simpler
-          git checkout fe63325094dabed918eafa63edb1a2fc40c3be6f
           pip install -v .
 
       - name: Run fuzz tests (sim mode)
