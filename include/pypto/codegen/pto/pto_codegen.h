@@ -256,6 +256,20 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetImportBufferSSA() const;
 
   /**
+   * @brief Record the SSA name of the __gm_pipe_buffer function parameter
+   *
+   * On Ascend910B (a2a3), the GM slot buffer is a function parameter used as
+   * intermediary for cross-core pipe communication. The codegen emits it as
+   * a gm_slot_buffer operand in initialize_pipe instructions.
+   */
+  void RecordGMSlotBufferSSA(const std::string& ssa);
+
+  /**
+   * @brief Get the recorded GM slot buffer SSA name (empty if none)
+   */
+  [[nodiscard]] std::string GetGMSlotBufferSSA() const;
+
+  /**
    * @brief Get the split value for a tile var produced by a matching tpop operation
    * @param var Raw pointer to the tile variable
    * @param expected_tpop_op_name Expected originating tpop op name
@@ -428,6 +442,7 @@ class PTOCodegen : public CodegenBase {
 
     std::string reserve_buf_ssa;
     std::string import_buf_ssa;
+    std::string gm_slot_buffer_ssa;
 
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
@@ -469,6 +484,7 @@ class PTOCodegen : public CodegenBase {
 
       reserve_buf_ssa.clear();
       import_buf_ssa.clear();
+      gm_slot_buffer_ssa.clear();
 
       current_expr_value.clear();
       yield_buffer.clear();

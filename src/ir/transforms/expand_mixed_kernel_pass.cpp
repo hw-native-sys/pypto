@@ -11,6 +11,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -24,6 +25,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -851,6 +853,236 @@ bool GroupCallsFunction(const FunctionPtr& group_func, const std::string& callee
   return false;
 }
 
+// ============================================================================
+// GM Slot Buffer Injection (a2a3 only)
+// ============================================================================
+
+/// Well-known parameter name for the GM slot buffer.
+constexpr const char* kGMPipeBufferName = "__gm_pipe_buffer";
+
+/// Check if a statement list contains aic_initialize_pipe or aiv_initialize_pipe.
+bool HasInitializePipeOps(const std::vector<StmtPtr>& stmts) {
+  for (const auto& stmt : stmts) {
+    CallPtr call;
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    if (call) {
+      auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+      if (op && (op->name_ == "system.aic_initialize_pipe" || op->name_ == "system.aiv_initialize_pipe")) {
+        return true;
+      }
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      if (HasInitializePipeOps(FlattenBody(for_stmt->body_))) return true;
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      if (HasInitializePipeOps(FlattenBody(if_stmt->then_body_))) return true;
+      if (if_stmt->else_body_.has_value()) {
+        if (HasInitializePipeOps(FlattenBody(if_stmt->else_body_.value()))) return true;
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      if (HasInitializePipeOps(FlattenBody(while_stmt->body_))) return true;
+    }
+  }
+  return false;
+}
+
+bool HasGMPipeBufferParam(const FunctionPtr& func) {
+  for (const auto& param : func->params_) {
+    if (param->name_hint_ == kGMPipeBufferName) return true;
+  }
+  return false;
+}
+
+void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
+                                 std::unordered_map<std::string, std::unordered_set<std::string>>& callers,
+                                 std::unordered_map<std::string, std::unordered_set<std::string>>& callees) {
+  std::unordered_set<std::string> func_names;
+  for (const auto& func : functions) func_names.insert(func->name_);
+  for (const auto& func : functions) {
+    std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& stmts) {
+      for (const auto& stmt : stmts) {
+        CallPtr call;
+        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+          call = std::dynamic_pointer_cast<const Call>(assign->value_);
+        } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+          call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+        }
+        if (call) {
+          auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+          if (gv && func_names.count(gv->name_)) {
+            callees[func->name_].insert(gv->name_);
+            callers[gv->name_].insert(func->name_);
+          }
+        }
+        if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+          walk(FlattenBody(for_stmt->body_));
+        } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+          walk(FlattenBody(if_stmt->then_body_));
+          if (if_stmt->else_body_.has_value()) walk(FlattenBody(if_stmt->else_body_.value()));
+        } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+          walk(FlattenBody(while_stmt->body_));
+        }
+      }
+    };
+    if (func->body_) walk(FlattenBody(func->body_));
+  }
+}
+
+FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func) {
+  auto gm_type =
+      std::make_shared<TensorType>(std::vector<int64_t>{1}, DataType::FP32, std::nullopt, std::nullopt);
+  auto gm_var = std::make_shared<Var>(kGMPipeBufferName, gm_type, func->span_);
+  auto new_params = func->params_;
+  new_params.push_back(gm_var);
+  auto new_directions = func->param_directions_;
+  new_directions.push_back(ParamDirection::In);
+  return std::make_shared<Function>(func->name_, new_params, new_directions, func->return_types_, func->body_,
+                                    func->span_, func->func_type_, func->level_, func->role_);
+}
+
+StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<std::string>& modified_funcs,
+                                const VarPtr& gm_param) {
+  auto stmts = FlattenBody(body);
+  std::vector<StmtPtr> new_stmts;
+  bool any_changed = false;
+  for (const auto& stmt : stmts) {
+    auto try_rewrite = [&](const CallPtr& call) -> CallPtr {
+      if (!call) return nullptr;
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+      if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
+      std::vector<ExprPtr> new_args = call->args_;
+      new_args.push_back(gm_param);
+      return call->GetType() ? std::make_shared<Call>(call->op_, new_args, call->GetType(), call->span_)
+                             : std::make_shared<Call>(call->op_, new_args, call->span_);
+    };
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {
+        new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, rw, assign->span_));
+        any_changed = true;
+        continue;
+      }
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_))) {
+        new_stmts.push_back(std::make_shared<EvalStmt>(rw, eval->span_));
+        any_changed = true;
+        continue;
+      }
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
+      if (nb != for_stmt->body_) {
+        new_stmts.push_back(std::make_shared<ForStmt>(
+            for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_, nb,
+            for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
+            for_stmt->chunk_policy_, for_stmt->loop_origin_));
+        any_changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto nt = RewriteCallsForGMBuffer(if_stmt->then_body_, modified_funcs, gm_param);
+      std::optional<StmtPtr> ne;
+      if (if_stmt->else_body_.has_value()) {
+        ne = RewriteCallsForGMBuffer(if_stmt->else_body_.value(), modified_funcs, gm_param);
+      }
+      bool body_changed = (nt != if_stmt->then_body_);
+      if (!body_changed && ne.has_value() && if_stmt->else_body_.has_value()) {
+        body_changed = (ne.value() != if_stmt->else_body_.value());
+      }
+      if (body_changed) {
+        new_stmts.push_back(
+            std::make_shared<IfStmt>(if_stmt->condition_, nt, ne, if_stmt->return_vars_, if_stmt->span_));
+        any_changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto nb = RewriteCallsForGMBuffer(while_stmt->body_, modified_funcs, gm_param);
+      if (nb != while_stmt->body_) {
+        new_stmts.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_, nb,
+                                                        while_stmt->return_vars_, while_stmt->span_));
+        any_changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+    } else {
+      new_stmts.push_back(stmt);
+    }
+  }
+  if (!any_changed) return body;
+  return SeqStmts::Flatten(std::move(new_stmts), body->span_);
+}
+
+/// Inject __gm_pipe_buffer into pipe-using functions and propagate through callers.
+void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
+  if (!backend::BackendConfig::IsConfigured() ||
+      backend::GetBackendType() != backend::BackendType::Ascend910B) {
+    return;
+  }
+
+  std::unordered_map<std::string, std::unordered_set<std::string>> callers, callees;
+  BuildCallGraphFromFunctions(functions, callers, callees);
+
+  std::unordered_set<std::string> pipe_funcs;
+  for (const auto& func : functions) {
+    if (!HasGMPipeBufferParam(func) && func->body_ && HasInitializePipeOps(FlattenBody(func->body_))) {
+      pipe_funcs.insert(func->name_);
+    }
+  }
+  if (pipe_funcs.empty()) return;
+
+  // Propagate upward
+  std::unordered_set<std::string> needs_gm = pipe_funcs;
+  std::vector<std::string> worklist(pipe_funcs.begin(), pipe_funcs.end());
+  while (!worklist.empty()) {
+    std::string name = worklist.back();
+    worklist.pop_back();
+    auto it = callers.find(name);
+    if (it == callers.end()) continue;
+    for (const auto& c : it->second) {
+      if (needs_gm.insert(c).second) worklist.push_back(c);
+    }
+  }
+
+  // Add params then rewrite call sites
+  for (auto& func : functions) {
+    if (needs_gm.count(func->name_) && !HasGMPipeBufferParam(func)) {
+      func = AddGMSlotBufferParam(func);
+    }
+  }
+
+  for (auto& func : functions) {
+    if (!needs_gm.count(func->name_)) continue;
+
+    VarPtr gm_param;
+    for (const auto& p : func->params_) {
+      if (p->name_hint_ == kGMPipeBufferName) {
+        gm_param = p;
+        break;
+      }
+    }
+    INTERNAL_CHECK(gm_param) << "Internal error: " << func->name_ << " should have " << kGMPipeBufferName;
+
+    std::unordered_set<std::string> mod_callees;
+    auto ci = callees.find(func->name_);
+    if (ci != callees.end()) {
+      for (const auto& c : ci->second) {
+        if (needs_gm.count(c)) mod_callees.insert(c);
+      }
+    }
+
+    if (!mod_callees.empty()) {
+      auto nb = RewriteCallsForGMBuffer(func->body_, mod_callees, gm_param);
+      func =
+          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                     nb, func->span_, func->func_type_, func->level_, func->role_);
+    }
+  }
+}
+
 }  // namespace
 
 namespace pass {
@@ -934,6 +1166,10 @@ Pass ExpandMixedKernel() {
         }
       }
     }
+
+    // Phase 4: Inject GM slot buffer params for a2a3 cross-core pipe communication.
+    // On Ascend910B, cross-core pipes require a GM slot buffer as intermediary.
+    InjectGMSlotBufferInPlace(new_functions);
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);
   };

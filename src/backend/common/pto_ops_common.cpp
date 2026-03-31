@@ -938,6 +938,19 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";
 }
 
+// Helper to format initialize_pipe operand list
+static void EmitInitializePipeOperands(std::ostringstream& oss, const std::string& gm_ssa,
+                                       const std::string& c2v_ssa, const std::string& v2c_ssa) {
+  if (!gm_ssa.empty()) {
+    oss << "\n      (gm_slot_buffer = " << gm_ssa << " : !pto.ptr<f32>"
+        << ", c2v_consumer_buf = " << c2v_ssa << " : i32"
+        << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
+  } else {
+    oss << " (c2v_consumer_buf = " << c2v_ssa << " : i32"
+        << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
+  }
+}
+
 // system.aic_initialize_pipe: Initialize cross-core pipe on Cube side
 static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -954,9 +967,8 @@ static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::C
   if (c2v_ssa.empty()) c2v_ssa = codegen.GetOrEmitI32Constant(0);
 
   std::ostringstream oss;
-  oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}"
-      << " (c2v_consumer_buf = " << c2v_ssa << " : i32"
-      << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
+  oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
+  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSA(), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 
   return "";
@@ -978,9 +990,8 @@ static std::string MakeAivInitializePipeCodegenPTO(const CallPtr& op, codegen::C
   if (v2c_ssa.empty()) v2c_ssa = codegen.GetOrEmitI32Constant(0);
 
   std::ostringstream oss;
-  oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}"
-      << " (c2v_consumer_buf = " << c2v_ssa << " : i32"
-      << ", v2c_consumer_buf = " << v2c_ssa << " : i32)";
+  oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
+  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSA(), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 
   return "";

@@ -345,6 +345,11 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   for (const auto& var : func->params_) {
     if (auto tensor_type = As<TensorType>(var->GetType())) {
+      // Skip tensor view for GM slot buffer workspace parameter (raw pointer, no view needed)
+      if (var->name_hint_ == "__gm_pipe_buffer") {
+        RecordGMSlotBufferSSA(GetVarName(var));
+        continue;
+      }
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
 
@@ -464,6 +469,9 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     if (auto tensor_type = As<TensorType>(param->GetType())) {
+      // Skip GM slot buffer workspace parameter (raw pointer, no view needed)
+      if (param->name_hint_ == "__gm_pipe_buffer") continue;
+
       std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
 
       bool layout_DN = false;
@@ -775,6 +783,10 @@ void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) {
 }
 
 std::string PTOCodegen::GetImportBufferSSA() const { return fs_.import_buf_ssa; }
+
+void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa) { fs_.gm_slot_buffer_ssa = ssa; }
+
+std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_ssa; }
 
 int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
                                       const std::string& tfree_op_name) const {
