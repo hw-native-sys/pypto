@@ -38,6 +38,7 @@ Factory functions for batch-dynamic kernels:
   make_kernel_pv_matmul(key_cache_rows)
 """
 
+import argparse
 import struct
 
 import pypto.language as pl
@@ -736,6 +737,15 @@ def build_tensor_specs_multi_config(
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Multi-config paged attention example")
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        default=False,
+        help="Enable runtime profiling and generate swimlane JSON",
+    )
+    args = parser.parse_args()
+
     batch = 4
     num_heads = 16
     head_dim = HEAD_DIM
@@ -774,6 +784,7 @@ def main():
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
+            enable_profiling=args.enable_profiling,
         ),
     )
     print(f"Result: {result}")

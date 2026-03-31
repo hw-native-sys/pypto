@@ -135,6 +135,11 @@ jobs:
       - name: Test system tests
         run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128
 
+      - name: Test swimlane output
+        run: |
+          pytest tests/st/runtime/test_perf_swimlane.py \
+            -v --device=$DEVICE_ID --platform=a2a3 --enable-profiling --forked
+
   fuzz-tests-sim:
     runs-on: ubuntu-latest
     continue-on-error: true

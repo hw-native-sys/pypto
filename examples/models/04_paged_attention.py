@@ -33,6 +33,7 @@ Shared InCore kernels (module-level @pl.function):
 These can be imported and reused by other @pl.program definitions.
 """
 
+import argparse
 import struct
 
 import pypto.language as pl
@@ -591,6 +592,15 @@ def build_tensor_specs(
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Paged attention example")
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        default=False,
+        help="Enable runtime profiling and generate swimlane JSON",
+    )
+    args = parser.parse_args()
+
     batch = 64
     num_heads = 16
     head_dim = 128
@@ -630,6 +640,7 @@ def main():
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
+            enable_profiling=args.enable_profiling,
         ),
     )
     print(f"Result: {result}")

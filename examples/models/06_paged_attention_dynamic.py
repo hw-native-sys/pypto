@@ -19,6 +19,8 @@ accepts any batch size at runtime.
 # DSL function bodies are parsed as AST — dynamic var names look undefined to pyright.
 # pyright: reportUndefinedVariable=false
 
+import argparse
+
 import pypto.language as pl
 import torch
 from pypto.backend import BackendType
@@ -500,6 +502,15 @@ def main():
     blocks.  The program is built once via build_dynamic_paged_attention_program()
     and executed on the target device with tolerance atol/rtol=2e-2.
     """
+    parser = argparse.ArgumentParser(description="Dynamic paged attention example")
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        default=False,
+        help="Enable runtime profiling and generate swimlane JSON",
+    )
+    args = parser.parse_args()
+
     batch = 64
     num_heads = 16
     head_dim = 128
@@ -535,6 +546,7 @@ def main():
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
+            enable_profiling=args.enable_profiling,
         ),
     )
     print(f"Result: {result}")

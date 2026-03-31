@@ -32,6 +32,8 @@ Run:  python examples/models/02_vector_dag.py  (requires hardware)
 Next: examples/models/03_flash_attention.py
 """
 
+import argparse
+
 import pypto.language as pl
 import torch
 from pypto.backend import BackendType
@@ -187,6 +189,15 @@ def golden(tensors: dict, params: dict | None = None) -> None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Vector DAG example")
+    parser.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        default=False,
+        help="Enable runtime profiling and generate swimlane JSON",
+    )
+    args = parser.parse_args()
+
     tensor_specs = [
         TensorSpec("a", [128, 128], torch.float32, init_value=2.0),
         TensorSpec("b", [128, 128], torch.float32, init_value=3.0),
@@ -203,6 +214,7 @@ def main():
             backend_type=BackendType.Ascend910B,
             rtol=1e-5,
             atol=1e-5,
+            enable_profiling=args.enable_profiling,
         ),
     )
     print(f"Result: {result}")
