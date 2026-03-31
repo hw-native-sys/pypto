@@ -1973,3 +1973,61 @@ def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.sort32", [src, idx], {}, actual_span)
+
+
+# ============================================================================
+# Gather Operations
+# ============================================================================
+
+
+def gather(
+    src: Expr,
+    indices: Expr | None = None,
+    tmp: Expr | None = None,
+    *,
+    mask_pattern: int | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements from src, using either indices or a fixed mask pattern.
+
+    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
+    Mask form: selects elements by a hardware mask pattern.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        indices: Index tile (INT32). Required for index form.
+        tmp: Temporary workspace tile (INT32). Required for index form.
+        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile
+    """
+    actual_span = _get_span_or_capture(span)
+    if mask_pattern is not None:
+        kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
+        return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
+    if indices is None or tmp is None:
+        raise ValueError(
+            "gather() requires either (indices, tmp) for index form, "
+            "or mask_pattern=<int> for mask form"
+        )
+    return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
+
+
+def gather_mask(src: Expr, mask_pattern: int, span: Span | None = None) -> Call:
+    """Gather elements from src using a fixed mask pattern.
+
+    .. deprecated::
+        Use ``gather(src, mask_pattern=<value>)`` instead.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        mask_pattern: Mask pattern selector (1-7)
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile
+    """
+    return gather(src, mask_pattern=mask_pattern, span=span)

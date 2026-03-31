@@ -109,6 +109,8 @@ __all__ = [
     "tpop_from_aic",
     "tpop_from_aiv",
     "sort32",
+    "gather",
+    "MaskPattern",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -134,6 +136,21 @@ class MemRefType:
     (``mem_vec_0: pl.MemRefType = pl.tile.alloc(...)``) is valid Python that
     pyright and the text-parser can process.
     """
+
+
+class MaskPattern:
+    """Hardware mask pattern selectors for tile.gather_mask.
+
+    Bit patterns are read right-to-left; lower bits correspond to lower indices.
+    """
+
+    P0101 = 1  # stride-2: select positions 0, 2, 4, ...
+    P1010 = 2  # stride-2: select positions 1, 3, 5, ...
+    P0001 = 3  # stride-4: select positions 0, 4, 8, ...
+    P0010 = 4  # stride-4: select positions 1, 5, 9, ...
+    P0100 = 5  # stride-4: select positions 2, 6, 10, ...
+    P1000 = 6  # stride-4: select positions 3, 7, 11, ...
+    P1111 = 7  # select all positions
 
 
 def alloc(
@@ -1567,4 +1584,47 @@ def sort32(src: Tile, idx: Tile) -> Tile:
         Tile wrapping the sort32 operation (last dim doubled)
     """
     call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
+    return Tile(expr=call_expr)
+
+
+@overload
+def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile: ...
+
+
+@overload
+def gather(src: Tile, *, mask_pattern: int) -> Tile: ...
+
+
+def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, mask_pattern: int | None = None) -> Tile:
+    """Gather elements from src tile, using either indices or a fixed mask pattern.
+
+    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
+    Mask form: selects elements by a hardware mask pattern. No indices or tmp needed.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        indices: Index tile (INT32). Required for index form.
+        tmp: Temporary workspace tile (INT32). Required for index form.
+        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+
+    Returns:
+        Tile with gathered elements
+
+    Examples:
+        # Index form
+        out = gather(src, indices, tmp)
+
+        # Mask form
+        out = gather(src, mask_pattern=1)
+    """
+    if mask_pattern is not None:
+        call_expr = _ir_ops.gather_mask(src.unwrap(), mask_pattern)
+        return Tile(expr=call_expr)
+    if indices is None or tmp is None:
+        raise ValueError(
+            "gather() requires either (indices, tmp) for index form, "
+            "or mask_pattern=<int> for mask form"
+        )
+    call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
     return Tile(expr=call_expr)

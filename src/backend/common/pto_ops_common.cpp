@@ -107,6 +107,9 @@ static void CheckSafeIdentifier(const std::string& value, const std::string& att
 static const std::vector<std::string> cmp_modes = {"eq", "ne", "lt", "le", "gt", "ge"};
 static const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                                      "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
+// Mask pattern names for pto.tgather mask form (index 0 unused, patterns 1-7)
+static const std::vector<std::string> mask_patterns = {"",      "P0101", "P1010", "P0001",
+                                                       "P0010", "P0100", "P1000", "P1111"};
 
 // Helper function for input & output generation (with type annotations)
 static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
@@ -359,6 +362,36 @@ static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const Ca
     oss << " : " << src_type << ", " << idx_type;
   }
   // outs clause: dst only (idx is modified in-place by hardware)
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for GatherMask: emits pto.tgather with maskPattern attribute
+// PTOAS expects: ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type) outs(dst : dst_type)
+static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "tile.gather_mask requires 1 argument (src), but got " << op->args_.size();
+
+  int pattern = op->GetKwarg<int>("mask_pattern");
+  CHECK(pattern >= 1 && pattern < static_cast<int>(mask_patterns.size()))
+      << "mask_pattern out of range: " << pattern;
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << "pto.tgather ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern) << ">}";
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
   oss << ") outs(" << dst;
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
@@ -1138,7 +1171,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.transpose",       "pto.ttrans",           3},
     {"tile.extract",         "pto.textract",         3},
     // Gather/scatter operations
-    {"tile.gather",          "pto.tgather",          2},
+    {"tile.gather",          "pto.tgather",          3},
     {"tile.gatherb",         "pto.tgatherb",         2},
     {"tile.scatter",         "pto.tscatter",         2},
     // Partial reduction operations
@@ -1259,6 +1292,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         .set_input_layout(1, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);
   }
+  // tile.gather_mask (TGATHER mask form): only src operand + maskPattern attribute
+  reg("tile.gather_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGatherMaskCodegenPTO(op, codegen);
+  });
   // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
   reg("tile.mrgsort", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
