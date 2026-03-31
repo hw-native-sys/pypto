@@ -819,9 +819,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   struct ParamEntry {
-    std::string kind;              // "add_input", "add_output", "add_inout", "add_scalar"
-    std::string value;             // expression passed to the method
-    std::string out_var;           // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
+    std::string kind;     // "add_input", "add_output", "add_inout", "add_scalar"
+    std::string value;    // expression passed to the method
+    std::string out_var;  // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
     bool out_var_is_new_decl = false;  // true: emit "const Tensor& var = get_ref()" (non-DN);
                                        // false: emit "var = get_ref()" (DN, pre-declared placeholder)
   };

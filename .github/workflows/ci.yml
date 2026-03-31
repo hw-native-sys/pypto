@@ -134,7 +134,7 @@ jobs:
           pip install -v .
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128
+        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=012a8c22fd0121c59ec2462da2146c260266f63b
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest
