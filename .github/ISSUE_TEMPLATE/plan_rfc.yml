@@ -1,0 +1,88 @@
+name: Plan / RFC
+description: Propose a design plan or request for comments on an architectural change
+title: "[RFC] "
+labels: ["rfc"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for design proposals, architectural changes, or significant new subsystems
+        that benefit from discussion before implementation.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-paragraph overview of what this proposal does and why
+      placeholder: e.g., "Add a warning verification system that emits non-fatal diagnostics for likely user errors"
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem does this solve? Why is the current state insufficient?
+      placeholder: Describe the gap and who benefits from this change
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: |
+        Detailed design with concrete code snippets, data structures, and API surfaces.
+        Include before/after comparisons for modifications to existing code.
+      placeholder: |
+        ### New Class / API
+
+        ```cpp
+        class MyNewThing { ... };
+        ```
+
+        ### Changes to Existing Code
+
+        Before: ...
+        After: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected_files
+    attributes:
+      label: Affected Files
+      description: List of files to create or modify, with a brief description of each change
+      placeholder: |
+        - `include/pypto/ir/example.h` — **New** — Add ExampleClass
+        - `src/ir/example.cpp` — **Modify** — Implement ExampleClass
+        - `python/bindings/modules/ir.cpp` — **Modify** — Expose Python binding
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other designs were evaluated? Why was this one chosen?
+      placeholder: Describe alternative approaches and why they were rejected
+    validations:
+      required: false
+
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Rollout / Migration
+      description: How will this be introduced? Any backward-compatibility concerns?
+      placeholder: Describe the rollout plan and any migration steps needed
+    validations:
+      required: false
+
+  - type: textarea
+    id: open_questions
+    attributes:
+      label: Open Questions
+      description: Unresolved design decisions or areas where feedback is especially wanted
+      placeholder: List any unresolved decisions or areas where you want feedback
+    validations:
+      required: false
