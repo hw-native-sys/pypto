@@ -775,9 +775,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   }
 
   auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);
-  auto group_func =
-      std::make_shared<Function>(group_name, group_params, func->param_directions_, func->return_types_,
-                                 group_body, func->span_, FunctionType::Group);
+  auto group_func = std::make_shared<Function>(group_name, group_params, func->param_directions_,
+                                               func->return_types_, group_body, func->span_,
+                                               FunctionType::Group, std::nullopt, std::nullopt, func->attrs_);
 
   return {aic_func, aiv_func, group_func};
 }
@@ -829,9 +829,9 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
   }
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), group_func->span_);
-  auto result =
-      std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
-                                 group_func->return_types_, new_body, group_func->span_, FunctionType::Group);
+  auto result = std::make_shared<Function>(
+      group_func->name_, group_func->params_, group_func->param_directions_, group_func->return_types_,
+      new_body, group_func->span_, FunctionType::Group, std::nullopt, std::nullopt, group_func->attrs_);
   return result;
 }
 

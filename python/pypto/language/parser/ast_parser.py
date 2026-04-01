@@ -1656,7 +1656,8 @@ class ASTParser:
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
                 if func.attr in _SCOPE_KIND_MAP:
-                    split_mode = None
+                    # Default split mode: UP_DOWN for auto_incore, None for others
+                    split_mode = ir.SplitMode.UP_DOWN if func.attr == "auto_incore" else None
                     if func.attr == "auto_incore":
                         if context_expr.args:
                             raise ParserSyntaxError(
@@ -1667,6 +1668,12 @@ class ASTParser:
                         for kw in context_expr.keywords:
                             if kw.arg == "split":
                                 split_mode = self._eval_split_mode(kw.value, stmt)
+                                if split_mode == ir.SplitMode.NONE:
+                                    raise ParserSyntaxError(
+                                        "SplitMode.NONE is not supported by pto-isa now",
+                                        span=self.span_tracker.get_span(stmt),
+                                        hint="Use a valid split mode, e.g. pl.SplitMode.UP_DOWN",
+                                    )
                             else:
                                 raise ParserSyntaxError(
                                     f"pl.auto_incore() got unexpected keyword argument '{kw.arg}'",

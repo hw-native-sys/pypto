@@ -607,7 +607,7 @@ def auto_incore(split: SplitMode = SplitMode.UP_DOWN) -> AutoIncoreContext:
         ...         x = pl.add(x, x)
     """
     if split == SplitMode.NONE:
-        raise ValueError("SplitMode.NONE is not supported for auto_incore")
+        raise ValueError("SplitMode.NONE is not supported by pto-isa now")
     return AutoIncoreContext(split=split)
 
 
