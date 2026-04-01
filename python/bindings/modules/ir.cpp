@@ -259,6 +259,9 @@ void BindIR(nb::module_& m) {
       .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
            "Create a tensor view with stride, layout and optional valid shape")
+      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&>(),
+           nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<int64_t>{},
+           "Create a tensor view with integer stride, layout and optional integer valid shape")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
       .def_rw("layout", &TensorView::layout, "Tensor layout type")
       .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension");
@@ -363,6 +366,12 @@ void BindIR(nb::module_& m) {
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            "Create a tile view with valid_shape, stride, start_offset, blayout, slayout, fractal, and pad")
+      .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
+                    uint64_t, PadValue>(),
+           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
+           nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
+           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
+           "Create a tile view with integer valid_shape and stride, auto-converted to ConstInt")
       .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
       .def_rw("stride", &TileView::stride, "Stride for each dimension")
       .def_rw("start_offset", &TileView::start_offset, "Starting offset")

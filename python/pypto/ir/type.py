@@ -19,10 +19,14 @@ from pypto.pypto_core.ir import (
     PadValue,
     TensorLayout,
     TensorType,
-    TensorView,
     TileLayout,
     TileType,
-    TileView,
+)
+from pypto.pypto_core.ir import (
+    TensorView as _TensorViewBase,
+)
+from pypto.pypto_core.ir import (
+    TileView as _TileViewBase,
 )
 
 from .utils import _normalize_expr, _normalize_shape
@@ -30,8 +34,6 @@ from .utils import _normalize_expr, _normalize_shape
 # Store the original native __init__
 _native_tensor_type_init = TensorType.__init__
 _native_tile_type_init = TileType.__init__
-_native_tensor_view_init = TensorView.__init__
-_native_tile_view_init = TileView.__init__
 
 _MEMREF_NAME_PREFIX_TO_SPACE = {
     "mem_ddr_": MemorySpace.DDR,
@@ -58,7 +60,7 @@ def _tensor_type_init_wrapper(
     shape: Sequence[int | Expr],
     dtype: DataType,
     memref: MemRef | None = None,
-    tensor_view: TensorView | None = None,
+    tensor_view: _TensorViewBase | None = None,
 ):
     """Wrapped __init__ for TensorType that supports integer shapes, optional MemRef and TensorView.
 
@@ -79,7 +81,7 @@ def _tile_type_init_wrapper(
     shape: Sequence[int | Expr],
     dtype: DataType,
     memref: MemRef | None = None,
-    tile_view: TileView | None = None,
+    tile_view: _TileViewBase | None = None,
     memory_space: MemorySpace | None = None,
 ):
     """Wrapped __init__ for TileType that supports integer shapes, optional MemRef and TileView.
@@ -98,92 +100,95 @@ def _tile_type_init_wrapper(
     _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
 
 
-def _normalize_optional_shape(shape: Sequence[int | Expr] | None) -> list[Expr]:
-    return _normalize_shape(shape) if shape is not None else []
-
-
-def _tensor_view_init_wrapper(
-    self,
-    stride: Sequence[int | Expr] | None = None,
-    layout: TensorLayout | None = None,
-    valid_shape: Sequence[int | Expr] | None = None,
-):
-    """Wrapped __init__ for TensorView that supports integer stride and valid_shape.
-
-    Args:
-        stride: Stride for each dimension (int or Expr)
-        layout: Tensor layout type
-        valid_shape: Valid shape for each dimension (int or Expr, defaults to empty)
-    """
-    if stride is None and layout is None and valid_shape is None:
-        _native_tensor_view_init(self)
-        return
-    if layout is None:
-        raise ValueError("layout is required when stride or valid_shape is provided")
-    _native_tensor_view_init(
-        self,
-        _normalize_optional_shape(stride),
-        layout,
-        _normalize_optional_shape(valid_shape),
-    )
-
-
-def _tile_view_init_wrapper(
-    self,
-    valid_shape: Sequence[int | Expr] | None = None,
-    stride: Sequence[int | Expr] | None = None,
-    start_offset: Expr | int | None = None,
-    blayout: TileLayout = TileLayout.row_major,
-    slayout: TileLayout = TileLayout.none_box,
-    fractal: int = 512,
-    pad: PadValue = PadValue.null,
-):
-    """Wrapped __init__ for TileView that supports integer valid_shape and stride.
-
-    Args:
-        valid_shape: Valid shape dimensions (int or Expr)
-        stride: Stride for each dimension (int or Expr)
-        start_offset: Starting offset (int or Expr, int auto-converted to ConstInt)
-        blayout: Block layout
-        slayout: Scatter layout
-        fractal: Fractal size
-        pad: Pad mode
-    """
-    has_positional = valid_shape is not None or stride is not None or start_offset is not None
-    has_non_default_kwargs = (
-        blayout != TileLayout.row_major
-        or slayout != TileLayout.none_box
-        or fractal != 512
-        or pad != PadValue.null
-    )
-    if not has_positional and not has_non_default_kwargs:
-        _native_tile_view_init(self)
-        return
-    if start_offset is None:
-        raise ValueError("start_offset is required when valid_shape, stride, or layout kwargs are provided")
-    if isinstance(start_offset, int):
-        start_offset = _normalize_expr(start_offset)
-    _native_tile_view_init(
-        self,
-        _normalize_optional_shape(valid_shape),
-        _normalize_optional_shape(stride),
-        start_offset,
-        blayout=blayout,
-        slayout=slayout,
-        fractal=fractal,
-        pad=pad,
-    )
-
-
 # Monkey-patch the native TensorType.__init__ to support integer shapes
 TensorType.__init__ = _tensor_type_init_wrapper
 
 # Monkey-patch the native TileType.__init__ to support integer shapes
 TileType.__init__ = _tile_type_init_wrapper
 
-# Monkey-patch TensorView and TileView to support integer stride/valid_shape
-TensorView.__init__ = _tensor_view_init_wrapper
-TileView.__init__ = _tile_view_init_wrapper
+
+def _normalize_seq(seq: Sequence[Expr | int] | None) -> list[Expr]:
+    """Normalize a sequence of Expr or int to a list of Expr."""
+    if not seq:
+        return []
+    return [_normalize_expr(v) if isinstance(v, int) else v for v in seq]
+
+
+class _TensorViewMeta(type):
+    """Metaclass for TensorView.
+
+    __instancecheck__ makes isinstance(c++_instance, TensorView) return True
+    for instances created by C++ code (which return _TensorViewBase, not our subclass).
+    __call__ normalizes mixed int/Expr arguments before construction.
+    """
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        return isinstance(instance, _TensorViewBase)
+
+    def __call__(
+        cls,
+        stride: Sequence[Expr | int] | None = None,
+        layout: TensorLayout | None = None,
+        valid_shape: Sequence[Expr | int] | None = None,
+    ) -> "_TensorViewBase":
+        if stride is None and layout is None and valid_shape is None:
+            return _TensorViewBase()
+        if layout is None:
+            raise ValueError("layout is required when stride or valid_shape is provided")
+        return _TensorViewBase(_normalize_seq(stride), layout, _normalize_seq(valid_shape))
+
+
+class TensorView(metaclass=_TensorViewMeta):
+    """TensorView factory: accepts Expr or int in stride/valid_shape."""
+
+
+class _TileViewMeta(type):
+    """Metaclass for TileView.
+
+    __instancecheck__ makes isinstance(c++_instance, TileView) return True
+    for instances created by C++ code (which return _TileViewBase, not our subclass).
+    __call__ normalizes mixed int/Expr arguments before construction.
+    """
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        return isinstance(instance, _TileViewBase)
+
+    def __call__(
+        cls,
+        valid_shape: Sequence[Expr | int] | None = None,
+        stride: Sequence[Expr | int] | None = None,
+        start_offset: Expr | int | None = None,
+        blayout: TileLayout = TileLayout.row_major,
+        slayout: TileLayout = TileLayout.none_box,
+        fractal: int = 512,
+        pad: PadValue = PadValue.null,
+    ) -> "_TileViewBase":
+        has_args = valid_shape is not None or stride is not None or start_offset is not None
+        has_kwargs = (
+            blayout != TileLayout.row_major
+            or slayout != TileLayout.none_box
+            or fractal != 512
+            or pad != PadValue.null
+        )
+        if not has_args and not has_kwargs:
+            return _TileViewBase()
+        if start_offset is None:
+            raise ValueError("start_offset is required")
+        if isinstance(start_offset, int):
+            start_offset = _normalize_expr(start_offset)
+        return _TileViewBase(
+            _normalize_seq(valid_shape),
+            _normalize_seq(stride),
+            start_offset,
+            blayout,
+            slayout,
+            fractal,
+            pad,
+        )
+
+
+class TileView(metaclass=_TileViewMeta):
+    """TileView factory: accepts Expr or int in valid_shape/stride."""
 
 
 __all__ = ["TensorType", "TileType", "TensorView", "TileView"]

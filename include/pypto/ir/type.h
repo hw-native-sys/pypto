@@ -182,6 +182,16 @@ struct TensorView {
       : stride(std::move(stride)), layout(layout), valid_shape(std::move(valid_shape)) {}
 
   /**
+   * @brief Constructor with integer stride and valid_shape (auto-converted to ConstInt)
+   *
+   * @param stride Stride for each dimension (int64, converted to ConstInt with INDEX dtype)
+   * @param layout Tensor layout type
+   * @param valid_shape Valid shape for each dimension (int64, defaults to empty)
+   */
+  TensorView(const std::vector<int64_t>& stride, TensorLayout layout,
+             const std::vector<int64_t>& valid_shape = {});
+
+  /**
    * @brief Get field descriptors for reflection-based visitation
    *
    * @return Tuple of field descriptors
@@ -276,6 +286,21 @@ struct TileView {
         slayout(slayout),
         fractal(fractal),
         pad(pad) {}
+
+  /**
+   * @brief Constructor with integer valid_shape and stride (auto-converted to ConstInt)
+   *
+   * @param valid_shape Valid shape dimensions (int64, converted to ConstInt with INDEX dtype)
+   * @param stride Stride for each dimension (int64, converted to ConstInt with INDEX dtype)
+   * @param start_offset Starting offset
+   * @param blayout Block layout
+   * @param slayout Scatter layout
+   * @param fractal Fractal size
+   * @param pad Pad mode
+   */
+  TileView(const std::vector<int64_t>& valid_shape, const std::vector<int64_t>& stride, ExprPtr start_offset,
+           TileLayout blayout = TileLayout::row_major, TileLayout slayout = TileLayout::none_box,
+           uint64_t fractal = 512, PadValue pad = PadValue::null);
 
   /**
    * @brief Get field descriptors for reflection-based visitation

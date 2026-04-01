@@ -114,6 +114,33 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
   }
 }
 
+TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
+                       const std::vector<int64_t>& valid_shape_ints)
+    : layout(layout_) {
+  for (int64_t s : stride_ints) {
+    stride.push_back(std::make_shared<ConstInt>(s, DataType::INDEX, Span::unknown()));
+  }
+  for (int64_t v : valid_shape_ints) {
+    valid_shape.push_back(std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()));
+  }
+}
+
+TileView::TileView(const std::vector<int64_t>& valid_shape_ints, const std::vector<int64_t>& stride_ints,
+                   ExprPtr start_offset_, TileLayout blayout_, TileLayout slayout_, uint64_t fractal_,
+                   PadValue pad_)
+    : start_offset(std::move(start_offset_)),
+      blayout(blayout_),
+      slayout(slayout_),
+      fractal(fractal_),
+      pad(pad_) {
+  for (int64_t v : valid_shape_ints) {
+    valid_shape.push_back(std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()));
+  }
+  for (int64_t s : stride_ints) {
+    stride.push_back(std::make_shared<ConstInt>(s, DataType::INDEX, Span::unknown()));
+  }
+}
+
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape, MemRefPtr memref)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::move(memref)) {}
 

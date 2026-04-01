@@ -49,7 +49,12 @@ from .printer import python_print
 
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
 # This patches the native TensorType and TileType classes to accept integer shapes
-from .type import TensorType, TileType  # also patches TensorView and TileView __init__
+from .type import (  # also shadows C++ TensorView/TileView with Python subclasses
+    TensorType,
+    TensorView,
+    TileType,
+    TileView,
+)
 
 # Export common DataType values for convenience
 FP4 = DataType.FP4
@@ -80,7 +85,9 @@ __all__ = [
     "IRMutator",
     "IRVisitor",
     "TensorType",
+    "TensorView",
     "TileType",
+    "TileView",
     "python_print",
     "compile",
     "PassManager",

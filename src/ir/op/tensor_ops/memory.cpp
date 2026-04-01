@@ -135,7 +135,7 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
 
   auto tensor_type = std::make_shared<TensorType>(shape, dtype);
   if (layout != TensorLayout::ND) {
-    tensor_type->tensor_view_ = TensorView({}, layout);
+    tensor_type->tensor_view_ = TensorView(std::vector<ExprPtr>{}, layout);
   }
   return tensor_type;
 }
