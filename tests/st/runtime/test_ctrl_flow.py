@@ -673,6 +673,144 @@ class TestForLoopBreakContinue(PTOTestCase):
         tensors["c"][192:] = 0.0
 
 
+class TestForLoopAddA5(TestForLoopAdd):
+    """Test for loop add with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_add_a5_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopMulA5(TestForLoopMul):
+    """Test for loop mul with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_mul_a5_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopYieldAddA5(TestForLoopYieldAdd):
+    """Test for loop yield add with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_yield_add_a5_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopYieldTileAccumA5(TestForLoopYieldTileAccum):
+    """Test for loop yield tile accumulator with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_yield_tile_accum_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestIfYieldTensorA5(TestIfYieldTensor):
+    """Test if-else with yield on A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "if_yield_tensor_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForIfElseNestedA5(TestForIfElseNested):
+    """Test if-else nested in for loop with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_if_else_nested_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestWhileLoopAddA5(TestWhileLoopAdd):
+    """Test while loop add with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "while_loop_add_a5_64x64"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopBreakA5(TestForLoopBreak):
+    """Test for loop with break on A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_break_a5_64x64"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopContinueA5(TestForLoopContinue):
+    """Test for loop with continue on A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_continue_a5_64x64"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestForLoopBreakContinueA5(TestForLoopBreakContinue):
+    """Test for loop with break and continue on A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "for_loop_break_continue_a5_64x64"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
@@ -758,6 +896,82 @@ class TestCtrlFlowOperations:
         test_case = TestForLoopBreakContinue()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    def test_for_loop_add_a5(self, test_runner):
+        """Test for loop add with A5 (Ascend 950) backend."""
+        test_case = TestForLoopAddA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_for_loop_mul_a5(self, test_runner):
+        """Test for loop mul with A5 (Ascend 950) backend."""
+        test_case = TestForLoopMulA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_for_loop_yield_add_a5(self, test_runner):
+        """Test for loop yield add with A5 (Ascend 950) backend."""
+        test_case = TestForLoopYieldAddA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_for_loop_yield_tile_accum_a5(self, test_runner):
+        """Test for loop yield tile accumulator with A5 (Ascend 950) backend."""
+        test_case = TestForLoopYieldTileAccumA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_if_yield_tensor_a5(self, test_runner):
+        """Test if-else with yield on A5 (Ascend 950) backend."""
+        test_case = TestIfYieldTensorA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_for_if_else_nested_a5(self, test_runner):
+        """Test if-else nested in for loop with A5 (Ascend 950) backend."""
+        test_case = TestForIfElseNestedA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="PTOAS BUG")
+    def test_while_loop_add_a5(self, test_runner):
+        """Test while loop add with A5 (Ascend 950) backend."""
+        test_case = TestWhileLoopAddA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="PTOAS BUG")
+    def test_for_loop_break_a5(self, test_runner):
+        """Test for loop with break on A5 (Ascend 950) backend."""
+        test_case = TestForLoopBreakA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="PTOAS BUG")
+    def test_for_loop_continue_a5(self, test_runner):
+        """Test for loop with continue on A5 (Ascend 950) backend."""
+        test_case = TestForLoopContinueA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="PTOAS BUG")
+    def test_for_loop_break_continue_a5(self, test_runner):
+        """Test for loop with break and continue on A5 (Ascend 950) backend."""
+        test_case = TestForLoopBreakContinueA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

@@ -605,6 +605,71 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
         tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
 
 
+class DynOrchAddA5TestCase(DynOrchAddTestCase):
+    """Test add with dynamic M×N orchestration on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"dyn_orch_add_a5_{self._rows}x{self._cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class DynOrchValidShapeAddA5TestCase(DynOrchValidShapeAddTestCase):
+    """Test add with dynamic M×N orchestration and valid_shapes on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return (
+            f"dyn_orch_valid_shape_add_a5_{self._rows}x{self._cols}"
+            f"_valid_{self._valid_rows}x{self._valid_cols}"
+        )
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class DynOrchLoopMixedDimsAddA5TestCase(DynOrchLoopMixedDimsAddTestCase):
+    """Test add with dynamic M / static cols on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"dyn_orch_loop_mixed_dims_add_a5_{self._rows}x{self._cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class DynOrchDimOnDynParamAddA5TestCase(DynOrchDimOnDynParamAddTestCase):
+    """Test add with tensor.dim on dynamic params on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"dyn_orch_dim_on_dyn_param_add_a5_{self._rows}x{self._cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class DynOrchPagedAttentionA5TestCase(DynOrchPagedAttentionTestCase):
+    """Paged attention with fully dynamic dims on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return (
+            f"dyn_orch_paged_attn_a5_{self._batch}b_{self._num_heads}h_{self._head_dim}d_{self._block_size}bs"
+        )
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 # =============================================================================
 # pytest test suite
 # =============================================================================
@@ -659,6 +724,61 @@ class TestDynOrchShapeOperations:
         )
         result = test_runner.run(test_case)
         assert result.passed, f"Dyn orch paged attention test failed: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape", _DYN_SHAPES)
+    def test_dyn_orch_add_a5(self, test_runner, shape):
+        """Test add with dynamic M×N orchestration on A5 (Ascend 950)."""
+        test_case = DynOrchAddA5TestCase(shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape,valid_shape", [((32, 32), (16, 16))])
+    def test_dyn_orch_valid_shape_add_a5(self, test_runner, shape, valid_shape):
+        """Test add with dynamic M×N orchestration and valid_shapes on A5 (Ascend 950)."""
+        test_case = DynOrchValidShapeAddA5TestCase(shape, valid_shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}, valid_shape {valid_shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape", _MIXED_SHAPES)
+    def test_dyn_orch_loop_mixed_dims_add_a5(self, test_runner, shape):
+        """Test add with dynamic M / static cols on A5 (Ascend 950)."""
+        test_case = DynOrchLoopMixedDimsAddA5TestCase(shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape", _DYN_SHAPES)
+    def test_dyn_orch_dim_on_dyn_param_add_a5(self, test_runner, shape):
+        """Test add with tensor.dim on dynamic params on A5 (Ascend 950)."""
+        test_case = DynOrchDimOnDynParamAddA5TestCase(shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="CPU sim path bug: TMATMUL does not support bf16 data type")
+    @pytest.mark.parametrize(
+        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
+        _PA_CONFIGS,
+    )
+    def test_dyn_orch_paged_attention_a5(
+        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+    ):
+        """Test paged attention with fully dynamic dims on A5 (Ascend 950)."""
+        test_case = DynOrchPagedAttentionA5TestCase(
+            batch=batch,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_size=block_size,
+            context_len=context_len,
+            max_model_len=max_model_len,
+        )
+        result = test_runner.run(test_case)
+        assert result.passed, f"Dyn orch paged attention A5 test failed: {result.error}"
 
 
 if __name__ == "__main__":

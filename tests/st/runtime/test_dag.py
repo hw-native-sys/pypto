@@ -74,6 +74,21 @@ class VectorDAGPTOTestCase(VectorDAGTestCase):
         return BackendType.Ascend910B
 
 
+class VectorDAGA5TestCase(VectorDAGTestCase):
+    """Test vector DAG with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "vector_dag_a5_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 class TestDAGOperations:
     """Test suite for DAG operations."""
 
@@ -88,6 +103,15 @@ class TestDAGOperations:
         test_case = VectorDAGPTOTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for vector DAG (PTO): {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    def test_vector_dag_a5_128x128(self, test_runner):
+        """Test vector DAG with A5 (Ascend 950) backend."""
+        test_case = VectorDAGA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

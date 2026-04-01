@@ -47,6 +47,18 @@ class TileConcatTestCase(PTOTestCase):
         tensors["c"][:, 16:] = tensors["b"]
 
 
+class TileConcatA5TestCase(TileConcatTestCase):
+    """Test case for tile concat on A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_concat_a5_32x32"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 class TestConcatOperations:
     """Test suite for concat operations."""
 
@@ -56,6 +68,16 @@ class TestConcatOperations:
         test_case = TileConcatTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
+    def test_tile_concat_32x32_a5(self, test_runner):
+        """Test tile concatenation on A5 (Ascend 950) backend."""
+        test_case = TileConcatA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

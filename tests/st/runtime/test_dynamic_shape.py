@@ -265,6 +265,42 @@ class LoopDynShapeAddTestCase(PTOTestCase):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
 
+class DynShapeAddA5TestCase(DynShapeAddTestCase):
+    """Test add kernel with fully dynamic M*N tensor shapes on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"dyn_shape_add_a5_{self._rows}x{self._cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class ValidShapeAddA5TestCase(ValidShapeAddTestCase):
+    """Test add kernel with static tensors and valid_shapes on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"valid_shape_add_a5_{self._rows}x{self._cols}_valid_{self._valid_rows}x{self._valid_cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class LoopDynShapeAddA5TestCase(LoopDynShapeAddTestCase):
+    """Test add kernel with dynamic M dim and scf.for loop on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"loop_dyn_shape_add_a5_{self._rows}x{self._cols}"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 # =============================================================================
 # pytest test suite
 # =============================================================================
@@ -293,6 +329,32 @@ class TestDynamicShapeOperations:
         test_case = LoopDynShapeAddTestCase(shape)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape", _SHAPES)
+    def test_dyn_shape_add_a5(self, test_runner, shape):
+        """Test add with fully dynamic M×N tensor shapes on A5 (Ascend 950)."""
+        test_case = DynShapeAddA5TestCase(shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape,valid_shape", [((128, 128), (64, 64))])
+    def test_valid_shape_add_a5(self, test_runner, shape, valid_shape):
+        """Test add with static tensors and valid_shapes on A5 (Ascend 950)."""
+        test_case = ValidShapeAddA5TestCase(shape, valid_shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}, valid_shape {valid_shape}: {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize("shape", _SHAPES)
+    def test_loop_dyn_shape_add_a5(self, test_runner, shape):
+        """Test add with dynamic M dim iterated in pairs on A5 (Ascend 950)."""
+        test_case = LoopDynShapeAddA5TestCase(shape)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
 
 
 if __name__ == "__main__":

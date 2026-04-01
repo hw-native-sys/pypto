@@ -329,6 +329,66 @@ class TestMatmulABTransposePTO(TestMatmulABTranspose):
         return BackendType.Ascend910B
 
 
+class TestMatmulA5(TestMatmul):
+    """Test matmul with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"matmul_a5_{self.M}x{self.K}x{self.N}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestMatmulBTransposeA5(TestMatmulBTranspose):
+    """Test matmul B transpose with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"matmul_btranspose_a5_{self.M}x{self.K}x{self.N}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestMatmulATransposeA5(TestMatmulATranspose):
+    """Test matmul A transpose with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"matmul_atranspose_a5_{self.M}x{self.K}x{self.N}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TestMatmulABTransposeA5(TestMatmulABTranspose):
+    """Test matmul AB transpose with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return f"matmul_abtranspose_a5_{self.M}x{self.K}x{self.N}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 class TestMatmulAcc(PTOTestCase):
     """Test matmul with accumulation (K-split into two chunks).
 
@@ -368,6 +428,21 @@ class TestMatmulAccPTO(TestMatmulAcc):
 
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
+
+
+class TestMatmulAccA5(TestMatmulAcc):
+    """Test matmul_acc with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "matmulacc_a5_64x64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
 
 
 class TestMatmulOperations:
@@ -472,6 +547,59 @@ class TestMatmulOperations:
         test_case = TestMatmulAccPTO()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (PTO): {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [(64, 64, 64), (128, 64, 128), (64, 128, 64)],
+    )
+    def test_matmul_a5(self, test_runner, m, k, n):
+        """Test matmul with A5 (Ascend 950) backend."""
+        test_case = TestMatmulA5(m=m, k=k, n=n)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
+    )
+    def test_matmul_btranspose_a5(self, test_runner, m, k, n):
+        """Test matmul B transpose with A5 (Ascend 950) backend."""
+        test_case = TestMatmulBTransposeA5(m=m, k=k, n=n)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
+    )
+    def test_matmul_atranspose_a5(self, test_runner, m, k, n):
+        """Test matmul A transpose with A5 (Ascend 950) backend."""
+        test_case = TestMatmulATransposeA5(m=m, k=k, n=n)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
+    )
+    def test_matmul_abtranspose_a5(self, test_runner, m, k, n):
+        """Test matmul AB transpose with A5 (Ascend 950) backend."""
+        test_case = TestMatmulABTransposeA5(m=m, k=k, n=n)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_matmulacc_a5_64x64x64(self, test_runner):
+        """Test matmul_acc with A5 (Ascend 950) backend."""
+        test_case = TestMatmulAccA5()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

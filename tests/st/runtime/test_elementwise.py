@@ -146,6 +146,66 @@ class TileMulPTOASTestCase(TileMulTestCase):
         return BackendType.Ascend910B
 
 
+class TileAddA5TestCase(TileAddTestCase):
+    """Test case for tile add with A5 (Ascend 950) backend (128x128)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_add_a5_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TileAdd64x64A5TestCase(TileAdd64x64TestCase):
+    """Test case for tile add with A5 (Ascend 950) backend (64x64)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_add_a5_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TileMulA5TestCase(TileMulTestCase):
+    """Test case for tile mul with A5 (Ascend 950) backend (128x128)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_mul_a5_128x128"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class TileMul64x64A5TestCase(TileMul64x64TestCase):
+    """Test case for tile mul with A5 (Ascend 950) backend (64x64)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_mul_a5_64x64"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 # =============================================================================
 # pytest test functions
 # =============================================================================
@@ -189,6 +249,36 @@ class TestElementwiseOperations:
         test_case = TileMulPTOASTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    def test_tile_add_64x64_a5(self, test_runner):
+        """Test tile addition with 64x64 shape on A5 (Ascend 950)."""
+        test_case = TileAdd64x64A5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_add_128x128_a5(self, test_runner):
+        """Test tile addition with 128x128 shape on A5 (Ascend 950)."""
+        test_case = TileAddA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_mul_64x64_a5(self, test_runner):
+        """Test tile multiplication with 64x64 shape on A5 (Ascend 950)."""
+        test_case = TileMul64x64A5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_mul_128x128_a5(self, test_runner):
+        """Test tile multiplication with 128x128 shape on A5 (Ascend 950)."""
+        test_case = TileMulA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

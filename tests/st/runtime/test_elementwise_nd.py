@@ -287,6 +287,69 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
         tensors["out"][1, 2, :] = tensors["a"][0, :] * tensors["b"][0, :]
 
 
+# --- A5 (Ascend 950) Test Cases ---
+
+
+class Tile4DMulPartialA5TestCase(Tile4DMulPartialTestCase):
+    """4D tile partial coverage with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_4d_mul_partial_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class Tile4DTopToBottomA5TestCase(Tile4DTopToBottomTestCase):
+    """4D tensor top-to-bottom with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_4d_top_to_bottom_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class Tile4DQuadrantA5TestCase(Tile4DQuadrantTestCase):
+    """4D tensor quadrant with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_4d_quadrant_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class Tile2DStoreTo3DA5TestCase(Tile2DStoreTo3DTestCase):
+    """2D tile store to 3D tensor with A5 (Ascend 950) backend."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tile_2d_store_to_3d_a5"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 # --- Tests ---
 
 
@@ -338,6 +401,36 @@ class TestElementwise4D:
         test_case = Tile2DStoreTo3DTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    def test_tile_4d_mul_partial_a5(self, test_runner):
+        """Test 4D tile partial store with A5 (Ascend 950) backend."""
+        test_case = Tile4DMulPartialA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_4d_top_to_bottom_a5(self, test_runner):
+        """Test 4D tile top-to-bottom with A5 (Ascend 950) backend."""
+        test_case = Tile4DTopToBottomA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_4d_quadrant_a5(self, test_runner):
+        """Test 4D tile quadrant with A5 (Ascend 950) backend."""
+        test_case = Tile4DQuadrantA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_tile_2d_store_to_3d_a5(self, test_runner):
+        """Test 2D tile store to 3D tensor with A5 (Ascend 950) backend."""
+        test_case = Tile2DStoreTo3DA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

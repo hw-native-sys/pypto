@@ -140,6 +140,45 @@ jobs:
           pytest tests/st/runtime/test_perf_swimlane.py \
             -v --device=$DEVICE_ID --platform=a2a3 --enable-profiling --forked
 
+  system-tests-a5sim:
+    runs-on: ubuntu-latest
+    env:
+      SIMPLER_ROOT: ${{ github.workspace }}/simpler
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+    container:
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -v .[dev]
+
+      - name: Install ptoas
+        run: |
+          PTOAS_VERSION=v0.16
+          PTOAS_SHA256=37bae58a015fe64be1cc105898317fb38f422992e87963ac90fcef5d595d00ec
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-x86_64.tar.gz \
+             -o /tmp/ptoas-bin-x86_64.tar.gz
+          echo "${PTOAS_SHA256}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
+          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+          tar -xzf /tmp/ptoas-bin-x86_64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+
+      - name: Clone and install simpler repository (stable)
+        run: |
+          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
+          cd $GITHUB_WORKSPACE/simpler
+          pip install -v .
+
+      - name: Test A5 system tests (simulator)
+        run: pytest tests/st -v --platform a5sim --forked -m a5
+
   fuzz-tests-sim:
     runs-on: ubuntu-latest
     continue-on-error: true

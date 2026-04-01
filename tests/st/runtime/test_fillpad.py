@@ -197,6 +197,45 @@ class FillpadMinTestCase(PTOTestCase):
         tensors["output"][:] = expected
 
 
+# --- A5 (Ascend 950) Test Cases ---
+
+
+class FillpadZeroA5TestCase(FillpadZeroTestCase):
+    """Test fillpad zero on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "fillpad_zero_a5"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class FillpadMaxA5TestCase(FillpadMaxTestCase):
+    """Test fillpad max on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "fillpad_max_a5"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
+class FillpadMinA5TestCase(FillpadMinTestCase):
+    """Test fillpad min on A5 (Ascend 950)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "fillpad_min_a5"
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+
 # --- Tests ---
 
 
@@ -220,6 +259,29 @@ class TestFillpad:
         test_case = FillpadMinTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
+
+    # ---- A5 (Ascend 950) tests ----
+
+    @pytest.mark.a5
+    def test_fillpad_zero_a5(self, test_runner):
+        """Verify fillpad fills padding with 0.0 on A5 (Ascend 950)."""
+        test_case = FillpadZeroA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_fillpad_max_a5(self, test_runner):
+        """Verify fillpad fills padding with FP32 max on A5 (Ascend 950)."""
+        test_case = FillpadMaxA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
+
+    @pytest.mark.a5
+    def test_fillpad_min_a5(self, test_runner):
+        """Verify fillpad fills padding with FP32 min on A5 (Ascend 950)."""
+        test_case = FillpadMinA5TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":
