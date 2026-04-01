@@ -2,6 +2,20 @@
 
 The PTO Codegen (`PTOCodegen`) generates MLIR code in PTO-ISA dialect from PyPTO IR. It transforms high-level PyPTO programs into low-level PTO instructions suitable for accelerator execution.
 
+## Design Principle: Strict 1-to-1 Mapping
+
+Codegen must be a **strict 1-to-1 translation** from IR to generated code. Each IR node maps directly to its corresponding output construct — no optimization, analysis, or indirection transformation should occur in the codegen layer.
+
+| Belongs in codegen | Belongs in an earlier pass |
+| ------------------ | -------------------------- |
+| IR node → output code mapping | Data-flow analysis (e.g., tracing return values to parameters) |
+| Type/format conversion (DataType → MLIR type) | IR restructuring or canonicalization |
+| Name mangling and SSA bookkeeping | Optimization or simplification |
+
+**Why:** Codegen that embeds analysis becomes fragile — it duplicates logic that passes already handle, and it's harder to test in isolation. Keeping codegen a straightforward translation ensures it stays predictable and maintainable.
+
+**When analysis is found in codegen:** File a tracking issue and refactor it into a dedicated pass when bandwidth allows. See [#814](https://github.com/hw-native-sys/pypto/issues/814) for an example.
+
 ## Overview
 
 ### Key Features
