@@ -1060,6 +1060,54 @@ class TestTileViewConstructor:
                 assert tv.blayout == blayout
                 assert tv.slayout == slayout
 
+    def test_tileview_int_valid_shape_and_stride(self):
+        """Test TileView construction with int valid_shape and stride (auto-converted to ConstInt)."""
+        span = ir.Span.unknown()
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView([16, 16], [1, 16], start_offset)
+
+        assert len(tv.valid_shape) == 2
+        assert len(tv.stride) == 2
+        vs_0 = tv.valid_shape[0]
+        stride_1 = tv.stride[1]
+        assert isinstance(vs_0, ir.ConstInt)
+        assert isinstance(stride_1, ir.ConstInt)
+        assert vs_0.value == 16
+        assert stride_1.value == 16
+
+    def test_tileview_int_with_kwargs(self):
+        """Test TileView with int values and keyword arguments."""
+        span = ir.Span.unknown()
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView(
+            [32, 32],
+            [1, 32],
+            start_offset,
+            blayout=ir.TileLayout.col_major,
+            pad=ir.PadValue.zero,
+        )
+
+        assert len(tv.valid_shape) == 2
+        assert tv.blayout == ir.TileLayout.col_major
+        assert tv.pad == ir.PadValue.zero
+        assert isinstance(tv.valid_shape[0], ir.ConstInt)
+
+    def test_tileview_mixed_expr_int(self):
+        """Test TileView with mixed Expr and int in valid_shape/stride."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+        start_offset = ir.ConstInt(0, DataType.INT64, span)
+
+        tv = ir.TileView([n, 16], [1, n], start_offset)
+
+        assert len(tv.valid_shape) == 2
+        assert tv.valid_shape[0].same_as(n)
+        assert isinstance(tv.valid_shape[1], ir.ConstInt)
+        assert isinstance(tv.stride[0], ir.ConstInt)
+        assert tv.stride[1].same_as(n)
+
 
 class TestTileLayout:
     """Tests for TileLayout enum."""

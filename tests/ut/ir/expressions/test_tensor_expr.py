@@ -336,6 +336,49 @@ class TestTensorView:
             B, enable_auto_mapping=True
         )
 
+    def test_tensor_view_int_stride_and_valid_shape(self):
+        """Test TensorView construction with int stride and valid_shape (auto-converted to ConstInt)."""
+        tv = ir.TensorView(stride=[32, 1], layout=ir.TensorLayout.ND, valid_shape=[8, 16])
+
+        assert len(tv.stride) == 2
+        assert len(tv.valid_shape) == 2
+        assert tv.layout == ir.TensorLayout.ND
+        # Verify ints were converted to ConstInt Expr nodes
+        stride_0 = tv.stride[0]
+        valid_1 = tv.valid_shape[1]
+        assert isinstance(stride_0, ir.ConstInt)
+        assert isinstance(valid_1, ir.ConstInt)
+        assert stride_0.value == 32
+        assert valid_1.value == 16
+
+    def test_tensor_view_int_stride_only(self):
+        """Test TensorView with int stride and no valid_shape."""
+        tv = ir.TensorView(stride=[16, 1], layout=ir.TensorLayout.DN)
+
+        assert len(tv.stride) == 2
+        assert len(tv.valid_shape) == 0
+        assert tv.layout == ir.TensorLayout.DN
+        assert isinstance(tv.stride[0], ir.ConstInt)
+
+    def test_tensor_view_mixed_expr_int_stride(self):
+        """Test TensorView with mixed Expr and int in stride."""
+        span = ir.Span.unknown()
+        expr_stride = ir.ConstInt(32, DataType.INT32, span)
+        tv = ir.TensorView(stride=[expr_stride, 1], layout=ir.TensorLayout.ND)
+
+        assert len(tv.stride) == 2
+        assert tv.stride[0] is expr_stride
+        assert isinstance(tv.stride[1], ir.ConstInt)
+
+    def test_tensor_view_int_attached_to_tensor_type(self):
+        """Test TensorView with int values works when attached to TensorType."""
+        tv = ir.TensorView(stride=[32, 1], layout=ir.TensorLayout.ND, valid_shape=[8, 16])
+        t = ir.TensorType([16, 32], DataType.FP16, None, tv)
+
+        assert t.tensor_view is not None
+        assert len(t.tensor_view.stride) == 2
+        assert len(t.tensor_view.valid_shape) == 2
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

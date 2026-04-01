@@ -43,21 +43,25 @@ id；内存空间不再存储在 `MemRef` 本身上。
 带有布局和步长信息的张量，用于优化内存访问。
 
 ```python
-# Create tensor with tensor view
-shape = [ir.ConstInt(128, DataType.INT64, span), ir.ConstInt(256, DataType.INT64, span)]
-stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(128, DataType.INT64, span)]
+# Create tensor with tensor view (stride/valid_shape accept int or Expr)
+tensor_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND)
+tensor_with_view = ir.TensorType([128, 256], DataType.FP32, memref=None, tensor_view=tensor_view)
 
-tensor_view = ir.TensorView(stride, ir.TensorLayout.ND)
-tensor_with_view = ir.TensorType(shape, DataType.FP32, memref=None, tensor_view=tensor_view)
+# With valid_shape
+tensor_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND, valid_shape=[64, 128])
 
 # Different layouts
-nd_view = ir.TensorView(stride, ir.TensorLayout.ND)  # ND layout
-dn_view = ir.TensorView(stride, ir.TensorLayout.DN)  # DN layout
-nz_view = ir.TensorView(stride, ir.TensorLayout.NZ)  # NZ layout
+nd_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND)  # ND layout
+dn_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.DN)  # DN layout
+nz_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.NZ)  # NZ layout
+
+# Expr values also accepted (e.g., symbolic dimensions)
+stride = [ir.ConstInt(1, DataType.INT64, span), ir.ConstInt(128, DataType.INT64, span)]
+tensor_view = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
 
 # Tensor with both MemRef and TensorView
 memref = ir.MemRef(ir.ConstInt(0x2000, DataType.INT64, span), 16384, 1)
-tensor_with_both = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
+tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tensor_view=tensor_view)
 ```
 
 **TensorLayout 值：**

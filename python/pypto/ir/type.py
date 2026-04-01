@@ -12,13 +12,26 @@
 from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Expr, MemorySpace, MemRef, TensorType, TensorView, TileType, TileView
+from pypto.pypto_core.ir import (
+    Expr,
+    MemorySpace,
+    MemRef,
+    PadValue,
+    TensorLayout,
+    TensorType,
+    TensorView,
+    TileLayout,
+    TileType,
+    TileView,
+)
 
 from .utils import _normalize_shape
 
 # Store the original native __init__
 _native_tensor_type_init = TensorType.__init__
 _native_tile_type_init = TileType.__init__
+_native_tensor_view_init = TensorView.__init__
+_native_tile_view_init = TileView.__init__
 
 _MEMREF_NAME_PREFIX_TO_SPACE = {
     "mem_ddr_": MemorySpace.DDR,
@@ -85,11 +98,83 @@ def _tile_type_init_wrapper(
     _native_tile_type_init(self, shape_exprs, dtype, memref, tile_view, memory_space)
 
 
+def _normalize_optional_shape(shape: Sequence[int | Expr] | None) -> list[Expr]:
+    return _normalize_shape(shape) if shape is not None else []
+
+
+def _tensor_view_init_wrapper(
+    self,
+    stride: Sequence[int | Expr] | None = None,
+    layout: TensorLayout | None = None,
+    valid_shape: Sequence[int | Expr] | None = None,
+):
+    """Wrapped __init__ for TensorView that supports integer stride and valid_shape.
+
+    Args:
+        stride: Stride for each dimension (int or Expr)
+        layout: Tensor layout type
+        valid_shape: Valid shape for each dimension (int or Expr, defaults to empty)
+    """
+    if stride is None and layout is None:
+        _native_tensor_view_init(self)
+        return
+    if layout is None:
+        raise ValueError("layout is required when stride is provided")
+    _native_tensor_view_init(
+        self,
+        _normalize_optional_shape(stride),
+        layout,
+        _normalize_optional_shape(valid_shape),
+    )
+
+
+def _tile_view_init_wrapper(
+    self,
+    valid_shape: Sequence[int | Expr] | None = None,
+    stride: Sequence[int | Expr] | None = None,
+    start_offset: Expr | None = None,
+    blayout: TileLayout = TileLayout.row_major,
+    slayout: TileLayout = TileLayout.none_box,
+    fractal: int = 512,
+    pad: PadValue = PadValue.null,
+):
+    """Wrapped __init__ for TileView that supports integer valid_shape and stride.
+
+    Args:
+        valid_shape: Valid shape dimensions (int or Expr)
+        stride: Stride for each dimension (int or Expr)
+        start_offset: Starting offset
+        blayout: Block layout
+        slayout: Scatter layout
+        fractal: Fractal size
+        pad: Pad mode
+    """
+    if valid_shape is None and stride is None and start_offset is None:
+        _native_tile_view_init(self)
+        return
+    if start_offset is None:
+        raise ValueError("start_offset is required when valid_shape or stride is provided")
+    _native_tile_view_init(
+        self,
+        _normalize_optional_shape(valid_shape),
+        _normalize_optional_shape(stride),
+        start_offset,
+        blayout=blayout,
+        slayout=slayout,
+        fractal=fractal,
+        pad=pad,
+    )
+
+
 # Monkey-patch the native TensorType.__init__ to support integer shapes
 TensorType.__init__ = _tensor_type_init_wrapper
 
 # Monkey-patch the native TileType.__init__ to support integer shapes
 TileType.__init__ = _tile_type_init_wrapper
 
+# Monkey-patch TensorView and TileView to support integer stride/valid_shape
+TensorView.__init__ = _tensor_view_init_wrapper
+TileView.__init__ = _tile_view_init_wrapper
 
-__all__ = ["TensorType", "TileType"]
+
+__all__ = ["TensorType", "TileType", "TensorView", "TileView"]
