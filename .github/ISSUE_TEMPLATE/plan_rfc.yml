@@ -52,13 +52,31 @@ body:
     id: affected_files
     attributes:
       label: Affected Files
-      description: List of files to create or modify, with a brief description of each change
+      description: (Optional) List of files to create or modify, with a brief description of each change
       placeholder: |
         - `include/pypto/ir/example.h` — **New** — Add ExampleClass
         - `src/ir/example.cpp` — **Modify** — Implement ExampleClass
         - `python/bindings/modules/ir.cpp` — **Modify** — Expose Python binding
     validations:
-      required: true
+      required: false
+
+  - type: textarea
+    id: testing_plan
+    attributes:
+      label: Testing Plan
+      description: How will this change be verified? Include unit tests, integration tests, and performance benchmarks.
+      placeholder: Describe the testing strategy and any new test suites required
+    validations:
+      required: false
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security Considerations
+      description: Are there any security implications? (e.g., memory safety, data isolation, input validation)
+      placeholder: Describe potential security risks and how they are mitigated
+    validations:
+      required: false
 
   - type: textarea
     id: alternatives
