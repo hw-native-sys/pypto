@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
+#include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace pypto {
 namespace ir {
@@ -131,12 +132,49 @@ void ReportInstrument::WriteReport(const Report& report, const std::string& file
   }
 }
 
+// WarningInstrument
+
+WarningInstrument::WarningInstrument(WarningLevel phase, WarningCheckSet checks)
+    : phase_(phase), checks_(checks), pre_pipeline_done_(false) {}
+
+void WarningInstrument::RunBeforePass(const Pass& /*pass*/, const ProgramPtr& program) {
+  if (pre_pipeline_done_) return;
+
+  if (phase_ == WarningLevel::PrePipeline || phase_ == WarningLevel::Both) {
+    auto diags = WarningVerifierRegistry::GetInstance().RunChecks(checks_, program);
+    for (const auto& d : diags) {
+      LOG_WARN << "[" << d.rule_name << "] " << d.message;
+    }
+  }
+  pre_pipeline_done_ = true;
+}
+
+void WarningInstrument::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
+  if (phase_ != WarningLevel::PostPass && phase_ != WarningLevel::Both) return;
+
+  auto diags = WarningVerifierRegistry::GetInstance().RunChecks(checks_, program);
+  for (const auto& d : diags) {
+    LOG_WARN << "[" << d.rule_name << "] (after " << pass.GetName() << ") " << d.message;
+  }
+}
+
+std::string WarningInstrument::GetName() const { return "WarningInstrument"; }
+
 // PassContext
 
-PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level)
-    : instruments_(std::move(instruments)), verification_level_(verification_level), previous_(nullptr) {}
+PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
+                         WarningLevel warning_level, WarningCheckSet disabled_warnings)
+    : instruments_(std::move(instruments)),
+      verification_level_(verification_level),
+      warning_level_(warning_level),
+      disabled_warnings_(disabled_warnings),
+      previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
+
+WarningLevel PassContext::GetWarningLevel() const { return warning_level_; }
+
+const WarningCheckSet& PassContext::GetDisabledWarnings() const { return disabled_warnings_; }
 
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
 

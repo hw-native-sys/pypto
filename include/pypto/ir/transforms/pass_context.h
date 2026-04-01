@@ -22,6 +22,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
+#include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace pypto {
 namespace ir {
@@ -150,6 +151,26 @@ class ReportInstrument : public PassInstrument {
 };
 
 /**
+ * @brief Instrument that runs warning checks before/after passes
+ *
+ * For advanced use outside PassPipeline or fine-grained per-instrument control.
+ */
+class WarningInstrument : public PassInstrument {
+ public:
+  explicit WarningInstrument(WarningLevel phase = WarningLevel::PrePipeline,
+                             WarningCheckSet checks = WarningVerifierRegistry::GetAllChecks());
+
+  void RunBeforePass(const Pass& pass, const ProgramPtr& program) override;
+  void RunAfterPass(const Pass& pass, const ProgramPtr& program) override;
+  [[nodiscard]] std::string GetName() const override;
+
+ private:
+  WarningLevel phase_;
+  WarningCheckSet checks_;
+  bool pre_pipeline_done_;
+};
+
+/**
  * @brief Context that holds instruments and manages a thread-local stack
  *
  * PassContext provides a `with`-style nesting mechanism. When active, Pass::operator()
@@ -164,12 +185,16 @@ class ReportInstrument : public PassInstrument {
 class PassContext {
  public:
   /**
-   * @brief Create a context with instruments and optional verification level
+   * @brief Create a context with instruments and optional verification/warning levels
    * @param instruments List of pass instruments
    * @param verification_level Verification level (default: Basic)
+   * @param warning_level Warning level (default: PrePipeline)
+   * @param disabled_warnings Warning checks to skip (default: none)
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
-                       VerificationLevel verification_level = VerificationLevel::Basic);
+                       VerificationLevel verification_level = VerificationLevel::Basic,
+                       WarningLevel warning_level = WarningLevel::PrePipeline,
+                       WarningCheckSet disabled_warnings = {});
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -197,6 +222,16 @@ class PassContext {
   [[nodiscard]] VerificationLevel GetVerificationLevel() const;
 
   /**
+   * @brief Get the warning level for this context
+   */
+  [[nodiscard]] WarningLevel GetWarningLevel() const;
+
+  /**
+   * @brief Get the disabled warning checks
+   */
+  [[nodiscard]] const WarningCheckSet& GetDisabledWarnings() const;
+
+  /**
    * @brief Get the instruments registered on this context
    */
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
@@ -210,6 +245,8 @@ class PassContext {
  private:
   std::vector<PassInstrumentPtr> instruments_;
   VerificationLevel verification_level_;
+  WarningLevel warning_level_;
+  WarningCheckSet disabled_warnings_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

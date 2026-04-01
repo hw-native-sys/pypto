@@ -27,6 +27,7 @@
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
+#include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace nb = nanobind;
 
@@ -100,6 +101,45 @@ void BindPass(nb::module_& m) {
       .value("ROUNDTRIP", VerificationLevel::Roundtrip,
              "BASIC + print→parse structural-equality check after every pass");
 
+  // Bind WarningLevel enum
+  nb::enum_<WarningLevel>(passes, "WarningLevel", "Controls automatic warning checks in PassPipeline")
+      .value("NONE", WarningLevel::None, "All warnings disabled")
+      .value("PRE_PIPELINE", WarningLevel::PrePipeline, "Run once before first pass (default)")
+      .value("POST_PASS", WarningLevel::PostPass, "Run after every pass (pass debugging)")
+      .value("BOTH", WarningLevel::Both, "Both pre-pipeline and post-pass");
+
+  passes.def("get_default_warning_level", &GetDefaultWarningLevel,
+             "Get the default warning level (from PYPTO_WARNING_LEVEL env var, default: PrePipeline)");
+
+  // Bind WarningCheck enum
+  nb::enum_<WarningCheck>(passes, "WarningCheck", "Identifies a specific warning check")
+      .value("UnusedVariable", WarningCheck::UnusedVariable, "Variable defined but never read");
+
+  // Bind WarningCheckSet
+  nb::class_<WarningCheckSet>(passes, "WarningCheckSet", "A set of warning checks")
+      .def(nb::init<>(), "Create an empty warning check set")
+      .def("insert", &WarningCheckSet::Insert, nb::arg("check"), "Insert a warning check")
+      .def("remove", &WarningCheckSet::Remove, nb::arg("check"), "Remove a warning check")
+      .def("contains", &WarningCheckSet::Contains, nb::arg("check"), "Check if check is in set")
+      .def("empty", &WarningCheckSet::Empty, "Check if empty")
+      .def("difference", &WarningCheckSet::Difference, nb::arg("other"), "Return this minus other")
+      .def("to_list", &WarningCheckSet::ToVector, "Convert to list of warning checks")
+      .def("__str__", &WarningCheckSet::ToString)
+      .def("__repr__", &WarningCheckSet::ToString)
+      .def("__eq__", &WarningCheckSet::operator==)
+      .def("__ne__", &WarningCheckSet::operator!=);
+
+  // Bind WarningVerifierRegistry
+  nb::class_<WarningVerifierRegistry>(passes, "WarningVerifierRegistry", "Registry of warning verifiers")
+      .def_static(
+          "run_checks",
+          [](const WarningCheckSet& checks, const ProgramPtr& program) {
+            return WarningVerifierRegistry::GetInstance().RunChecks(checks, program);
+          },
+          nb::arg("checks"), nb::arg("program"), "Run warning checks and collect diagnostics")
+      .def_static("get_all_checks", &WarningVerifierRegistry::GetAllChecks,
+                  "Get all registered warning checks");
+
   // Verification functions
   passes.def(
       "get_verified_properties", []() { return GetVerifiedProperties(); },
@@ -146,15 +186,25 @@ void BindPass(nb::module_& m) {
       .def("enable_report", &ReportInstrument::EnableReport, nb::arg("type"), nb::arg("trigger_pass"),
            "Enable a report type after a specific pass");
 
+  // WarningInstrument
+  nb::class_<WarningInstrument, PassInstrument>(passes, "WarningInstrument",
+                                                "Instrument that runs warning checks before/after passes")
+      .def(nb::init<WarningLevel, WarningCheckSet>(), nb::arg("phase") = WarningLevel::PrePipeline,
+           nb::arg("checks") = WarningVerifierRegistry::GetAllChecks(),
+           "Create a warning instrument with optional phase and check set");
+
   // PassContext
   nb::class_<PassContext>(passes, "PassContext",
                           "Context that holds instruments and pass configuration.\n\n"
                           "When active, Pass.__call__ will run the context's instruments\n"
                           "before/after each pass execution. Also controls automatic\n"
-                          "verification level for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), nb::arg("instruments"),
-           nb::arg("verification_level") = VerificationLevel::Basic,
-           "Create a PassContext with instruments and optional verification level")
+                          "verification and warning levels for PassPipeline.")
+      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, WarningLevel, WarningCheckSet>(),
+           nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
+           nb::arg("warning_level") = WarningLevel::PrePipeline,
+           nb::arg("disabled_warnings") = WarningCheckSet{},
+           "Create a PassContext with instruments, verification level, warning level, "
+           "and optional disabled warnings")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -163,6 +213,8 @@ void BindPass(nb::module_& m) {
       .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
+      .def("get_warning_level", &PassContext::GetWarningLevel, "Get the warning level for this context")
+      .def("get_disabled_warnings", &PassContext::GetDisabledWarnings, "Get the disabled warning checks")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
