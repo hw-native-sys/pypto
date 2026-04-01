@@ -8,13 +8,16 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Test sort32 operation for fixed 32-element block sorting.
+Test sort32 and mrgsort operations for tile-level sorting.
 
 TSORT32 sorts 32-element blocks descending. The result is written to dst as
 interleaved (value, index) pairs:
   - float: dst cols = src cols × 2, layout [val_f32, idx_u32, val_f32, idx_u32, ...]
   - idx is INPUT only — it is NOT modified by the sort.
   - Sorted indices are stored inside dst at odd positions (u32 bits in f32 memory).
+
+TMRGSORT format2 merges 4 pre-sorted lists into a single sorted output:
+  - ins(src0, src1, src2, src3 {exhausted}) outs(dst, tmp, excuted)
 
 To read back indices as integers on the host side, use:
     values, indices = extract_sort32_results(output_f32)
@@ -197,9 +200,63 @@ class Sort32GatherMaskFP32Program:
 
 
 @pl.program
+class MrgSort1FP32Program:
+    """Sort 4×32-element blocks with sort32, then merge with mrgsort format1.
+
+    Pipeline: sort32 → mrgsort(block_len=64) → gather(P0101) val + gather(P1010) idx
+    idx output is FP32 holding UINT32 bit patterns (sort32 convention).
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def mrgsort1_kernel(
+        self,
+        src_tensor: pl.Tensor[[1, 128], pl.FP32],
+        idx_tensor: pl.Tensor[[1, 128], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.FP32]]:
+        src_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(
+            src_tensor, offsets=[0, 0], shapes=[1, 128]
+        )
+        idx_tile: pl.Tile[[1, 128], pl.UINT32] = pl.load(
+            idx_tensor, offsets=[0, 0], shapes=[1, 128]
+        )
+        # Sort each 32-element block descending → [1, 256] interleaved (val+idx pairs)
+        sorted_tile: pl.Tile[[1, 256], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+        # Merge the 4 sorted 64-col runs into one sorted sequence (block_len=64, repeatTimes=1)
+        merged: pl.Tile[[1, 256], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=64)
+        # Extract sorted values (even positions) and indices (odd positions, UINT32 bits in f32)
+        vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(
+            merged, mask_pattern=pl.tile.MaskPattern.P0101
+        )
+        idx: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(
+            merged, mask_pattern=pl.tile.MaskPattern.P1010
+        )
+        out_val: pl.Tensor[[1, 128], pl.FP32] = pl.store(
+            vals, offsets=[0, 0], output_tensor=val_output
+        )
+        out_idx: pl.Tensor[[1, 128], pl.FP32] = pl.store(
+            idx, offsets=[0, 0], output_tensor=idx_output
+        )
+        return out_val, out_idx
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        src_tensor: pl.Tensor[[1, 128], pl.FP32],
+        idx_tensor: pl.Tensor[[1, 128], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.FP32]]:
+        val_output, idx_output = self.mrgsort1_kernel(
+            src_tensor, idx_tensor, val_output, idx_output
+        )
+        return val_output, idx_output
+
+
+@pl.program
 class GatherMaskFP32Program:
     """Gather elements using a fixed mask pattern (P1111 = all elements)."""
-
     @pl.function(type=pl.FunctionType.InCore)
     def gather_mask_kernel(
         self,
@@ -244,6 +301,69 @@ _VAL_GATHER_IDX = (
 _IDX_GATHER_IDX = (
     (torch.arange(0, 32, dtype=torch.int32) * 2 + 1).unsqueeze(0) + _ROW_OFFSETS
 ).contiguous()  # [8, 32]
+
+# Pre-compute tensors for single-row mrgsort format2 test.
+# sort32 idx: [0, 1, 2, ..., 31] for 1 row
+_IDX_1x32 = torch.arange(0, 32, dtype=torch.int32).unsqueeze(0).contiguous()  # [1, 32]
+# Gather indices for extracting values from sort32 [1,64] interleaved output.
+# For rows=1, flat indices = column positions: even positions [0, 2, 4, ..., 62]
+_VAL_GIDX_1x32 = (
+    torch.arange(0, 32, dtype=torch.int32) * 2
+).unsqueeze(0).contiguous()  # [1, 32]
+
+# Pre-compute tensors for mrgsort format1 test (sort32 → mrgsort → gather pipeline).
+# 4 groups × 32 FP32 values: idx per group = [0, 2, 4, ..., 62] (FP32 sort32 stride-2 convention)
+_IDX_1x128 = torch.cat([
+    torch.arange(0, 32, dtype=torch.int32) * 2 for _ in range(4)
+]).unsqueeze(0).contiguous()  # [1, 128]
+
+
+class MrgSort1FP32TestCase(PTOTestCase):
+    """Test sort32 → mrgsort format1 → gather(P0101/P1010) pipeline.
+
+    4×32-element FP32 blocks are sorted by sort32, merged by mrgsort format1
+    (block_len=64, repeatTimes=1), then split into sorted values and permuted indices.
+    idx_output holds UINT32 bit patterns stored in f32 memory (sort32 convention).
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort1_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        src = torch.randn(128).unsqueeze(0).contiguous()  # [1, 128] random FP32
+        return [
+            TensorSpec("src_tensor", [1, 128], DataType.FP32, init_value=src),
+            TensorSpec("idx_tensor", [1, 128], DataType.UINT32, init_value=_IDX_1x128),
+            TensorSpec("val_output", [1, 128], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 128], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort1FP32Program
+
+    def compute_expected(self, tensors, params=None):
+        """Compute expected val and idx outputs.
+
+        val_output: all 128 values sorted descending.
+        idx_output: within-group position × 2 (UINT32 bits in f32 memory), sorted by value.
+            For FP32 sort32: each idx = 2 × (original position within its 32-element group).
+        """
+        src = tensors["src_tensor"].flatten()  # [128]
+        _, global_order = torch.sort(src, descending=True)
+
+        # Expected sorted values
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
+
+        # Expected idx: within-group position × 2, reinterpreted as f32 bits
+        within_group_pos = global_order % 32
+        expected_idx_u32 = (within_group_pos * 2).to(torch.int32).view(torch.float32)
+        tensors["idx_output"][:] = expected_idx_u32.unsqueeze(0)
 
 
 class Sort32FP32TestCase(PTOTestCase):
@@ -403,7 +523,7 @@ class GatherMaskFP32TestCase(PTOTestCase):
 
 
 class TestSort:
-    """Test suite for sort32 operations."""
+    """Test suite for sort32 and mrgsort operations."""
 
     def test_sort32_fp32(self, test_runner):
         """Test sort32 with FP32 data: verify descending sort with index tracking.
@@ -440,6 +560,12 @@ class TestSort:
     def test_gather_mask_fp32(self, test_runner):
         """Test gather_mask with P1111 pattern: output should match input."""
         test_case = GatherMaskFP32TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_mrgsort1_fp32(self, test_runner):
+        """Test tmrgsort format1: merge 4 pre-sorted 64-element runs into single sorted list."""
+        test_case = MrgSort1FP32TestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 

@@ -2031,3 +2031,62 @@ def gather_mask(src: Expr, mask_pattern: int, span: Span | None = None) -> Call:
         Call expression returning gathered tile
     """
     return gather(src, mask_pattern=mask_pattern, span=span)
+# ============================================================================
+# Merge Sort Operations
+# ============================================================================
+
+
+def mrgsort(
+    src0: Expr,
+    src1: Expr | None = None,
+    src2: Expr | None = None,
+    src3: Expr | None = None,
+    tmp: Expr | None = None,
+    excuted: Expr | None = None,
+    exhausted: bool = False,
+    *,
+    block_len: int | Expr | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Merge sort — format1 (single-list) or format2 (4-way merge).
+
+    Format1 (block_len form): sorts a tile containing multiple pre-sorted runs.
+    Format2 (4-way form): merges 4 pre-sorted input tiles into one sorted output.
+
+    Args:
+        src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
+              For format2: first sorted input tile.
+        src1: (format2) Second sorted input tile.
+        src2: (format2) Third sorted input tile.
+        src3: (format2) Fourth sorted input tile.
+        tmp: (format2) Temporary workspace tile.
+        excuted: (format2) Exhaustion status tile (written by hardware).
+        exhausted: (format2) If True, marks inputs as exhausted (default: False).
+        block_len: (format1, keyword-only) Run length, must be multiple of 64.
+        span: Optional source span for debugging.
+
+    Returns:
+        Call expression returning merged sorted tile.
+    """
+    actual_span = _get_span_or_capture(span)
+    if block_len is not None:
+        # format1: single-list merge sort (pto.tmrgsort format1)
+        # PTO ISA requires block_len as i32. The parser may emit ConstInt with INDEX dtype,
+        # so always extract the integer value and create a fresh INT32 constant.
+        if isinstance(block_len, _ir_core.ConstInt):
+            block_len_expr = _ir_core.ConstInt(block_len.value, DataType.INT32, actual_span)
+        elif isinstance(block_len, Expr):
+            block_len_expr = block_len
+        else:
+            block_len_expr = _ir_core.ConstInt(block_len, DataType.INT32, actual_span)
+        return _ir_core.create_op_call("tile.mrgsort_format1", [src0, block_len_expr], {}, actual_span)
+    # format2: 4-way merge (pto.tmrgsort format2)
+    if src1 is None or src2 is None or src3 is None or tmp is None or excuted is None:
+        raise ValueError(
+            "mrgsort() requires either block_len=<int> for format1, "
+            "or (src0, src1, src2, src3, tmp, excuted) for format2"
+        )
+    kwargs: dict[str, Any] = {"exhausted": exhausted}
+    return _ir_core.create_op_call(
+        "tile.mrgsort_format2", [src0, src1, src2, src3, tmp, excuted], kwargs, actual_span
+    )

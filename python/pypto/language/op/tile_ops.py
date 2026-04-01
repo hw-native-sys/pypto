@@ -111,6 +111,7 @@ __all__ = [
     "sort32",
     "gather",
     "MaskPattern",
+    "mrgsort",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -1627,4 +1628,80 @@ def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, m
             "or mask_pattern=<int> for mask form"
         )
     call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
+    return Tile(expr=call_expr)
+
+
+@overload
+def mrgsort(src0: Tile, *, block_len: int | Scalar) -> Tile: ...
+
+
+@overload
+def mrgsort(
+    src0: Tile,
+    src1: Tile,
+    src2: Tile,
+    src3: Tile,
+    tmp: Tile,
+    excuted: Tile,
+    exhausted: bool = ...,
+) -> Tile: ...
+
+
+def mrgsort(
+    src0: Tile,
+    src1: Tile | None = None,
+    src2: Tile | None = None,
+    src3: Tile | None = None,
+    tmp: Tile | None = None,
+    excuted: Tile | None = None,
+    exhausted: bool = False,
+    *,
+    block_len: int | Scalar | None = None,
+) -> Tile:
+    """Merge sort — format1 (single-list) or format2 (4-way merge).
+
+    Format1: sorts a tile containing multiple pre-sorted runs of length block_len.
+    Format2: performs a 4-way merge of 4 pre-sorted input tiles.
+
+    Format1 usage (keyword block_len):
+        out = mrgsort(src, block_len=64)
+
+    Format2 usage (6 positional args):
+        out = mrgsort(src0, src1, src2, src3, tmp, excuted)
+        out = mrgsort(src0, src1, src2, src3, tmp, excuted, exhausted=True)
+
+    Args:
+        src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
+              For format2: first sorted input tile.
+        src1: (format2) Second sorted input tile.
+        src2: (format2) Third sorted input tile.
+        src3: (format2) Fourth sorted input tile.
+        tmp: (format2) Temporary workspace tile.
+        excuted: (format2) Exhaustion status tile (written by hardware).
+        exhausted: (format2) If True, marks inputs as exhausted (default: False).
+        block_len: (format1, keyword-only) Run length, must be multiple of 64.
+
+    Returns:
+        Tile with merged sorted elements
+    """
+    if block_len is not None:
+        # format1: single-list merge sort
+        block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
+        call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
+        return Tile(expr=call_expr)
+    # format2: 4-way merge
+    if src1 is None or src2 is None or src3 is None or tmp is None or excuted is None:
+        raise ValueError(
+            "mrgsort() requires either block_len=<int> for format1, "
+            "or (src0, src1, src2, src3, tmp, excuted) for format2"
+        )
+    call_expr = _ir_ops.mrgsort(
+        src0.unwrap(),
+        src1.unwrap(),
+        src2.unwrap(),
+        src3.unwrap(),
+        tmp.unwrap(),
+        excuted.unwrap(),
+        exhausted,
+    )
     return Tile(expr=call_expr)
