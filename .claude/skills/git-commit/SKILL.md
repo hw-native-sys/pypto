@@ -16,19 +16,30 @@ Create tasks and check them off as you complete each step:
 - [ ] Step 3: Post-commit verification
 ```
 
-## Step 0: Code Simplification Decision (MANDATORY checkpoint)
+## Step 0: Code Simplification Decision
 
-**You MUST ask the user this question before proceeding. Do NOT skip this step.**
+**Decide whether to run code simplification based on the nature of changes.**
 
-Ask the user:
+Check what changed:
 
-> Run code simplification before committing? This refines your changed code for clarity, consistency, and maintainability while preserving all functionality. May take extra time. (yes/no)
+```bash
+git diff --name-only
+git diff --cached --name-only
+```
 
-**If YES** → Run code simplification on changed files, then proceed to Step 1.
+**Skip code simplification when:**
 
-**If NO** → Proceed directly to Step 1.
+- Changes are docs/rules/skills only (`.md`, `.rst`, `docs/`, `.claude/rules/`, `.claude/skills/`)
+- Changes are config only (`.json`, `.yaml`, `.toml`, `.github/`)
+- Changes are purely mechanical (renaming, typo fixes, import reordering, moving code without logic changes)
 
-**You MUST wait for the user's answer before continuing.**
+**Run code simplification for all other cases** — any change involving logic, even small ones. If changes include any code files mixed with docs/config, run it.
+
+**User override:** If the user explicitly requests or declines code simplification, honor their preference.
+
+**If running** → Run code simplification on changed files, then proceed to Step 1.
+
+**If skipping** → Briefly state why (e.g., "Skipping code simplification — docs-only changes"), then proceed to Step 1.
 
 ## Step 1: Analyze Changes & Launch Review/Test Skills
 
@@ -147,7 +158,7 @@ git add file && git commit --amend --no-edit   # Add forgotten file
 
 ## Checklist
 
-- [ ] Code simplification decision obtained from user (Step 0)
+- [ ] Code simplification: ran (if code changes) or skipped with reason (if docs/config/trivial)
 - [ ] Changed files analyzed (code vs docs/config only)
 - [ ] Code review completed
 - [ ] Tests passed (if code changed) or skipped (if docs/config only)
