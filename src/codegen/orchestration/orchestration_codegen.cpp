@@ -1135,6 +1135,68 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   // --- Alias generation helpers ---
 
+  // Build a mapping from return-tuple index to function parameter index by
+  // inspecting the callee's return statement.  Each return value is traced to
+  // the Out parameter it ultimately writes to — either via a top-level
+  // tile.store or via a ForStmt yield chain (iter_arg initValue).
+  //
+  // Returns a vector of param indices (one per return value).  An entry of
+  // SIZE_MAX means the mapping could not be determined for that return value.
+  static std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& callee) {
+    std::vector<size_t> mapping;
+    if (!callee || !callee->body_) return mapping;
+
+    // Find the ReturnStmt (last statement in the body).
+    auto seq = As<SeqStmts>(callee->body_);
+    if (!seq || seq->stmts_.empty()) return mapping;
+    auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
+    if (!return_stmt) return mapping;
+
+    // Helper: match a Var* to a function parameter index.
+    auto find_param_index = [&](const Var* v) -> size_t {
+      for (size_t pi = 0; pi < callee->params_.size(); ++pi) {
+        if (callee->params_[pi].get() == v) return pi;
+      }
+      return SIZE_MAX;
+    };
+
+    // Build a unified lookup: return var → Out parameter index.
+    // Traces through tile.store destinations and ForStmt yield chains.
+    std::unordered_map<const Var*, size_t> var_to_out_param;
+    for (size_t si = 0; si + 1 < seq->stmts_.size(); ++si) {
+      if (auto assign = As<AssignStmt>(seq->stmts_[si])) {
+        if (!assign->var_) continue;
+        auto call = As<Call>(assign->value_);
+        if (call && call->op_ && call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
+          auto out_param = As<Var>(call->args_[2]);
+          if (out_param) {
+            var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
+          }
+        }
+      } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
+        // Map each return_var to its iter_arg's initValue → Out param.
+        for (size_t ri = 0; ri < for_stmt->return_vars_.size() && ri < for_stmt->iter_args_.size(); ++ri) {
+          auto init_var = As<Var>(for_stmt->iter_args_[ri]->initValue_);
+          if (init_var && for_stmt->return_vars_[ri]) {
+            var_to_out_param[for_stmt->return_vars_[ri].get()] = find_param_index(init_var.get());
+          }
+        }
+      }
+    }
+
+    // For each return expression, look up the resolved Out param index.
+    for (const auto& ret_expr : return_stmt->value_) {
+      auto var = As<Var>(ret_expr);
+      if (!var) {
+        mapping.push_back(SIZE_MAX);
+        continue;
+      }
+      auto it = var_to_out_param.find(var.get());
+      mapping.push_back(it != var_to_out_param.end() ? it->second : SIZE_MAX);
+    }
+    return mapping;
+  }
+
   // Collect indices of Out/InOut parameters from a callee function.
   static std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
     std::vector<size_t> out_indices;
@@ -1175,11 +1237,31 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (!callee) return;
 
     auto out_indices = CollectOutIndices(callee);
+
+    // Try to build a precise mapping from return-tuple index to param index
+    // by inspecting the callee's return statement.  This handles the case
+    // where the return order differs from the Out parameter order (e.g. when
+    // assemble outputs and tile outputs are mixed in the same kernel).
+    auto ret_to_param = BuildReturnToParamMapping(callee);
+
     for (const auto& elem : elements_it->second) {
-      INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
-          << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
-          << " (has " << out_indices.size() << " Out/InOut params)";
-      size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
+      size_t param_idx;
+      if (static_cast<size_t>(elem.index) < ret_to_param.size() &&
+          ret_to_param[static_cast<size_t>(elem.index)] != SIZE_MAX) {
+        // Use the precise mapping derived from tile.store analysis.
+        param_idx = ret_to_param[static_cast<size_t>(elem.index)];
+      } else {
+        // Fall back to sequential Out/InOut parameter mapping.  This handles
+        // cases where BuildReturnToParamMapping returns empty (e.g. callee has
+        // no recognizable ReturnStmt) or cannot trace a specific return value.
+        INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
+            << "Internal error: tuple element index " << elem.index << " out of range for "
+            << call->op_->name_ << " (has " << out_indices.size() << " Out/InOut params)";
+        param_idx = out_indices[static_cast<size_t>(elem.index)];
+      }
+      INTERNAL_CHECK(param_idx < callee->param_directions_.size())
+          << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
+          << " (has " << callee->param_directions_.size() << " params)";
       // InOut params are already the external tensor (modified in-place); no alias needed.
       if (callee->param_directions_[param_idx] == ParamDirection::InOut) {
         continue;
