@@ -41,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -617,6 +618,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void SetNonOptimizableAssembleRoots(const std::unordered_set<const Var*>& roots) {
     non_optimizable_assemble_roots_ = roots;
   }
+
+  void AddTensorCreateVarName(const std::string& name) { tensor_create_var_names_.insert(name); }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
 
@@ -1426,6 +1429,44 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> declared_var_ptrs_;
 };
 
+/// Well-known parameter name for the GM slot buffer workspace.
+constexpr const char* kGMPipeBufferName = "__gm_pipe_buffer";
+
+/// Scan program functions for initialize_pipe ops and compute total GM buffer size.
+/// Computes per-op workspace (slot_size * num_slots) and returns the maximum,
+/// avoiding incorrect aggregation of dir_mask across independent ops.
+/// Returns 0 if no cross-core pipe is used.
+int64_t ComputeGMPipeBufferSize(const ProgramPtr& program) {
+  class InitPipeScanner : public IRVisitor {
+   public:
+    int64_t max_workspace_bytes = 0;
+
+   protected:
+    void VisitExpr_(const CallPtr& call) override {
+      auto op = As<Op>(call->op_);
+      if (op && (op->name_ == "system.aic_initialize_pipe" || op->name_ == "system.aiv_initialize_pipe")) {
+        int ss = call->GetKwarg<int>("slot_size", 0);
+        int dm = call->GetKwarg<int>("dir_mask", 0);
+        if (ss > 0 && dm != 0) {
+          int64_t bytes =
+              static_cast<int64_t>(ss) * static_cast<int64_t>(cross_core_pipe::GetSlotNumForDirMask(dm));
+          if (bytes > max_workspace_bytes) {
+            max_workspace_bytes = bytes;
+          }
+        }
+      }
+      IRVisitor::VisitExpr_(call);
+    }
+  };
+
+  InitPipeScanner scanner;
+  for (const auto& [gvar, func] : program->functions_) {
+    if (!func->body_) continue;
+    scanner.VisitStmt(func->body_);
+  }
+  return scanner.max_workspace_bytes;
+}
+
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
   using namespace pypto::ir;  // NOLINT(build/namespaces)
 
@@ -1456,6 +1497,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   std::set<std::string> param_name_set;
   std::map<std::string, int> param_name_to_orch_index;
   int tensor_param_count = 0;
+  int64_t gm_workspace_bytes = 0;
   // Collect scalar params in declaration order for ChipStorageTaskArgs scalar slot assignment
   struct ScalarParamInfo {
     std::string emit_name;
@@ -1463,12 +1505,25 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   };
   std::vector<ScalarParamInfo> scalar_params;
   for (const auto& var : func->params_) {
-    std::string emit_name = GetSSABaseName(var->name_hint_);
+    // GM pipe buffer is a workspace param — not provided by host.
+    // Use the full name (not GetSSABaseName) since '__' is the auto-name delimiter
+    // and would incorrectly yield an empty base name.
+    bool is_gm_workspace = (var->name_hint_ == kGMPipeBufferName);
+    std::string emit_name =
+        is_gm_workspace ? std::string(kGMPipeBufferName) : GetSSABaseName(var->name_hint_);
     emit_name_map[var.get()] = emit_name;
     param_name_set.insert(emit_name);
     if (As<TensorType>(var->GetType())) {
-      param_name_to_orch_index[emit_name] = tensor_param_count;
-      tensor_param_count++;
+      if (is_gm_workspace) {
+        // Don't assign an orch_args tensor index — this is allocated by runtime, not host.
+        gm_workspace_bytes = ComputeGMPipeBufferSize(program);
+        INTERNAL_CHECK(gm_workspace_bytes > 0)
+            << "Internal error: " << kGMPipeBufferName
+            << " parameter present but no initialize_pipe ops found in program";
+      } else {
+        param_name_to_orch_index[emit_name] = tensor_param_count;
+        tensor_param_count++;
+      }
     } else if (auto stype = As<ScalarType>(var->GetType())) {
       scalar_params.push_back({emit_name, stype});
     }
@@ -1518,17 +1573,35 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
   stmt_codegen.SetAssembleViewInfos(buffer_info.assemble_view_infos);
   stmt_codegen.SetNonOptimizableAssembleRoots(buffer_info.non_optimizable_assemble_roots);
+  if (gm_workspace_bytes > 0) {
+    // Register pipe buffer as a tensor_create var so BuildTaskParams emits add_output(ci).
+    stmt_codegen.AddTensorCreateVarName(kGMPipeBufferName);
+  }
 
-  // 6. External tensors (from ChipStorageTaskArgs — all from params)
+  // 6. External tensors (from ChipStorageTaskArgs — all from params except workspace)
   oss << "    // External tensors\n";
   int orch_idx = 0;
   for (const auto& var : func->params_) {
     auto tensor_type = As<TensorType>(var->GetType());
     if (tensor_type) {
+      if (var->name_hint_ == kGMPipeBufferName) {
+        // Workspace param — skip host extraction, will be emitted below.
+        continue;
+      }
       std::string name = auto_name::GetCompatibleBaseName(var->name_hint_);
       oss << GenerateMakeTensorExternal(name, orch_idx, tensor_type, stmt_codegen);
       orch_idx++;
     }
+  }
+
+  // 6b. GM workspace for cross-core pipe buffer (runtime-allocated via add_output)
+  if (gm_workspace_bytes > 0) {
+    oss << "\n    // GM workspace for cross-core pipe buffer (runtime-allocated)\n";
+    // Encode as 1D FP32 tensor: shape[0] = total_bytes / sizeof(float)
+    int64_t shape_dim = (gm_workspace_bytes + 3) / 4;  // ceil division
+    oss << "    uint32_t " << kGMPipeBufferName << "_shapes[1] = {" << shape_dim << "};\n";
+    oss << "    TensorCreateInfo " << kGMPipeBufferName << "_ci(" << kGMPipeBufferName
+        << "_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true);\n";
   }
 
   // 7. Scalar params (from ChipStorageTaskArgs scalar slots — 0-indexed separately from tensors)
