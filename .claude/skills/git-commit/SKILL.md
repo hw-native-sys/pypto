@@ -158,7 +158,7 @@ git add file && git commit --amend --no-edit   # Add forgotten file
 
 ## Checklist
 
-- [ ] Code simplification: ran (if code changes) or skipped with reason (if docs/config/trivial)
+- [ ] Code simplification: ran (for logic changes) or skipped with reason (if docs/config/mechanical)
 - [ ] Changed files analyzed (code vs docs/config only)
 - [ ] Code review completed
 - [ ] Tests passed (if code changed) or skipped (if docs/config only)
