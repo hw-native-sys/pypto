@@ -1,5 +1,11 @@
 # Orchestration Code Generation
 
+## Design Principle: Strict 1-to-1 Mapping
+
+Orchestration codegen follows the same principle as [PTO codegen](00-pto_codegen.md#design-principle-strict-1-to-1-mapping): a **strict 1-to-1 translation** from IR to generated C++ code. The codegen should not perform optimization, analysis, or indirection — such work belongs in earlier passes.
+
+For example, return-to-parameter tracing (mapping callee return values back to `Out` parameters) is analysis that should be resolved by a pass before codegen sees the IR. See [#814](https://github.com/hw-native-sys/pypto/issues/814) for a tracked instance.
+
 ## Overview
 
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
