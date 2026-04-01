@@ -11,6 +11,7 @@
 
 import pytest
 from pypto import DataType, ir, passes
+from pypto.pypto_core.ir import ConstInt
 
 
 def test_tpush_ops_return_unknown_type():
@@ -38,11 +39,16 @@ def test_tpop_ops_return_tile_type():
 
 
 def test_initialize_pipe_ops():
-    """Test initialize_pipe ops accept no args and return UnknownType."""
+    """Test initialize_pipe ops take two i32 buffer operands and return UnknownType.
+
+    dir_mask=1: only C2V is active; c2v_consumer_buf must be concrete, v2c uses placeholder zero.
+    """
     span = ir.Span.unknown()
+    z = ConstInt(0, DataType.INT32, span)
+    c2v_base = ir.Var("c2v_base", ir.ScalarType(DataType.INT32), span)
 
     for op_name in ["system.aic_initialize_pipe", "system.aiv_initialize_pipe"]:
-        call = ir.create_op_call(op_name, [], {"dir_mask": 1, "slot_size": 256}, span)
+        call = ir.create_op_call(op_name, [c2v_base, z], {"dir_mask": 1, "slot_size": 256}, span)
         assert isinstance(call.type, ir.UnknownType)
 
 

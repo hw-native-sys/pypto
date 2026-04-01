@@ -35,6 +35,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -47,6 +48,7 @@ namespace backend {
 using ir::As;
 using ir::AsVarLike;
 using ir::CallPtr;
+using ir::ScalarType;
 using ir::TensorType;
 using ir::Var;
 
@@ -938,6 +940,23 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   return "";
 }
 
+static bool ExprIsI32Scalar(const ir::ExprPtr& expr) {
+  if (auto st = As<ScalarType>(expr->GetType())) {
+    return st->dtype_ == DataType::INT32;
+  }
+  return false;
+}
+
+// Pipe buffer operands are i32 SSA. GetExprAsCode(ConstInt) uses index constants; use i32 here.
+static std::string GetPipeBufOperandI32SSA(codegen::PTOCodegen& codegen, const ir::ExprPtr& expr) {
+  if (auto c = As<ir::ConstInt>(expr)) {
+    return codegen.GetOrEmitI32Constant(static_cast<int32_t>(c->value_));
+  }
+  INTERNAL_CHECK(ExprIsI32Scalar(expr))
+      << "Initialize-pipe buffer operand must be INT32 scalar SSA or integral ConstInt placeholder";
+  return codegen.GetExprAsCode(expr);
+}
+
 // Helper to format initialize_pipe operand list
 static void EmitInitializePipeOperands(std::ostringstream& oss, const std::string& gm_ssa,
                                        const std::string& c2v_ssa, const std::string& v2c_ssa) {
@@ -955,16 +974,19 @@ static void EmitInitializePipeOperands(std::ostringstream& oss, const std::strin
 static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
+  CHECK(op->args_.size() == 2)
+      << "aic_initialize_pipe requires 2 arguments (c2v_consumer_buf, v2c_consumer_buf), got "
+      << op->args_.size();
   const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
   const int slot_size = op->GetKwarg<int>("slot_size", -1);
   CHECK(dir_mask >= 0) << "aic_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aic_initialize_pipe requires 'slot_size' attribute";
 
-  // AIC (Cube): consumer for V2C (reserve), producer for C2V (import)
-  std::string v2c_ssa = codegen.GetReserveBufferSSA();
-  std::string c2v_ssa = codegen.GetImportBufferSSA();
-  if (v2c_ssa.empty()) v2c_ssa = codegen.GetOrEmitI32Constant(0);
-  if (c2v_ssa.empty()) c2v_ssa = codegen.GetOrEmitI32Constant(0);
+  // AIC (Cube): operands are explicit i32 SSAs (validated by MixedKernelExpanded verifier).
+  std::string c2v_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[0]);
+  std::string v2c_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
+  CHECK(!c2v_ssa.empty() && !v2c_ssa.empty())
+      << "aic_initialize_pipe: failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
   oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
@@ -978,16 +1000,18 @@ static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::C
 static std::string MakeAivInitializePipeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
+  CHECK(op->args_.size() == 2)
+      << "aiv_initialize_pipe requires 2 arguments (c2v_consumer_buf, v2c_consumer_buf), got "
+      << op->args_.size();
   const int dir_mask = op->GetKwarg<int>("dir_mask", -1);
   const int slot_size = op->GetKwarg<int>("slot_size", -1);
   CHECK(dir_mask >= 0) << "aiv_initialize_pipe requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << "aiv_initialize_pipe requires 'slot_size' attribute";
 
-  // AIV (Vector): consumer for C2V (reserve), producer for V2C (import)
-  std::string c2v_ssa = codegen.GetReserveBufferSSA();
-  std::string v2c_ssa = codegen.GetImportBufferSSA();
-  if (c2v_ssa.empty()) c2v_ssa = codegen.GetOrEmitI32Constant(0);
-  if (v2c_ssa.empty()) v2c_ssa = codegen.GetOrEmitI32Constant(0);
+  std::string c2v_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[0]);
+  std::string v2c_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
+  CHECK(!c2v_ssa.empty() && !v2c_ssa.empty())
+      << "aiv_initialize_pipe: failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
   oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
@@ -1315,7 +1339,6 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         << ", location = #pto.address_space<" << location << ">, auto = false, base = " << base;
     oss << "} -> i32";
     codegen.Emit(oss.str());
-    codegen.RecordReserveBufferSSA(ssa_name);
 
     return std::string("");
   });
@@ -1339,7 +1362,6 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     oss << ssa_name << " = pto.import_reserved_buffer {name = \"" << name << "\", peer_func = @" << peer_func
         << "} -> i32";
     codegen.Emit(oss.str());
-    codegen.RecordImportBufferSSA(ssa_name);
 
     return std::string("");
   });

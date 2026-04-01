@@ -334,10 +334,8 @@ REGISTER_OP("system.sync_src")
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.aic_initialize_pipe` | 0 | 在 Cube 侧初始化跨核管道 | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
-| `system.aiv_initialize_pipe` | 0 | 在 Vector 侧初始化跨核管道 | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
-
-\* 可选：方向未激活时省略（默认 `AUTO = -1`）。
+| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size` |
+| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size` |
 
 ### 缓冲区管理操作
 
@@ -350,6 +348,8 @@ REGISTER_OP("system.sync_src")
 
 ### DSL 示例（跨核 V2C 单向）
 
+`dir_mask=2` 仅启用 V2C，因此 C2V 侧缓冲区实参需为未使用方向的占位（`0`、`pl.const(0, pl.INT32)`）；启用侧将 `reserve_buffer` / `import_peer_buffer` 的句柄作为第一个位置实参传入。
+
 ```python
 import pypto.language as pl
 
@@ -357,18 +357,16 @@ import pypto.language as pl
 class CrossCoreExample:
     @pl.function(type=pl.FunctionType.InCore)
     def vector_producer(self, a: pl.Tensor[[16, 16], pl.FP16]):
-        # 导入消费者的缓冲区地址
         peer = pl.import_peer_buffer(name="v2c_buf", peer_func="cube_consumer")
-        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
+        pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
         pl.tpush_to_aic(tile_a, aiv_idx=0)
 
     @pl.function(type=pl.FunctionType.InCore)
     def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
-        # 预留本地缓冲区接收传入数据
         buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
-        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
+        pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512)
 
         received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
         pl.tfree_to_aiv(aiv_idx=0)

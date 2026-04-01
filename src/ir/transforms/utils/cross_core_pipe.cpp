@@ -150,7 +150,12 @@ std::string BuildPipeBufferName(const std::string& func_name, core_affinity::Pip
 
 CallPtr CreateSystemOpCall(const std::string& op_name,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
-  return OpRegistry::GetInstance().Create(op_name, {}, kwargs, span);
+  return CreateSystemOpCall(op_name, {}, kwargs, span);
+}
+
+CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span) {
+  return OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
 }
 
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span) {
@@ -170,13 +175,15 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 }
 
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
+                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
                              const Span& span) {
   CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << slot_size_bytes;
   const std::string op_name =
       (side == core_affinity::CoreSide::AIC) ? "system.aic_initialize_pipe" : "system.aiv_initialize_pipe";
-  return CreateSystemOpCall(
-      op_name, {{"dir_mask", std::any(dir_mask)}, {"slot_size", std::any(slot_size_bytes)}}, span);
+  return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf},
+                            {{"dir_mask", std::any(dir_mask)}, {"slot_size", std::any(slot_size_bytes)}},
+                            span);
 }
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata) {
@@ -283,30 +290,51 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   const int slot_size_bytes = static_cast<int>(common_slot_size.value());
   AutomaticPipeSetup setup;
 
+  std::shared_ptr<Var> aic_v2c_reserve_var;
+  std::shared_ptr<Var> aic_c2v_import_var;
+  std::shared_ptr<Var> aiv_c2v_reserve_var;
+  std::shared_ptr<Var> aiv_v2c_import_var;
+
+  auto zero_i32 = [&]() { return std::make_shared<ConstInt>(0, DataType::INT32, span); };
+  auto var_as_expr = [](const std::shared_ptr<Var>& v) -> ExprPtr {
+    return std::static_pointer_cast<const Expr>(v);
+  };
+
   if (dir_mask & core_affinity::kDirMaskV2C) {
     const auto v2c_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C);
     auto v2c_reserve = CreateReserveBuffer(v2c_name, buffer_size, span);
-    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(v2c_name, v2c_reserve->GetType(), span), v2c_reserve, span));
+    aic_v2c_reserve_var = std::make_shared<Var>(v2c_name, v2c_reserve->GetType(), span);
+    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_v2c_reserve_var, v2c_reserve, span));
     auto v2c_import = CreateImportPeerBuffer(v2c_name, aic_name, span);
-    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(v2c_name + "_import", v2c_import->GetType(), span), v2c_import, span));
+    aiv_v2c_import_var = std::make_shared<Var>(v2c_name + "_import", v2c_import->GetType(), span);
+    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_v2c_import_var, v2c_import, span));
   }
 
   if (dir_mask & core_affinity::kDirMaskC2V) {
     const auto c2v_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V);
     auto c2v_reserve = CreateReserveBuffer(c2v_name, buffer_size, span);
-    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(c2v_name, c2v_reserve->GetType(), span), c2v_reserve, span));
+    aiv_c2v_reserve_var = std::make_shared<Var>(c2v_name, c2v_reserve->GetType(), span);
+    setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(aiv_c2v_reserve_var, c2v_reserve, span));
     auto c2v_import = CreateImportPeerBuffer(c2v_name, aiv_name, span);
-    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(c2v_name + "_import", c2v_import->GetType(), span), c2v_import, span));
+    aic_c2v_import_var = std::make_shared<Var>(c2v_name + "_import", c2v_import->GetType(), span);
+    setup.aic_stmts.push_back(std::make_shared<AssignStmt>(aic_c2v_import_var, c2v_import, span));
   }
 
-  setup.aic_stmts.push_back(std::make_shared<EvalStmt>(
-      CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes, span), span));
-  setup.aiv_stmts.push_back(std::make_shared<EvalStmt>(
-      CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes, span), span));
+  // AIC: c2v operand = import on Cube; v2c operand = reserve on Cube (matches PTO codegen order).
+  const ExprPtr aic_c2v_arg = aic_c2v_import_var ? var_as_expr(aic_c2v_import_var) : ExprPtr(zero_i32());
+  const ExprPtr aic_v2c_arg = aic_v2c_reserve_var ? var_as_expr(aic_v2c_reserve_var) : ExprPtr(zero_i32());
+  // AIV: c2v operand = reserve on Vector; v2c operand = import on Vector.
+  const ExprPtr aiv_c2v_arg = aiv_c2v_reserve_var ? var_as_expr(aiv_c2v_reserve_var) : ExprPtr(zero_i32());
+  const ExprPtr aiv_v2c_arg = aiv_v2c_import_var ? var_as_expr(aiv_v2c_import_var) : ExprPtr(zero_i32());
+
+  setup.aic_stmts.push_back(
+      std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIC, dir_mask, slot_size_bytes,
+                                                      aic_c2v_arg, aic_v2c_arg, span),
+                                 span));
+  setup.aiv_stmts.push_back(
+      std::make_shared<EvalStmt>(CreateInitializePipe(core_affinity::CoreSide::AIV, dir_mask, slot_size_bytes,
+                                                      aiv_c2v_arg, aiv_v2c_arg, span),
+                                 span));
 
   return setup;
 }

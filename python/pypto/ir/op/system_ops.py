@@ -18,8 +18,11 @@ System operations handle hardware synchronization and cross-core communication:
 - reserve_buffer / import_peer_buffer: Cross-core buffer management (i32 SSA results)
 """
 
+from typing import Protocol, runtime_checkable
+
+from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, Expr, PipeType, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, Span
 
 from ..utils import _get_span_or_capture
 from .tile_ops import (  # noqa: F401
@@ -28,6 +31,13 @@ from .tile_ops import (  # noqa: F401
     tpush_to_aic,
     tpush_to_aiv,
 )
+
+
+@runtime_checkable
+class _UnwrapsToExpr(Protocol):
+    """Language wrappers (e.g. ``pl.Scalar[dtype]``) that expose ``unwrap() -> Expr``."""
+
+    def unwrap(self) -> Expr: ...
 
 
 def _create_sync_op(
@@ -127,64 +137,76 @@ def bar_all(*, span: Span | None = None) -> Call:
 # Sentinel value: compiler auto-assigns the buffer base address
 AUTO: int = -1
 
+PipeBufOperand = Expr | int | float | _UnwrapsToExpr
 
-def _build_pipe_kwargs(
-    dir_mask: int,
-    slot_size: int,
-    c2v_consumer_buf: int,
-    v2c_consumer_buf: int,
-) -> dict[str, int]:
-    """Build kwargs dict for pipe initialization, omitting AUTO (-1) consumer bufs."""
-    kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
-    if c2v_consumer_buf != AUTO:
-        kwargs["c2v_consumer_buf"] = c2v_consumer_buf
-    if v2c_consumer_buf != AUTO:
-        kwargs["v2c_consumer_buf"] = v2c_consumer_buf
-    return kwargs
+
+def _consumer_buf_operand(buf: PipeBufOperand, span: Span) -> Expr:
+    """Build positional operand for pipe init: Expr passthrough; int (incl. 0 / ``AUTO``) -> ConstInt."""
+    if isinstance(buf, Expr):
+        return buf
+    if isinstance(buf, _UnwrapsToExpr):
+        return buf.unwrap()
+    if isinstance(buf, float):
+        return ConstInt(int(buf), DataType.INT32, span)
+    return ConstInt(buf, DataType.INT32, span)
+
+
+def _build_pipe_init_args(
+    c2v_consumer_buf: PipeBufOperand,
+    v2c_consumer_buf: PipeBufOperand,
+    span: Span,
+) -> list[Expr]:
+    """Positional args (c2v_consumer_buf, v2c_consumer_buf) for aic/aiv_initialize_pipe."""
+    return [
+        _consumer_buf_operand(c2v_consumer_buf, span),
+        _consumer_buf_operand(v2c_consumer_buf, span),
+    ]
 
 
 def aic_initialize_pipe(
+    c2v_consumer_buf: PipeBufOperand = 0,
+    v2c_consumer_buf: PipeBufOperand = 0,
     *,
     dir_mask: int,
     slot_size: int,
-    c2v_consumer_buf: int = AUTO,
-    v2c_consumer_buf: int = AUTO,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
 
     Args:
+        c2v_consumer_buf: C2V consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
+        v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
-        c2v_consumer_buf: C2V consumer buffer base address (AUTO = not used)
-        v2c_consumer_buf: V2C consumer buffer base address (AUTO = not used)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_kwargs(dir_mask, slot_size, c2v_consumer_buf, v2c_consumer_buf)
-    return _ir_core.create_op_call("system.aic_initialize_pipe", [], kwargs, actual_span)
+    kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
+    return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
 
 def aiv_initialize_pipe(
+    c2v_consumer_buf: PipeBufOperand = 0,
+    v2c_consumer_buf: PipeBufOperand = 0,
     *,
     dir_mask: int,
     slot_size: int,
-    c2v_consumer_buf: int = AUTO,
-    v2c_consumer_buf: int = AUTO,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
 
     Args:
+        c2v_consumer_buf: C2V consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
+        v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
-        c2v_consumer_buf: C2V consumer buffer base address (AUTO = not used)
-        v2c_consumer_buf: V2C consumer buffer base address (AUTO = not used)
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = _build_pipe_kwargs(dir_mask, slot_size, c2v_consumer_buf, v2c_consumer_buf)
-    return _ir_core.create_op_call("system.aiv_initialize_pipe", [], kwargs, actual_span)
+    kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
+    return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
 
 
 def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Call:

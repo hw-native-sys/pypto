@@ -334,10 +334,8 @@ REGISTER_OP("system.sync_src")
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 0 | Init cross-core pipe on Cube side | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
-| `system.aiv_initialize_pipe` | 0 | Init cross-core pipe on Vector side | `dir_mask`, `slot_size`, `c2v_consumer_buf`*, `v2c_consumer_buf`* |
-
-\* Optional: omitted when direction is not active (default `AUTO = -1`).
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size` |
 
 ### Buffer Management Operations
 
@@ -350,6 +348,8 @@ REGISTER_OP("system.sync_src")
 
 ### DSL Example (cross-core V2C unidirectional)
 
+`dir_mask=2` enables V2C only, so the C2V buffer operand must be an inactive-direction placeholder (`0`, or `pl.const(0, pl.INT32)`); the active side passes the reserved/imported buffer handle as the first positional operand.
+
 ```python
 import pypto.language as pl
 
@@ -357,18 +357,16 @@ import pypto.language as pl
 class CrossCoreExample:
     @pl.function(type=pl.FunctionType.InCore)
     def vector_producer(self, a: pl.Tensor[[16, 16], pl.FP16]):
-        # Import consumer's buffer address
         peer = pl.import_peer_buffer(name="v2c_buf", peer_func="cube_consumer")
-        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
+        pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
         pl.tpush_to_aic(tile_a, aiv_idx=0)
 
     @pl.function(type=pl.FunctionType.InCore)
     def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
-        # Reserve local buffer for incoming data
         buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
-        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
+        pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512)
 
         received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
         pl.tfree_to_aiv(aiv_idx=0)

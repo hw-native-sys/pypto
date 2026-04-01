@@ -63,22 +63,20 @@ REGISTER_OP("system.tfree_to_aiv")
 REGISTER_OP("system.aic_initialize_pipe")
     .set_description("Initialize cross-core pipe on AIC side")
     .set_op_category("CrossCoreOp")
-    .no_argument()
+    .add_argument("c2v_consumer_buf", "C2V consumer buffer base (i32 SSA)")
+    .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
-    .set_attr<int>("c2v_consumer_buf")
-    .set_attr<int>("v2c_consumer_buf")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIV side
 REGISTER_OP("system.aiv_initialize_pipe")
     .set_description("Initialize cross-core pipe on AIV side")
     .set_op_category("CrossCoreOp")
-    .no_argument()
+    .add_argument("c2v_consumer_buf", "C2V consumer buffer base (i32 SSA)")
+    .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
-    .set_attr<int>("c2v_consumer_buf")
-    .set_attr<int>("v2c_consumer_buf")
     .f_deduce_type(DeduceUnknownType);
 
 // Reserve a named buffer in a kernel

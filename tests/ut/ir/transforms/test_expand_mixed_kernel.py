@@ -1735,7 +1735,7 @@ class TestPropertyVerification:
             @pl.function(type=pl.FunctionType.AIV)
             def bad_aiv(self):
                 pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
                 _: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
 
         prop_set = passes.IRPropertySet()
@@ -1755,7 +1755,7 @@ class TestPropertyVerification:
             @pl.function(type=pl.FunctionType.AIC)
             def bad_aic(self):
                 pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
                 first: pl.Tile[
                     [16, 16],
                     pl.FP16,
@@ -1795,7 +1795,7 @@ class TestPropertyVerification:
                 processed = pl.exp(popped)
                 pl.tfree_to_aic(popped)
                 pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
                 _ = processed
 
         prop_set = passes.IRPropertySet()
@@ -1824,10 +1824,16 @@ class TestAutoPipeSetup:
 
         assert "import_peer_buffer" in aic_str
         assert "main_incore_0_c2v_slot_buffer" in aic_str
-        assert "aic_initialize_pipe(dir_mask=1, slot_size=8192)" in aic_str
+        assert (
+            "pl.system.aic_initialize_pipe(main_incore_0_c2v_slot_buffer_import, pl.const(0, pl.INT32), "
+            "dir_mask=1, slot_size=8192)" in aic_str
+        )
         assert "reserve_buffer" in aiv_str
         assert "main_incore_0_c2v_slot_buffer" in aiv_str
-        assert "aiv_initialize_pipe(dir_mask=1, slot_size=8192)" in aiv_str
+        assert (
+            "pl.system.aiv_initialize_pipe(main_incore_0_c2v_slot_buffer, pl.const(0, pl.INT32), "
+            "dir_mask=1, slot_size=8192)" in aiv_str
+        )
         assert "tfree_to_aic" in aiv_str
 
     def test_auto_tfree_inserted_after_post_tpop_move(self):
@@ -1867,12 +1873,19 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[128, 64], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ):
-                _v2c_slot_buffer = pl.reserve_buffer(name="main_incore_0_v2c_slot_buffer", size=16384)
-                _c2v_slot_buffer_import = pl.import_peer_buffer(
+                main_incore_0_v2c_slot_buffer = pl.reserve_buffer(
+                    name="main_incore_0_v2c_slot_buffer", size=16384
+                )
+                main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
                     name="main_incore_0_c2v_slot_buffer",
                     peer_func="main_incore_0_aiv",
                 )
-                pl.aic_initialize_pipe(dir_mask=3, slot_size=4096)
+                pl.aic_initialize_pipe(
+                    main_incore_0_c2v_slot_buffer_import,
+                    main_incore_0_v2c_slot_buffer,
+                    dir_mask=3,
+                    slot_size=4096,
+                )
                 x_left_mat: pl.Tile[
                     [16, 128],
                     pl.BF16,
@@ -1932,8 +1945,15 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[128, 16], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                _c2v_slot_buffer = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=8192)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=1024)
+                main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
+                    name="main_incore_0_c2v_slot_buffer", size=8192
+                )
+                pl.aiv_initialize_pipe(
+                    main_incore_0_c2v_slot_buffer,
+                    pl.const(0, pl.INT32),
+                    dir_mask=1,
+                    slot_size=1024,
+                )
                 z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )

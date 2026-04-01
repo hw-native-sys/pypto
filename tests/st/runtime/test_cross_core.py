@@ -46,7 +46,7 @@ class CrossCoreTpushTpopProgram:
         output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ):
         v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer.base)
+        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
         tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
@@ -64,7 +64,7 @@ class CrossCoreTpushTpopProgram:
         output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
+        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
 
         # Chain 1: tpop -> move (use) -> tfree
         received_add: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)

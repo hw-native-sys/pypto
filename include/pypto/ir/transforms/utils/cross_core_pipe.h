@@ -71,10 +71,13 @@ std::string BuildPipeBufferName(const std::string& func_name, core_affinity::Pip
 
 CallPtr CreateSystemOpCall(const std::string& op_name,
                            const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span);
+CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs, const Span& span);
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span);
 CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string& peer_func,
                                const Span& span);
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
+                             const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
                              const Span& span);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);

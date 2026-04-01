@@ -63,7 +63,7 @@ class CrossCoreTpushTpopProgram:
         output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ):
         v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer.base)
+        pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
         tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
@@ -81,7 +81,7 @@ class CrossCoreTpushTpopProgram:
         output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
+        pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
 
         received_add: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
         received_sub: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
@@ -143,9 +143,7 @@ class BidirectionalCrossCorProgram:
         # V2C producer: import cube's reserved buffer
         v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_bidir")
         # Bidirectional init with consumer buffer addresses
-        pl.aiv_initialize_pipe(
-            dir_mask=3, slot_size=512, c2v_consumer_buf=c2v_buf.base, v2c_consumer_buf=v2c_peer.base
-        )
+        pl.aiv_initialize_pipe(dir_mask=3, slot_size=512, c2v_consumer_buf=c2v_buf, v2c_consumer_buf=v2c_peer)
 
         # Preprocess: elementwise add (Vector op)
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
@@ -178,9 +176,7 @@ class BidirectionalCrossCorProgram:
         # C2V producer: import vector's reserved buffer
         c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_bidir")
         # Bidirectional init with explicit consumer buffer addresses
-        pl.aic_initialize_pipe(
-            dir_mask=3, slot_size=512, c2v_consumer_buf=c2v_peer.base, v2c_consumer_buf=v2c_buf.base
-        )
+        pl.aic_initialize_pipe(dir_mask=3, slot_size=512, c2v_consumer_buf=c2v_peer, v2c_consumer_buf=v2c_buf)
 
         # Receive preprocessed tile from Vector (V2C direction)
         received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=0)
@@ -336,7 +332,7 @@ class TestCrossCoreTpushTpopCodegen:
                 output: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
             ) -> pl.Tensor[[16, 16], pl.FP16]:
                 pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf.base)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
 
                 received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
                 if flag == 0:
@@ -369,7 +365,7 @@ class TestCrossCoreTpushTpopCodegen:
             @pl.function(type=pl.FunctionType.AIV)
             def vector_consumer(self):
                 pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
                 received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
                 pl.tfree_to_aiv(received)
 
@@ -394,7 +390,7 @@ class TestCrossCoreTpushTpopCodegen:
                 output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
-                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf.base)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
 
                 received: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
                 if flag == 0:

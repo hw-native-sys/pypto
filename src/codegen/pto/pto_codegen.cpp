@@ -766,24 +766,6 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
-void PTOCodegen::RecordReserveBufferSSA(const std::string& ssa) {
-  INTERNAL_CHECK(fs_.reserve_buf_ssa.empty())
-      << "Internal error: multiple reserve_buffer ops in the same function not supported, "
-      << "existing: " << fs_.reserve_buf_ssa << ", new: " << ssa;
-  fs_.reserve_buf_ssa = ssa;
-}
-
-std::string PTOCodegen::GetReserveBufferSSA() const { return fs_.reserve_buf_ssa; }
-
-void PTOCodegen::RecordImportBufferSSA(const std::string& ssa) {
-  INTERNAL_CHECK(fs_.import_buf_ssa.empty())
-      << "Internal error: multiple import_peer_buffer ops in the same function not supported, "
-      << "existing: " << fs_.import_buf_ssa << ", new: " << ssa;
-  fs_.import_buf_ssa = ssa;
-}
-
-std::string PTOCodegen::GetImportBufferSSA() const { return fs_.import_buf_ssa; }
-
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa) { fs_.gm_slot_buffer_ssa = ssa; }
 
 std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_ssa; }

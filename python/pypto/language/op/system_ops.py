@@ -28,61 +28,10 @@ from pypto.ir.op.system_ops import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
 
-from ..typing import Tile
-
-
-class ReservedBuffer:
-    """Return value from pl.reserve_buffer(), providing access to buffer metadata.
-
-    The underlying IR node is a ``Call`` whose result type is ``ScalarType(INT32)``,
-    matching PTO ``pto.reserve_buffer ... -> i32``.
-
-    Attributes:
-        base: Base address in local SRAM (int literal or AUTO sentinel).
-        size: Buffer size in bytes.
-        name: Buffer name for cross-core reference.
-    """
-
-    def __init__(self, expr: Call, name: str, size: int, base: int) -> None:
-        self._expr = expr
-        self.name = name
-        self.size = size
-        self.base = base
-
-    @property
-    def call(self) -> Call:
-        """The ``system.reserve_buffer`` IR call (i32 SSA result)."""
-        return self._expr
-
-
-class ImportedBuffer:
-    """Return value from pl.import_peer_buffer(), providing access to peer buffer metadata.
-
-    The underlying IR node is a ``Call`` whose result type is ``ScalarType(INT32)``,
-    matching PTO ``pto.import_reserved_buffer ... -> i32``.
-
-    Attributes:
-        base: Peer buffer base address (resolved by allocator if peer uses AUTO).
-        name: Buffer name matching the peer's reserve_buffer name.
-        peer_func: Name of the peer function that owns the buffer.
-    """
-
-    def __init__(self, expr: Call, name: str, peer_func: str) -> None:
-        self._expr = expr
-        self.name = name
-        self.peer_func = peer_func
-        self.base: int = AUTO  # resolved by allocator pass
-
-    @property
-    def call(self) -> Call:
-        """The ``system.import_peer_buffer`` IR call (i32 SSA result)."""
-        return self._expr
-
+from ..typing import Scalar, Tile
 
 __all__ = [
     "AUTO",
-    "ImportedBuffer",
-    "ReservedBuffer",
     "sync_src",
     "sync_dst",
     "bar_v",
@@ -159,7 +108,7 @@ def tpop_from_aiv(
     return Tile(expr=call)
 
 
-def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> ReservedBuffer:
+def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Scalar:
     """Reserve a named buffer for cross-core communication.
 
     Args:
@@ -171,13 +120,13 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
         span: Optional source span.
 
     Returns:
-        ReservedBuffer with .base, .size, .name and .call (IR ``Call`` with INT32 scalar type).
+        ``pl.Scalar[pl.INT32]`` wrapping the ``system.reserve_buffer`` IR call (PTO ``... -> i32``).
     """
     call = _ir_ops.reserve_buffer(name=name, size=size, base=base, span=span)
-    return ReservedBuffer(expr=call, name=name, size=size, base=base)
+    return Scalar(DataType.INT32, call)
 
 
-def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> ImportedBuffer:
+def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Scalar:
     """Import a buffer from a peer function in the same group.
 
     Args:
@@ -186,8 +135,7 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
         span: Optional source span.
 
     Returns:
-        ImportedBuffer with .base, .name, .peer_func and .call (IR ``Call`` with INT32 scalar type).
-        The .base value is resolved by the allocator pass.
+        ``pl.Scalar[pl.INT32]`` wrapping the ``system.import_peer_buffer`` IR call (PTO ``... -> i32``).
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
-    return ImportedBuffer(expr=call, name=name, peer_func=peer_func)
+    return Scalar(DataType.INT32, call)

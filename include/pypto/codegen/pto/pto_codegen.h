@@ -236,26 +236,6 @@ class PTOCodegen : public CodegenBase {
   std::string GetSSATileBufType(const std::string& ssa_name) const;
 
   /**
-   * @brief Record the SSA name produced by reserve_buffer for cross-core pipe setup
-   */
-  void RecordReserveBufferSSA(const std::string& ssa);
-
-  /**
-   * @brief Get the recorded reserve_buffer SSA name (empty if none)
-   */
-  [[nodiscard]] std::string GetReserveBufferSSA() const;
-
-  /**
-   * @brief Record the SSA name produced by import_reserved_buffer for cross-core pipe setup
-   */
-  void RecordImportBufferSSA(const std::string& ssa);
-
-  /**
-   * @brief Get the recorded import_reserved_buffer SSA name (empty if none)
-   */
-  [[nodiscard]] std::string GetImportBufferSSA() const;
-
-  /**
    * @brief Record the SSA name of the __gm_pipe_buffer function parameter
    *
    * On Ascend910B (a2a3), the GM slot buffer is a function parameter used as
@@ -440,8 +420,6 @@ class PTOCodegen : public CodegenBase {
     std::string current_result_buf;
     std::shared_ptr<const ir::TileType> current_result_tile_type;
 
-    std::string reserve_buf_ssa;
-    std::string import_buf_ssa;
     std::string gm_slot_buffer_ssa;
 
     std::string current_expr_value;
@@ -482,8 +460,6 @@ class PTOCodegen : public CodegenBase {
       current_result_buf.clear();
       current_result_tile_type = nullptr;
 
-      reserve_buf_ssa.clear();
-      import_buf_ssa.clear();
       gm_slot_buffer_ssa.clear();
 
       current_expr_value.clear();

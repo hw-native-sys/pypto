@@ -495,7 +495,8 @@ def const(value: int | float, dtype: Any) -> int | float:
         dtype: DataType for the constant
 
     Returns:
-        The value unchanged (parser handles dtype semantics)
+        Parser builds ``ConstInt``/``ConstFloat`` IR; the runtime stub returns
+        the numeric value unchanged (type checking sees ``int``/``float``).
     """
     return value
 
