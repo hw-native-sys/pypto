@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
@@ -156,7 +157,33 @@ static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.valid_shape = out_shape;
   InheritTileViewLayout(tile_view, src_type);
-  return std::make_shared<TileType>(out_shape, src_type->dtype_, std::nullopt, tile_view);
+
+  // Read optional output_dtype kwarg for cross-type bit extraction (e.g. FP32→UINT32).
+  // Hardware TGATHER mask form only requires sizeof(dst) == sizeof(src), not same type.
+  bool has_output_dtype = false;
+  DataType out_dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "output_dtype") {
+      if (value.type() == typeid(DataType)) {
+        out_dtype = AnyCast<DataType>(value, "kwarg key: output_dtype");
+      } else if (value.type() == typeid(int)) {
+        out_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: output_dtype"));
+      }
+      has_output_dtype = true;
+      break;
+    }
+  }
+  if (!has_output_dtype) {
+    out_dtype = src_type->dtype_;
+  } else {
+    CHECK(out_dtype.GetBit() == src_type->dtype_.GetBit())
+        << "The operator " << op_name
+        << " output_dtype must have the same bit width as src dtype ("
+        << src_type->dtype_.ToString() << " = " << src_type->dtype_.GetBit()
+        << " bits), but got " << out_dtype.ToString() << " = " << out_dtype.GetBit() << " bits";
+  }
+
+  return std::make_shared<TileType>(out_shape, out_dtype, std::nullopt, tile_view);
 }
 
 REGISTER_OP("tile.gather_mask")
@@ -164,6 +191,7 @@ REGISTER_OP("tile.gather_mask")
     .set_description("Gather elements by mask pattern (maps to pto.tgather with maskPattern)")
     .add_argument("src", "Source tile (FP16, FP32, INT16, or INT32)")
     .set_attr<int>("mask_pattern")
+    .set_attr<DataType>("output_dtype")  // optional: cross-type output (sizeof equality required)
     .set_input_memory(0, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()

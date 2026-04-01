@@ -1593,10 +1593,10 @@ def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile: ...
 
 
 @overload
-def gather(src: Tile, *, mask_pattern: int) -> Tile: ...
+def gather(src: Tile, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tile: ...
 
 
-def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, mask_pattern: int | None = None) -> Tile:
+def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, mask_pattern: int | None = None, output_dtype: int | DataType | None = None) -> Tile:
     """Gather elements from src tile, using either indices or a fixed mask pattern.
 
     Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
@@ -1608,6 +1608,10 @@ def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, m
         tmp: Temporary workspace tile (INT32). Required for index form.
         mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype for mask form only. When provided, the result
+            tile has this dtype instead of src's dtype (bit reinterpretation, no conversion).
+            Hardware requires sizeof(dst_dtype) == sizeof(src_dtype). Example: use
+            output_dtype=pl.UINT32 to extract sort32 index bits from FP32 memory.
 
     Returns:
         Tile with gathered elements
@@ -1616,12 +1620,19 @@ def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, m
         # Index form
         out = gather(src, indices, tmp)
 
-        # Mask form
+        # Mask form (same dtype)
         out = gather(src, mask_pattern=1)
+
+        # Mask form with cross-type output (FP32 bits → UINT32)
+        out = gather(src, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
     """
     if mask_pattern is not None:
-        call_expr = _ir_ops.gather_mask(src.unwrap(), mask_pattern)
+        if output_dtype is not None and (indices is not None or tmp is not None):
+            raise ValueError("output_dtype is only valid for the mask form of gather()")
+        call_expr = _ir_ops.gather(src.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
         return Tile(expr=call_expr)
+    if output_dtype is not None:
+        raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
     if indices is None or tmp is None:
         raise ValueError(
             "gather() requires either (indices, tmp) for index form, "

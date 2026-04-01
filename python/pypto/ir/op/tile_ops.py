@@ -1986,6 +1986,7 @@ def gather(
     tmp: Expr | None = None,
     *,
     mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
     span: Span | None = None,
 ) -> Call:
     """Gather elements from src, using either indices or a fixed mask pattern.
@@ -1999,6 +2000,10 @@ def gather(
         tmp: Temporary workspace tile (INT32). Required for index form.
         mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype for mask form (keyword-only). When provided,
+            the result tile has this dtype instead of src's dtype. The hardware only
+            requires sizeof(dst_dtype) == sizeof(src_dtype). Useful for extracting
+            UINT32 index bits from FP32 sort32 output (bit reinterpretation).
         span: Optional source span
 
     Returns:
@@ -2007,6 +2012,8 @@ def gather(
     actual_span = _get_span_or_capture(span)
     if mask_pattern is not None:
         kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
+        if output_dtype is not None:
+            kwargs["output_dtype"] = output_dtype  # int | DataType, C++ handles both
         return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
     if indices is None or tmp is None:
         raise ValueError(

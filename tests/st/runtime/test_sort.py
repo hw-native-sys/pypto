@@ -203,8 +203,8 @@ class Sort32GatherMaskFP32Program:
 class MrgSort1FP32Program:
     """Sort 4×32-element blocks with sort32, then merge with mrgsort format1.
 
-    Pipeline: sort32 → mrgsort(block_len=64) → gather(P0101) val + gather(P1010) idx
-    idx output is FP32 holding UINT32 bit patterns (sort32 convention).
+    Pipeline: sort32 → mrgsort(block_len=64) → gather(P0101) val + gather(P1010, UINT32) idx
+    idx output is UINT32 holding the actual sorted index values.
     """
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -213,8 +213,8 @@ class MrgSort1FP32Program:
         src_tensor: pl.Tensor[[1, 128], pl.FP32],
         idx_tensor: pl.Tensor[[1, 128], pl.UINT32],
         val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-        idx_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.FP32]]:
+        idx_output: pl.Out[pl.Tensor[[1, 128], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.UINT32]]:
         src_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(
             src_tensor, offsets=[0, 0], shapes=[1, 128]
         )
@@ -225,17 +225,19 @@ class MrgSort1FP32Program:
         sorted_tile: pl.Tile[[1, 256], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
         # Merge the 4 sorted 64-col runs into one sorted sequence (block_len=64, repeatTimes=1)
         merged: pl.Tile[[1, 256], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=64)
-        # Extract sorted values (even positions) and indices (odd positions, UINT32 bits in f32)
+        # Extract sorted values (even positions, FP32)
         vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(
             merged, mask_pattern=pl.tile.MaskPattern.P0101
         )
-        idx: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(
-            merged, mask_pattern=pl.tile.MaskPattern.P1010
+        # Extract indices (odd positions): bit-reinterpret FP32 → UINT32 in one step.
+        # Hardware TGATHER mask form requires sizeof(dst) == sizeof(src), not same type.
+        idx: pl.Tile[[1, 128], pl.UINT32] = pl.tile.gather(
+            merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
         )
         out_val: pl.Tensor[[1, 128], pl.FP32] = pl.store(
             vals, offsets=[0, 0], output_tensor=val_output
         )
-        out_idx: pl.Tensor[[1, 128], pl.FP32] = pl.store(
+        out_idx: pl.Tensor[[1, 128], pl.UINT32] = pl.store(
             idx, offsets=[0, 0], output_tensor=idx_output
         )
         return out_val, out_idx
@@ -246,8 +248,8 @@ class MrgSort1FP32Program:
         src_tensor: pl.Tensor[[1, 128], pl.FP32],
         idx_tensor: pl.Tensor[[1, 128], pl.UINT32],
         val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-        idx_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.FP32]]:
+        idx_output: pl.Out[pl.Tensor[[1, 128], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.UINT32]]:
         val_output, idx_output = self.mrgsort1_kernel(
             src_tensor, idx_tensor, val_output, idx_output
         )
@@ -323,7 +325,7 @@ class MrgSort1FP32TestCase(PTOTestCase):
 
     4×32-element FP32 blocks are sorted by sort32, merged by mrgsort format1
     (block_len=64, repeatTimes=1), then split into sorted values and permuted indices.
-    idx_output holds UINT32 bit patterns stored in f32 memory (sort32 convention).
+    idx_output is UINT32 — index bits are extracted directly via cross-type gather_mask.
     """
 
     def get_name(self) -> str:
@@ -341,7 +343,7 @@ class MrgSort1FP32TestCase(PTOTestCase):
             TensorSpec("src_tensor", [1, 128], DataType.FP32, init_value=src),
             TensorSpec("idx_tensor", [1, 128], DataType.UINT32, init_value=_IDX_1x128),
             TensorSpec("val_output", [1, 128], DataType.FP32, is_output=True),
-            TensorSpec("idx_output", [1, 128], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 128], DataType.UINT32, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -351,7 +353,7 @@ class MrgSort1FP32TestCase(PTOTestCase):
         """Compute expected val and idx outputs.
 
         val_output: all 128 values sorted descending.
-        idx_output: within-group position × 2 (UINT32 bits in f32 memory), sorted by value.
+        idx_output: within-group position × 2 as UINT32, sorted by value.
             For FP32 sort32: each idx = 2 × (original position within its 32-element group).
         """
         src = tensors["src_tensor"].flatten()  # [128]
@@ -360,9 +362,9 @@ class MrgSort1FP32TestCase(PTOTestCase):
         # Expected sorted values
         tensors["val_output"][:] = src[global_order].unsqueeze(0)
 
-        # Expected idx: within-group position × 2, reinterpreted as f32 bits
+        # Expected idx: within-group position × 2 as UINT32 (int32 in PyTorch, same bits)
         within_group_pos = global_order % 32
-        expected_idx_u32 = (within_group_pos * 2).to(torch.int32).view(torch.float32)
+        expected_idx_u32 = (within_group_pos * 2).to(torch.int32)
         tensors["idx_output"][:] = expected_idx_u32.unsqueeze(0)
 
 
