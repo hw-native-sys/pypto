@@ -486,6 +486,87 @@ def add_scalar(x: pl.Tensor[[64], pl.FP32], scalar: pl.Scalar[pl.FP32]) -> pl.Te
         assert func.params[1].type.dtype == pl.FP32
 
 
+class TestExecErrorDiagnostics:
+    """Tests for exec-time error diagnostics in parse()."""
+
+    def test_exec_runtime_error_becomes_parser_syntax_error(self):
+        """Verify that a runtime error during exec() produces a ParserSyntaxError with span."""
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        # pl.FunctionType exists but FunctionType.BadType does not — caught by pre-validator
+        code = """
+@pl.function(type=pl.FunctionType.BadType)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        assert err.span is not None
+        assert "BadType" in err.message or "FunctionType" in err.message
+
+    def test_exec_runtime_error_span_has_correct_filename(self):
+        """Verify that ParserSyntaxError from exec error has the expected filename in span."""
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        code = """
+@pl.function(type=pl.FunctionType.BadType)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code, filename="test_file.py")
+        err = exc_info.value
+        assert err.span is not None
+        assert err.span["filename"] == "test_file.py"
+
+    def test_exec_runtime_error_includes_source_lines(self):
+        """Verify that ParserSyntaxError from exec error includes source lines for context."""
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        code = """
+@pl.function(type=pl.FunctionType.BadType)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        assert err.source_lines is not None
+        assert len(err.source_lines) > 0
+
+    def test_exec_error_column_points_to_bad_attribute(self):
+        """Column in span points to the start of the bad attribute (not column 0)."""
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        code = """
+@pl.function(type=pl.FunctionType.BadType)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        assert err.span is not None
+        assert err.span["column"] > 0  # Not column 0 — points at 'BadType'
+
+    def test_exec_error_hint_lists_valid_values(self):
+        """Hint message lists the valid enum values."""
+        from pypto.language.parser.diagnostics import ParserSyntaxError  # noqa: PLC0415
+
+        code = """
+@pl.function(type=pl.FunctionType.BadType)
+def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    return x
+"""
+        with pytest.raises(ParserSyntaxError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        assert err.hint is not None
+        assert "AIC" in err.hint  # Valid value should be listed
+        assert "AIV" in err.hint
+
+
 class TestScalarRangeRoundTrip:
     """Tests for round-trip (print -> parse) of pl.range() with Scalar arguments."""
 

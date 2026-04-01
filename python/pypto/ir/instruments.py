@@ -70,14 +70,16 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
 
         # --- Step 2: parse ---
         try:
-            reparsed = parse(printed)
+            reparsed = parse(printed, filename="<roundtrip>")
         except Exception as exc:
+            from pypto.language.parser.diagnostics import ErrorRenderer, ParserError  # noqa: PLC0415
+
+            if isinstance(exc, ParserError):
+                error_detail = ErrorRenderer(use_color=False).render(exc)
+            else:
+                error_detail = f"{type(exc).__name__}: {exc}"
             raise RuntimeError(
-                f"[RoundtripInstrument] Parse failed after pass '{pass_name}'.\n"
-                f"\n"
-                f"Error: {exc}\n"
-                f"\n"
-                f"--- Printed IR ---\n{printed}"
+                f"[RoundtripInstrument] Parse failed after pass '{pass_name}'.\n\n{error_detail}"
             ) from exc
 
         if not isinstance(reparsed, _ir.Program):

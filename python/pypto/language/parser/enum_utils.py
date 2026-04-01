@@ -48,6 +48,15 @@ SPLIT_MODE_MAP: dict[str, ir.SplitMode] = {
     "LEFT_RIGHT": ir.SplitMode.LEFT_RIGHT,
 }
 
+FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
+    "Opaque": ir.FunctionType.Opaque,
+    "Orchestration": ir.FunctionType.Orchestration,
+    "InCore": ir.FunctionType.InCore,
+    "AIC": ir.FunctionType.AIC,
+    "AIV": ir.FunctionType.AIV,
+    "Group": ir.FunctionType.Group,
+}
+
 
 def extract_enum_value(
     value: ast.expr,
@@ -88,3 +97,12 @@ def extract_enum_value(
     ):
         return enum_map[value.attr]
     raise ParserSyntaxError(f"Expected {qualified}.<name>")
+
+
+__all__ = [
+    "LEVEL_MAP",
+    "ROLE_MAP",
+    "SPLIT_MODE_MAP",
+    "FUNCTION_TYPE_MAP",
+    "extract_enum_value",
+]

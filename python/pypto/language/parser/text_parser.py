@@ -9,13 +9,25 @@
 
 """Parse DSL functions from text or files without requiring decorator syntax."""
 
+import ast
 import linecache
 import sys
 import types
 
 from pypto.pypto_core import ir
 
-from .diagnostics.exceptions import ParserError
+from .diagnostics.exceptions import ParserError, ParserSyntaxError
+from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP
+
+
+def _extract_exec_error_line(tb, filename: str) -> int | None:
+    """Return the last line number in the traceback that comes from the given filename."""
+    line_num = None
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == filename:
+            line_num = tb.tb_lineno
+        tb = tb.tb_next
+    return line_num
 
 
 class _AutoDynVar(dict):
@@ -33,6 +45,96 @@ class _AutoDynVar(dict):
             self[key] = dvar
             return dvar
         raise KeyError(key)
+
+
+# Maps kwarg name → (enum_map, enum_class_name, pl-qualified name)
+_ENUM_KWARGS: dict[str, tuple[dict, str, str]] = {
+    "type": (FUNCTION_TYPE_MAP, "FunctionType", "pl.FunctionType"),
+    "level": (LEVEL_MAP, "Level", "pl.Level"),
+    "role": (ROLE_MAP, "Role", "pl.Role"),
+}
+
+
+def _prevalidate_decorator_args(code: str, filename: str) -> None:
+    """Pre-validate @pl.function decorator kwargs before exec().
+
+    Walks the Python AST to check that enum-typed keyword arguments
+    (type=, level=, role=) have valid values.  Raises
+    ParserSyntaxError with column-accurate span and a hint listing valid
+    values — before exec() has a chance to raise a bare AttributeError.
+    """
+    try:
+        tree = ast.parse(code, filename=filename)
+    except SyntaxError:
+        return  # Syntax errors are caught later in compile()
+
+    source_lines = code.splitlines()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            is_pl_function = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "function"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "pl"
+            ) or (isinstance(func, ast.Name) and func.id == "function")
+            if not is_pl_function:
+                continue
+            for keyword in decorator.keywords:
+                if keyword.arg not in _ENUM_KWARGS:
+                    continue
+                value = keyword.value
+                if isinstance(value, ast.Constant) and value.value is None:
+                    continue  # None is always valid
+                _validate_enum_kwarg(value, keyword.arg, filename, source_lines)
+
+
+def _validate_enum_kwarg(
+    value: ast.expr,
+    kwarg: str,
+    filename: str,
+    source_lines: list[str],
+) -> None:
+    """Raise ParserSyntaxError with column-accurate span for an invalid enum kwarg."""
+    enum_map, enum_name, qualified = _ENUM_KWARGS[kwarg]
+
+    if not isinstance(value, ast.Attribute):
+        return  # Not an attribute expression — let exec() handle it
+
+    attr_name = value.attr
+    if attr_name not in enum_map:
+        # Column: end_col_offset − len(attr) gives start of the attribute name
+        line = getattr(value, "lineno", 0)
+        col = max(0, getattr(value, "end_col_offset", 0) - len(attr_name))
+        span = ir.Span(filename, line, col)
+        raise ParserSyntaxError(
+            f"Unknown {enum_name} value: {attr_name}",
+            span=span,
+            hint=f"Valid values: {', '.join(sorted(enum_map.keys()))}",
+            source_lines=source_lines,
+        )
+
+    # Validate prefix: EnumName.X or pl.EnumName.X
+    valid_prefix = (isinstance(value.value, ast.Name) and value.value.id == enum_name) or (
+        isinstance(value.value, ast.Attribute)
+        and isinstance(value.value.value, ast.Name)
+        and value.value.value.id == "pl"
+        and value.value.attr == enum_name
+    )
+    if not valid_prefix:
+        line = getattr(value, "lineno", 0)
+        col = getattr(value, "col_offset", 0)
+        span = ir.Span(filename, line, col)
+        raise ParserSyntaxError(
+            f"Expected {qualified}.<name>",
+            span=span,
+            hint=f"Use {qualified}.<name>.",
+            source_lines=source_lines,
+        )
 
 
 def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
@@ -118,12 +220,21 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     # dynamic shape variable references that may not be in scope during re-parse
     exec_ns = _AutoDynVar(temp_module.__dict__)
     try:
+        _prevalidate_decorator_args(code, filename)
         exec(compiled_code, exec_ns)
-    except ParserError as e:
+    except ParserError:
         # Re-raise ParserError as-is, it already has source lines
-        raise e
+        raise
     except Exception as e:
-        # Re-raise with context about where the error occurred
+        # Convert exec-time errors to ParserSyntaxError with source location when possible.
+        line_num = _extract_exec_error_line(e.__traceback__, filename)
+        if line_num is not None:
+            span = ir.Span(filename, line_num, 0)
+            raise ParserSyntaxError(
+                f"{type(e).__name__}: {e}",
+                span=span,
+                source_lines=code.splitlines(),
+            ) from e
         raise RuntimeError(f"Error executing code from {filename}: {e}") from e
     finally:
         # Clean up linecache entry

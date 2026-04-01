@@ -22,7 +22,7 @@ from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
 from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
-from .enum_utils import LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 
 
 @dataclasses.dataclass
@@ -200,16 +200,6 @@ def _has_pl_function_decorator(node: ast.FunctionDef) -> bool:
     return False
 
 
-_FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
-    "Opaque": ir.FunctionType.Opaque,
-    "Orchestration": ir.FunctionType.Orchestration,
-    "InCore": ir.FunctionType.InCore,
-    "AIC": ir.FunctionType.AIC,
-    "AIV": ir.FunctionType.AIV,
-    "Group": ir.FunctionType.Group,
-}
-
-
 def _find_function_decorator_call(node: ast.FunctionDef) -> ast.Call | None:
     """Find the @pl.function(...) Call decorator on a FunctionDef, if present.
 
@@ -264,12 +254,12 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
             and value.value.value.id == "pl"
             and value.value.attr == "FunctionType"
         )
-        if not is_function_type_attr or value.attr not in _FUNCTION_TYPE_MAP:
+        if not is_function_type_attr or value.attr not in FUNCTION_TYPE_MAP:
             raise ParserSyntaxError(
                 "Unsupported `@pl.function`(type=...) value",
                 hint="Use pl.FunctionType.<name>.",
             )
-        return _FUNCTION_TYPE_MAP[value.attr]
+        return FUNCTION_TYPE_MAP[value.attr]
 
     return ir.FunctionType.Opaque
 

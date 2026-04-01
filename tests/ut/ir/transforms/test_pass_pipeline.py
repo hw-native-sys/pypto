@@ -500,5 +500,46 @@ class TestReportInstrument:
         assert "cube_kernel" in report_text
 
 
+class TestRoundtripInstrument:
+    """Test RoundtripInstrument error formatting."""
+
+    def test_parse_failure_no_ir_dump(self):
+        """RoundtripInstrument error does not include full IR dump when parse fails."""
+        from unittest import mock  # noqa: PLC0415
+
+        from pypto.ir.instruments import make_roundtrip_instrument  # noqa: PLC0415
+
+        instrument = make_roundtrip_instrument()
+
+        with mock.patch(
+            "pypto.language.parser.text_parser.parse",
+            side_effect=RuntimeError("mock parse error"),
+        ):
+            with passes.PassContext([instrument]):
+                with pytest.raises(RuntimeError) as exc_info:
+                    passes.convert_to_ssa()(_make_non_ssa_program())
+
+        assert "--- Printed IR ---" not in str(exc_info.value)
+        assert "mock parse error" in str(exc_info.value)
+
+    def test_parse_failure_includes_pass_name(self):
+        """RoundtripInstrument error includes the name of the failing pass."""
+        from unittest import mock  # noqa: PLC0415
+
+        from pypto.ir.instruments import make_roundtrip_instrument  # noqa: PLC0415
+
+        instrument = make_roundtrip_instrument()
+
+        with mock.patch(
+            "pypto.language.parser.text_parser.parse",
+            side_effect=RuntimeError("mock parse error"),
+        ):
+            with passes.PassContext([instrument]):
+                with pytest.raises(RuntimeError) as exc_info:
+                    passes.convert_to_ssa()(_make_non_ssa_program())
+
+        assert "ConvertToSSA" in str(exc_info.value)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
