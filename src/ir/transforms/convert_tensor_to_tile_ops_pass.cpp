@@ -1631,24 +1631,29 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
     std::vector<IfStmtSinkCandidate> sink_candidates;
 
     if (last_if_stmt && last_if_stmt->else_body_.has_value() && !last_if_stmt->return_vars_.empty()) {
+      // Pre-build map from IfStmt return var pointers to their indices.
+      std::unordered_map<const Var*, size_t> if_return_var_to_index;
+      for (size_t rv_i = 0; rv_i < last_if_stmt->return_vars_.size(); ++rv_i) {
+        if_return_var_to_index[last_if_stmt->return_vars_[rv_i].get()] = rv_i;
+      }
+
       for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
         auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
         auto ret_var = As<Var>(ret_expr);
         if (!ret_var || !As<TileType>(ret_var->GetType())) continue;
 
-        for (size_t rv_i = 0; rv_i < last_if_stmt->return_vars_.size(); ++rv_i) {
-          if (last_if_stmt->return_vars_[rv_i].get() == ret_var.get()) {
-            auto map_it = iter_arg_mapping.find(i);
-            if (map_it != iter_arg_mapping.end()) {
-              size_t arg_idx = map_it->second;
-              if (arg_idx < func->params_.size()) {
-                auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
-                if (orig_tensor_type) {
-                  sink_candidates.push_back({i, rv_i, arg_idx, orig_tensor_type});
-                }
-              }
+        auto if_rv_it = if_return_var_to_index.find(ret_var.get());
+        if (if_rv_it == if_return_var_to_index.end()) continue;
+        size_t rv_i = if_rv_it->second;
+
+        auto map_it = iter_arg_mapping.find(i);
+        if (map_it != iter_arg_mapping.end()) {
+          size_t arg_idx = map_it->second;
+          if (arg_idx < func->params_.size()) {
+            auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
+            if (orig_tensor_type) {
+              sink_candidates.push_back({i, rv_i, arg_idx, orig_tensor_type});
             }
-            break;
           }
         }
       }
@@ -1749,6 +1754,25 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
         INTERNAL_CHECK(orig_tensor_type)
             << "Internal error: return type " << i << " should be TensorType but got "
             << func->return_types_[i]->TypeName();
+
+        // Check if this return value has an iter-arg mapping: store to the
+        // existing In param (auto-promoted to InOut) instead of adding a new Out param.
+        auto map_it = iter_arg_mapping.find(i);
+        if (map_it != iter_arg_mapping.end()) {
+          size_t arg_idx = map_it->second;
+          INTERNAL_CHECK(arg_idx < new_params.size())
+              << "Internal error: iter-arg mapping arg_idx " << arg_idx << " exceeds param count "
+              << new_params.size();
+
+          auto in_param = new_params[arg_idx];
+          auto offsets = MakeZeroOffsets(orig_tensor_type->shape_.size(), span);
+          auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, in_param}, span);
+          auto store_var = std::make_shared<Var>(MakeStoreResultName(i), store_call->GetType(), span);
+          new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          new_return_types.push_back(store_call->GetType());
+          new_return_exprs.push_back(store_var);
+          continue;
+        }
 
         // Add output tensor parameter
         std::string out_name = MakeOutParamName(num_added_outputs);
