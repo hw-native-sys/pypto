@@ -209,6 +209,27 @@ const IRPropertySet& GetDefaultVerifyProperties();
  */
 VerificationLevel GetDefaultVerificationLevel();
 
+/**
+ * @brief Controls automatic warning checks in PassPipeline
+ *
+ * Warnings are non-fatal diagnostics for likely user errors or pass bugs.
+ */
+enum class WarningLevel {
+  None,         ///< All warnings disabled
+  PrePipeline,  ///< Run once before first pass (default — user-facing)
+  PostPass,     ///< Run after every pass (pass debugging)
+  Both          ///< Both phases
+};
+
+/**
+ * @brief Get the default warning level from environment
+ *
+ * Checks the PYPTO_WARNING_LEVEL environment variable on first call
+ * (values: "none", "pre_pipeline", "post_pass", "both").
+ * Defaults to PrePipeline.
+ */
+WarningLevel GetDefaultWarningLevel();
+
 }  // namespace ir
 }  // namespace pypto
 

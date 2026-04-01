@@ -103,6 +103,8 @@ def compile(
         ctx = _passes.PassContext(
             list(outer.get_instruments()) + instruments,
             outer.get_verification_level(),
+            outer.get_warning_level(),
+            outer.get_disabled_warnings(),
         )
 
     with ctx:

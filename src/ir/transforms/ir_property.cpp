@@ -135,5 +135,26 @@ const IRPropertySet& GetDefaultVerifyProperties() {
   return props;
 }
 
+WarningLevel GetDefaultWarningLevel() {
+  static const WarningLevel level = [] {
+    const char* env = std::getenv("PYPTO_WARNING_LEVEL");
+    if (env == nullptr) {
+      return WarningLevel::PrePipeline;
+    }
+    std::string val(env);
+    if (val == "none") {
+      return WarningLevel::None;
+    }
+    if (val == "post_pass") {
+      return WarningLevel::PostPass;
+    }
+    if (val == "both") {
+      return WarningLevel::Both;
+    }
+    return WarningLevel::PrePipeline;
+  }();
+  return level;
+}
+
 }  // namespace ir
 }  // namespace pypto

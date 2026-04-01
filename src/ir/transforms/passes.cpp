@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
+#include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace pypto {
 namespace ir {
@@ -205,6 +206,18 @@ PassPipeline::PassPipeline() = default;
 
 void PassPipeline::AddPass(Pass pass) { passes_.push_back(std::move(pass)); }
 
+namespace {
+
+void EmitWarnings(const std::vector<Diagnostic>& diags, const std::string& phase) {
+  for (const auto& d : diags) {
+    INTERNAL_CHECK(d.severity == DiagnosticSeverity::Warning)
+        << "Warning verifier emitted non-Warning diagnostic: " << d.rule_name;
+    LOG_WARN << "[" << d.rule_name << "] (" << phase << ") " << d.message;
+  }
+}
+
+}  // namespace
+
 ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   CHECK(program) << "PassPipeline cannot run on null program";
 
@@ -216,6 +229,20 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   VerificationLevel level = ctx ? ctx->GetVerificationLevel() : GetDefaultVerificationLevel();
   const bool should_verify = level != VerificationLevel::None;
   IRPropertySet verified;
+
+  // Warning configuration from PassContext or env-var defaults
+  WarningLevel wlevel = ctx ? ctx->GetWarningLevel() : GetDefaultWarningLevel();
+  const bool should_warn = wlevel != WarningLevel::None;
+  WarningCheckSet effective_checks;
+  if (should_warn) {
+    WarningCheckSet disabled = ctx ? ctx->GetDisabledWarnings() : WarningCheckSet{};
+    effective_checks = WarningVerifierRegistry::GetAllChecks().Difference(disabled);
+  }
+
+  if (should_warn && (wlevel == WarningLevel::PrePipeline || wlevel == WarningLevel::Both)) {
+    auto diags = WarningVerifierRegistry::GetInstance().RunChecks(effective_checks, current);
+    EmitWarnings(diags, "pipeline_input");
+  }
 
   // Verify structural invariants at pipeline start
   if (should_verify) {
@@ -240,6 +267,11 @@ ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
         pass::VerifyProperties(to_verify, current, p.GetName());
         verified = verified.Union(to_verify);
       }
+    }
+
+    if (should_warn && (wlevel == WarningLevel::PostPass || wlevel == WarningLevel::Both)) {
+      auto diags = WarningVerifierRegistry::GetInstance().RunChecks(effective_checks, current);
+      EmitWarnings(diags, p.GetName());
     }
   }
   return current;

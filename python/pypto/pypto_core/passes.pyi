@@ -70,6 +70,45 @@ class VerificationLevel(Enum):
     BASIC = ...
     ROUNDTRIP = ...
 
+class WarningLevel(Enum):
+    """Controls automatic warning checks in PassPipeline."""
+
+    NONE = ...
+    PRE_PIPELINE = ...
+    POST_PASS = ...
+    BOTH = ...
+
+class WarningCheck(Enum):
+    """Identifies a specific warning check."""
+
+    UnusedVariable = ...
+
+class WarningCheckSet:
+    """A set of warning checks backed by a bitset."""
+
+    def __init__(self) -> None: ...
+    def insert(self, check: WarningCheck) -> None: ...
+    def remove(self, check: WarningCheck) -> None: ...
+    def contains(self, check: WarningCheck) -> bool: ...
+    def empty(self) -> bool: ...
+    def difference(self, other: WarningCheckSet) -> WarningCheckSet: ...
+    def to_list(self) -> list[WarningCheck]: ...
+    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+class WarningVerifierRegistry:
+    """Registry of warning verifiers."""
+
+    @staticmethod
+    def run_checks(checks: WarningCheckSet, program: Program) -> list[Diagnostic]: ...
+    @staticmethod
+    def get_all_checks() -> WarningCheckSet: ...
+
+def get_default_warning_level() -> WarningLevel:
+    """Get the default warning level (from PYPTO_WARNING_LEVEL env var, default: PrePipeline)."""
+
 def get_verified_properties() -> IRPropertySet:
     """Get the set of properties automatically verified during compilation."""
 
@@ -133,6 +172,17 @@ class CallbackInstrument(PassInstrument):
         """Create a callback instrument with optional before/after callbacks."""
         ...
 
+class WarningInstrument(PassInstrument):
+    """Instrument that runs warning checks before/after passes."""
+
+    def __init__(
+        self,
+        phase: WarningLevel = WarningLevel.PRE_PIPELINE,
+        checks: WarningCheckSet = ...,
+    ) -> None:
+        """Create a warning instrument with optional phase and check set."""
+        ...
+
 class ReportType(Enum):
     """Type of report to generate."""
 
@@ -155,15 +205,17 @@ class PassContext:
 
     When active, Pass.__call__ will run the context's instruments
     before/after each pass execution. Also controls automatic
-    verification level for PassPipeline.
+    verification and warning levels for PassPipeline.
     """
 
     def __init__(
         self,
         instruments: list[PassInstrument],
         verification_level: VerificationLevel = VerificationLevel.BASIC,
+        warning_level: WarningLevel = WarningLevel.PRE_PIPELINE,
+        disabled_warnings: WarningCheckSet = ...,
     ) -> None:
-        """Create a PassContext with instruments and optional verification level."""
+        """Create a PassContext with instruments, verification level, warning level, and disabled warnings."""
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -175,6 +227,14 @@ class PassContext:
     ) -> None: ...
     def get_verification_level(self) -> VerificationLevel:
         """Get the verification level for this context."""
+        ...
+
+    def get_warning_level(self) -> WarningLevel:
+        """Get the warning level for this context."""
+        ...
+
+    def get_disabled_warnings(self) -> WarningCheckSet:
+        """Get the disabled warning checks."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -346,8 +406,14 @@ __all__ = [
     "IRPropertySet",
     "VerificationMode",
     "VerificationLevel",
+    "WarningLevel",
+    "WarningCheck",
+    "WarningCheckSet",
+    "WarningVerifierRegistry",
+    "WarningInstrument",
     "get_verified_properties",
     "get_default_verification_level",
+    "get_default_warning_level",
     "get_default_verify_properties",
     "get_structural_properties",
     "verify_properties",
