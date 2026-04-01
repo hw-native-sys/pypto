@@ -1605,8 +1605,8 @@ class TestNestedControlFlow:
         ir.assert_structural_equal(After, Expected)
 
     def test_iter_arg_return_stores_to_inout_param(self):
-        """When InCore returns feed back as iter-args via ForStmt, tile.store targets
-        the existing In param (promoted to InOut) instead of adding a new Out param.
+        """When InCore returns feed back as iter-args via ForStmt, tile.store is sunk
+        into IfStmt branches targeting the existing In param (promoted to InOut).
 
         Pattern:
           orchestration: for i, (a, b) in range(N, init=(a0, b0)):
@@ -1617,7 +1617,8 @@ class TestNestedControlFlow:
                          else:    yield_(add(a,b), mul(a,b))
                          return phi_a, phi_b
 
-        Expected: store to In params (InOut), no Out params, no tensor.create at call site.
+        Expected: stores sunk into both branches, no Out params, no tensor.create at call site.
+        Alias chains are resolved so stores use the original tile, not an uninitialized alias.
         """
 
         @pl.program
@@ -1664,19 +1665,22 @@ class TestNestedControlFlow:
                 b: pl.InOut[pl.Tensor[[64], pl.FP32]],
                 n: pl.Scalar[pl.INT64],
             ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
-                a_tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
-                b_tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
+                a__tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
+                b__tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
                 if n == 0:
-                    ra_tile: pl.Tile[[64], pl.FP32] = a_tile
-                    rb_tile: pl.Tile[[64], pl.FP32] = b_tile
-                    phi_a, phi_b = pl.yield_(ra_tile, rb_tile)
+                    ra: pl.Tile[[64], pl.FP32] = a__tile  # noqa: F841
+                    rb: pl.Tile[[64], pl.FP32] = b__tile  # noqa: F841
+                    # Alias resolved: store from a__tile / b__tile directly
+                    ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(a__tile, [0], a)
+                    ret1__store: pl.Tensor[[64], pl.FP32] = pl.store(b__tile, [0], b)
+                    phi_a, phi_b = pl.yield_(ret0__store, ret1__store)
                 else:
-                    ra_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(a_tile, b_tile)
-                    rb_tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(a_tile, b_tile)
-                    phi_a, phi_b = pl.yield_(ra_tile, rb_tile)
-                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(phi_a, [0], a)
-                ret1__store: pl.Tensor[[64], pl.FP32] = pl.store(phi_b, [0], b)
-                return ret0__store, ret1__store
+                    ra__tile: pl.Tile[[64], pl.FP32] = pl.tile.add(a__tile, b__tile)
+                    rb__tile: pl.Tile[[64], pl.FP32] = pl.tile.mul(a__tile, b__tile)
+                    ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(ra__tile, [0], a)
+                    ret1__store: pl.Tensor[[64], pl.FP32] = pl.store(rb__tile, [0], b)
+                    phi_a, phi_b = pl.yield_(ret0__store, ret1__store)
+                return phi_a, phi_b
 
             @pl.function
             def main(

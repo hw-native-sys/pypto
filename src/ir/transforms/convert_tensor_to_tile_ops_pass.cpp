@@ -396,6 +396,64 @@ std::unordered_map<std::string, IterArgMapping> AnalyzeIterArgMappings(
   return result;
 }
 
+// ============================================================================
+// IfStmt store-sinking helpers
+// ============================================================================
+
+// Tile alias chains can form when IfStmt branches yield a var that is just an
+// alias for another tile var (e.g. from an assign `a = b` where both are tiles).
+// We cap the chain length to avoid infinite loops on malformed IR.
+constexpr int kMaxTileAliasChainDepth = 10;
+
+using TileAliasMap = std::unordered_map<const Var*, ExprPtr>;
+
+/// Build a tile alias map from a flat statement list.
+/// Scans for AssignStmts where the value is another Var with TileType.
+TileAliasMap BuildTileAliasMap(const std::vector<StmtPtr>& stmts) {
+  TileAliasMap alias_map;
+  for (const auto& stmt : stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) continue;
+    auto val_var = As<Var>(assign->value_);
+    if (val_var && As<TileType>(val_var->GetType())) {
+      alias_map[assign->var_.get()] = assign->value_;
+    }
+  }
+  return alias_map;
+}
+
+/// Resolve a tile alias chain using a pre-built alias map.
+/// Follows the chain to the original tile to avoid storing from an alias
+/// that has no tmov to populate it.
+ExprPtr ResolveTileAlias(const ExprPtr& expr, const TileAliasMap& alias_map) {
+  auto var = As<Var>(expr);
+  if (!var || !As<TileType>(var->GetType())) return expr;
+
+  ExprPtr current = expr;
+  for (int depth = 0; depth < kMaxTileAliasChainDepth; ++depth) {
+    auto cur_var = As<Var>(current);
+    if (!cur_var) break;
+    auto it = alias_map.find(cur_var.get());
+    if (it == alias_map.end()) break;
+    current = it->second;
+  }
+  return current;
+}
+
+/// Find the index of the YieldStmt in a flat statement list (backward search).
+/// Returns stmts.size() if not found.
+size_t FindYieldIndex(const std::vector<StmtPtr>& stmts) {
+  for (size_t si = stmts.size(); si > 0; --si) {
+    if (As<YieldStmt>(stmts[si - 1])) return si - 1;
+  }
+  return stmts.size();
+}
+
+/// Insert a statement before the YieldStmt at yield_index.
+void InsertBeforeYield(std::vector<StmtPtr>& stmts, size_t yield_index, const StmtPtr& to_insert) {
+  stmts.insert(stmts.begin() + static_cast<std::ptrdiff_t>(yield_index), to_insert);
+}
+
 /**
  * @brief Info about a tensor.slice result that feeds into a tensor.matmul/tensor.matmul_acc operand.
  *
@@ -1543,13 +1601,145 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
   std::vector<ParamDirection> new_param_directions = func->param_directions_;
   std::vector<TypePtr> new_return_types;
   size_t num_added_outputs = 0;
+  std::unordered_set<size_t> merged_return_indices;
 
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
 
-    // Phase 3: Process each return value
+    // Phase 3a: Sink tile.store into IfStmt branches for return values that
+    // map to iter-arg In params. This avoids phi-variable-mediated stores that
+    // are problematic on some backends (e.g. A5).
+    //
+    // Find the last IfStmt in new_stmts — candidate for store sinking.
+    IfStmtPtr last_if_stmt;
+    size_t last_if_index = 0;
+    for (size_t si = new_stmts.size(); si > 0; --si) {
+      if (auto ifs = As<IfStmt>(new_stmts[si - 1])) {
+        last_if_stmt = ifs;
+        last_if_index = si - 1;
+        break;
+      }
+    }
+
+    // Collect return values that are IfStmt return_vars AND have iter-arg mappings.
+    struct IfStmtSinkCandidate {
+      size_t return_index;
+      size_t ifstmt_rv_index;
+      size_t in_param_index;
+      TensorTypePtr orig_tensor_type;
+    };
+    std::vector<IfStmtSinkCandidate> sink_candidates;
+
+    if (last_if_stmt && last_if_stmt->else_body_.has_value() && !last_if_stmt->return_vars_.empty()) {
+      for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
+        auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
+        auto ret_var = As<Var>(ret_expr);
+        if (!ret_var || !As<TileType>(ret_var->GetType())) continue;
+
+        for (size_t rv_i = 0; rv_i < last_if_stmt->return_vars_.size(); ++rv_i) {
+          if (last_if_stmt->return_vars_[rv_i].get() == ret_var.get()) {
+            auto map_it = iter_arg_mapping.find(i);
+            if (map_it != iter_arg_mapping.end()) {
+              size_t arg_idx = map_it->second;
+              if (arg_idx < func->params_.size()) {
+                auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
+                if (orig_tensor_type) {
+                  sink_candidates.push_back({i, rv_i, arg_idx, orig_tensor_type});
+                }
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // Apply store sinking into both branches.
+    if (!sink_candidates.empty()) {
+      INTERNAL_CHECK(last_if_stmt->else_body_.has_value())
+          << "Internal error: sink candidates require IfStmt with else branch";
+
+      auto then_stmts = FlattenToStmts(last_if_stmt->then_body_);
+      auto else_stmts = FlattenToStmts(*last_if_stmt->else_body_);
+
+      auto then_yield = transform_utils::FindYieldStmt(last_if_stmt->then_body_);
+      auto else_yield = transform_utils::FindYieldStmt(*last_if_stmt->else_body_);
+
+      if (then_yield && else_yield) {
+        auto then_alias_map = BuildTileAliasMap(then_stmts);
+        auto else_alias_map = BuildTileAliasMap(else_stmts);
+
+        size_t then_yield_idx = FindYieldIndex(then_stmts);
+        size_t else_yield_idx = FindYieldIndex(else_stmts);
+        INTERNAL_CHECK(then_yield_idx < then_stmts.size())
+            << "Internal error: yield not found in then branch";
+        INTERNAL_CHECK(else_yield_idx < else_stmts.size())
+            << "Internal error: yield not found in else branch";
+
+        auto new_then_yield_values = then_yield->value_;
+        auto new_else_yield_values = else_yield->value_;
+        std::vector<VarPtr> new_rv = last_if_stmt->return_vars_;
+
+        for (const auto& cand : sink_candidates) {
+          auto in_param = new_params[cand.in_param_index];
+          auto offsets = MakeZeroOffsets(cand.orig_tensor_type->shape_.size(), span);
+
+          // Resolve aliases so we store from the actual computed tile, not an uninitialized alias.
+          auto then_tile = ResolveTileAlias(then_yield->value_[cand.ifstmt_rv_index], then_alias_map);
+          auto then_store = op_registry.Create("tile.store", {then_tile, offsets, in_param}, span);
+          auto then_store_var =
+              std::make_shared<Var>(MakeStoreResultName(cand.return_index), then_store->GetType(), span);
+
+          auto else_tile = ResolveTileAlias(else_yield->value_[cand.ifstmt_rv_index], else_alias_map);
+          auto else_store = op_registry.Create("tile.store", {else_tile, offsets, in_param}, span);
+          auto else_store_var =
+              std::make_shared<Var>(MakeStoreResultName(cand.return_index), else_store->GetType(), span);
+
+          new_then_yield_values[cand.ifstmt_rv_index] = then_store_var;
+          new_else_yield_values[cand.ifstmt_rv_index] = else_store_var;
+          new_rv[cand.ifstmt_rv_index] = std::make_shared<Var>(
+              last_if_stmt->return_vars_[cand.ifstmt_rv_index]->name_hint_, then_store->GetType(), span);
+
+          InsertBeforeYield(then_stmts, then_yield_idx,
+                            std::make_shared<AssignStmt>(then_store_var, then_store, span));
+          ++then_yield_idx;
+          InsertBeforeYield(else_stmts, else_yield_idx,
+                            std::make_shared<AssignStmt>(else_store_var, else_store, span));
+          ++else_yield_idx;
+
+          merged_return_indices.insert(cand.return_index);
+        }
+
+        then_stmts[then_yield_idx] = std::make_shared<YieldStmt>(new_then_yield_values, then_yield->span_);
+        else_stmts[else_yield_idx] = std::make_shared<YieldStmt>(new_else_yield_values, else_yield->span_);
+
+        auto new_then_body = SeqStmts::Flatten(std::move(then_stmts), last_if_stmt->then_body_->span_);
+        auto new_else_body = SeqStmts::Flatten(std::move(else_stmts), (*last_if_stmt->else_body_)->span_);
+        auto new_if_stmt =
+            std::make_shared<IfStmt>(last_if_stmt->condition_, new_then_body, new_else_body, new_rv, span);
+        new_stmts[last_if_index] = new_if_stmt;
+
+        // Update tensor_to_tile so Phase 3b sees the new TensorType return vars.
+        for (const auto& cand : sink_candidates) {
+          const auto& new_var = new_rv[cand.ifstmt_rv_index];
+          tensor_to_tile[last_if_stmt->return_vars_[cand.ifstmt_rv_index].get()] = new_var;
+          auto orig_ret_var = As<Var>(return_stmt->value_[cand.return_index]);
+          if (orig_ret_var) tensor_to_tile[orig_ret_var.get()] = new_var;
+        }
+      }
+    }
+
+    // Phase 3b: Process each return value
     for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
       auto ret_expr = SubstituteExpr(return_stmt->value_[i], tensor_to_tile);
+
+      // If this return was merged into an In param via IfStmt store sinking,
+      // no new Out param needed — just pass through the TensorType result.
+      if (merged_return_indices.count(i) > 0) {
+        new_return_types.push_back(ret_expr->GetType());
+        new_return_exprs.push_back(ret_expr);
+        continue;
+      }
 
       // Check if the return value is a tile (was converted from tensor)
       auto tile_type = As<TileType>(ret_expr->GetType());
@@ -1559,25 +1749,6 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
         INTERNAL_CHECK(orig_tensor_type)
             << "Internal error: return type " << i << " should be TensorType but got "
             << func->return_types_[i]->TypeName();
-
-        // Check if this return value has an iter-arg mapping: store to the
-        // existing In param (auto-promoted to InOut) instead of adding a new Out param.
-        auto map_it = iter_arg_mapping.find(i);
-        if (map_it != iter_arg_mapping.end()) {
-          size_t arg_idx = map_it->second;
-          INTERNAL_CHECK(arg_idx < new_params.size())
-              << "Internal error: iter-arg mapping arg_idx " << arg_idx << " exceeds param count "
-              << new_params.size();
-
-          auto in_param = new_params[arg_idx];
-          auto offsets = MakeZeroOffsets(orig_tensor_type->shape_.size(), span);
-          auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, in_param}, span);
-          auto store_var = std::make_shared<Var>(MakeStoreResultName(i), store_call->GetType(), span);
-          new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
-          new_return_types.push_back(store_call->GetType());
-          new_return_exprs.push_back(store_var);
-          continue;
-        }
 
         // Add output tensor parameter
         std::string out_name = MakeOutParamName(num_added_outputs);
