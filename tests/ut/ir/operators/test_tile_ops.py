@@ -2083,5 +2083,59 @@ class TestTileConcatOps:
             tile.concat(t0_var, t1_var)
 
 
+class TestTileFormatShapeError:
+    """Regression tests for issue #824: FormatShape prints readable shapes, not pointer addresses."""
+
+    def test_tile_add_shape_mismatch_shows_readable_dims(self):
+        """Test that shape mismatch errors show readable dimensions, not pointer addresses."""
+        span = ir.Span.unknown()
+
+        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
+        dim32 = ir.ConstInt(32, DataType.DEFAULT_CONST_INT, span)
+
+        tile_type1 = ir.TileType([dim16, dim16], DataType.FP32)
+        tile_type2 = ir.TileType([dim32, dim16], DataType.FP32)
+
+        tile_a = ir.Var("a", tile_type1, span)
+        tile_b = ir.Var("b", tile_type2, span)
+
+        with pytest.raises(ValueError, match=r"\[16, 16\].*\[32, 16\]"):
+            tile.add(tile_a, tile_b)
+
+    def test_tile_mul_shape_mismatch_shows_readable_dims(self):
+        """Test that tile.mul shape mismatch shows readable shapes."""
+        span = ir.Span.unknown()
+
+        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
+        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
+        dim32 = ir.ConstInt(32, DataType.DEFAULT_CONST_INT, span)
+
+        tile_type1 = ir.TileType([dim8, dim16], DataType.FP32)
+        tile_type2 = ir.TileType([dim32, dim16], DataType.FP32)
+
+        tile_a = ir.Var("a", tile_type1, span)
+        tile_b = ir.Var("b", tile_type2, span)
+
+        with pytest.raises(ValueError, match=r"\[8, 16\].*\[32, 16\]"):
+            tile.mul(tile_a, tile_b)
+
+    def test_tile_add_symbolic_shape_mismatch_shows_var_names(self):
+        """Test that symbolic shape mismatch errors show variable names."""
+        span = ir.Span.unknown()
+
+        sym_m = ir.Var("M", ir.ScalarType(DataType.INT32), span)
+        sym_n = ir.Var("N", ir.ScalarType(DataType.INT32), span)
+        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
+
+        tile_type1 = ir.TileType([sym_m, dim16], DataType.FP32)
+        tile_type2 = ir.TileType([sym_n, dim16], DataType.FP32)
+
+        tile_a = ir.Var("a", tile_type1, span)
+        tile_b = ir.Var("b", tile_type2, span)
+
+        with pytest.raises(ValueError, match=r"\[M, 16\].*\[N, 16\]"):
+            tile.add(tile_a, tile_b)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

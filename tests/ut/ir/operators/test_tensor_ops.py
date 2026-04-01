@@ -1617,5 +1617,43 @@ def test_tensor_scatter_update_invalid_dim():
         ir.op.tensor.scatter_update(input_var, 0, index_var, src_var)
 
 
+class TestTensorFormatShapeError:
+    """Regression tests for issue #824: FormatShape prints readable shapes, not pointer addresses."""
+
+    def test_tensor_add_shape_mismatch_shows_readable_dims(self):
+        """Test that tensor shape mismatch errors show readable dimensions."""
+        span = ir.Span.unknown()
+
+        dim4 = ir.ConstInt(4, DataType.DEFAULT_CONST_INT, span)
+        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
+        dim3 = ir.ConstInt(3, DataType.DEFAULT_CONST_INT, span)
+
+        tensor_type1 = ir.TensorType([dim4, dim8], DataType.FP32)
+        tensor_type2 = ir.TensorType([dim3, dim8], DataType.FP32)
+
+        tensor_a = ir.Var("a", tensor_type1, span)
+        tensor_b = ir.Var("b", tensor_type2, span)
+
+        with pytest.raises(ValueError, match=r"\[4, 8\].*\[3, 8\]"):
+            ir.op.tensor.add(tensor_a, tensor_b)
+
+    def test_tensor_add_symbolic_shape_mismatch_shows_var_names(self):
+        """Test that symbolic tensor shape mismatch errors show variable names."""
+        span = ir.Span.unknown()
+
+        sym_m = ir.Var("M", ir.ScalarType(DataType.INT32), span)
+        sym_n = ir.Var("N", ir.ScalarType(DataType.INT32), span)
+        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
+
+        tensor_type1 = ir.TensorType([sym_m, dim8], DataType.FP32)
+        tensor_type2 = ir.TensorType([sym_n, dim8], DataType.FP32)
+
+        tensor_a = ir.Var("a", tensor_type1, span)
+        tensor_b = ir.Var("b", tensor_type2, span)
+
+        with pytest.raises(ValueError, match=r"\[M, 8\].*\[N, 8\]"):
+            ir.op.tensor.add(tensor_a, tensor_b)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
