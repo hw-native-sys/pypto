@@ -1096,8 +1096,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
-    code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id
-          << ", INVALID_KERNEL_ID};\n";
+    code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
+          << aiv_id << "};\n";
 
     // Collect internal Out tensors that need to be bound from TaskOutputTensors.
     struct InternalOutVar {

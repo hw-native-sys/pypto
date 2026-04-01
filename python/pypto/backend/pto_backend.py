@@ -236,7 +236,12 @@ def _preprocess_ptoas_output(content: str) -> str:
             continue
         filtered.append(line)
     result = "".join(filtered)
+    # Non-mixed kernels: __global__ AICORE void → static __aicore__ void
     result = re.sub(r"__global__\s+AICORE\s+void", "static __aicore__ void", result)
+    # Mixed kernel sub-functions: bare AICORE void at line start → static __aicore__ void
+    result = re.sub(r"^AICORE(?=\s+void)", "static __aicore__", result, flags=re.MULTILINE)
+    # Helper functions: static AICORE inline → static __aicore__ inline
+    result = re.sub(r"\bAICORE\b", "__aicore__", result)
     return result
 
 

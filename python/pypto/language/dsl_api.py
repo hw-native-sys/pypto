@@ -586,14 +586,14 @@ class AutoIncoreContext:
         pass
 
 
-def auto_incore(split: SplitMode = SplitMode.NONE) -> AutoIncoreContext:
+def auto_incore(split: SplitMode = SplitMode.UP_DOWN) -> AutoIncoreContext:
     """Mark a region of code for automatic incore chunking.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.AutoInCore.
 
     Args:
-        split: Split mode for cross-core data transfer (default: SplitMode.NONE)
+        split: Split mode for cross-core data transfer (default: SplitMode.UP_DOWN)
 
     Returns:
         Context manager for AutoInCore scope
@@ -606,6 +606,8 @@ def auto_incore(split: SplitMode = SplitMode.NONE) -> AutoIncoreContext:
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
     """
+    if split == SplitMode.NONE:
+        raise ValueError("SplitMode.NONE is not supported for auto_incore")
     return AutoIncoreContext(split=split)
 
 
