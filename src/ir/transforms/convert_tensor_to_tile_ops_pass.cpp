@@ -1631,7 +1631,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   auto new_func =
       std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types, new_body,
-                                 span, FunctionType::InCore, func->level_, func->role_, func->split_);
+                                 span, FunctionType::InCore, func->level_, func->role_, func->attrs_);
 
   return {new_func, num_added_outputs};
 }
@@ -1967,7 +1967,7 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, span, func->func_type_, func->level_, func->role_,
-                                    func->split_);
+                                    func->attrs_);
 }
 
 }  // namespace

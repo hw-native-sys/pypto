@@ -260,7 +260,7 @@ class SSAConverter {
     StmtPtr new_body = func->body_ ? ConvertStmt(func->body_) : nullptr;
 
     return std::make_shared<Function>(func->name_, new_params, new_dirs, func->return_types_, new_body,
-                                      func->span_, func->func_type_, func->level_, func->role_, func->split_);
+                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
   }
 
  private:

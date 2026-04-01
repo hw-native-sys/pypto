@@ -658,7 +658,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   // and this pass only flattens tile ops. Tensor types are never modified.
   auto result =
       std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                 new_body, span, func->func_type_, func->level_, func->role_, func->split_);
+                                 new_body, span, func->func_type_, func->level_, func->role_, func->attrs_);
   return result;
 }
 

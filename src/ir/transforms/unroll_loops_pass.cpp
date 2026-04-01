@@ -152,7 +152,7 @@ FunctionPtr TransformUnrollLoops(const FunctionPtr& func) {
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->split_);
+                                    func->attrs_);
 }
 
 }  // namespace

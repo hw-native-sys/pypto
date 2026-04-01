@@ -335,11 +335,12 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
 }
 
 FunctionPtr ProcessFunction(const FunctionPtr& func) {
-  if (!func->split_.has_value() || func->split_.value() == SplitMode::None) {
+  auto split_mode = func->GetSplitMode();
+  if (!split_mode.has_value()) {
     return func;
   }
 
-  SplitMode mode = func->split_.value();
+  SplitMode mode = *split_mode;
   int split_int = static_cast<int>(mode);
   int split_dim = SplitDimension(mode);
   bool is_aiv = (func->func_type_ == FunctionType::AIV);
@@ -392,7 +393,7 @@ FunctionPtr ProcessFunction(const FunctionPtr& func) {
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->split_);
+                                    func->attrs_);
 }
 
 }  // namespace
@@ -407,7 +408,7 @@ Pass SplitVectorKernel() {
     for (const auto& [gvar, func] : program->functions_) {
       // Only process AIC and AIV functions that have a non-None split mode
       if ((func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC) &&
-          func->split_.has_value() && func->split_.value() != SplitMode::None) {
+          func->GetSplitMode().has_value()) {
         auto new_func = ProcessFunction(func);
         new_functions.push_back(new_func);
         changed = true;

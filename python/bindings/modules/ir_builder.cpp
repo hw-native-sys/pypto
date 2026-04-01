@@ -15,6 +15,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "../module.h"
@@ -45,20 +47,29 @@ void BindIRBuilder(nb::module_& m) {
       .def(nb::init<>(), "Create a new IR builder")
 
       // Function building
-      .def("begin_function", &IRBuilder::BeginFunction, nb::arg("name"), nb::arg("span"),
-           nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(),
-           nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
-           "Begin building a function.\n\n"
-           "Creates a new function context. Must be closed with end_function().\n\n"
-           "Args:\n"
-           "    name: Function name\n"
-           "    span: Source location for function definition\n"
-           "    type: Function type (default: Opaque)\n"
-           "    level: Hierarchy level (default: None)\n"
-           "    role: Function role (default: None)\n"
-           "    split: Split mode (default: None)\n\n"
-           "Raises:\n"
-           "    RuntimeError: If already inside a function (nested functions not allowed)")
+      .def(
+          "begin_function",
+          [](IRBuilder& self, const std::string& name, const Span& span, FunctionType type,
+             std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none) {
+            std::vector<std::pair<std::string, std::any>> attrs;
+            if (!attrs_or_none.is_none()) {
+              attrs = ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
+            }
+            self.BeginFunction(name, span, type, level, role, std::move(attrs));
+          },
+          nb::arg("name"), nb::arg("span"), nb::arg("type") = FunctionType::Opaque,
+          nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("attrs") = nb::none(),
+          "Begin building a function.\n\n"
+          "Creates a new function context. Must be closed with end_function().\n\n"
+          "Args:\n"
+          "    name: Function name\n"
+          "    span: Source location for function definition\n"
+          "    type: Function type (default: Opaque)\n"
+          "    level: Hierarchy level (default: None)\n"
+          "    role: Function role (default: None)\n"
+          "    attrs: Function-level attributes dict (default: None)\n\n"
+          "Raises:\n"
+          "    RuntimeError: If already inside a function (nested functions not allowed)")
 
       .def("func_arg", &IRBuilder::FuncArg, nb::arg("name"), nb::arg("type"), nb::arg("span"),
            nb::arg("direction") = ParamDirection::In,

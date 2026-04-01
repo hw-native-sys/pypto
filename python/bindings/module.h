@@ -23,8 +23,23 @@
 
 #include <nanobind/nanobind.h>
 
+#include <any>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace pypto {
 namespace python {
+
+/**
+ * @brief Convert a Python dict to a vector of (key, value) pairs with std::any values
+ *
+ * Handles common types: int, bool, str, double, DataType, MemorySpace, etc.
+ *
+ * @param kwargs_dict Python dictionary of keyword arguments
+ * @return Vector of key-value pairs
+ */
+std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nanobind::dict& kwargs_dict);
 
 /**
  * @brief Register error exception types and exception translator

@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_FUNCTION_H_
 #define PYPTO_IR_FUNCTION_H_
 
+#include <algorithm>
+#include <any>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -332,12 +334,12 @@ class Function : public IRNode {
    * @param type Function type (default: Opaque)
    * @param level Hierarchy level (default: nullopt — unspecified)
    * @param role Function role (default: nullopt)
-   * @param split Split mode for cross-core transfer (default: nullopt)
+   * @param attrs Function-level attributes (default: empty)
    */
   Function(std::string name, std::vector<VarPtr> params, std::vector<ParamDirection> param_directions,
            std::vector<TypePtr> return_types, StmtPtr body, Span span,
            FunctionType type = FunctionType::Opaque, std::optional<Level> level = std::nullopt,
-           std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt)
+           std::optional<Role> role = std::nullopt, std::vector<std::pair<std::string, std::any>> attrs = {})
       : IRNode(std::move(span)),
         name_(std::move(name)),
         params_(std::move(params)),
@@ -347,7 +349,7 @@ class Function : public IRNode {
         func_type_(type),
         level_(level),
         role_(role),
-        split_(split) {
+        attrs_(std::move(attrs)) {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
@@ -359,7 +361,7 @@ class Function : public IRNode {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (params as DEF field, func_type, level, role, split,
+   * @return Tuple of field descriptors (params as DEF field, func_type, level, role, attrs,
    *         return_types and body as USUAL fields, name as an IGNORE field)
    */
   static constexpr auto GetFieldDescriptors() {
@@ -370,22 +372,63 @@ class Function : public IRNode {
                         reflection::UsualField(&Function::func_type_, "func_type"),
                         reflection::UsualField(&Function::level_, "level"),
                         reflection::UsualField(&Function::role_, "role"),
-                        reflection::UsualField(&Function::split_, "split"),
+                        reflection::UsualField(&Function::attrs_, "attrs"),
                         reflection::UsualField(&Function::return_types_, "return_types"),
                         reflection::UsualField(&Function::body_, "body"),
                         reflection::IgnoreField(&Function::name_, "name")));
   }
 
  public:
-  std::string name_;                // Function name
-  FunctionType func_type_;          // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
-  std::optional<Level> level_;      // Hierarchy level (nullopt = infer from func_type)
-  std::optional<Role> role_;        // Function role (nullopt = default per level)
-  std::optional<SplitMode> split_;  // Split mode for cross-core transfer (nullopt = no split)
-  std::vector<VarPtr> params_;      // Parameter variables
-  std::vector<ParamDirection> param_directions_;  // Parameter directions (same length as params_)
-  std::vector<TypePtr> return_types_;             // Return types
-  StmtPtr body_;                                  // Function body statement
+  std::string name_;            // Function name
+  FunctionType func_type_;      // Function type (Opaque, Orchestration, InCore, AIC, AIV, or Group)
+  std::optional<Level> level_;  // Hierarchy level (nullopt = infer from func_type)
+  std::optional<Role> role_;    // Function role (nullopt = default per level)
+  std::vector<std::pair<std::string, std::any>> attrs_;  // Function-level attributes (key-value metadata)
+  std::vector<VarPtr> params_;                           // Parameter variables
+  std::vector<ParamDirection> param_directions_;         // Parameter directions (same length as params_)
+  std::vector<TypePtr> return_types_;                    // Return types
+  StmtPtr body_;                                         // Function body statement
+
+  /**
+   * @brief Get a typed attribute value
+   * @tparam T Expected type of the attribute value
+   * @param key Attribute key
+   * @param default_value Default value if key doesn't exist
+   * @return The attribute value or default
+   */
+  template <typename T>
+  [[nodiscard]] T GetAttr(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : attrs_) {
+      if (k == key) return AnyCast<T>(v, "func attr key: " + key);
+    }
+    return default_value;
+  }
+
+  /**
+   * @brief Check if an attribute exists
+   * @param key Attribute key
+   * @return true if the attribute exists
+   */
+  [[nodiscard]] bool HasAttr(const std::string& key) const {
+    return std::any_of(attrs_.begin(), attrs_.end(), [&key](const auto& pair) { return pair.first == key; });
+  }
+
+  /**
+   * @brief Get all attributes
+   * @return Vector of key-value attribute pairs
+   */
+  [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
+
+  /**
+   * @brief Convenience: extract SplitMode from attrs
+   * @return SplitMode if "split" attr is set and non-zero, nullopt otherwise
+   */
+  [[nodiscard]] std::optional<SplitMode> GetSplitMode() const {
+    if (!HasAttr("split")) return std::nullopt;
+    int val = GetAttr<int>("split", 0);
+    if (val == 0) return std::nullopt;
+    return static_cast<SplitMode>(val);
+  }
 };
 
 using FunctionPtr = std::shared_ptr<const Function>;

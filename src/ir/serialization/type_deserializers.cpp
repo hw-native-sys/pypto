@@ -653,17 +653,26 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     role = static_cast<Role>(role_obj->via.u64);
   }
 
-  // Deserialize optional split mode
-  std::optional<SplitMode> split = std::nullopt;
-  auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
-  if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
-    split = static_cast<SplitMode>(split_obj->via.u64);
+  // Deserialize function attrs (new format), with backward compat for old "split" field
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_obj, "attrs");
+  } else {
+    // Legacy backward compat: convert old "split" field to attrs
+    auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
+    if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
+      int split_val = static_cast<int>(split_obj->via.u64);
+      if (split_val != 0) {
+        attrs.emplace_back("split", split_val);
+      }
+    }
   }
 
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type,
-                                    level, role, split);
+                                    level, role, std::move(attrs));
 }
 
 // Deserialize Program

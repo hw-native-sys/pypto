@@ -302,7 +302,7 @@ class ASTParser:
         func_type: ir.FunctionType = ir.FunctionType.Opaque,
         func_level: ir.Level | None = None,
         func_role: ir.Role | None = None,
-        func_split: ir.SplitMode | None = None,
+        func_attrs: dict[str, Any] | None = None,
     ) -> ir.Function:
         """Parse function definition and build IR.
 
@@ -311,7 +311,7 @@ class ASTParser:
             func_type: Function type (default: Opaque)
             func_level: Hierarchy level (default: None)
             func_role: Function role (default: None)
-            func_split: Split mode (default: None)
+            func_attrs: Function-level attributes dict (default: None)
 
         Returns:
             IR Function object
@@ -325,7 +325,7 @@ class ASTParser:
 
         # Begin building function
         with self.builder.function(
-            func_name, func_span, type=func_type, level=func_level, role=func_role, split=func_split
+            func_name, func_span, type=func_type, level=func_level, role=func_role, attrs=func_attrs
         ) as f:
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:

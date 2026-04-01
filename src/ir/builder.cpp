@@ -11,6 +11,7 @@
 
 #include "pypto/ir/builder.h"
 
+#include <any>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -38,14 +39,15 @@ IRBuilder::IRBuilder() = default;
 
 void IRBuilder::BeginFunction(const std::string& name, const Span& span, FunctionType type,
                               std::optional<Level> level, std::optional<Role> role,
-                              std::optional<SplitMode> split) {
+                              std::vector<std::pair<std::string, std::any>> attrs) {
   if (InFunction()) {
     throw pypto::RuntimeError("Cannot begin function '" + name + "': already inside function '" +
                               static_cast<FunctionContext*>(CurrentContext())->GetName() + "' at " +
                               CurrentContext()->GetBeginSpan().to_string());
   }
 
-  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type, level, role, split));
+  context_stack_.push_back(
+      std::make_unique<FunctionContext>(name, span, type, level, role, std::move(attrs)));
 }
 
 VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span,
@@ -80,7 +82,7 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
   auto func =
       std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(),
                                  func_ctx->GetReturnTypes(), body, combined_span, func_ctx->GetFuncType(),
-                                 func_ctx->GetLevel(), func_ctx->GetRole(), func_ctx->GetSplit());
+                                 func_ctx->GetLevel(), func_ctx->GetRole(), func_ctx->GetAttrs());
 
   // Pop context
   context_stack_.pop_back();

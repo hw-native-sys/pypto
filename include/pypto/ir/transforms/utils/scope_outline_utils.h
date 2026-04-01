@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -598,10 +599,14 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function (propagate level/role/split from ScopeStmt)
-    auto outlined_func = std::make_shared<Function>(outlined_func_name, input_params, input_param_directions,
-                                                    return_types, outlined_body, op->span_,
-                                                    outlined_func_type_, op->level_, op->role_, op->split_);
+    // Register the outlined function (propagate level/role from ScopeStmt, convert split to attrs)
+    std::vector<std::pair<std::string, std::any>> outlined_attrs;
+    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
+      outlined_attrs.emplace_back("split", static_cast<int>(op->split_.value()));
+    }
+    auto outlined_func = std::make_shared<Function>(
+        outlined_func_name, input_params, input_param_directions, return_types, outlined_body, op->span_,
+        outlined_func_type_, op->level_, op->role_, std::move(outlined_attrs));
     outlined_functions_.push_back(outlined_func);
 
     // Build the call site in the parent function

@@ -47,7 +47,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -56,7 +56,7 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=0)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
@@ -66,7 +66,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -75,7 +75,7 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=1)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
@@ -89,7 +89,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -98,7 +98,7 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=0)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -114,7 +114,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -123,7 +123,7 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=1)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -164,7 +164,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
                 a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
                     split=0
@@ -173,7 +173,7 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.UP_DOWN)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
                 a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
                     split=1
@@ -191,7 +191,7 @@ class TestSplitVectorKernelLeftRight:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -200,7 +200,7 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=0)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
@@ -210,7 +210,7 @@ class TestSplitVectorKernelLeftRight:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -219,7 +219,7 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=2)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
@@ -235,7 +235,7 @@ class TestSplitVectorKernelLeftRight:
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -244,7 +244,7 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=0)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -260,7 +260,7 @@ class TestSplitVectorKernelLeftRight:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIC, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
@@ -269,7 +269,7 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=2)
 
-            @pl.function(type=pl.FunctionType.AIV, split=pl.SplitMode.LEFT_RIGHT)
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:

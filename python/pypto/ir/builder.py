@@ -18,6 +18,7 @@ import builtins
 import inspect
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from typing import Any
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
@@ -61,7 +62,7 @@ class IRBuilder:
         type: ir.FunctionType = ir.FunctionType.Opaque,
         level: ir.Level | None = None,
         role: ir.Role | None = None,
-        split: ir.SplitMode | None = None,
+        attrs: dict[str, Any] | None = None,
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -71,7 +72,7 @@ class IRBuilder:
             type: Function type (default: Opaque)
             level: Hierarchy level (default: None)
             role: Function role (default: None)
-            split: Split mode for cross-core transfer (default: None)
+            attrs: Function-level attributes dict (default: None)
 
         Yields:
             FunctionBuilder: Helper object for building the function
@@ -89,7 +90,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(name, begin_span, type, level, role, split)
+        self._builder.begin_function(name, begin_span, type, level, role, attrs or {})
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj

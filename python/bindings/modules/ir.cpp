@@ -118,6 +118,9 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<CoreType>(item.second)) {
       // Cast enum to int for storage
       kwargs.emplace_back(key, static_cast<int>(nb::cast<CoreType>(item.second)));
+    } else if (nb::isinstance<SplitMode>(item.second)) {
+      // Cast enum to int for storage
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<SplitMode>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
@@ -916,7 +919,7 @@ void BindIR(nb::module_& m) {
       "__init__",
       [](Function* self, const std::string& name, const nb::list& params,
          const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
-         std::optional<Level> level, std::optional<Role> role, std::optional<SplitMode> split) {
+         std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none) {
         std::vector<VarPtr> param_vars;
         std::vector<ParamDirection> param_dirs;
         param_vars.reserve(nb::len(params));
@@ -935,13 +938,58 @@ void BindIR(nb::module_& m) {
             param_dirs.push_back(ParamDirection::In);
           }
         }
+        // Build attrs vector from attrs dict
+        std::vector<std::pair<std::string, std::any>> attrs;
+        if (!attrs_or_none.is_none()) {
+          attrs = ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
+        }
         new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
-                            type, level, role, split);
+                            type, level, role, std::move(attrs));
       },
       nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
       nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
-      nb::arg("split") = nb::none(), "Create a function definition");
+      nb::arg("attrs") = nb::none(), "Create a function definition");
   BindFields<Function>(function_class);
+  // Custom attrs property: convert vector<pair<string, any>> to Python dict
+  function_class.def_prop_ro(
+      "attrs",
+      [](const FunctionPtr& self) {
+        nb::dict result;
+        for (const auto& [key, value] : self->attrs_) {
+          if (value.type() == typeid(int)) {
+            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(bool)) {
+            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(std::string)) {
+            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(double)) {
+            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(float)) {
+            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(DataType)) {
+            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(MemorySpace)) {
+            result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TensorLayout)) {
+            result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TileLayout)) {
+            result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(PadValue)) {
+            result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
+          }
+        }
+        return result;
+      },
+      "Function-level attributes as a dictionary");
+  // Backward-compat split property: extract SplitMode from attrs
+  function_class.def_prop_ro(
+      "split",
+      [](const FunctionPtr& self) -> nb::object {
+        auto mode = self->GetSplitMode();
+        if (!mode.has_value()) return nb::none();
+        return nb::cast(*mode);
+      },
+      "Split mode for cross-core transfer (convenience accessor into attrs)");
 
   // Program - const shared_ptr
   auto program_class =

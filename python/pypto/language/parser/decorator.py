@@ -210,12 +210,28 @@ _FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
 }
 
 
+def _find_function_decorator_call(node: ast.FunctionDef) -> ast.Call | None:
+    """Find the @pl.function(...) Call decorator on a FunctionDef, if present.
+
+    Args:
+        node: AST FunctionDef node to search
+
+    Returns:
+        The ast.Call node for the @pl.function(...) decorator, or None
+    """
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        func = decorator.func
+        if (isinstance(func, ast.Attribute) and func.attr == "function") or (
+            isinstance(func, ast.Name) and func.id == "function"
+        ):
+            return decorator
+    return None
+
+
 def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionType:
     """Extract function type from @pl.function(type=...) decorator.
-
-    Searches through the function's decorators to find @pl.function(type=...)
-    and extracts the FunctionType value. If no type parameter is found,
-    returns FunctionType.Opaque as the default.
 
     Args:
         node: AST FunctionDef node to extract function type from
@@ -223,48 +239,37 @@ def _extract_function_type_from_decorator(node: ast.FunctionDef) -> ir.FunctionT
     Returns:
         FunctionType extracted from decorator, or FunctionType.Opaque if not specified
     """
-    for decorator in node.decorator_list:
-        if not isinstance(decorator, ast.Call):
-            continue
+    decorator = _find_function_decorator_call(node)
+    if decorator is None:
+        return ir.FunctionType.Opaque
 
-        # Check if it's a pl.function or function call
-        is_function_call = (
-            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
-        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
-
-        if not is_function_call:
-            continue
-
-        # Look for type= keyword argument
-        for keyword in decorator.keywords:
-            if keyword.arg is None:
-                raise ParserSyntaxError(
-                    "Unsupported `@pl.function(**kwargs)` in `@pl.program`",
-                    hint="Use a literal type=pl.FunctionType.<name>.",
-                )
-            if keyword.arg != "type":
-                continue
-
-            value = keyword.value
-            if not isinstance(value, ast.Attribute):
-                raise ParserSyntaxError(
-                    "Unsupported `@pl.function`(type=...) value",
-                    hint="Use pl.FunctionType.<name>.",
-                )
-            is_function_type_attr = (
-                isinstance(value.value, ast.Name) and value.value.id == "FunctionType"
-            ) or (
-                isinstance(value.value, ast.Attribute)
-                and isinstance(value.value.value, ast.Name)
-                and value.value.value.id == "pl"
-                and value.value.attr == "FunctionType"
+    for keyword in decorator.keywords:
+        if keyword.arg is None:
+            raise ParserSyntaxError(
+                "Unsupported `@pl.function(**kwargs)` in `@pl.program`",
+                hint="Use a literal type=pl.FunctionType.<name>.",
             )
-            if not is_function_type_attr or value.attr not in _FUNCTION_TYPE_MAP:
-                raise ParserSyntaxError(
-                    "Unsupported `@pl.function`(type=...) value",
-                    hint="Use pl.FunctionType.<name>.",
-                )
-            return _FUNCTION_TYPE_MAP[value.attr]
+        if keyword.arg != "type":
+            continue
+
+        value = keyword.value
+        if not isinstance(value, ast.Attribute):
+            raise ParserSyntaxError(
+                "Unsupported `@pl.function`(type=...) value",
+                hint="Use pl.FunctionType.<name>.",
+            )
+        is_function_type_attr = (isinstance(value.value, ast.Name) and value.value.id == "FunctionType") or (
+            isinstance(value.value, ast.Attribute)
+            and isinstance(value.value.value, ast.Name)
+            and value.value.value.id == "pl"
+            and value.value.attr == "FunctionType"
+        )
+        if not is_function_type_attr or value.attr not in _FUNCTION_TYPE_MAP:
+            raise ParserSyntaxError(
+                "Unsupported `@pl.function`(type=...) value",
+                hint="Use pl.FunctionType.<name>.",
+            )
+        return _FUNCTION_TYPE_MAP[value.attr]
 
     return ir.FunctionType.Opaque
 
@@ -280,53 +285,85 @@ def _extract_function_level_role_from_decorator(
     Returns:
         Tuple of (level, role), either or both may be None
     """
-    for decorator in node.decorator_list:
-        if not isinstance(decorator, ast.Call):
+    decorator = _find_function_decorator_call(node)
+    if decorator is None:
+        return None, None
+
+    level = None
+    role = None
+    for keyword in decorator.keywords:
+        if keyword.arg == "level":
+            if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                level = None
+            else:
+                level = extract_enum_value(keyword.value, LEVEL_MAP, "Level", "pl.Level")
+        elif keyword.arg == "role":
+            if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+                role = None
+            else:
+                role = extract_enum_value(keyword.value, ROLE_MAP, "Role", "pl.Role")
+    return level, role
+
+
+def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize function attrs: convert SplitMode enums to int values for C++ storage.
+
+    SplitMode.NONE entries are dropped (equivalent to no split).
+    Returns None if the result is empty.
+    """
+    if not attrs:
+        return None
+    result: dict[str, Any] = {}
+    for key, value in attrs.items():
+        if isinstance(value, ir.SplitMode):
+            if value != ir.SplitMode.NONE:
+                result[key] = value.value
+        else:
+            result[key] = value
+    return result or None
+
+
+def _extract_function_attrs_from_decorator(node: ast.FunctionDef) -> dict[str, Any]:
+    """Extract function attrs from @pl.function(attrs={...}) decorator.
+
+    Supports attrs={"split": pl.SplitMode.UP_DOWN, ...} syntax.
+    Returns a normalized dict with enum values converted to ints.
+    """
+    decorator = _find_function_decorator_call(node)
+    if decorator is None:
+        return {}
+
+    for keyword in decorator.keywords:
+        if keyword.arg != "attrs":
             continue
-
-        is_function_call = (
-            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
-        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
-
-        if not is_function_call:
-            continue
-
-        level = None
-        role = None
-        for keyword in decorator.keywords:
-            if keyword.arg == "level":
-                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
-                    level = None
-                else:
-                    level = extract_enum_value(keyword.value, LEVEL_MAP, "Level", "pl.Level")
-            elif keyword.arg == "role":
-                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
-                    role = None
-                else:
-                    role = extract_enum_value(keyword.value, ROLE_MAP, "Role", "pl.Role")
-        return level, role
-    return None, None
-
-
-def _extract_function_split_from_decorator(node: ast.FunctionDef) -> ir.SplitMode | None:
-    """Extract split mode from @pl.function(split=...) decorator."""
-    for decorator in node.decorator_list:
-        if not isinstance(decorator, ast.Call):
-            continue
-
-        is_function_call = (
-            isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "function"
-        ) or (isinstance(decorator.func, ast.Name) and decorator.func.id == "function")
-
-        if not is_function_call:
-            continue
-
-        for keyword in decorator.keywords:
-            if keyword.arg == "split":
-                if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
-                    return None
-                return extract_enum_value(keyword.value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-    return None
+        if isinstance(keyword.value, ast.Constant) and keyword.value.value is None:
+            return {}
+        if not isinstance(keyword.value, ast.Dict):
+            raise ParserSyntaxError(
+                "Unsupported `@pl.function(attrs=...)` value",
+                hint='Use a dict literal, e.g. attrs={"split": pl.SplitMode.UP_DOWN}.',
+            )
+        attrs: dict[str, Any] = {}
+        for k, v in zip(keyword.value.keys, keyword.value.values):
+            if k is None:
+                raise ParserSyntaxError(
+                    "Unsupported `**` unpacking in `@pl.function(attrs={...})`",
+                    hint="Use only string literal keys in the attrs dict.",
+                )
+            if not isinstance(k, ast.Constant) or not isinstance(k.value, str):
+                raise ParserSyntaxError(
+                    f"Attrs dict key must be a string literal, got {ast.dump(k)}",
+                    hint='Use string literal keys, e.g. attrs={"split": ...}.',
+                )
+            attr_key = k.value
+            if attr_key == "split":
+                split_mode = extract_enum_value(v, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+                if split_mode != ir.SplitMode.NONE:
+                    attrs["split"] = split_mode.value
+            elif isinstance(v, ast.Constant):
+                attrs[attr_key] = v.value
+        return attrs
+    return {}
 
 
 def _prescan_reserve_buffers(
@@ -550,7 +587,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
-    split: ir.SplitMode | None = None,
+    attrs: dict[str, Any] | None = None,
     strict_ssa: bool = False,
 ) -> ir.Function: ...
 
@@ -562,7 +599,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
-    split: ir.SplitMode | None = None,
+    attrs: dict[str, Any] | None = None,
     strict_ssa: bool = False,
 ) -> FunctionDecorator: ...
 
@@ -573,7 +610,7 @@ def function(
     type: ir.FunctionType = ir.FunctionType.Opaque,
     level: ir.Level | None = None,
     role: ir.Role | None = None,
-    split: ir.SplitMode | None = None,
+    attrs: dict[str, Any] | None = None,
     strict_ssa: bool = False,
 ) -> ir.Function | FunctionDecorator:
     """Decorator that parses a DSL function and returns IR Function.
@@ -587,6 +624,7 @@ def function(
         type: Function type (Opaque, Orchestration, or InCore)
         level: Hierarchy level (e.g. pl.Level.HOST)
         role: Function role (e.g. pl.Role.Worker)
+        attrs: Function-level attributes dict (e.g. {"split": pl.SplitMode.UP_DOWN})
         strict_ssa: If True, enforce SSA (single assignment per variable).
                    If False (default), allow variable reassignment (non-SSA mode).
 
@@ -644,8 +682,17 @@ def function(
                 closure_vars=closure_vars,
             )
 
+            # Normalize attrs: convert enum values to ints for storage
+            func_attrs = _normalize_attrs(attrs) if attrs else None
+
             try:
-                ir_func = parser.parse_function(func_def, func_type=type, func_level=level, func_role=role)
+                ir_func = parser.parse_function(
+                    func_def,
+                    func_type=type,
+                    func_level=level,
+                    func_role=role,
+                    func_attrs=func_attrs,
+                )
             except ParserError:
                 # Re-raise ParserError as-is, it already has source lines
                 raise
@@ -821,10 +868,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             dyn_var_cache: dict[str, ir.Var] = {}
 
             for func_def in func_defs:
-                # Extract function type, level/role, and split from decorator
+                # Extract function type, level/role, and attrs from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
                 func_level, func_role = _extract_function_level_role_from_decorator(func_def)
-                func_split = _extract_function_split_from_decorator(func_def)
+                func_attrs = _extract_function_attrs_from_decorator(func_def)
 
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = _strip_self_parameter(func_def)
@@ -849,7 +896,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         func_type=func_type,
                         func_level=func_level,
                         func_role=func_role,
-                        func_split=func_split,
+                        func_attrs=func_attrs or None,
                     )
                 except ParserError:
                     raise

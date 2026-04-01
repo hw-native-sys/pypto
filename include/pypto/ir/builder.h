@@ -88,7 +88,7 @@ class IRBuilder {
    */
   void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque,
                      std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
-                     std::optional<SplitMode> split = std::nullopt);
+                     std::vector<std::pair<std::string, std::any>> attrs = {});
 
   /**
    * @brief Add a function parameter
@@ -534,13 +534,13 @@ class FunctionContext : public BuildContext {
  public:
   FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque,
                   std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
-                  std::optional<SplitMode> split = std::nullopt)
+                  std::vector<std::pair<std::string, std::any>> attrs = {})
       : BuildContext(Type::FUNCTION, std::move(span)),
         name_(std::move(name)),
         func_type_(func_type),
         level_(level),
         role_(role),
-        split_(split) {}
+        attrs_(std::move(attrs)) {}
 
   void AddParam(const VarPtr& param, ParamDirection direction = ParamDirection::In) {
     params_.push_back(param);
@@ -556,14 +556,14 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] FunctionType GetFuncType() const { return func_type_; }
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
-  [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
+  [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
 
  private:
   std::string name_;
   FunctionType func_type_;
   std::optional<Level> level_;
   std::optional<Role> role_;
-  std::optional<SplitMode> split_;
+  std::vector<std::pair<std::string, std::any>> attrs_;
   std::vector<VarPtr> params_;
   std::vector<ParamDirection> param_directions_;
   std::vector<TypePtr> return_types_;

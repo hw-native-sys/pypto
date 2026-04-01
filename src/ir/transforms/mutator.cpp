@@ -138,7 +138,7 @@ FunctionPtr IRMutator::VisitFunction(const FunctionPtr& func) {
   }
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                           func->return_types_, std::move(new_body), func->span_,
-                                          func->func_type_, func->level_, func->role_);
+                                          func->func_type_, func->level_, func->role_, func->attrs_);
 }
 
 ExprPtr IRMutator::VisitExpr(const ExprPtr& expr) { return ExprFunctor<ExprPtr>::VisitExpr(expr); }

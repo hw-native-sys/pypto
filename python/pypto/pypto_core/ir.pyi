@@ -1865,8 +1865,11 @@ class Function(IRNode):
     role: Final[Role | None]
     """Function role (None = unspecified)."""
 
+    attrs: Final[dict[str, Any]]
+    """Function-level attributes (key-value metadata)."""
+
     split: Final[SplitMode | None]
-    """Split mode for cross-core transfer (None = no split)."""
+    """Split mode for cross-core transfer (convenience accessor into attrs)."""
 
     params: Final[list[Var]]
     """Parameter variables."""
@@ -1890,7 +1893,7 @@ class Function(IRNode):
         type: FunctionType = FunctionType.Opaque,
         level: Level | None = None,
         role: Role | None = None,
-        split: SplitMode | None = None,
+        attrs: dict[str, Any] | None = None,
     ) -> None:
         """Create a function definition.
 
@@ -1903,7 +1906,7 @@ class Function(IRNode):
             type: Function type (default: Opaque)
             level: Hierarchy level (default: None — unspecified)
             role: Function role (default: None — unspecified)
-            split: Split mode for cross-core transfer (default: None)
+            attrs: Function-level attributes dict (default: None)
         """
 
     def __str__(self) -> str:
@@ -2323,6 +2326,7 @@ class IRBuilder:
         type: FunctionType = FunctionType.Opaque,
         level: Level | None = None,
         role: Role | None = None,
+        attrs: dict[str, Any] | None = None,
     ) -> None:
         """Begin building a function.
 
@@ -2332,6 +2336,7 @@ class IRBuilder:
             type: Function type (default: Opaque)
             level: Hierarchy level (default: None)
             role: Function role (default: None)
+            attrs: Function-level attributes dict (default: None)
         """
 
     def func_arg(

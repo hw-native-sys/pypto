@@ -1216,7 +1216,10 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    bool has_split = func->split_.has_value() && func->split_.value() != SplitMode::None;
+    // NOTE: Currently only the "split" attr is printed. Other attrs in func->attrs_
+    // will be silently dropped during printing. Extend here when new attrs are added.
+    auto func_split_mode = func->GetSplitMode();
+    bool has_split = func_split_mode.has_value();
     if (has_type || has_level || has_role || has_split) {
       stream_ << "(";
       bool first = true;
@@ -1236,7 +1239,8 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
       }
       if (has_split) {
         if (!first) stream_ << ", ";
-        stream_ << "split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(func->split_.value());
+        stream_ << "attrs={\"split\": " << prefix_ << ".SplitMode."
+                << SplitModeToPythonString(*func_split_mode) << "}";
       }
       stream_ << ")";
     }
