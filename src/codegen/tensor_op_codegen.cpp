@@ -19,6 +19,7 @@
 
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -347,6 +348,137 @@ REGISTER_ORCHESTRATION_OP(tensor_scatter_update, ("tensor.scatter_update")) {
   oss << "           " << d_var << " * " << elem_bytes << "ULL);\n";
   oss << "  }\n}\n";
   oss << "Tensor " << result_var << " = " << codegen.GetExternalTensorName(input_name) << ";";
+  return oss.str();
+}
+
+REGISTER_ORCHESTRATION_OP(tensor_gather, ("tensor.gather")) {
+  // tensor.gather(input, index, dim=D):
+  //   output[i0][i1]...[iN] = input[i0]...[index[i0..iN]]...[iN]
+  //   where the dim-th coordinate is replaced by the index value.
+  // Supports arbitrary N-D tensors.
+  CHECK(op->args_.size() == 2) << "tensor.gather requires 2 arguments";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.gather: input must be a variable";
+  std::string index_name = codegen.TryGetVarName(op->args_[1]);
+  CHECK(!index_name.empty()) << "tensor.gather: index must be a variable";
+
+  auto input_type = As<TensorType>(op->args_[0]->GetType());
+  auto index_type = As<TensorType>(op->args_[1]->GetType());
+  INTERNAL_CHECK(input_type && index_type) << "Internal error: invalid types for tensor.gather";
+
+  // Extract dim from kwargs
+  int gather_dim = 0;
+  for (const auto& [key, val] : op->kwargs_) {
+    if (key == "dim") {
+      gather_dim = AnyCast<int>(val, "kwarg key: dim");
+    }
+  }
+  int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
+  if (gather_dim < 0) {
+    gather_dim += static_cast<int>(ndim);
+  }
+
+  std::string input_ptr = codegen.GetTensorDataPtr(input_name);
+  std::string index_ptr = codegen.GetTensorDataPtr(index_name);
+
+  std::string elem_cpp_type = input_type->dtype_.ToCTypeString();
+  std::string index_cpp_type = index_type->dtype_.ToCTypeString();
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  std::ostringstream oss;
+
+  // 1. Create output tensor (shape = index shape, dtype = input dtype)
+  oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
+  for (int64_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << "(uint32_t)(" << codegen.GenerateExprString(index_type->shape_[i]) << ")";
+  }
+  oss << "};\n";
+  oss << "Tensor " << result_var << " = make_tensor(" << result_var << "_shapes, " << ndim << ", "
+      << codegen.GetRuntimeDataTypeString(input_type->dtype_) << ");\n";
+
+  // 2. Declare typed pointers
+  std::string ip = "inp_" + result_var;
+  std::string xp = "idx_" + result_var;
+  std::string op_ptr = "out_" + result_var;
+  oss << "const " << elem_cpp_type << "* " << ip << " = static_cast<const " << elem_cpp_type << "*>("
+      << input_ptr << ");\n";
+  oss << "const " << index_cpp_type << "* " << xp << " = static_cast<const " << index_cpp_type << "*>("
+      << index_ptr << ");\n";
+  oss << elem_cpp_type << "* " << op_ptr << " = static_cast<" << elem_cpp_type << "*>(" << result_var
+      << ".data);\n";
+
+  // 3. Declare output shape and input shape arrays, compute strides and total
+  std::string osh = "osh_" + result_var;
+  std::string ish = "ish_" + result_var;
+  std::string ist = "ist_" + result_var;
+  std::string total = "tot_" + result_var;
+
+  oss << "size_t " << osh << "[" << ndim << "] = {";
+  for (int64_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << "(size_t)(" << codegen.GenerateExprString(index_type->shape_[i]) << ")";
+  }
+  oss << "};\n";
+
+  oss << "size_t " << ish << "[" << ndim << "] = {";
+  for (int64_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << "(size_t)(" << codegen.GenerateExprString(input_type->shape_[i]) << ")";
+  }
+  oss << "};\n";
+
+  // Input strides (row-major)
+  oss << "size_t " << ist << "[" << ndim << "];\n";
+  oss << ist << "[" << ndim - 1 << "] = 1;\n";
+  if (ndim > 1) {
+    std::string d_var = "sd_" + result_var;
+    oss << "for (int " << d_var << " = " << ndim - 2 << "; " << d_var << " >= 0; --" << d_var << ") {\n";
+    oss << "  " << ist << "[" << d_var << "] = " << ist << "[" << d_var << " + 1] * " << ish << "[" << d_var
+        << " + 1];\n";
+    oss << "}\n";
+  }
+
+  // Total elements
+  oss << "size_t " << total << " = 1;\n";
+  {
+    std::string d_var = "td_" + result_var;
+    oss << "for (size_t " << d_var << " = 0; " << d_var << " < " << ndim << "; ++" << d_var << ") {\n";
+    oss << "  " << total << " *= " << osh << "[" << d_var << "];\n";
+    oss << "}\n";
+  }
+
+  // 4. Main gather loop
+  std::string flat = "f_" + result_var;
+  std::string coords = "c_" + result_var;
+  std::string tmp = "t_" + result_var;
+  std::string in_idx = "ii_" + result_var;
+  std::string d_loop = "d_" + result_var;
+
+  oss << "for (size_t " << flat << " = 0; " << flat << " < " << total << "; ++" << flat << ") {\n";
+
+  // Decompose flat index to N-D coordinates
+  oss << "  size_t " << coords << "[" << ndim << "];\n";
+  oss << "  size_t " << tmp << " = " << flat << ";\n";
+  oss << "  for (int " << d_loop << " = " << ndim - 1 << "; " << d_loop << " >= 0; --" << d_loop << ") {\n";
+  oss << "    " << coords << "[" << d_loop << "] = " << tmp << " % " << osh << "[" << d_loop << "];\n";
+  oss << "    " << tmp << " /= " << osh << "[" << d_loop << "];\n";
+  oss << "  }\n";
+
+  // Replace dim coordinate with index value
+  oss << "  " << coords << "[" << gather_dim << "] = static_cast<size_t>(" << xp << "[" << flat << "]);\n";
+
+  // Compute input linear index
+  oss << "  size_t " << in_idx << " = 0;\n";
+  oss << "  for (int " << d_loop << " = 0; " << d_loop << " < " << ndim << "; ++" << d_loop << ") {\n";
+  oss << "    " << in_idx << " += " << coords << "[" << d_loop << "] * " << ist << "[" << d_loop << "];\n";
+  oss << "  }\n";
+
+  // Copy element
+  oss << "  " << op_ptr << "[" << flat << "] = " << ip << "[" << in_idx << "];\n";
+  oss << "}\n";
+
   return oss.str();
 }
 

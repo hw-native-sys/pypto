@@ -110,6 +110,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
     src/ir/op/tensor_ops/memory.cpp
+    src/ir/op/tensor_ops/gather.cpp
     src/ir/op/tensor_ops/scatter_update.cpp
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/transform.cpp

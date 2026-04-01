@@ -1617,5 +1617,186 @@ def test_tensor_scatter_update_invalid_dim():
         ir.op.tensor.scatter_update(input_var, 0, index_var, src_var)
 
 
+# ── tensor.gather tests ──────────────────────────────────────────────────
+
+
+def test_tensor_gather_2d_dim0():
+    """Test tensor.gather with 2D tensors and dim=0."""
+    span = ir.Span.unknown()
+
+    rows = ir.ConstInt(8, DataType.INT32, span)
+    cols = ir.ConstInt(4, DataType.INT32, span)
+    idx_rows = ir.ConstInt(3, DataType.INT32, span)
+
+    input_type = ir.TensorType([rows, cols], DataType.FP32)
+    index_type = ir.TensorType([idx_rows, cols], DataType.INT32)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    call = ir.op.tensor.gather(input_var, 0, index_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+    # Output shape == index shape
+    assert isinstance(result_type.shape[0], ir.ConstInt)
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[0].value == 3
+    assert result_type.shape[1].value == 4
+
+
+def test_tensor_gather_2d_dim1():
+    """Test tensor.gather with 2D tensors and dim=1 (MoE use case)."""
+    span = ir.Span.unknown()
+
+    batch = ir.ConstInt(16, DataType.INT32, span)
+    num_experts = ir.ConstInt(64, DataType.INT32, span)
+    topk = ir.ConstInt(4, DataType.INT32, span)
+
+    input_type = ir.TensorType([batch, num_experts], DataType.FP16)
+    index_type = ir.TensorType([batch, topk], DataType.INT32)
+
+    input_var = ir.Var("topk_weights", input_type, span)
+    index_var = ir.Var("topk_ids", index_type, span)
+
+    call = ir.op.tensor.gather(input_var, 1, index_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt)
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[0].value == 16
+    assert result_type.shape[1].value == 4
+
+
+def test_tensor_gather_3d():
+    """Test tensor.gather with 3D tensors and dim=1."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+    d2 = ir.ConstInt(16, DataType.INT32, span)
+    idx_d1 = ir.ConstInt(3, DataType.INT32, span)
+
+    input_type = ir.TensorType([d0, d1, d2], DataType.FP32)
+    index_type = ir.TensorType([d0, idx_d1, d2], DataType.INT64)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    call = ir.op.tensor.gather(input_var, 1, index_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 3
+
+
+def test_tensor_gather_negative_dim():
+    """Test tensor.gather with negative dim value."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([d0, d1], DataType.FP32)
+    index_type = ir.TensorType([d0, d1], DataType.INT32)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    # dim=-1 should be equivalent to dim=1 for a 2D tensor
+    call = ir.op.tensor.gather(input_var, -1, index_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_gather_rank_mismatch():
+    """Test tensor.gather rejects rank mismatch between input and index."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+    d2 = ir.ConstInt(16, DataType.INT32, span)
+
+    input_type = ir.TensorType([d0, d1, d2], DataType.FP32)  # 3D
+    index_type = ir.TensorType([d0, d1], DataType.INT32)  # 2D
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    with pytest.raises(ValueError, match="index rank"):
+        ir.op.tensor.gather(input_var, 0, index_var)
+
+
+def test_tensor_gather_non_integer_index():
+    """Test tensor.gather rejects non-integer index dtype."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([d0, d1], DataType.FP32)
+    index_type = ir.TensorType([d0, d1], DataType.FP32)  # float, not int
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    with pytest.raises(ValueError, match="index dtype must be integer"):
+        ir.op.tensor.gather(input_var, 0, index_var)
+
+
+def test_tensor_gather_dim_out_of_range():
+    """Test tensor.gather rejects dim out of range."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([d0, d1], DataType.FP32)
+    index_type = ir.TensorType([d0, d1], DataType.INT32)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    with pytest.raises(ValueError, match="dim.*out of range"):
+        ir.op.tensor.gather(input_var, 2, index_var)
+
+
+def test_tensor_gather_index_shape_exceeds_input():
+    """Test tensor.gather rejects index shape larger than input on non-gather dims."""
+    span = ir.Span.unknown()
+
+    d0 = ir.ConstInt(4, DataType.INT32, span)
+    d1 = ir.ConstInt(8, DataType.INT32, span)
+    d1_big = ir.ConstInt(16, DataType.INT32, span)  # bigger than input's d1
+
+    input_type = ir.TensorType([d0, d1], DataType.FP32)
+    index_type = ir.TensorType([d0, d1_big], DataType.INT32)
+
+    input_var = ir.Var("inp", input_type, span)
+    index_var = ir.Var("idx", index_type, span)
+
+    # dim=0, so d1 (index 1) is a non-gather dim and index.shape[1]=16 > input.shape[1]=8
+    with pytest.raises(ValueError, match="must be <="):
+        ir.op.tensor.gather(input_var, 0, index_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

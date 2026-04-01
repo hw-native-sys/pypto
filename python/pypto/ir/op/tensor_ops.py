@@ -940,3 +940,34 @@ def scatter_update(
     op_args: list[Expr] = [input, index, src]
     kwargs: dict[str, Any] = {"dim": dim_val}
     return _ir_core.create_op_call("tensor.scatter_update", op_args, kwargs, actual_span)
+
+
+def gather(
+    input: Expr,
+    dim: int,
+    index: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Gather values from input tensor along the specified dimension using index tensor.
+
+    For a 3D tensor, the output is computed as:
+        output[i][j][k] = input[index[i][j][k]][j][k]  if dim=0
+        output[i][j][k] = input[i][index[i][j][k]][k]  if dim=1
+        output[i][j][k] = input[i][j][index[i][j][k]]  if dim=2
+
+    Args:
+        input: Input tensor to gather from
+        dim: Dimension along which to gather (supports negative indexing)
+        index: Index tensor (same rank as input, integer dtype).
+               Output shape equals index shape.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression returning the gathered tensor (same dtype as input, same shape as index)
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [input, index]
+    # dim may arrive as a ConstInt when called from the DSL parser — extract the int value
+    dim_val = int(dim.value) if isinstance(dim, ConstInt) else int(dim)
+    kwargs: dict[str, Any] = {"dim": dim_val}
+    return _ir_core.create_op_call("tensor.gather", args, kwargs, actual_span)

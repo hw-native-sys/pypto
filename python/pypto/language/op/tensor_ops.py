@@ -59,6 +59,7 @@ __all__ = [
     "reshape",
     "transpose",
     "scatter_update",
+    "gather",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -778,4 +779,29 @@ def scatter_update(
         Tensor wrapping the scatter_update operation
     """
     call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def gather(
+    input: Tensor,
+    dim: int,
+    index: Tensor,
+) -> Tensor:
+    """Gather values from input tensor along the specified dimension using index tensor.
+
+    For a 3D tensor, the output is computed as:
+        output[i][j][k] = input[index[i][j][k]][j][k]  if dim=0
+        output[i][j][k] = input[i][index[i][j][k]][k]  if dim=1
+        output[i][j][k] = input[i][j][index[i][j][k]]  if dim=2
+
+    Args:
+        input: Input tensor to gather from
+        dim: Dimension along which to gather (supports negative indexing)
+        index: Index tensor (same rank as input, integer dtype).
+               Output shape equals index shape.
+
+    Returns:
+        Tensor wrapping the gather operation (same dtype as input, same shape as index)
+    """
+    call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)

@@ -1719,5 +1719,122 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
 
+class TestTensorGatherCodegen:
+    """Tests for tensor.gather orchestration codegen."""
+
+    def test_gather_2d_dim0_codegen(self):
+        """tensor.gather with 2D tensors and dim=0 generates correct C++ code."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class GatherProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_noop(
+                self,
+                t: pl.Tensor[[3, 4], pl.FP32],
+                out: pl.Out[pl.Tensor[[3, 4], pl.FP32]],
+            ) -> pl.Tensor[[3, 4], pl.FP32]:
+                tile: pl.Tile[[3, 4], pl.FP32] = pl.load(t, [0, 0], [3, 4])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                inp: pl.Tensor[[8, 4], pl.FP32],
+                idx: pl.Tensor[[3, 4], pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 4], pl.FP32]],
+            ) -> pl.Tensor[[3, 4], pl.FP32]:
+                gathered: pl.Tensor[[3, 4], pl.FP32] = pl.gather(inp, 0, idx)
+                out = self.kernel_noop(gathered, out)
+                return out
+
+        code = _generate_orch_code(GatherProgram)
+
+        # Output tensor creation with index shape
+        assert "make_tensor(" in code
+        # Typed pointer casts for input and index
+        assert "static_cast<const float*>" in code
+        assert "static_cast<const int32_t*>" in code
+        # Main gather loop
+        assert "for (size_t" in code
+        # Dim coordinate replacement (dim=0)
+        assert "[0] = static_cast<size_t>" in code
+
+    def test_gather_2d_dim1_codegen(self):
+        """tensor.gather with dim=1 generates dim replacement at index 1."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class GatherDim1Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_noop(
+                self,
+                t: pl.Tensor[[16, 4], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 4], pl.FP16]],
+            ) -> pl.Tensor[[16, 4], pl.FP16]:
+                tile: pl.Tile[[16, 4], pl.FP16] = pl.load(t, [0, 0], [16, 4])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                weights: pl.Tensor[[16, 64], pl.FP16],
+                topk_ids: pl.Tensor[[16, 4], pl.INT32],
+                out: pl.Out[pl.Tensor[[16, 4], pl.FP16]],
+            ) -> pl.Tensor[[16, 4], pl.FP16]:
+                selected: pl.Tensor[[16, 4], pl.FP16] = pl.gather(weights, 1, topk_ids)
+                out = self.kernel_noop(selected, out)
+                return out
+
+        code = _generate_orch_code(GatherDim1Program)
+
+        # Dim coordinate replacement should use index 1
+        assert "[1] = static_cast<size_t>" in code
+
+        # Output tensor dtype matches input (FP16), not index (INT32)
+        assert "DataType::FLOAT16" in code
+
+        # Output tensor shape matches index [16, 4], not input [16, 64]
+        assert "selected_shapes[2] = {(uint32_t)(16), (uint32_t)(4)}" in code
+        assert "make_tensor(selected_shapes, 2, DataType::FLOAT16)" in code
+
+        # Input shape [16, 64] is used for stride computation (distinct from output shape)
+        assert "ish_selected[2] = {(size_t)(16), (size_t)(64)}" in code
+
+    def test_gather_negative_dim_codegen(self):
+        """tensor.gather with negative dim normalizes to positive index in codegen."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class GatherNegDimProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_noop(
+                self,
+                t: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                tile: pl.Tile[[4, 8], pl.FP32] = pl.load(t, [0, 0], [4, 8])
+                return pl.store(tile, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                inp: pl.Tensor[[4, 8], pl.FP32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                gathered: pl.Tensor[[4, 8], pl.FP32] = pl.gather(inp, -1, idx)
+                out = self.kernel_noop(gathered, out)
+                return out
+
+        code = _generate_orch_code(GatherNegDimProgram)
+
+        # dim=-1 for 2D tensor normalizes to dim=1
+        assert "[1] = static_cast<size_t>" in code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
