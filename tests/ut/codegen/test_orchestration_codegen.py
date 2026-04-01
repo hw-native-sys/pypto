@@ -1654,7 +1654,7 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t0.add_inout(ext_acc)" in code
 
     def test_mixed_loop_carried_and_full_tuple_return(self):
-        """ForStmt yield + tile.full outputs in same kernel get correct return-to-param mapping.
+        """ForStmt yield + tile.store outputs in same kernel get correct return-to-param mapping.
 
         Regression test for a bug where BuildReturnToParamMapping could not trace
         ForStmt yield return values back to their Out parameters.  The sequential
@@ -1674,13 +1674,15 @@ class TestTensorReadWriteOffsetCodegen:
                 final_out: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
             ) -> pl.Tensor[[4, 16], pl.FP32]:
                 dst = pl.create_tensor([4, 16], dtype=pl.FP32)
+                acc = pl.create_tensor([4, 16], dtype=pl.FP32)
                 with pl.incore():
                     # ForStmt: assemble rows into dst (produces yield return).
                     for i in pl.range(4):
                         row = pl.slice(src, [1, 16], [i, 0])
                         dst = pl.assemble(dst, row, [i, 0])
-                    # pl.full: create accumulator (produces tile.store return).
-                    acc = pl.full([4, 16], dtype=pl.FP32, value=0.0)
+                    # Top-level assemble into acc (produces tile.store return).
+                    full_view = pl.slice(src, [4, 16], [0, 0])
+                    acc = pl.assemble(acc, full_view, [0, 0])
                 with pl.incore():
                     # Consumer: uses both dst and acc from previous kernel.
                     dst_tile = pl.slice(dst, [4, 16], [0, 0])
@@ -1697,24 +1699,23 @@ class TestTensorReadWriteOffsetCodegen:
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
         # The mixed kernel returns a tuple of (acc, dst).
-        # acc comes from tile.store to a ret*__out param.
+        # acc comes from tile.store to an acc Out param.
         # dst comes from ForStmt yield tracing back to a dst Out param.
-        # Before the fix, dst would incorrectly alias to ret*__out.
-        # Verify both outputs are used as separate inputs to the consumer.
-        assert "params_t1.add_input(" in code
+        # Before the fix, dst would incorrectly alias to the acc Out param.
 
         # Ensure the two tuple aliases reference DIFFERENT get_ref indices.
-        # Before the fix, both aliases would point to the same index.
         get_ref_matches = re.findall(r"outs_t0\.get_ref\((\d+)\)", code)
         assert len(set(get_ref_matches)) >= 2, (
             f"Expected at least 2 distinct get_ref indices, got {get_ref_matches}"
         )
 
-        # After alias resolution, both acc and dst should appear as add_input
-        # to the consumer task. Count distinct inputs to task 1.
+        # Verify the consumer receives both tuple outputs as distinct inputs.
         t1_inputs = re.findall(r"params_t1\.add_input\(([^)]+)\)", code)
         assert len(t1_inputs) >= 2, (
             f"Consumer kernel should have at least 2 inputs (acc + dst), got {len(t1_inputs)}"
+        )
+        assert len(set(t1_inputs)) == len(t1_inputs), (
+            f"Consumer inputs should all be distinct tensors, got {t1_inputs}"
         )
 
 

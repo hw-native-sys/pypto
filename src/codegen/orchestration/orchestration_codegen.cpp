@@ -1176,8 +1176,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
         // Map each return_var to its iter_arg's initValue → Out param.
         for (size_t ri = 0; ri < for_stmt->return_vars_.size() && ri < for_stmt->iter_args_.size(); ++ri) {
-          auto init_var = As<Var>(for_stmt->iter_args_[ri]->initValue_);
-          if (init_var && for_stmt->return_vars_[ri]) {
+          const auto& iter_arg = for_stmt->iter_args_[ri];
+          if (!iter_arg || !iter_arg->initValue_ || !for_stmt->return_vars_[ri]) continue;
+          auto init_var = As<Var>(iter_arg->initValue_);
+          if (init_var) {
             var_to_out_param[for_stmt->return_vars_[ri].get()] = find_param_index(init_var.get());
           }
         }
@@ -1185,14 +1187,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // For each return expression, look up the resolved Out param index.
+    // Also handle the case where a return value IS a parameter directly.
     for (const auto& ret_expr : return_stmt->value_) {
       auto var = As<Var>(ret_expr);
       if (!var) {
         mapping.push_back(SIZE_MAX);
         continue;
       }
+      // Check the derived mapping first (tile.store / ForStmt yield).
       auto it = var_to_out_param.find(var.get());
-      mapping.push_back(it != var_to_out_param.end() ? it->second : SIZE_MAX);
+      if (it != var_to_out_param.end()) {
+        mapping.push_back(it->second);
+        continue;
+      }
+      // Fall back: the return value might be a parameter returned directly.
+      mapping.push_back(find_param_index(var.get()));
     }
     return mapping;
   }
