@@ -1025,9 +1025,9 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   used_collector.VisitStmt(new_body);
   new_body = RemoveUnusedAllocStatements(new_body, used_collector.GetUsedPtrs());
 
-  auto result =
-      std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                       func->return_types_, new_body, func->span_, func->func_type_);
+  auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
+                                                 func->return_types_, new_body, func->span_, func->func_type_,
+                                                 func->level_, func->role_, func->attrs_);
   return result;
 }
 

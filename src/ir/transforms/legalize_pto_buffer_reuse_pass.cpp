@@ -363,7 +363,8 @@ FunctionPtr TransformLegalizePTOBufferReuse(const FunctionPtr& func) {
   new_body = InsertNewAllocStatements(new_body, splits);
 
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                          func->return_types_, new_body, func->span_, func->func_type_);
+                                          func->return_types_, new_body, func->span_, func->func_type_,
+                                          func->level_, func->role_, func->attrs_);
 }
 
 }  // namespace

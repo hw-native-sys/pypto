@@ -1096,8 +1096,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
     }
+    // When split is active, set the third kernel ID to the AIV function ID;
+    // otherwise use INVALID_KERNEL_ID (no vec preprocessing kernel).
+    auto split_mode = group_func->GetSplitMode();
+    std::string third_id = split_mode.has_value() ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
-          << aiv_id << "};\n";
+          << third_id << "};\n";
 
     // Collect internal Out tensors that need to be bound from TaskOutputTensors.
     struct InternalOutVar {
