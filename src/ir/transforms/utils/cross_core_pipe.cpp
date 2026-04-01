@@ -22,7 +22,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
@@ -285,33 +284,23 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   AutomaticPipeSetup setup;
 
   if (dir_mask & core_affinity::kDirMaskV2C) {
+    const auto v2c_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C);
+    auto v2c_reserve = CreateReserveBuffer(v2c_name, buffer_size, span);
     setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C),
-                              GetUnknownType(), span),
-        CreateReserveBuffer(BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C), buffer_size,
-                            span),
-        span));
+        std::make_shared<Var>(v2c_name, v2c_reserve->GetType(), span), v2c_reserve, span));
+    auto v2c_import = CreateImportPeerBuffer(v2c_name, aic_name, span);
     setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C) + "_import",
-                              GetUnknownType(), span),
-        CreateImportPeerBuffer(BuildPipeBufferName(func_name, core_affinity::PipeDirection::V2C), aic_name,
-                               span),
-        span));
+        std::make_shared<Var>(v2c_name + "_import", v2c_import->GetType(), span), v2c_import, span));
   }
 
   if (dir_mask & core_affinity::kDirMaskC2V) {
+    const auto c2v_name = BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V);
+    auto c2v_reserve = CreateReserveBuffer(c2v_name, buffer_size, span);
     setup.aiv_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V),
-                              GetUnknownType(), span),
-        CreateReserveBuffer(BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V), buffer_size,
-                            span),
-        span));
+        std::make_shared<Var>(c2v_name, c2v_reserve->GetType(), span), c2v_reserve, span));
+    auto c2v_import = CreateImportPeerBuffer(c2v_name, aiv_name, span);
     setup.aic_stmts.push_back(std::make_shared<AssignStmt>(
-        std::make_shared<Var>(BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V) + "_import",
-                              GetUnknownType(), span),
-        CreateImportPeerBuffer(BuildPipeBufferName(func_name, core_affinity::PipeDirection::C2V), aiv_name,
-                               span),
-        span));
+        std::make_shared<Var>(c2v_name + "_import", c2v_import->GetType(), span), c2v_import, span));
   }
 
   setup.aic_stmts.push_back(std::make_shared<EvalStmt>(

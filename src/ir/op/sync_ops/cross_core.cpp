@@ -10,10 +10,12 @@
  */
 
 #include <any>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
@@ -26,6 +28,14 @@ namespace {
 TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
   return GetUnknownType();
+}
+
+// PTO emits `pto.reserve_buffer` / `pto.import_reserved_buffer` with `-> i32` result.
+TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  (void)args;
+  (void)kwargs;
+  return std::make_shared<ScalarType>(DataType::INT32);
 }
 
 }  // namespace
@@ -79,7 +89,7 @@ REGISTER_OP("system.reserve_buffer")
     .set_attr<std::string>("name")
     .set_attr<int>("size")
     .set_attr<int>("base")
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type(DeduceI32ScalarType);
 
 // Import a peer function's buffer
 REGISTER_OP("system.import_peer_buffer")
@@ -88,7 +98,7 @@ REGISTER_OP("system.import_peer_buffer")
     .no_argument()
     .set_attr<std::string>("name")
     .set_attr<std::string>("peer_func")
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type(DeduceI32ScalarType);
 
 }  // namespace ir
 }  // namespace pypto

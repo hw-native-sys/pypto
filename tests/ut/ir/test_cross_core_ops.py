@@ -47,19 +47,21 @@ def test_initialize_pipe_ops():
 
 
 def test_reserve_buffer_op():
-    """Test reserve_buffer op accepts no args and returns UnknownType."""
+    """Test reserve_buffer op accepts no args and returns ScalarType(INT32)."""
     span = ir.Span.unknown()
     call = ir.create_op_call("system.reserve_buffer", [], {"name": "shared_buf", "size": 1024}, span)
-    assert isinstance(call.type, ir.UnknownType)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.INT32
 
 
 def test_import_peer_buffer_op():
-    """Test import_peer_buffer op accepts no args and returns UnknownType."""
+    """Test import_peer_buffer op accepts no args and returns ScalarType(INT32)."""
     span = ir.Span.unknown()
     call = ir.create_op_call(
         "system.import_peer_buffer", [], {"name": "shared_buf", "peer_func": "aic_kernel"}, span
     )
-    assert isinstance(call.type, ir.UnknownType)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.INT32
 
 
 def test_cross_core_ops_registered():

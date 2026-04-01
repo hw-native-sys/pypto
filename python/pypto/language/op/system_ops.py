@@ -34,6 +34,9 @@ from ..typing import Tile
 class ReservedBuffer:
     """Return value from pl.reserve_buffer(), providing access to buffer metadata.
 
+    The underlying IR node is a ``Call`` whose result type is ``ScalarType(INT32)``,
+    matching PTO ``pto.reserve_buffer ... -> i32``.
+
     Attributes:
         base: Base address in local SRAM (int literal or AUTO sentinel).
         size: Buffer size in bytes.
@@ -46,9 +49,17 @@ class ReservedBuffer:
         self.size = size
         self.base = base
 
+    @property
+    def call(self) -> Call:
+        """The ``system.reserve_buffer`` IR call (i32 SSA result)."""
+        return self._expr
+
 
 class ImportedBuffer:
     """Return value from pl.import_peer_buffer(), providing access to peer buffer metadata.
+
+    The underlying IR node is a ``Call`` whose result type is ``ScalarType(INT32)``,
+    matching PTO ``pto.import_reserved_buffer ... -> i32``.
 
     Attributes:
         base: Peer buffer base address (resolved by allocator if peer uses AUTO).
@@ -61,6 +72,11 @@ class ImportedBuffer:
         self.name = name
         self.peer_func = peer_func
         self.base: int = AUTO  # resolved by allocator pass
+
+    @property
+    def call(self) -> Call:
+        """The ``system.import_peer_buffer`` IR call (i32 SSA result)."""
+        return self._expr
 
 
 __all__ = [
@@ -155,7 +171,7 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
         span: Optional source span.
 
     Returns:
-        ReservedBuffer with .base, .size, .name attributes.
+        ReservedBuffer with .base, .size, .name and .call (IR ``Call`` with INT32 scalar type).
     """
     call = _ir_ops.reserve_buffer(name=name, size=size, base=base, span=span)
     return ReservedBuffer(expr=call, name=name, size=size, base=base)
@@ -170,7 +186,7 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
         span: Optional source span.
 
     Returns:
-        ImportedBuffer with .base, .name, .peer_func attributes.
+        ImportedBuffer with .base, .name, .peer_func and .call (IR ``Call`` with INT32 scalar type).
         The .base value is resolved by the allocator pass.
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)

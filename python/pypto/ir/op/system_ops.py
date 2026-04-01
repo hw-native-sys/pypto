@@ -15,7 +15,7 @@ System operations handle hardware synchronization and cross-core communication:
 - tpush_to_aiv / tpush_to_aic: Push tile data across cores
 - tpop_from_aic / tpop_from_aiv: Pop tile data from cross-core pipe
 - aic_initialize_pipe / aiv_initialize_pipe: Initialize cross-core pipes
-- reserve_buffer / import_peer_buffer: Cross-core buffer management
+- reserve_buffer / import_peer_buffer: Cross-core buffer management (i32 SSA results)
 """
 
 from pypto.pypto_core import ir as _ir_core
@@ -190,6 +190,8 @@ def aiv_initialize_pipe(
 def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None = None) -> Call:
     """Reserve a named buffer for cross-core communication.
 
+    Result type is ``ScalarType(INT32)`` (PTO ``pto.reserve_buffer ... -> i32``).
+
     Args:
         name: Buffer name
         size: Buffer size in bytes
@@ -206,6 +208,8 @@ def reserve_buffer(*, name: str, size: int, base: int = AUTO, span: Span | None 
 
 def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -> Call:
     """Import a buffer from a peer function in the same group.
+
+    Result type is ``ScalarType(INT32)`` (PTO ``pto.import_reserved_buffer ... -> i32``).
 
     Args:
         name: Buffer name to import
