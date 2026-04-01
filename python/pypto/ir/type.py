@@ -25,7 +25,7 @@ from pypto.pypto_core.ir import (
     TileView,
 )
 
-from .utils import _normalize_shape
+from .utils import _normalize_expr, _normalize_shape
 
 # Store the original native __init__
 _native_tensor_type_init = TensorType.__init__
@@ -115,11 +115,11 @@ def _tensor_view_init_wrapper(
         layout: Tensor layout type
         valid_shape: Valid shape for each dimension (int or Expr, defaults to empty)
     """
-    if stride is None and layout is None:
+    if stride is None and layout is None and valid_shape is None:
         _native_tensor_view_init(self)
         return
     if layout is None:
-        raise ValueError("layout is required when stride is provided")
+        raise ValueError("layout is required when stride or valid_shape is provided")
     _native_tensor_view_init(
         self,
         _normalize_optional_shape(stride),
@@ -132,7 +132,7 @@ def _tile_view_init_wrapper(
     self,
     valid_shape: Sequence[int | Expr] | None = None,
     stride: Sequence[int | Expr] | None = None,
-    start_offset: Expr | None = None,
+    start_offset: Expr | int | None = None,
     blayout: TileLayout = TileLayout.row_major,
     slayout: TileLayout = TileLayout.none_box,
     fractal: int = 512,
@@ -143,17 +143,26 @@ def _tile_view_init_wrapper(
     Args:
         valid_shape: Valid shape dimensions (int or Expr)
         stride: Stride for each dimension (int or Expr)
-        start_offset: Starting offset
+        start_offset: Starting offset (int or Expr, int auto-converted to ConstInt)
         blayout: Block layout
         slayout: Scatter layout
         fractal: Fractal size
         pad: Pad mode
     """
-    if valid_shape is None and stride is None and start_offset is None:
+    has_positional = valid_shape is not None or stride is not None or start_offset is not None
+    has_non_default_kwargs = (
+        blayout != TileLayout.row_major
+        or slayout != TileLayout.none_box
+        or fractal != 512
+        or pad != PadValue.null
+    )
+    if not has_positional and not has_non_default_kwargs:
         _native_tile_view_init(self)
         return
     if start_offset is None:
-        raise ValueError("start_offset is required when valid_shape or stride is provided")
+        raise ValueError("start_offset is required when valid_shape, stride, or layout kwargs are provided")
+    if isinstance(start_offset, int):
+        start_offset = _normalize_expr(start_offset)
     _native_tile_view_init(
         self,
         _normalize_optional_shape(valid_shape),

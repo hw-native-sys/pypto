@@ -504,7 +504,7 @@ class TileView:
         self,
         valid_shape: Sequence[Expr | int],
         stride: Sequence[Expr | int],
-        start_offset: Expr,
+        start_offset: Expr | int,
         blayout: TileLayout = ...,
         slayout: TileLayout = ...,
         fractal: int = ...,
@@ -515,7 +515,7 @@ class TileView:
         Args:
             valid_shape: Valid shape dimensions (Expr or int, ints auto-converted to ConstInt)
             stride: Stride for each dimension (Expr or int, ints auto-converted to ConstInt)
-            start_offset: Starting offset
+            start_offset: Starting offset (Expr or int, int auto-converted to ConstInt)
             blayout: Block layout (default: row_major)
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size (default: 512)
