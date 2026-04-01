@@ -331,6 +331,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
   stream_ << " {\n";
   indent_level_++;
+  fs_.constants_indent = GetIndent();
 
   // Pre-emit i64 address constants now that indent_level_ is set
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
@@ -682,7 +683,7 @@ std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << GetIndent() << name << " = arith.constant " << value << " : index\n";
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : index\n";
   fs_.emitted_constants[value] = name;
   return name;
 }
@@ -708,7 +709,7 @@ std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << GetIndent() << name << " = arith.constant " << value << " : i64\n";
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : i64\n";
   fs_.emitted_i64_constants[value] = name;
   return name;
 }
@@ -734,7 +735,7 @@ std::string PTOCodegen::GetOrEmitI32Constant(int32_t value) {
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << GetIndent() << name << " = arith.constant " << value << " : i32\n";
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : i32\n";
   fs_.emitted_i32_constants[value] = name;
   return name;
 }
@@ -1050,7 +1051,7 @@ std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& 
     std::ostringstream val_str;
     val_str << std::scientific << std::setprecision(6) << value;
 
-    fs_.constants_section << GetIndent() << name << " = arith.constant " << val_str.str() << " : "
+    fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << val_str.str() << " : "
                           << mlir_type << "\n";
     fs_.emitted_float_constants.insert(value);
     fs_.float_const_names[value] = name;

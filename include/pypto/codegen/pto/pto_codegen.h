@@ -383,6 +383,7 @@ class PTOCodegen : public CodegenBase {
   struct FunctionState {
     std::ostringstream constants_section;
     std::ostringstream body_section;
+    std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
 
     std::map<const ir::Var*, std::string> var_to_mlir;
     std::map<const ir::Var*, std::string> tensor_to_view;
@@ -430,6 +431,7 @@ class PTOCodegen : public CodegenBase {
       constants_section.clear();
       body_section.str("");
       body_section.clear();
+      constants_indent.clear();
 
       var_to_mlir.clear();
       tensor_to_view.clear();

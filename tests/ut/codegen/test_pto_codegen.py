@@ -1394,5 +1394,40 @@ class TestColumnVectorCodegen:
         assert "layout = #pto.layout<nd>" in row_view
 
 
+def test_pto_codegen_constant_indent_consistency():
+    """All arith.constant lines must have consistent 2-space indent.
+
+    Regression test for #812: constants first encountered inside a nested scope
+    (for loop) used the loop's deeper indent level instead of the function-body
+    indent level.
+    """
+
+    @pl.program
+    class NestedConstantProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def nested_const(
+            self,
+            a: pl.Tensor[[128, 128], pl.FP32],
+            output: pl.Tensor[[128, 128], pl.FP32],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            for i, (out_iter,) in pl.range(2, init_values=(output,)):
+                offset_i: pl.Scalar[pl.INDEX] = i * 64
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.load(a, [offset_i, 0], [64, 128])
+                updated: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile, [offset_i, 0], out_iter)
+                result = pl.yield_(updated)
+            return result
+
+    mlir_code = _generate_default_mlir(NestedConstantProgram)
+
+    # Collect all arith.constant lines with original indentation
+    const_lines = [line for line in mlir_code.splitlines() if "arith.constant" in line]
+    assert len(const_lines) >= 2, f"Expected at least 2 arith.constant lines, got {len(const_lines)}"
+
+    # All should have exactly 2-space indent (function-body level)
+    for line in const_lines:
+        leading_spaces = len(line) - len(line.lstrip())
+        assert leading_spaces == 2, f"arith.constant has {leading_spaces}-space indent (expected 2): {line!r}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
