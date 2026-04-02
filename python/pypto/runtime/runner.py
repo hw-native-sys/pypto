@@ -248,7 +248,7 @@ class RunConfig:
         warning_level: Override warning level for compilation. ``None`` uses the
             default (``PrePipeline``, or ``PYPTO_WARNING_LEVEL`` env var).
         disabled_warnings: Set of warning checks to disable during compilation.
-            ``None`` uses the default (no warnings disabled).
+            ``None`` uses the default (``UnusedControlFlowResult`` disabled).
     """
 
     __test__ = False  # Not a pytest test class
