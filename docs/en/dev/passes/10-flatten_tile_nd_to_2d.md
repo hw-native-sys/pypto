@@ -6,6 +6,11 @@ Flattens ND tile operations (3D+) to 2D in InCore functions by merging all dimen
 
 PTO-ISA only accepts 2D tiles. After `ConvertTensorToTileOps`, tiles may be ND (matching tensor shapes). This pass flattens all >2D tile operations to 2D by merging higher axes into one dimension and keeping the last axis unchanged. For example, a tile `[2, 3, 4]` becomes `[6, 4]`.
 
+For batched matrix multiplication, `ConvertTensorToTileOps` first preserves the
+high-level intent as `tile.batch_matmul`. `FlattenTileNdTo2D` then becomes the
+canonical legalization point that expands it into broadcast-aware per-batch
+2D `tile.matmul` operations.
+
 **Requirements**:
 
 - Input IR must be in SSA form
@@ -47,6 +52,7 @@ Per-statement handling:
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
+| `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast and any explicit operand `tile.transpose` |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 

@@ -110,6 +110,16 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+`tensor.matmul` is reserved for 2D matrix multiplication. For batched tensors
+with rank >= 3, use `tensor.batch_matmul` from the registry or the Python helper
+`op.tensor.batch_matmul(...)`.
+
+At the tile layer, `tile.batch_matmul` mirrors the batched semantics for
+`TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
+dimensions, and keeps the same operand-only interface style as `tile.matmul`.
+If batch operands need transpose semantics, that is expressed explicitly with
+`tile.transpose(...)` on the inputs before later lowering to 2D `tile.matmul`.
+
 ## Python Usage
 
 ```python
@@ -131,6 +141,10 @@ dim64, dim128 = ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType
 a = ir.Var("a", ir.TensorType([dim64, dim128], DataType.FP16), span)
 b = ir.Var("b", ir.TensorType([dim128, dim64], DataType.FP16), span)
 matmul = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+batch_a = ir.Var("batch_a", ir.TensorType([dim4, dim64, dim128], DataType.FP16), span)
+batch_b = ir.Var("batch_b", ir.TensorType([dim4, dim128, dim64], DataType.FP16), span)
+batch_matmul = op.tensor.batch_matmul(batch_a, batch_b, out_dtype=DataType.FP32)
 
 # Query registry
 assert ir.is_op_registered("tensor.add")

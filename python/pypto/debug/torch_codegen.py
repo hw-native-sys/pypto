@@ -275,6 +275,7 @@ def _register_ops() -> None:
 
     # --- Tensor-only ops ---
     m["tensor.matmul"] = _handle_tensor_matmul
+    m["tensor.batch_matmul"] = _handle_tensor_matmul
     m["tensor.matmul_acc"] = _handle_tensor_matmul_acc
     m["tensor.dim"] = lambda a, _kw: f"{a[0]}.shape[{a[1]}]"
     m["tensor.create"] = _handle_create
@@ -317,6 +318,7 @@ def _register_ops() -> None:
 
     # tile matmul variants — .float() to match hardware FP32 accumulation output
     m["tile.matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
+    m["tile.batch_matmul"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"
     m["tile.matmul_acc"] = lambda a, _kw: f"({a[0]} + torch.matmul({a[1]}, {a[2]}).float())"
     m["tile.matmul_bias"] = lambda a, _kw: f"(torch.matmul({a[0]}, {a[1]}).float() + {a[2]})"
     m["tile.gemv"] = lambda a, _kw: f"torch.matmul({a[0]}, {a[1]}).float()"

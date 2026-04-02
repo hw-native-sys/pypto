@@ -25,6 +25,7 @@ __all__ = [
     "fillpad",
     "full",
     "matmul",
+    "batch_matmul",
     "matmul_acc",
     "mul",
     "muls",
@@ -211,11 +212,11 @@ def matmul(
     b_trans: bool = False,
     c_matrix_nz: bool = False,
 ) -> Tensor:
-    """Matrix multiplication with optional transpose.
+    """2D matrix multiplication with optional transpose.
 
     Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        lhs: Left-hand side tensor (2D)
+        rhs: Right-hand side tensor (2D)
         out_dtype: Output data type (optional, inferred if not provided)
         a_trans: Whether to transpose lhs
         b_trans: Whether to transpose rhs
@@ -227,6 +228,31 @@ def matmul(
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap()
     call_expr = _ir_ops.matmul(lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz)
+    return Tensor(expr=call_expr)
+
+
+def batch_matmul(
+    lhs: Tensor,
+    rhs: Tensor,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+) -> Tensor:
+    """Batch matrix multiplication with optional transpose.
+
+    Args:
+        lhs: Left-hand side tensor (rank >= 3)
+        rhs: Right-hand side tensor (rank >= 3)
+        out_dtype: Output data type (optional, inferred if not provided)
+        a_trans: Whether to transpose lhs matrix dimensions
+        b_trans: Whether to transpose rhs matrix dimensions
+        c_matrix_nz: C matrix non-zero flag
+
+    Returns:
+        Tensor wrapping the batch matrix multiplication operation
+    """
+    call_expr = _ir_ops.batch_matmul(lhs.unwrap(), rhs.unwrap(), out_dtype, a_trans, b_trans, c_matrix_nz)
     return Tensor(expr=call_expr)
 
 

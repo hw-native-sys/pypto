@@ -1796,5 +1796,173 @@ class TestFlattenTileNdTo2DControlFlow:
         passes.verify_properties(props, After, "test_while_stmt_tile_iter_arg")
 
 
+class TestFlattenTileNdTo2DBatchMatmul:
+    """Tests for tile.batch_matmul lowering inside FlattenTileNdTo2D."""
+
+    def test_batch_matmul_broadcasts_and_unrolls(self):
+        """Broadcasted tile.batch_matmul expands to per-batch 2D tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 3, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 1, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0, 0], [2, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[1, 3, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0, 0], [1, 3, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 3, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 3, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir_str = str(After)
+
+        assert "tile.batch_matmul" not in ir_str
+        assert ir_str.count("tile.matmul") == 6
+        assert "tile.reshape" not in ir_str
+        assert "tile.store" in ir_str
+
+    def test_batch_matmul_with_inline_transpose_unrolls_per_batch(self):
+        """Inline transpose operands stay per-batch after tile.batch_matmul flattening."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 128, 16], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[2, 64, 128], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 64, 128], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(
+                    pl.transpose(lhs_tile, axis1=1, axis2=2),
+                    pl.transpose(rhs_tile, axis1=1, axis2=2),
+                )
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir_str = str(After)
+
+        assert "tile.batch_matmul" not in ir_str
+        assert ir_str.count("tile.matmul") == 2
+        assert ir_str.count("tile.transpose") == 4
+        assert "tile.reshape" not in ir_str
+
+    def test_batch_matmul_3d_no_transpose_unrolls(self):
+        """Simple 3D tile.batch_matmul without transpose unrolls to per-batch tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir_str = str(After)
+
+        assert "tile.batch_matmul" not in ir_str
+        assert ir_str.count("tile.matmul") == 2
+        assert "tile.transpose" not in ir_str
+        assert "tile.reshape" not in ir_str
+        assert "tile.store" in ir_str
+
+    def test_batch_matmul_single_batch_unrolls(self):
+        """Batch=1 edge case: tile.batch_matmul unrolls to exactly 1 tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[1, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[1, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[1, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[1, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([1, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir_str = str(After)
+
+        assert "tile.batch_matmul" not in ir_str
+        assert ir_str.count("tile.matmul") == 1
+        assert "tile.transpose" not in ir_str
+        assert "tile.reshape" not in ir_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

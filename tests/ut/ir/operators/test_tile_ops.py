@@ -1033,14 +1033,14 @@ class TestTileBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
+        call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 2
-        assert result_type.dtype == DataType.FP16
+        assert result_type.dtype == DataType.FP32
 
     def test_batch_matmul_3d(self):
         """Test tile.batch_matmul with 3D tiles (batch dimension)."""
@@ -1059,7 +1059,7 @@ class TestTileBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
+        call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "tile.batch_matmul"
@@ -1086,14 +1086,14 @@ class TestTileBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
+        call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 4
-        assert result_type.dtype == DataType.FP16
+        assert result_type.dtype == DataType.FP32
 
     def test_batch_matmul_broadcast(self):
         """Test tile.batch_matmul with broadcasting batch dimensions."""
@@ -1113,15 +1113,74 @@ class TestTileBatchMatMulOps:
         rhs = ir.Var("rhs", rhs_type, span)
 
         # Create batch_matmul call
-        call = ir.create_op_call("tile.batch_matmul", [lhs, rhs], {}, span)
+        call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert len(result_type.shape) == 3
 
+    def test_batch_matmul_dtype_mismatch(self):
+        """Test tile.batch_matmul rejects mismatched dtypes."""
+        span = ir.Span.unknown()
 
-class TestMultiDimensionalTileOps:
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim4, dim16, dim32], DataType.FP16)
+        rhs_type = ir.TileType([dim4, dim32, dim16], DataType.FP32)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        with pytest.raises(Exception):
+            tile.batch_matmul(lhs, rhs, span)
+
+    def test_batch_matmul_int_accumulation(self):
+        """Test tile.batch_matmul with integer inputs produces INT32 accumulator dtype."""
+        span = ir.Span.unknown()
+
+        dim2 = ir.ConstInt(2, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim2, dim16, dim32], DataType.INT8)
+        rhs_type = ir.TileType([dim2, dim32, dim16], DataType.INT8)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        call = tile.batch_matmul(lhs, rhs, span)
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.INT32
+
+    def test_batch_matmul_output_tile_view(self):
+        """Test tile.batch_matmul output has correct TileView (col_major, row_major, fractal=1024)."""
+        span = ir.Span.unknown()
+
+        dim2 = ir.ConstInt(2, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+
+        lhs_type = ir.TileType([dim2, dim16, dim32], DataType.FP16)
+        rhs_type = ir.TileType([dim2, dim32, dim64], DataType.FP16)
+
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        call = tile.batch_matmul(lhs, rhs, span)
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.blayout == ir.TileLayout.col_major
+        assert result_type.tile_view.slayout == ir.TileLayout.row_major
+        assert result_type.tile_view.fractal == 1024
+
     """Tests for multi-dimensional TileType operations."""
 
     def test_transpose_3d(self):

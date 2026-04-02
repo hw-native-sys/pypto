@@ -233,7 +233,7 @@ class TestMemRefSharing:
                 result_memrefs[stmt.var.name_hint] = stmt.var.type.memref
 
         assert "result" in result_memrefs
-        assert result_memrefs["result"] is param_types["output"].memref
+        assert result_memrefs["result"].id_ == param_types["output"].memref.id_
 
     def test_view_op_shares_memref_with_input(self):
         """tile.reshape output shares MemRef with its input tile."""
@@ -310,6 +310,43 @@ class TestMemRefSharing:
         # Only 1 Acc alloc needed (not 2)
         acc_allocs = [a for a in _get_alloc_stmts(func) if a.value.args[0].value == MemorySpace.Acc.value]
         assert len(acc_allocs) == 1
+
+    def test_call_result_shares_memref_with_returned_out_param(self):
+        """Call result should share MemRef when callee returns a store result backed by an Out param."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Group)
+            def callee(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                result: pl.Tensor[[64, 64], pl.FP32] = self.callee(input_a, output)
+                return result
+
+        After = passes.init_mem_ref()(Before)
+        func = After.get_function("orchestrator")
+        assert func is not None
+
+        param_types = _get_param_types(func)
+        result_memrefs = {}
+        for stmt in _iter_assign_stmts(func):
+            if isinstance(stmt.var.type, ir.TensorType) and stmt.var.type.memref is not None:
+                result_memrefs[stmt.var.name_hint] = stmt.var.type.memref
+
+        assert "result" in result_memrefs
+        assert result_memrefs["result"] is param_types["output"].memref
 
 
 class TestYieldMemRef:

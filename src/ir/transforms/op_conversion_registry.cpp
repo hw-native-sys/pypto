@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -48,6 +50,20 @@ ExprPtr MakeZeroOffsetsTuple(size_t ndim, const Span& span) {
 
 ExprPtr MakeShapesTuple(const std::vector<ExprPtr>& shape, const Span& span) {
   return std::make_shared<MakeTuple>(shape, span);
+}
+
+/// Extract shape from a TensorType or TileType operand (batch_matmul operands
+/// may already be TileType when loaded to Mat space by an earlier conversion).
+const std::vector<ExprPtr>& GetTensorOrTileShape(const ExprPtr& operand, const std::string& operand_name) {
+  if (auto tensor_type = As<TensorType>(operand->GetType())) {
+    return tensor_type->shape_;
+  }
+  if (auto tile_type = As<TileType>(operand->GetType())) {
+    return tile_type->shape_;
+  }
+  CHECK(false) << "Expected " << operand_name << " to be TensorType or TileType, but got "
+               << operand->GetType()->TypeName();
+  return As<TensorType>(operand->GetType())->shape_;  // unreachable
 }
 
 // Check if a shape dimension is statically equal to 1
@@ -108,6 +124,27 @@ ExprPtr LoadOperandToMat(const ExprPtr& operand, bool transpose, const std::stri
   }
   INTERNAL_CHECK(false) << "LoadOperandToMat: unexpected type: " << operand->GetType()->TypeName();
   return nullptr;  // unreachable
+}
+
+/// If `transpose` is true, insert a tile.transpose swapping the last two axes;
+/// otherwise return `operand` unchanged.
+ExprPtr InsertTrailingTranspose(const ExprPtr& operand, bool transpose, const Span& span) {
+  if (!transpose) {
+    return operand;
+  }
+
+  auto tile_type = As<TileType>(operand->GetType());
+  INTERNAL_CHECK(tile_type) << "Internal error: InsertTrailingTranspose expects TileType operand, but got "
+                            << operand->GetType()->TypeName();
+  INTERNAL_CHECK(tile_type->shape_.size() >= 2)
+      << "Internal error: InsertTrailingTranspose expects rank >= 2 tile, but got "
+      << tile_type->shape_.size();
+
+  int64_t axis1_value = static_cast<int64_t>(tile_type->shape_.size()) - 2;
+  int64_t axis2_value = static_cast<int64_t>(tile_type->shape_.size()) - 1;
+  auto axis1 = std::make_shared<ConstInt>(axis1_value, DataType::INDEX, span);
+  auto axis2 = std::make_shared<ConstInt>(axis2_value, DataType::INDEX, span);
+  return OpRegistry::GetInstance().Create("tile.transpose", {operand, axis1, axis2}, span);
 }
 
 }  // namespace
@@ -234,7 +271,7 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul → tile.load(Mat) + tile.move(L0A/L0B) + tile.matmul + tile.store
+  // tensor.matmul → tile.load(Mat) + tile.matmul
   //
   // tensor.matmul(lhs, rhs, a_trans=False, b_trans=True, c_matrix_nz=False)
   // ────────────────────────────────────────────────────────────────────────
@@ -254,6 +291,46 @@ OpConversionRegistry::OpConversionRegistry() {
 
         auto matmul_call = OpRegistry::GetInstance().Create("tile.matmul", {lhs_mat, rhs_mat}, span);
         return ConversionResult{std::move(prologue), matmul_call};
+      });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // tensor.batch_matmul → tile.load(Mat) + optional tile.transpose + tile.batch_matmul
+  //
+  // tensor.batch_matmul(lhs, rhs, a_trans=False, b_trans=True, c_matrix_nz=False)
+  // ────────────────────────────────────────────────────────────────────────
+
+  RegisterCustom(
+      "tensor.batch_matmul",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.batch_matmul conversion expects 2 args (lhs, rhs)";
+
+        const auto& lhs_shape = GetTensorOrTileShape(args[0], "lhs");
+        const auto& rhs_shape = GetTensorOrTileShape(args[1], "rhs");
+        CHECK(lhs_shape.size() >= 3) << "tensor.batch_matmul conversion expects lhs rank >= 3, but got "
+                                     << lhs_shape.size();
+        CHECK(rhs_shape.size() >= 3) << "tensor.batch_matmul conversion expects rhs rank >= 3, but got "
+                                     << rhs_shape.size();
+
+        bool a_trans = GetKwargOr<bool>(kwargs, "a_trans", false);
+        bool b_trans = GetKwargOr<bool>(kwargs, "b_trans", false);
+
+        std::vector<ExprPtr> lhs_batch(lhs_shape.begin(), lhs_shape.end() - 2);
+        std::vector<ExprPtr> rhs_batch(rhs_shape.begin(), rhs_shape.end() - 2);
+        auto broadcast_result = BroadcastShapes(lhs_batch, rhs_batch);
+        CHECK(broadcast_result.success) << "tensor.batch_matmul conversion cannot broadcast batch dimensions";
+
+        auto& op_reg = OpRegistry::GetInstance();
+        std::vector<StmtPtr> prologue;
+        auto lhs_mat = LoadOperandToMat(args[0], false, "lhs_batch_mat", prologue, span);
+        auto rhs_mat = LoadOperandToMat(args[1], false, "rhs_batch_mat", prologue, span);
+
+        auto lhs_batch_operand = InsertTrailingTranspose(lhs_mat, a_trans, span);
+        auto rhs_batch_operand = InsertTrailingTranspose(rhs_mat, b_trans, span);
+
+        auto batch_matmul_call =
+            op_reg.Create("tile.batch_matmul", {lhs_batch_operand, rhs_batch_operand}, span);
+        return ConversionResult{std::move(prologue), batch_matmul_call};
       });
 
   // ────────────────────────────────────────────────────────────────────────
