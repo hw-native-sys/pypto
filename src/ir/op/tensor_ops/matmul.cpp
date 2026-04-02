@@ -97,17 +97,50 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 
   if (lhs_shape.size() == 1 && rhs_shape.size() == 1) {
     // Vector x vector (dot product): [K] x [K] -> scalar (0D tensor)
+    auto k_lhs_const = As<ConstInt>(lhs_shape[0]);
+    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
+    if (k_lhs_const && k_rhs_const) {
+      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+          << "tensor.matmul dot product requires matching dimensions, but got lhs K=" << k_lhs_const->value_
+          << " and rhs K=" << k_rhs_const->value_;
+    }
     output_shape = {};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 1) {
     // Matrix x vector: [M, K] x [K] -> [M]
+    auto k_lhs_const = As<ConstInt>(lhs_shape[1]);
+    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
+    if (k_lhs_const && k_rhs_const) {
+      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
+          << " and rhs K=" << k_rhs_const->value_;
+    }
     output_shape = {lhs_shape[0]};
   } else if (lhs_shape.size() == 1 && rhs_shape.size() == 2) {
     // Vector x matrix: [K] x [K, N] -> [N]
+    auto k_lhs_const = As<ConstInt>(lhs_shape[0]);
+    auto k_rhs_const = As<ConstInt>(rhs_shape[0]);
+    if (k_lhs_const && k_rhs_const) {
+      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
+          << " and rhs K=" << k_rhs_const->value_;
+    }
     output_shape = {rhs_shape[1]};
   } else if (lhs_shape.size() == 2 && rhs_shape.size() == 2) {
     // 2D x 2D matrix multiplication
     ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
+    ExprPtr k_lhs = a_trans ? lhs_shape[0] : lhs_shape[1];
+    ExprPtr k_rhs = b_trans ? rhs_shape[1] : rhs_shape[0];
     ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
+
+    // Verify K dimensions match (when statically known)
+    auto k_lhs_const = As<ConstInt>(k_lhs);
+    auto k_rhs_const = As<ConstInt>(k_rhs);
+    if (k_lhs_const && k_rhs_const) {
+      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+          << "tensor.matmul requires matching inner dimensions, but got lhs K=" << k_lhs_const->value_
+          << " and rhs K=" << k_rhs_const->value_;
+    }
+
     output_shape = {m_dim, n_dim};
   } else {
     // For higher-dimensional tensors (both must have at least 2 dimensions),
@@ -132,7 +165,19 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
 
     // Append matrix dimensions
     ExprPtr m_dim = a_trans ? lhs_shape[lhs_ndim - 1] : lhs_shape[lhs_ndim - 2];
+    ExprPtr k_lhs = a_trans ? lhs_shape[lhs_ndim - 2] : lhs_shape[lhs_ndim - 1];
+    ExprPtr k_rhs = b_trans ? rhs_shape[rhs_ndim - 1] : rhs_shape[rhs_ndim - 2];
     ExprPtr n_dim = b_trans ? rhs_shape[rhs_ndim - 2] : rhs_shape[rhs_ndim - 1];
+
+    // Verify K dimensions match (when statically known)
+    auto k_lhs_const = As<ConstInt>(k_lhs);
+    auto k_rhs_const = As<ConstInt>(k_rhs);
+    if (k_lhs_const && k_rhs_const) {
+      CHECK(k_lhs_const->value_ == k_rhs_const->value_)
+          << "tensor.matmul requires matching inner dimensions for batched matmul, but got lhs K="
+          << k_lhs_const->value_ << " and rhs K=" << k_rhs_const->value_;
+    }
+
     output_shape.push_back(m_dim);
     output_shape.push_back(n_dim);
   }

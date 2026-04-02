@@ -111,7 +111,9 @@ def test_tensor_unary_ops():
 
 def test_tensor_matmul_with_transpose():
     """tensor.matmul with a_trans/b_trans should emit .mT."""
-    a = _tensor_var("a", [64, 128])
+    # When a_trans=True, K is lhs_shape[0] and M is lhs_shape[1].
+    # a = [K=128, M=64], b = [K=128, N=64] -> output [M=64, N=64]
+    a = _tensor_var("a", [128, 64])
     b = _tensor_var("b", [128, 64])
     out = _tensor_var("out", [64, 64])
     call = _op_call("tensor.matmul", [a, b], {"a_trans": True, "b_trans": False, "c_matrix_nz": False})
