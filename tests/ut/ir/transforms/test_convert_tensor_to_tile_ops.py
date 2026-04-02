@@ -1668,9 +1668,8 @@ class TestNestedControlFlow:
                 a__tile: pl.Tile[[64], pl.FP32] = pl.load(a, [0], [64])
                 b__tile: pl.Tile[[64], pl.FP32] = pl.load(b, [0], [64])
                 if n == 0:
-                    ra: pl.Tile[[64], pl.FP32] = a__tile  # noqa: F841
-                    rb: pl.Tile[[64], pl.FP32] = b__tile  # noqa: F841
                     # Alias resolved: store from a__tile / b__tile directly
+                    # (dead alias assignments ra=a__tile, rb=b__tile are removed)
                     ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(a__tile, [0], a)
                     ret1__store: pl.Tensor[[64], pl.FP32] = pl.store(b__tile, [0], b)
                     phi_a, phi_b = pl.yield_(ret0__store, ret1__store)

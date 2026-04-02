@@ -1622,6 +1622,27 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
         then_stmts[then_yield_idx] = std::make_shared<YieldStmt>(new_then_yield_values, then_yield->span_);
         else_stmts[else_yield_idx] = std::make_shared<YieldStmt>(new_else_yield_values, else_yield->span_);
 
+        // Remove dead alias assignments for yield values replaced by store sinking.
+        // Safe because sink candidates are simple pass-through branches (alias + yield).
+        auto remove_dead_aliases = [&sink_candidates](std::vector<StmtPtr>& stmts, const YieldStmtPtr& yield,
+                                                      const TileAliasMap& alias_map) {
+          std::unordered_set<const Var*> dead_vars;
+          for (const auto& cand : sink_candidates) {
+            auto old_var = As<Var>(yield->value_[cand.ifstmt_rv_index]);
+            if (old_var && alias_map.count(old_var.get())) {
+              dead_vars.insert(old_var.get());
+            }
+          }
+          stmts.erase(std::remove_if(stmts.begin(), stmts.end(),
+                                     [&dead_vars](const StmtPtr& s) {
+                                       auto assign = As<AssignStmt>(s);
+                                       return assign && dead_vars.count(assign->var_.get()) > 0;
+                                     }),
+                      stmts.end());
+        };
+        remove_dead_aliases(then_stmts, then_yield, then_alias_map);
+        remove_dead_aliases(else_stmts, else_yield, else_alias_map);
+
         auto new_then_body = SeqStmts::Flatten(std::move(then_stmts), last_if_stmt->then_body_->span_);
         auto new_else_body = SeqStmts::Flatten(std::move(else_stmts), (*last_if_stmt->else_body_)->span_);
         auto new_if_stmt =
