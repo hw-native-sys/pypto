@@ -351,6 +351,60 @@ class OrchestrationBufferInfoCollector : public IRVisitor {
   std::unordered_map<const Var*, MakeTuplePtr> tuple_values_;
 };
 
+class LoopEscapeInfoCollector : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> escaping_loop_returns;
+
+ protected:
+  void VisitStmt_(const SeqStmtsPtr& seq) override {
+    for (size_t i = 0; i < seq->stmts_.size(); ++i) {
+      if (auto for_stmt = As<ForStmt>(seq->stmts_[i])) {
+        for (const auto& return_var : for_stmt->return_vars_) {
+          if (!return_var) continue;
+          if (IsVarReferencedLater(seq, i + 1, return_var.get())) {
+            escaping_loop_returns.insert(return_var.get());
+          }
+        }
+      }
+      VisitStmt(seq->stmts_[i]);
+    }
+  }
+
+ private:
+  class VarReferenceCollector : public IRVisitor {
+   public:
+    explicit VarReferenceCollector(const Var* target) : target_(target) {}
+
+    bool found = false;
+
+   protected:
+    void VisitExpr_(const VarPtr& op) override {
+      if (op.get() == target_) {
+        found = true;
+      }
+      IRVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const IterArgPtr& op) override {
+      if (op.get() == target_) {
+        found = true;
+      }
+      IRVisitor::VisitExpr_(op);
+    }
+
+   private:
+    const Var* target_;
+  };
+
+  static bool IsVarReferencedLater(const SeqStmtsPtr& seq, size_t start_index, const Var* target) {
+    VarReferenceCollector collector(target);
+    for (size_t i = start_index; i < seq->stmts_.size() && !collector.found; ++i) {
+      collector.VisitStmt(seq->stmts_[i]);
+    }
+    return collector.found;
+  }
+};
+
 /**
  * @brief Trace variable lineage from body vars back to function parameters
  *
@@ -470,11 +524,15 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
 
 namespace {
 
-std::string GenerateIncludes() {
+std::string GenerateIncludes(bool include_optional) {
   std::ostringstream oss;
   oss << "#include <stddef.h>\n";
   oss << "#include <stdint.h>\n";
-  oss << "#include <stdio.h>\n\n";
+  oss << "#include <stdio.h>\n";
+  if (include_optional) {
+    oss << "#include <optional>\n";
+  }
+  oss << "\n";
   oss << "#include \"pto_orchestration_api.h\"\n\n";
   return oss.str();
 }
@@ -618,10 +676,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     non_optimizable_assemble_roots_ = roots;
   }
 
+  void SetEscapingLoopReturns(const std::unordered_set<const Var*>& returns) {
+    escaping_loop_returns_ = returns;
+  }
+
   void SetInitialIndent(int indent) { indent_ = indent; }
 
   std::string GetGeneratedCode() const { return code_.str(); }
-
   // --- CodegenBase pure virtual implementations ---
   [[nodiscard]] std::string GetCurrentResultTarget() const override { return current_result_var_; }
   void Emit(const std::string& line) override { code_ << line; }
@@ -635,6 +696,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return ci->value_;
   }
   std::string GetVarName(const VarPtr& var) const override {
+    auto escaped_it = escaped_loop_return_exprs_.find(var.get());
+    if (escaped_it != escaped_loop_return_exprs_.end()) {
+      return escaped_it->second;
+    }
     auto it = emit_name_map_.find(var.get());
     if (it != emit_name_map_.end()) {
       return it->second;
@@ -688,6 +753,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
       emit_name_map_[iter_arg.get()] = init_var_name;
       emit_name_map_[return_var.get()] = init_var_name;
+      auto tensor_type = As<TensorType>(return_var->GetType());
+      bool is_dn = tensor_type && tensor_type->tensor_view_.has_value() &&
+                   tensor_type->tensor_view_->layout == TensorLayout::DN;
+      if (escaping_loop_returns_.count(return_var.get()) > 0 &&
+          tensor_create_var_names_.count(init_var_name) > 0 && !is_dn) {
+        std::string state_name = ReserveSyntheticEmitName(init_var_name + "__loop_state");
+        INTERNAL_CHECK(tensor_type) << "Internal error: escaping loop-carried output must be a tensor";
+        code_ << Indent() << "Tensor " << state_name << " = make_tensor_external(nullptr, " << init_var_name
+              << "_ci_shapes, " << tensor_type->shape_.size() << ", "
+              << GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
+        active_loop_output_states_[init_var_name] = state_name;
+        escaped_loop_return_exprs_[return_var.get()] = state_name;
+      }
     }
 
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
@@ -697,11 +775,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ += 4;
 
     auto saved = current_return_vars_;
+    auto saved_active_loop_output_states = active_loop_output_states_;
     current_return_vars_.clear();
     // Don't populate current_return_vars_: in orchestration,
     // task submission handles data flow; yield assignments are unnecessary.
     VisitStmt(for_stmt->body_);
     current_return_vars_ = saved;
+    active_loop_output_states_ = saved_active_loop_output_states;
 
     indent_ -= 4;
     code_ << Indent() << "}\n";
@@ -1046,6 +1126,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         const auto& ov = internal_out_vars[i];
         if (ov.is_new_decl) {
           code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+          auto state_it = active_loop_output_states_.find(ov.name);
+          if (state_it != active_loop_output_states_.end()) {
+            code_ << ind << state_it->second << " = " << ov.name << ";\n";
+          }
         } else {
           code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
         }
@@ -1126,6 +1210,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         const auto& ov = internal_out_vars[i];
         if (ov.is_new_decl) {
           code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+          auto state_it = active_loop_output_states_.find(ov.name);
+          if (state_it != active_loop_output_states_.end()) {
+            code_ << ind << state_it->second << " = " << ov.name << ";\n";
+          }
         } else {
           code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
         }
@@ -1400,6 +1488,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return emit_name;
   }
 
+  std::string ReserveSyntheticEmitName(const std::string& base_name) {
+    return auto_name::ReserveUniqueName(base_name, declared_var_names_);
+  }
+
   const ProgramPtr& program_;
   std::map<std::string, int>* func_name_to_id_;
   std::map<std::string, CoreType>* func_name_to_core_type_;
@@ -1426,6 +1518,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int task_counter_ = 0;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;  // Call* → unique key for tuple calls
+  std::unordered_set<const Var*> escaping_loop_returns_;
+  std::unordered_map<const Var*, std::string> escaped_loop_return_exprs_;
+  std::unordered_map<std::string, std::string> active_loop_output_states_;
   // VarPtr-based dedup: prevents skipping tensor.create for distinct vars with same base name
   std::unordered_set<const Var*> declared_var_ptrs_;
 };
@@ -1454,6 +1549,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   OrchestrationBufferInfoCollector buffer_info(program);
   buffer_info.Initialize(func->params_);
   buffer_info.VisitStmt(func->body_);
+
+  LoopEscapeInfoCollector loop_escape_info;
+  loop_escape_info.VisitStmt(func->body_);
 
   // Step 4a: Param name seed
   std::unordered_map<const Var*, std::string> emit_name_map;
@@ -1497,8 +1595,21 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::ostringstream oss;
 
+  // Create statement codegen (used for both external tensor generation and task submission)
+  OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
+                                        std::move(emit_name_map), std::move(lineage.var_to_param),
+                                        std::move(param_name_set), std::move(param_name_to_orch_index));
+  stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
+  stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
+  stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
+  stmt_codegen.SetAssembleViewInfos(buffer_info.assemble_view_infos);
+  stmt_codegen.SetNonOptimizableAssembleRoots(buffer_info.non_optimizable_assemble_roots);
+  stmt_codegen.SetEscapingLoopReturns(loop_escape_info.escaping_loop_returns);
+  stmt_codegen.SetInitialIndent(8);
+  stmt_codegen.VisitStmt(func->body_);
+
   // 1. Includes
-  oss << GenerateIncludes();
+  oss << GenerateIncludes(false);
 
   // 3. extern "C" block
   oss << "extern \"C\" {\n\n";
@@ -1512,16 +1623,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
          "int orch_thread_num, int orch_thread_index) {\n";
   oss << "    (void)orch_thread_num;\n";
   oss << "    (void)orch_thread_index;\n\n";
-
-  // Create statement codegen (used for both external tensor generation and task submission)
-  OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
-                                        std::move(emit_name_map), std::move(lineage.var_to_param),
-                                        std::move(param_name_set), std::move(param_name_to_orch_index));
-  stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
-  stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
-  stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
-  stmt_codegen.SetAssembleViewInfos(buffer_info.assemble_view_infos);
-  stmt_codegen.SetNonOptimizableAssembleRoots(buffer_info.non_optimizable_assemble_roots);
 
   // 6. External tensors (from ChipStorageTaskArgs — all from params)
   oss << "    // External tensors\n";
@@ -1544,11 +1645,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
-  // 9. Generate task submission code wrapped in top-level PTO2_SCOPE
-  stmt_codegen.SetInitialIndent(8);
-  stmt_codegen.VisitStmt(func->body_);
-
-  // 10. Emit generated code inside PTO2_SCOPE (required by runtime: scope_stack_top must be >= 0)
+  // 9. Emit generated code inside PTO2_SCOPE (required by runtime: scope_stack_top must be >= 0)
   oss << "\n    PTO2_SCOPE() {\n";
   oss << stmt_codegen.GetGeneratedCode();
   oss << "    }\n";

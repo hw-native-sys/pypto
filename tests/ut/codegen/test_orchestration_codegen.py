@@ -1187,6 +1187,59 @@ class TestOrchestration:
         assert "kernel_update" in code
         assert code.count("pto2_rt_submit_aiv_task") == 2
 
+    def test_loop_carried_internal_tensor_uses_hoisted_state_after_loop(self):
+        """Loop-carried internal tensors should remain consumable after the loop."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class LoopCarriedStateProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                out_tensor: pl.Tensor[[16, 16], pl.FP32] = pl.store(x_tile, [0, 0], out)
+                return out_tensor
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                out_tensor: pl.Tensor[[16, 16], pl.FP32] = pl.store(x_tile, [0, 0], out)
+                return out_tensor
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                for i in pl.range(2):
+                    acc = self.fill(x, acc)
+                out = self.consume(acc, out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(LoopCarriedStateProgram)
+        code = _generate_orch_code(transformed)
+
+        assert (
+            "Tensor acc__loop_state = make_tensor_external(nullptr, acc_ci_shapes, 2, DataType::FLOAT32);"
+            in code
+        )
+        assert "const Tensor& acc = outs_t0.get_ref(0);" in code
+        assert "acc__loop_state = acc;" in code
+        assert "params_t1.add_input(acc__loop_state);" in code
+        assert "params_t1.add_input(acc);" not in code
+
     def test_for_loop_with_inplace_return_after_passes(self):
         """Test inplace detection when return var has compound auto-name suffixes from pass pipeline.
 
