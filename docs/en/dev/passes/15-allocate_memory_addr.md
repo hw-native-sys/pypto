@@ -14,7 +14,7 @@ This pass allocates concrete memory addresses for non-DDR MemRefs and updates th
 - Update MemRef addresses in all variable types
 - Update `tile.alloc` statement arguments with the allocated addresses
 
-**When to use**: Run after MemoryReuse (to respect shared MemRefs) and before code generation. Final pass in memory management pipeline.
+**When to use**: Run after MemoryReuse (to respect shared MemRefs) and before PTO / orchestration code generation that assumes fixed MemRef addresses.
 
 ## API
 

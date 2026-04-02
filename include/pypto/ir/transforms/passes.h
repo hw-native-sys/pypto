@@ -183,6 +183,19 @@ Pass InsertSync();
 Pass AllocateMemoryAddr();
 
 /**
+ * @brief Reorder multi-value ReturnStmt (and matching return types) to match Out/InOut parameter order
+ *
+ * Traces each return value to its Out/InOut parameter (same rules as former codegen analysis:
+ * top-level tile.store and ForStmt yield chains). After this pass, return slot i corresponds to
+ * the i-th Out/InOut parameter in declaration order, so orchestration codegen can map tuple
+ * elements sequentially without data-flow analysis.
+ *
+ * Requirements:
+ * - Run after SplitVectorKernel and before InitMemRef (does not depend on MemRef allocation).
+ */
+Pass NormalizeTupleReturnOrder();
+
+/**
  * @brief Create a loop chunking pass
  *
  * Splits ForStmt nodes with chunk_size into nested loops: an outer loop

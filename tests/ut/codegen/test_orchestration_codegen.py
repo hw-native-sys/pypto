@@ -1654,12 +1654,10 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t0.add_inout(ext_acc)" in code
 
     def test_mixed_loop_carried_and_full_tuple_return(self):
-        """ForStmt yield + tile.store outputs in same kernel get correct return-to-param mapping.
+        """ForStmt yield + tile.store outputs in same kernel get correct tuple aliases.
 
-        Regression test for a bug where BuildReturnToParamMapping could not trace
-        ForStmt yield return values back to their Out parameters.  The sequential
-        fallback then mapped them to the wrong get_ref index, corrupting downstream
-        tensor aliases.
+        Regression: mixed return order vs Out parameter order must be normalized by
+        NormalizeTupleReturnOrder before orchestration codegen maps tuple elements to get_ref.
         """
 
         backend.reset_for_testing()

@@ -8,32 +8,49 @@ Pass documentation files in `docs/en/dev/passes/` (and `docs/zh-cn/dev/passes/`)
 
 Developers read pass docs sequentially to understand the compilation pipeline. If numbering doesn't match execution order, the reading experience is confusing.
 
-## Current Order
+## Current Order (Default strategy)
 
-| Number | File | Pass Manager Position |
-| ------ | ---- | --------------------- |
-| 00 | `00-pass_manager.md` | Overview (not a pass) |
-| 01 | `01-unroll_loops.md` | 1st pass |
-| 02 | `02-ctrl_flow_transform.md` | 2nd pass |
-| 03 | `03-convert_to_ssa.md` | 3rd pass |
-| 04 | `04-flatten_call_expr.md` | 4th pass |
-| 05 | `05-split_chunked_loops.md` | 5th pass |
-| 06 | `06-interchange_chunk_loops.md` | 6th pass |
-| 07 | `07-outline_incore_scopes.md` | 7th pass |
-| 08 | `08-outline_cluster_scopes.md` | 8th pass |
-| 09 | *(no doc yet)* | 9th pass (`ConvertTensorToTileOps`) |
-| 10 | `10-flatten_tile_nd_to_2d.md` | 10th pass |
-| 11 | *(no doc yet)* | 11th pass (`InferTileMemorySpace`) |
-| 12 | *(no doc yet)* | 12th pass (`ResolveTransposeLayout`) |
-| 13 | `13-expand_mixed_kernel.md` | 13th pass |
-| 14 | `14-init_memref.md` | 14th pass |
-| 15 | `15-memory_reuse.md` | 15th pass |
-| 16 | `16-allocate_memory_addr.md` | 16th pass |
-| -- | `14-insert_sync.md` | Not in Default strategy |
-| -- | `16-utility_passes.md` | Not in default strategy |
-| 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
+Order follows `OptimizationStrategy.Default`: `tensor_prefix_passes` + `tensor_only_passes` + `tile_pto_passes`.
 
-**Gaps**: When a pass has no documentation yet, reserve its number and note it in the table. This keeps subsequent numbering aligned with execution order.
+| Pos | Pass | Doc file (when present) |
+| --- | ---- | ----------------------- |
+| 00 | *(overview)* | `00-pass_manager.md` |
+| 1 | `UnrollLoops` | `01-unroll_loops.md` |
+| 2 | `CtrlFlowTransform` | `02-ctrl_flow_transform.md` |
+| 3 | `ConvertToSSA` | `03-convert_to_ssa.md` |
+| 4 | `NormalizeStmtStructure` | *(no standalone doc)* |
+| 5 | `FlattenCallExpr` | `04-flatten_call_expr.md` |
+| 6 | `SplitChunkedLoops` | `05-split_chunked_loops.md` |
+| 7 | `InterchangeChunkLoops` | `06-interchange_chunk_loops.md` |
+| 8 | `OutlineHierarchyScopes` | *(no doc yet)* |
+| 9 | `OutlineIncoreScopes` | `07-outline_incore_scopes.md` |
+| 10 | `OutlineClusterScopes` | `08-outline_cluster_scopes.md` |
+| 11 | `ConvertTensorToTileOps` | *(no doc yet)* |
+| 12 | `FlattenTileNdTo2D` | `10-flatten_tile_nd_to_2d.md` |
+| 13 | `InferTileMemorySpace` | *(no doc yet)* |
+| 14 | `ResolveTransposeLayout` | *(no doc yet)* |
+| 15 | `ResolveBackendOpLayouts` | *(no doc yet)* |
+| 16 | `NormalizeStmtStructure` | *(second run; no standalone doc)* |
+| 17 | `ExpandMixedKernel` | `11-expand_mixed_kernel.md` *(legacy prefix 11)* |
+| 18 | `SplitVectorKernel` | *(no doc yet)* |
+| 19 | `NormalizeTupleReturnOrder` | `19-normalize_tuple_return_order.md` |
+| 20 | `InitMemRef` | `12-init_memref.md` *(legacy prefix 12)* |
+| 21 | `MemoryReuse` | `15-memory_reuse.md` *(legacy prefix 15)* |
+| 22 | `LegalizePTOBufferReuse` | *(no doc yet)* |
+| 23 | `AllocateMemoryAddr` | `15-allocate_memory_addr.md` *(legacy prefix 15)* |
+
+### Not in Default strategy
+
+- `14-insert_sync.md` — `InsertSync`
+- `16-utility_passes.md` — Utility passes
+
+### Infrastructure (not a pipeline pass)
+
+- `99-verifier.md` — Verifier / property checks
+
+**Legacy numbering**: Some doc filenames still use older prefixes (e.g. `11-` for pass 17). When adding or renaming docs, prefer matching `pass_manager.py` position; renumber with `git mv` when touching those files.
+
+**Gaps**: When a pass has no documentation yet, reserve its number in this table or mark *(no doc yet)*.
 
 ## When Adding a New Pass
 

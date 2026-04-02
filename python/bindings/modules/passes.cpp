@@ -254,6 +254,11 @@ void BindPass(nb::module_& m) {
              "Allocates real memory addresses for existing alloc operations.\n"
              "Updates MemRef addresses and alloc statement arguments in place.");
 
+  passes.def("normalize_tuple_return_order", &pass::NormalizeTupleReturnOrder,
+             "Reorder multi-value returns to match Out/InOut parameter order\n\n"
+             "Runs after SplitVectorKernel and before InitMemRef so orchestration codegen can map\n"
+             "tuple outputs sequentially without tracing return values to parameters.");
+
   // Bind SSAErrorType enum
   nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
       .value("MULTIPLE_ASSIGNMENT", ssa::ErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")

@@ -148,6 +148,13 @@ inline const PassProperties kAllocateMemoryAddrProperties{
                  IRProperty::TileOps2D},
     .produced = {IRProperty::AllocatedMemoryAddr}};
 
+// -- Normalize tuple return order (orchestration codegen helper) --------------
+// Runs after SplitVectorKernel (VectorKernelSplit) and before InitMemRef — does not touch MemRefs.
+
+inline const PassProperties kNormalizeTupleReturnOrderProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::VectorKernelSplit}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

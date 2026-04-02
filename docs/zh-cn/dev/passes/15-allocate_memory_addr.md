@@ -14,7 +14,7 @@
 - 更新所有变量类型 (Type) 中的 MemRef 地址
 - 使用分配的地址更新 `tile.alloc` 语句参数
 
-**使用时机**：在 MemoryReuse 之后（以尊重共享的 MemRef）、代码生成 (CodeGen) 之前运行。内存管理流水线中的最终 Pass。
+**使用时机**：在 MemoryReuse 之后（以尊重共享的 MemRef）运行，在假定 MemRef 地址已固定的 PTO / 编排代码生成之前。
 
 ## API
 

@@ -278,6 +278,12 @@ def legalize_pto_buffer_reuse() -> Pass:
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
 
+def normalize_tuple_return_order() -> Pass:
+    """Reorder multi-value returns to match Out/InOut parameter order.
+
+    Runs after SplitVectorKernel and before InitMemRef.
+    """
+
 class VerificationError:
     """Unified verification error information."""
 
@@ -430,6 +436,7 @@ __all__ = [
     "legalize_pto_buffer_reuse",
     "insert_sync",
     "allocate_memory_addr",
+    "normalize_tuple_return_order",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

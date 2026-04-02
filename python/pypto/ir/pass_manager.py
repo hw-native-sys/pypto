@@ -75,6 +75,7 @@ class PassManager:
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
+            ("NormalizeTupleReturnOrder", lambda: passes.normalize_tuple_return_order()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
