@@ -272,6 +272,21 @@ std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string
   return mlir_name;
 }
 
+std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name) {
+  if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+    CHECK(!scalar_type->dtype_.IsFloat())
+        << "EmitCastToI32 does not support floating-point types (got " << GetTypeString(scalar_type->dtype_)
+        << ")";
+    if (scalar_type->dtype_ != DataType::INT32) {
+      std::string i32_name = NewTemp();
+      std::string src_type = GetTypeString(scalar_type->dtype_);
+      Emit(i32_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to i32");
+      return i32_name;
+    }
+  }
+  return mlir_name;
+}
+
 bool PTOCodegen::HasFillpadConsumer(const ir::Var* var) const {
   return fs_.fillpad_input_vars.count(var) > 0;
 }

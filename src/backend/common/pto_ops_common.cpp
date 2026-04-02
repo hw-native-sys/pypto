@@ -459,10 +459,15 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
-  // blockLen must be i32 per PTO ISA. Extract value from ConstInt and emit i32 constant.
-  auto const_int = ir::As<ir::ConstInt>(op->args_[1]);
-  INTERNAL_CHECK(const_int) << "tile.mrgsort_format1 block_len must be a ConstInt";
-  std::string block_len = codegen.GetOrEmitI32Constant(static_cast<int32_t>(const_int->value_));
+  // blockLen must be i32 per PTO ISA. Constants use the optimized dedup path;
+  // runtime variables (e.g., loop-carried block_len) go through GetExprAsCode + cast.
+  std::string block_len;
+  if (auto const_int = ir::As<ir::ConstInt>(op->args_[1])) {
+    block_len = codegen.GetOrEmitI32Constant(static_cast<int32_t>(const_int->value_));
+  } else {
+    block_len = codegen.GetExprAsCode(op->args_[1]);
+    block_len = codegen.EmitCastToI32(op->args_[1], block_len);
+  }
 
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
