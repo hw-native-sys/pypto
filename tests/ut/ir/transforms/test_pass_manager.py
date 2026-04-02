@@ -249,12 +249,16 @@ class TestPassManagerDumpIR:
         result = pm.run_passes(program, dump_ir=True, output_dir=output_dir)
 
         assert result is not None
-        # Frontend + one file per pass
-        expected_files = ["00_frontend.py"] + [
+        # Frontend + one file per pass (warning .log files may also be present)
+        expected_py_files = ["00_frontend.py"] + [
             f"{i + 1:02d}_after_{name}.py" for i, name in enumerate(pm.pass_names)
         ]
         actual_files = sorted(os.listdir(output_dir))
-        assert actual_files == sorted(expected_files)
+        actual_py_files = [f for f in actual_files if f.endswith(".py")]
+        assert actual_py_files == sorted(expected_py_files)
+        # Any extra files must be .log warning dumps
+        extra_files = [f for f in actual_files if not f.endswith(".py")]
+        assert all(f.endswith(".log") for f in extra_files)
 
     def test_dump_ir_requires_output_dir(self):
         """dump_ir=True without output_dir raises ValueError."""
