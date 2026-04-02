@@ -1656,27 +1656,21 @@ class ASTParser:
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
                 if func.attr in _SCOPE_KIND_MAP:
-                    # Default split mode: UP_DOWN for auto_incore, None for others
-                    split_mode = ir.SplitMode.UP_DOWN if func.attr == "auto_incore" else None
-                    if func.attr == "auto_incore":
+                    # Default split mode: None (validated later in ExpandMixedKernel for mixed kernels)
+                    split_mode = None
+                    if func.attr in ("auto_incore", "incore"):
                         if context_expr.args:
                             raise ParserSyntaxError(
-                                "pl.auto_incore() does not accept positional arguments",
+                                f"pl.{func.attr}() does not accept positional arguments",
                                 span=self.span_tracker.get_span(stmt),
-                                hint="Use 'with pl.auto_incore(split=pl.SplitMode.UP_DOWN):'",
+                                hint=f"Use 'with pl.{func.attr}(split=pl.SplitMode.UP_DOWN):'",
                             )
                         for kw in context_expr.keywords:
                             if kw.arg == "split":
                                 split_mode = self._eval_split_mode(kw.value, stmt)
-                                if split_mode == ir.SplitMode.NONE:
-                                    raise ParserSyntaxError(
-                                        "SplitMode.NONE is not supported by pto-isa now",
-                                        span=self.span_tracker.get_span(stmt),
-                                        hint="Use a valid split mode, e.g. pl.SplitMode.UP_DOWN",
-                                    )
                             else:
                                 raise ParserSyntaxError(
-                                    f"pl.auto_incore() got unexpected keyword argument '{kw.arg}'",
+                                    f"pl.{func.attr}() got unexpected keyword argument '{kw.arg}'",
                                     span=self.span_tracker.get_span(stmt),
                                     hint="Only 'split' keyword is supported",
                                 )

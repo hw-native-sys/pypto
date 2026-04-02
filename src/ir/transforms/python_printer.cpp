@@ -1018,8 +1018,7 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     INTERNAL_CHECK(it != scope_kind_to_dsl.end())
         << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
 
-    if (op->scope_kind_ == ScopeKind::AutoInCore && op->split_.has_value() &&
-        op->split_.value() != SplitMode::None) {
+    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
       stream_ << "with " << prefix_ << "." << it->second << "(split=" << prefix_ << ".SplitMode."
               << SplitModeToPythonString(op->split_.value()) << "):\n";
     } else {
