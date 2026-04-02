@@ -272,7 +272,7 @@ class PassManager:
         dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")
 
         # Compose dump instrument with any outer context's instruments and settings.
-        # C++ pipeline handles pre-pipeline warnings (stderr); post-pass warnings
+        # C++ pipeline handles pre-pipeline warnings (LOG_WARN); post-pass warnings
         # are dumped to files by the Python callback above, so force PrePipeline
         # for the C++ side to avoid double-execution.
         outer_instruments = list(ctx.get_instruments()) if ctx else []

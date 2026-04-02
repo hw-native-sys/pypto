@@ -64,7 +64,7 @@ def compile(
         warning_level: Override warning level for this compilation via PassContext.
             None uses the default (PrePipeline, or PYPTO_WARNING_LEVEL env var).
         disabled_warnings: Set of warning checks to disable. None uses the default
-            (no warnings disabled).
+            (UnusedControlFlowResult disabled).
 
     Returns:
         Path to the output directory containing all artifacts
