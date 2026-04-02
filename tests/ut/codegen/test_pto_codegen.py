@@ -1188,6 +1188,57 @@ def test_pto_codegen_if_stmt_tile_phi_preserves_dynamic_valid_shape():
     assert "v_col=?" in phi_alloc_line, f"Expected dynamic v_col in tile phi alloc, got: {phi_alloc_line}"
 
 
+def test_pto_codegen_if_stmt_tile_no_redundant_tmov():
+    """IfStmt emit_branch must not generate a codegen-level tmov for tile return_vars.
+
+    MemoryReuse's YieldFixupMutator inserts an IR-level tile.move in the else-branch
+    to unify its yield MemRef with the then-branch's canonical MemRef. The codegen
+    should emit exactly one pto.tmov (from that IR tile.move), not a second redundant
+    one from emit_branch (which would copy addr B → addr B, a no-op).
+    """
+
+    @pl.program
+    class IfTileNoRedundantTmovProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def repro(
+            self,
+            flag: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            seed: pl.Tile[[64, 64], pl.FP32] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+            )
+            then_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(seed, 2.0)
+            else_tile: pl.Tile[[64, 64], pl.FP32] = pl.tile.muls(seed, 3.0)
+            if flag == 0:
+                result = then_tile
+            else:
+                result = else_tile
+            final: pl.Tensor[[64, 64], pl.FP32] = pl.store(result, [0, 0], out)
+            return final
+
+    mlir_code = _generate_default_mlir(IfTileNoRedundantTmovProgram)
+    lines = _get_mlir_lines(mlir_code)
+
+    tmov_lines = _find_lines(lines, "pto.tmov")
+    # After the fix: exactly one tmov — the IR-level tile.move (else branch only).
+    # The then-branch has no tmov; the codegen-level tmov from emit_branch is removed.
+    assert len(tmov_lines) == 1, (
+        f"Expected exactly 1 pto.tmov (from IR tile.move), got {len(tmov_lines)}: {tmov_lines}"
+    )
+
+    # The single tmov copies from the else computation result to the canonical tile_buf.
+    tmov = tmov_lines[0]
+    assert "pto.tmov" in tmov, f"Expected a pto.tmov line, got: {tmov}"
+    # Verify the tmov targets are at different addresses (it's a real copy, not a no-op).
+    ins_match = re.search(r"ins\((%[\w\d_]+)", tmov)
+    outs_match = re.search(r"outs\((%[\w\d_]+)", tmov)
+    assert ins_match and outs_match, f"Expected ins/outs operands in tmov: {tmov}"
+    assert ins_match.group(1) != outs_match.group(1), (
+        f"tmov src and dst must differ (not a self-copy): {tmov}"
+    )
+
+
 def test_pto_codegen_if_stmt_scalar_result_preserves_integer_dtype():
     """IfStmt scalar results should use their real scalar dtype in scf.if results."""
 
