@@ -68,6 +68,7 @@ struct PassProperties {
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| SubstituteTiles | SSAForm, IncoreTileOps | SSAForm, IncoreTileOps | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
@@ -359,15 +360,16 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 
-1. `FlattenTileNdTo2D`
-2. `InferTileMemorySpace`
-3. `ResolveTransposeLayout`
-4. `ResolveBackendOpLayouts`
-5. `ExpandMixedKernel`
-6. `InitMemRef`
-7. `MemoryReuse`
-8. `LegalizePTOBufferReuse`
-9. `AllocateMemoryAddr`
+1. `SubstituteTiles`
+2. `FlattenTileNdTo2D`
+3. `InferTileMemorySpace`
+4. `ResolveTransposeLayout`
+5. `ResolveBackendOpLayouts`
+6. `ExpandMixedKernel`
+7. `InitMemRef`
+8. `MemoryReuse`
+9. `LegalizePTOBufferReuse`
+10. `AllocateMemoryAddr`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

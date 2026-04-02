@@ -1506,6 +1506,29 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
     return _ir_core.create_op_call("tile.expands", [target, scalar_expr], {}, actual_span)
 
 
+def expand_clone(
+    tile: Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    span: Span | None = None,
+) -> Call:
+    """Expand tile to new shape by cloning elements.
+
+    Args:
+        tile: Input tile expression
+        shape: New shape dimensions, or a MakeTuple
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tile expand_clone
+    """
+    actual_span = _get_span_or_capture(span)
+
+    shape_tuple = _to_make_tuple(shape, actual_span)
+
+    args = [tile, shape_tuple]
+    return _ir_core.create_op_call("tile.expand_clone", args, {}, actual_span)
+
+
 def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of two tiles.
 

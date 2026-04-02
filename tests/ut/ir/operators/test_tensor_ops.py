@@ -1465,6 +1465,38 @@ def test_tensor_expands():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_expand_clone():
+    """Test tensor.expand_clone operation."""
+    span = ir.Span.unknown()
+
+    # Create a tensor variable [4, 1, 8]
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim4, dim1, dim8], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    # expand clone to [4, 16, 8]
+    call = ir.op.tensor.expand_clone(tensor_var, [4, 16, 8])
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.expand_clone"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+
+    dim0 = result_type.shape[0]
+    assert isinstance(dim0, ir.ConstInt)
+    assert dim0.value == 4
+    dim1 = result_type.shape[1]
+    assert isinstance(dim1, ir.ConstInt)
+    assert dim1.value == 16
+    dim2 = result_type.shape[2]
+    assert isinstance(dim2, ir.ConstInt)
+    assert dim2.value == 8
+
+
 def test_tensor_concat():
     """Test tensor.concat - column-wise concatenation."""
     span = ir.Span.unknown()

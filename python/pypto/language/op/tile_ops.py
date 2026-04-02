@@ -72,6 +72,7 @@ __all__ = [
     "col_expand_div",
     "col_expand_sub",
     "expands",
+    "expand_clone",
     "minimum",
     "cmp",
     "cmps",
@@ -957,6 +958,21 @@ def expands(target: Tile, scalar: int | float | Expr | Scalar) -> Tile:
     """
     scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
     call_expr = _ir_ops.expands(target.unwrap(), scalar_expr)
+    return Tile(expr=call_expr)
+
+
+def expand_clone(tile: Tile, shape: Sequence[IntLike]) -> Tile:
+    """Clone and expand tile to target shape.
+
+    Args:
+        tile: Input tile
+        shape: Target shape dimensions
+
+    Returns:
+        Tile wrapping the expand_clone operation
+    """
+    tile_expr = tile.unwrap()
+    call_expr = _ir_ops.expand_clone(tile_expr, _normalize_intlike(shape))
     return Tile(expr=call_expr)
 
 

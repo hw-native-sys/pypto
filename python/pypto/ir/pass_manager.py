@@ -131,6 +131,7 @@ class PassManager:
             ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
         ]
         tile_pto_passes: list[PassSpec] = [
+            ("SubstituteTiles", lambda: passes.substitute_tiles()),
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),

@@ -40,6 +40,7 @@ __all__ = [
     "col_expand_sub",
     "concat",
     "expands",
+    "expand_clone",
     "reshape",
     "transpose",
     "slice",
@@ -292,6 +293,15 @@ def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Til
     if isinstance(target, Tile):
         return _tile.expands(target, scalar)
     raise TypeError(f"expands: expected Tensor or Tile, got {type(target).__name__}")
+
+
+def expand_clone(input: T, shape: Sequence[IntLike]) -> T:
+    """Clone and expand input to target shape, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.expand_clone(input, shape)
+    if isinstance(input, Tile):
+        return _tile.expand_clone(input, shape)
+    raise TypeError(f"expand_clone: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def reshape(input: T, shape: Sequence[IntLike]) -> T:
