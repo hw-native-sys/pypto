@@ -189,12 +189,12 @@ class PassContext {
    * @param instruments List of pass instruments
    * @param verification_level Verification level (default: Basic)
    * @param warning_level Warning level (default: PrePipeline)
-   * @param disabled_warnings Warning checks to skip (default: none)
+   * @param disabled_warnings Warning checks to skip (default: UnusedControlFlowResult)
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        WarningLevel warning_level = WarningLevel::PrePipeline,
-                       WarningCheckSet disabled_warnings = {});
+                       WarningCheckSet disabled_warnings = {WarningCheck::UnusedControlFlowResult});
 
   /**
    * @brief Push this context onto the thread-local stack

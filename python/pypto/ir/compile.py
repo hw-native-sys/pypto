@@ -40,6 +40,8 @@ def compile(
     backend_type: BackendType = BackendType.Ascend910B,
     skip_ptoas: bool = False,
     verification_level: _passes.VerificationLevel | None = None,
+    warning_level: _passes.WarningLevel | None = None,
+    disabled_warnings: _passes.WarningCheckSet | None = None,
 ) -> str:
     """Compile a Program through passes and codegen.
 
@@ -59,6 +61,10 @@ def compile(
             instead of compiled C++ kernel wrappers.
         verification_level: Override verification level for this compilation via
             PassContext. None uses the default (Basic, or PYPTO_VERIFY_LEVEL env var).
+        warning_level: Override warning level for this compilation via PassContext.
+            None uses the default (PrePipeline, or PYPTO_WARNING_LEVEL env var).
+        disabled_warnings: Set of warning checks to disable. None uses the default
+            (no warnings disabled).
 
     Returns:
         Path to the output directory containing all artifacts
@@ -71,7 +77,8 @@ def compile(
         ...     program,
         ...     strategy=ir.OptimizationStrategy.Default,
         ...     dump_passes=True,
-        ...     backend_type=BackendType.Ascend910B
+        ...     backend_type=BackendType.Ascend910B,
+        ...     warning_level=ir.WarningLevel.BOTH,
         ... )
     """
     _backend_core.set_backend_type(backend_type)
@@ -82,10 +89,16 @@ def compile(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    if verification_level is not None and _passes.PassContext.current() is not None:
+    outer = _passes.PassContext.current()
+    if verification_level is not None and outer is not None:
         raise RuntimeError(
             "compile() was called with verification_level while a PassContext is already active. "
             "Set the verification level on the existing PassContext instead."
+        )
+    if warning_level is not None and outer is not None:
+        raise RuntimeError(
+            "compile() was called with warning_level while a PassContext is already active. "
+            "Set the warning level on the existing PassContext instead."
         )
 
     report_dir = os.path.join(output_dir, "report")
@@ -94,18 +107,21 @@ def compile(
     report_instrument.enable_report(_passes.ReportType.Memory, "AllocateMemoryAddr")
 
     instruments: list[_passes.PassInstrument] = [report_instrument]
-    outer = _passes.PassContext.current()
-    if verification_level is not None:
-        ctx = _passes.PassContext(instruments, verification_level)
-    elif outer is None:
-        ctx = _passes.PassContext(instruments, _passes.get_default_verification_level())
+    # Resolve effective settings: explicit arg > outer context > global default.
+    default_disabled = _passes.WarningCheckSet()
+    default_disabled.insert(_passes.WarningCheck.UnusedControlFlowResult)
+    if outer is not None:
+        instruments = list(outer.get_instruments()) + instruments
+        vlevel = verification_level if verification_level is not None else outer.get_verification_level()
+        wlevel = warning_level if warning_level is not None else outer.get_warning_level()
+        disabled = disabled_warnings if disabled_warnings is not None else outer.get_disabled_warnings()
     else:
-        ctx = _passes.PassContext(
-            list(outer.get_instruments()) + instruments,
-            outer.get_verification_level(),
-            outer.get_warning_level(),
-            outer.get_disabled_warnings(),
+        vlevel = (
+            verification_level if verification_level is not None else _passes.get_default_verification_level()
         )
+        wlevel = warning_level if warning_level is not None else _passes.get_default_warning_level()
+        disabled = disabled_warnings if disabled_warnings is not None else default_disabled
+    ctx = _passes.PassContext(instruments, vlevel, wlevel, disabled)
 
     with ctx:
         pm = PassManager.get_strategy(strategy)

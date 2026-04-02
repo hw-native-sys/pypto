@@ -54,6 +54,7 @@ import torch
 from pypto import ir
 from pypto.backend import BackendType, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
 from .golden_writer import write_golden
 from .tensor_spec import TensorSpec
@@ -244,6 +245,10 @@ class RunConfig:
             commit (hash or tag).  ``None`` means use the latest remote HEAD.
         enable_profiling: If ``True``, enable runtime profiling and generate
             ``swimlane.json`` after execution.
+        warning_level: Override warning level for compilation. ``None`` uses the
+            default (``PrePipeline``, or ``PYPTO_WARNING_LEVEL`` env var).
+        disabled_warnings: Set of warning checks to disable during compilation.
+            ``None`` uses the default (no warnings disabled).
     """
 
     __test__ = False  # Not a pytest test class
@@ -260,6 +265,8 @@ class RunConfig:
     codegen_only: bool = False
     pto_isa_commit: str | None = None
     enable_profiling: bool = False
+    warning_level: WarningLevel | None = None
+    disabled_warnings: WarningCheckSet | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -322,6 +329,8 @@ def compile_program(
     strategy: OptimizationStrategy,
     backend_type: BackendType,
     dump_passes: bool = False,
+    warning_level: WarningLevel | None = None,
+    disabled_warnings: WarningCheckSet | None = None,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -334,6 +343,8 @@ def compile_program(
         strategy: PyPTO optimisation strategy applied during compilation.
         backend_type: Code-generation backend.
         dump_passes: If ``True``, dump intermediate IR after each pass.
+        warning_level: Override warning level for compilation.
+        disabled_warnings: Set of warning checks to disable.
     """
     ir.compile(
         program,
@@ -341,6 +352,8 @@ def compile_program(
         strategy=strategy,
         dump_passes=dump_passes,
         backend_type=backend_type,
+        warning_level=warning_level,
+        disabled_warnings=disabled_warnings,
     )
     _patch_orchestration_headers(work_dir)
 
@@ -400,6 +413,8 @@ def run(
             strategy=config.strategy,
             backend_type=config.backend_type,
             dump_passes=config.dump_passes,
+            warning_level=config.warning_level,
+            disabled_warnings=config.disabled_warnings,
         )
 
         # 3. Write golden.py

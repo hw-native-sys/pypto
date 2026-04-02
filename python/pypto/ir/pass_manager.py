@@ -10,6 +10,7 @@
 """Pass manager for IR transformations."""
 
 import os
+import re
 from collections.abc import Callable
 from enum import Enum
 
@@ -17,6 +18,68 @@ from pypto.pypto_core import ir as core_ir
 from pypto.pypto_core import passes
 
 from .printer import python_print
+
+# Regex to extract variable name from warning messages like:
+#   "Unused variable 'foo' in function 'bar'"
+_VAR_NAME_RE = re.compile(r"variable '([^']+)'")
+
+
+def _format_warnings(
+    ir_content: str,
+    dump_filename: str,
+    warnings: list[passes.Diagnostic],
+) -> str:
+    """Format warnings with gcc/clang-style source context from the printed IR.
+
+    For each warning, locates the variable's definition line in the printed IR
+    and emits a diagnostic pointing at it (file:line:col + source + caret).
+    """
+    lines = ir_content.splitlines()
+    out: list[str] = []
+
+    for d in warnings:
+        m = _VAR_NAME_RE.search(d.message)
+        if not m:
+            # Fallback: no variable name extracted
+            out.append(f"{dump_filename}: warning: {d.message} [{d.rule_name}]")
+            continue
+
+        var_name = m.group(1)
+        # Find the first line where this variable is defined.
+        # Patterns: `var:` (annotation), `var =` (assignment), or `var,` / `var ` in
+        # multi-assignment like `a, b, c = pl.yield_(...)`.
+        found = False
+        for lineno_0, line in enumerate(lines):
+            idx = line.find(var_name)
+            if idx == -1:
+                continue
+            after = line[idx + len(var_name) :]
+            # Must be followed by `:`, ` =`, `,`, or end-of-content (stripped)
+            if not (
+                after.startswith(":")
+                or after.startswith(" =")
+                or after.startswith(",")
+                or after.lstrip() == ""
+            ):
+                continue
+            # Verify it's not a substring of a longer identifier
+            if idx > 0 and (line[idx - 1].isalnum() or line[idx - 1] == "_"):
+                continue
+
+            lineno = lineno_0 + 1  # 1-based
+            col = idx + 1  # 1-based
+            gutter_w = len(str(lineno))
+            out.append(f"{dump_filename}:{lineno}:{col}: warning: {d.message} [{d.rule_name}]")
+            out.append(f" {lineno:>{gutter_w}} | {line.rstrip()}")
+            out.append(f" {' ' * gutter_w} | {' ' * idx}^{'~' * (len(var_name) - 1)}")
+            found = True
+            break
+
+        if not found:
+            out.append(f"{dump_filename}: warning: {d.message} [{d.rule_name}]")
+
+    return "\n".join(out) + "\n" if out else ""
+
 
 PassSpec = tuple[str, Callable[[], passes.Pass]]
 
@@ -169,25 +232,55 @@ class PassManager:
         # _pass_obj.get_name() because registered names may differ from C++ names.
         pass_index = 0
 
+        # Resolve warning checks once for post-pass dump.
+        ctx = passes.PassContext.current()
+        if ctx:
+            disabled = ctx.get_disabled_warnings()
+        else:
+            # Match PassContext default: disable UnusedControlFlowResult
+            disabled = passes.WarningCheckSet()
+            disabled.insert(passes.WarningCheck.UnusedControlFlowResult)
+        all_checks = passes.WarningVerifierRegistry.get_all_checks()
+        effective_checks = all_checks.difference(disabled)
+
         def after_pass(_pass_obj: passes.Pass, program: core_ir.Program) -> None:
             nonlocal pass_index
             pass_name = self.pass_names[pass_index]
-            dump_path = os.path.join(output_dir, f"{pass_index + 1:02d}_after_{pass_name}.py")
+            stem = f"{pass_index + 1:02d}_after_{pass_name}"
+
+            # Dump IR
+            dump_path = os.path.join(output_dir, f"{stem}.py")
             with open(dump_path, "w") as f:
                 content = python_print(program, prefix=prefix)
                 f.write(content)
                 if not content.endswith("\n"):
                     f.write("\n")
+
+            # Dump per-pass warnings alongside the IR
+            if not effective_checks.empty():
+                diags = passes.WarningVerifierRegistry.run_checks(effective_checks, program)
+                warn_diags = [d for d in diags if d.severity == passes.DiagnosticSeverity.Warning]
+                if warn_diags:
+                    dump_filename = os.path.relpath(os.path.join(output_dir, f"{stem}.py"))
+                    formatted = _format_warnings(content, dump_filename, warn_diags)
+                    warn_path = os.path.join(output_dir, f"{stem}.log")
+                    with open(warn_path, "w") as f:
+                        f.write(formatted)
+
             pass_index += 1
 
         dump_instrument = passes.CallbackInstrument(after_pass=after_pass, name="IRDump")
 
-        # Compose dump instrument with any outer context's instruments and verification level
-        ctx = passes.PassContext.current()
+        # Compose dump instrument with any outer context's instruments and settings.
+        # C++ pipeline handles pre-pipeline warnings (stderr); post-pass warnings
+        # are dumped to files by the Python callback above, so force PrePipeline
+        # for the C++ side to avoid double-execution.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
 
-        with passes.PassContext(outer_instruments + [dump_instrument], level):
+        with passes.PassContext(
+            outer_instruments + [dump_instrument], level, passes.WarningLevel.PRE_PIPELINE, disabled
+        ):
             return self._pipeline.run(input_ir)
 
     def get_pass_names(self) -> list[str]:

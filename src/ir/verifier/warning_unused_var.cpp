@@ -29,8 +29,9 @@ namespace ir {
 
 namespace {
 
-/// Warning error code for unused variables (1000+ range for warnings)
+/// Warning error codes (1000+ range for warnings)
 constexpr int kUnusedVariableCode = 1001;
+constexpr int kUnusedControlFlowResultCode = 1002;
 
 // Two-pass approach:
 //   Pass 1 (UseCollector): collect all Var pointers read in expressions.
@@ -100,15 +101,20 @@ class UseCollector : public IRVisitor {
 
 /// Walk statement structure only (no expression traversal) to find definitions
 /// and report any that don't appear in the uses set.
+///
+/// When `check_return_vars` is false (UnusedVariable), only AssignStmt definitions
+/// are checked.  When true (UnusedControlFlowResult), only for/while/if return_vars
+/// are checked.  The two checks are orthogonal and can be enabled independently.
 class UnusedVarChecker : public IRVisitor {
  public:
   UnusedVarChecker(const std::unordered_set<const Var*>& used_vars,
                    const std::unordered_set<const Var*>& param_vars, std::vector<Diagnostic>& diagnostics,
-                   std::string func_name)
+                   std::string func_name, bool check_return_vars)
       : used_vars_(used_vars),
         param_vars_(param_vars),
         diagnostics_(diagnostics),
-        func_name_(std::move(func_name)) {}
+        func_name_(std::move(func_name)),
+        check_return_vars_(check_return_vars) {}
 
  protected:
   // Skip all expression traversal — pass 1 already collected uses.
@@ -116,22 +122,26 @@ class UnusedVarChecker : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
-    if (op->var_) CheckUnused(op->var_);
+    if (!check_return_vars_ && op->var_) CheckUnused(op->var_);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
     if (!op) return;
     if (op->body_) VisitStmt(op->body_);
-    for (const auto& rv : op->return_vars_) {
-      CheckUnused(rv);
+    if (check_return_vars_) {
+      for (const auto& rv : op->return_vars_) {
+        CheckUnused(rv);
+      }
     }
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
     if (!op) return;
     if (op->body_) VisitStmt(op->body_);
-    for (const auto& rv : op->return_vars_) {
-      CheckUnused(rv);
+    if (check_return_vars_) {
+      for (const auto& rv : op->return_vars_) {
+        CheckUnused(rv);
+      }
     }
   }
 
@@ -141,8 +151,10 @@ class UnusedVarChecker : public IRVisitor {
     if (op->else_body_.has_value() && *op->else_body_) {
       VisitStmt(*op->else_body_);
     }
-    for (const auto& rv : op->return_vars_) {
-      CheckUnused(rv);
+    if (check_return_vars_) {
+      for (const auto& rv : op->return_vars_) {
+        CheckUnused(rv);
+      }
     }
   }
 
@@ -151,10 +163,11 @@ class UnusedVarChecker : public IRVisitor {
     if (!var) return;
     if (param_vars_.count(var.get()) > 0) return;
     if (used_vars_.count(var.get()) == 0) {
+      const char* rule = check_return_vars_ ? "UnusedControlFlowResultCheck" : "UnusedVariableCheck";
+      int code = check_return_vars_ ? kUnusedControlFlowResultCode : kUnusedVariableCode;
       std::ostringstream msg;
       msg << "Unused variable '" << var->name_hint_ << "' in function '" << func_name_ << "'";
-      diagnostics_.emplace_back(DiagnosticSeverity::Warning, "UnusedVariableCheck", kUnusedVariableCode,
-                                msg.str(), var->span_);
+      diagnostics_.emplace_back(DiagnosticSeverity::Warning, rule, code, msg.str(), var->span_);
     }
   }
 
@@ -162,11 +175,13 @@ class UnusedVarChecker : public IRVisitor {
   const std::unordered_set<const Var*>& param_vars_;
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
+  bool check_return_vars_;
 };
 
-class UnusedVariableWarningVerifierImpl : public PropertyVerifier {
+/// Shared logic for both verifiers — collects uses once, then runs the checker.
+class UnusedVarWarningVerifierBase : public PropertyVerifier {
  public:
-  [[nodiscard]] std::string GetName() const override { return "UnusedVariableCheck"; }
+  explicit UnusedVarWarningVerifierBase(bool check_return_vars) : check_return_vars_(check_return_vars) {}
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
@@ -174,27 +189,43 @@ class UnusedVariableWarningVerifierImpl : public PropertyVerifier {
     for (const auto& [global_var, func] : program->functions_) {
       if (!func) continue;
 
-      // Pass 1: Collect all variable uses across the function body
       UseCollector collector;
       if (func->body_) collector.VisitStmt(func->body_);
 
-      // Build set of function parameter pointers (excluded from warnings)
       std::unordered_set<const Var*> param_vars;
       for (const auto& param : func->params_) {
         if (param) param_vars.insert(param.get());
       }
 
-      // Pass 2: Walk definitions and report unused ones
-      UnusedVarChecker checker(collector.used_vars, param_vars, diagnostics, func->name_);
+      UnusedVarChecker checker(collector.used_vars, param_vars, diagnostics, func->name_, check_return_vars_);
       if (func->body_) checker.VisitStmt(func->body_);
     }
   }
+
+ private:
+  bool check_return_vars_;
+};
+
+class UnusedVariableWarningVerifierImpl : public UnusedVarWarningVerifierBase {
+ public:
+  UnusedVariableWarningVerifierImpl() : UnusedVarWarningVerifierBase(/*check_return_vars=*/false) {}
+  [[nodiscard]] std::string GetName() const override { return "UnusedVariableCheck"; }
+};
+
+class UnusedControlFlowResultWarningVerifierImpl : public UnusedVarWarningVerifierBase {
+ public:
+  UnusedControlFlowResultWarningVerifierImpl() : UnusedVarWarningVerifierBase(/*check_return_vars=*/true) {}
+  [[nodiscard]] std::string GetName() const override { return "UnusedControlFlowResultCheck"; }
 };
 
 }  // namespace
 
 PropertyVerifierPtr CreateUnusedVariableWarningVerifier() {
   return std::make_shared<UnusedVariableWarningVerifierImpl>();
+}
+
+PropertyVerifierPtr CreateUnusedControlFlowResultWarningVerifier() {
+  return std::make_shared<UnusedControlFlowResultWarningVerifierImpl>();
 }
 
 }  // namespace ir

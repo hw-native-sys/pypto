@@ -24,7 +24,14 @@ import shutil as _shutil
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import *  # noqa: F403
 from pypto.pypto_core.ir import IRMutator, IRVisitor
-from pypto.pypto_core.passes import PassContext, VerificationLevel, VerificationMode
+from pypto.pypto_core.passes import (
+    PassContext,
+    VerificationLevel,
+    VerificationMode,
+    WarningCheck,
+    WarningCheckSet,
+    WarningLevel,
+)
 
 # Import operation modules
 from . import op, operators  # noqa: F401
@@ -95,6 +102,9 @@ __all__ = [
     "VerificationMode",
     "VerificationLevel",
     "PassContext",
+    "WarningLevel",
+    "WarningCheck",
+    "WarningCheckSet",
     "ConversionContext",
     "op_conversion",
     "register_op_conversion",

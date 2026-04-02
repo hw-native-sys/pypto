@@ -82,6 +82,7 @@ class WarningCheck(Enum):
     """Identifies a specific warning check."""
 
     UnusedVariable = ...
+    UnusedControlFlowResult = ...
 
 class WarningCheckSet:
     """A set of warning checks backed by a bitset."""
@@ -213,7 +214,7 @@ class PassContext:
         instruments: list[PassInstrument],
         verification_level: VerificationLevel = VerificationLevel.BASIC,
         warning_level: WarningLevel = WarningLevel.PRE_PIPELINE,
-        disabled_warnings: WarningCheckSet = ...,
+        disabled_warnings: WarningCheckSet = ...,  # default: {UnusedControlFlowResult}
     ) -> None:
         """Create a PassContext with instruments, verification level, warning level, and disabled warnings."""
         ...

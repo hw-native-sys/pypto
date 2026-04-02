@@ -30,6 +30,8 @@ std::string WarningCheckToString(WarningCheck check) {
   switch (check) {
     case WarningCheck::UnusedVariable:
       return "UnusedVariable";
+    case WarningCheck::UnusedControlFlowResult:
+      return "UnusedControlFlowResult";
     default:
       return "Unknown";
   }
@@ -72,6 +74,7 @@ WarningVerifierRegistry& WarningVerifierRegistry::GetInstance() {
 WarningVerifierRegistry::WarningVerifierRegistry() {
   // Register all built-in warning verifiers
   Register(WarningCheck::UnusedVariable, CreateUnusedVariableWarningVerifier);
+  Register(WarningCheck::UnusedControlFlowResult, CreateUnusedControlFlowResultWarningVerifier);
 }
 
 void WarningVerifierRegistry::Register(WarningCheck check, std::function<PropertyVerifierPtr()> factory) {

@@ -240,7 +240,7 @@ class LoggerManager {
  public:
   std::mutex log_mtx;
 #ifdef NDEBUG
-  LogLevel level{LogLevel::ERROR};
+  LogLevel level{LogLevel::WARN};
 #else
   LogLevel level{LogLevel::DEBUG};
 #endif
@@ -365,7 +365,7 @@ class Logger {
   std::stringstream ss;
   std::stringstream ss_rich;
 #ifdef NDEBUG
-  LogLevel level{LogLevel::ERROR};
+  LogLevel level{LogLevel::WARN};
 #else
   LogLevel level{LogLevel::DEBUG};
 #endif

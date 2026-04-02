@@ -113,7 +113,9 @@ void BindPass(nb::module_& m) {
 
   // Bind WarningCheck enum
   nb::enum_<WarningCheck>(passes, "WarningCheck", "Identifies a specific warning check")
-      .value("UnusedVariable", WarningCheck::UnusedVariable, "Variable defined but never read");
+      .value("UnusedVariable", WarningCheck::UnusedVariable, "Variable defined but never read")
+      .value("UnusedControlFlowResult", WarningCheck::UnusedControlFlowResult,
+             "Unused return variable from for/while/if statement");
 
   // Bind WarningCheckSet
   nb::class_<WarningCheckSet>(passes, "WarningCheckSet", "A set of warning checks")
@@ -202,7 +204,7 @@ void BindPass(nb::module_& m) {
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, WarningLevel, WarningCheckSet>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("warning_level") = WarningLevel::PrePipeline,
-           nb::arg("disabled_warnings") = WarningCheckSet{},
+           nb::arg("disabled_warnings") = WarningCheckSet{WarningCheck::UnusedControlFlowResult},
            "Create a PassContext with instruments, verification level, warning level, "
            "and optional disabled warnings")
       .def("__enter__",

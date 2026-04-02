@@ -29,6 +29,7 @@ namespace ir {
 /// Identifies a specific warning check (independent of IRProperty)
 enum class WarningCheck : uint32_t {
   UnusedVariable = 0,
+  UnusedControlFlowResult = 1,
   // future: SuspiciousInOutAnnotation, UnreachableCode, RedundantAssignment, ...
   kCount
 };
@@ -104,6 +105,9 @@ class WarningVerifierRegistry {
 
 /// Factory function for creating UnusedVariable warning verifier
 PropertyVerifierPtr CreateUnusedVariableWarningVerifier();
+
+/// Factory function for creating UnusedControlFlowResult warning verifier
+PropertyVerifierPtr CreateUnusedControlFlowResultWarningVerifier();
 
 }  // namespace ir
 }  // namespace pypto
