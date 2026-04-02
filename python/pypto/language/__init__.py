@@ -159,6 +159,7 @@ from .op.unified_ops import (
     row_min,
     row_sum,
     rsqrt,
+    runtime_print,
     slice,
     sqrt,
     sub,
@@ -264,6 +265,7 @@ __all__ = [
     "recip",
     "read",
     "write",
+    "runtime_print",
     # Promoted tile-only
     "create_tile",
     "fillpad",

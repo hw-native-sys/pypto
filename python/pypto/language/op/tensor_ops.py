@@ -59,6 +59,7 @@ __all__ = [
     "reshape",
     "transpose",
     "scatter_update",
+    "runtime_print",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -779,3 +780,15 @@ def scatter_update(
     """
     call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
     return Tensor(expr=call_expr)
+
+
+def runtime_print(tensor: Tensor) -> None:
+    """Print tensor contents at runtime for debugging.
+
+    Generates a pto.tprint instruction in the compiled output.
+    This is a statement-only operation — no value is returned.
+
+    Args:
+        tensor: Input tensor to print
+    """
+    _ir_ops.runtime_print(tensor.unwrap())

@@ -108,6 +108,7 @@ __all__ = [
     "tpush_to_aic",
     "tpop_from_aic",
     "tpop_from_aiv",
+    "runtime_print",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -1547,3 +1548,15 @@ def sels(lhs: Tile, rhs: Tile, select_mode: int | float | Expr | Scalar) -> Tile
     select_mode_expr = select_mode.unwrap() if isinstance(select_mode, Scalar) else select_mode
     call_expr = _ir_ops.sels(lhs.unwrap(), rhs.unwrap(), select_mode_expr)
     return Tile(expr=call_expr)
+
+
+def runtime_print(tile: Tile) -> None:
+    """Print tile contents at runtime for debugging.
+
+    Generates a pto.tprint instruction in the compiled output.
+    This is a statement-only operation — no value is returned.
+
+    Args:
+        tile: Input tile to print
+    """
+    _ir_ops.runtime_print(tile.unwrap())

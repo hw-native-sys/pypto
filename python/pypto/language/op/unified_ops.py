@@ -53,6 +53,7 @@ __all__ = [
     "create_tile",
     "read",
     "write",
+    "runtime_print",
 ]
 
 from pypto.ir.utils import resolve_cast_mode
@@ -552,3 +553,19 @@ def write(dst: Tensor | Tile, offset: IntLike | Sequence[IntLike], value: Scalar
     if isinstance(dst, Tile):
         return _tile.write(dst, offset, value)
     raise TypeError(f"write: expected Tensor or Tile, got {type(dst).__name__}")
+
+
+def runtime_print(src: Tensor | Tile) -> None:
+    """Print tensor or tile contents at runtime for debugging.
+
+    Generates a pto.tprint instruction in the compiled output.
+    This is a statement-only operation — no value is returned.
+
+    Args:
+        src: Tensor or tile to print
+    """
+    if isinstance(src, Tensor):
+        return _tensor.runtime_print(src)
+    if isinstance(src, Tile):
+        return _tile.runtime_print(src)
+    raise TypeError(f"runtime_print: expected Tensor or Tile, got {type(src).__name__}")

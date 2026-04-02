@@ -104,6 +104,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/transform.cpp
     src/ir/op/tile_ops/unary.cpp
     src/ir/op/tile_ops/cross_core.cpp
+    src/ir/op/tile_ops/utility.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/sync_ops/cross_core.cpp
     src/ir/op/tensor_ops/broadcast.cpp
@@ -114,6 +115,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
+    src/ir/op/tensor_ops/utility.cpp
     src/ir/op/testing.cpp
     src/ir/op/type_inference.cpp
 

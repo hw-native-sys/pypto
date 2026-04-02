@@ -158,6 +158,9 @@ OpConversionRegistry::OpConversionRegistry() {
   // Memory creation ops
   RegisterSimple("tensor.full", "tile.full");
 
+  // Utility ops
+  RegisterSimple("tensor.runtime_print", "tile.runtime_print");
+
   // ────────────────────────────────────────────────────────────────────────
   // Broadcast-aware elementwise binary ops
   //

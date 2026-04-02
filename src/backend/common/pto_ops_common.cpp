@@ -1234,9 +1234,11 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.mrgsort", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
   });
-  reg("tile.print", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  auto make_tprint = [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
-  });
+  };
+  reg("tile.runtime_print", make_tprint);
+  reg("tensor.runtime_print", make_tprint);
 
   // In-place accumulation ops (matmul_acc, gemv_acc): ptoas expects the
   // accumulator in ins() to be the same SSA value as outs().  InitMemRef
