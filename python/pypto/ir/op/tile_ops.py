@@ -1275,6 +1275,28 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
 
 
+def batch_matmul(
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Batch matrix multiplication of two tiles with broadcasting.
+
+    For inputs with shape [...batch_dims, M, K] and [...batch_dims, K, N],
+    the output has shape [...broadcast_batch_dims, M, N].
+
+    Args:
+        lhs: Left-hand side tile (TileType, at least 2D)
+        rhs: Right-hand side tile (TileType, at least 2D)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for batch matrix multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.batch_matmul", [lhs, rhs], {}, actual_span)
+
+
 def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
@@ -1834,21 +1856,21 @@ def reshape(
     return _ir_core.create_op_call("tile.reshape", args, {}, actual_span)
 
 
-def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
+def transpose(tile: Expr, axis1: int | Expr, axis2: int | Expr, span: Span | None = None) -> Call:
     """Transpose tile by swapping two axes.
 
     Args:
         tile: Input tile expression
-        axis1: First axis to swap (supports negative indexing)
-        axis2: Second axis to swap (supports negative indexing)
+        axis1: First axis to swap as an integer or index expression
+        axis2: Second axis to swap as an integer or index expression
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for tile transpose
     """
     actual_span = _get_span_or_capture(span)
-    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    axis1_expr = _normalize_expr(axis1, actual_span, int_dtype=DataType.INDEX)
+    axis2_expr = _normalize_expr(axis2, actual_span, int_dtype=DataType.INDEX)
 
     args = [tile, axis1_expr, axis2_expr]
 

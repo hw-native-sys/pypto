@@ -110,6 +110,15 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+`tensor.matmul` 只处理 2D 矩阵乘法。对于 rank >= 3 的 batch 张量，请使用
+registry 中的 `tensor.batch_matmul`，或者 Python 辅助函数
+`op.tensor.batch_matmul(...)`。
+
+在 Tile 层，`tile.batch_matmul` 对应 batched `TileType` 语义。它接受
+rank >= 2 的 tile，支持前导 batch 维广播，并尽量保持和 `tile.matmul`
+一致的纯 operand 接口风格。如果 batch operand 需要转置语义，应先显式写成
+`tile.transpose(...)`，后续 lowering 再把它拆成 2D `tile.matmul`。
+
 ## Python 用法
 
 ```python
@@ -131,6 +140,10 @@ dim64, dim128 = ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(128, DataType
 a = ir.Var("a", ir.TensorType([dim64, dim128], DataType.FP16), span)
 b = ir.Var("b", ir.TensorType([dim128, dim64], DataType.FP16), span)
 matmul = op.tensor.matmul(a, b, out_dtype=DataType.FP32, a_trans=True)
+
+batch_a = ir.Var("batch_a", ir.TensorType([dim4, dim64, dim128], DataType.FP16), span)
+batch_b = ir.Var("batch_b", ir.TensorType([dim4, dim128, dim64], DataType.FP16), span)
+batch_matmul = op.tensor.batch_matmul(batch_a, batch_b, out_dtype=DataType.FP32)
 
 # Query registry
 assert ir.is_op_registered("tensor.add")

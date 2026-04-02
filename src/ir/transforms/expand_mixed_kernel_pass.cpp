@@ -29,6 +29,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
@@ -72,6 +73,31 @@ using tpop_chain::NormalizeTpopChains;
 
 // Use the shared utility; local alias preserves call sites.
 const auto& FlattenBody = transform_utils::FlattenToStmts;
+
+/// Check if the function body directly returns a writable (Out/InOut) parameter.
+/// Used to preserve the writable-param-return pattern during mixed-kernel
+/// expansion: when the AIV sub-function returns its Out param, the group
+/// function must return the same param instead of a fresh result variable.
+std::optional<size_t> FindReturnedWritableParamIndex(const StmtPtr& body, const std::vector<VarPtr>& params,
+                                                     const std::vector<ParamDirection>& param_directions) {
+  if (!body) return std::nullopt;
+
+  const auto flat_stmts = FlattenBody(body);
+  if (flat_stmts.empty()) return std::nullopt;
+
+  auto ret = As<ReturnStmt>(flat_stmts.back());
+  if (!ret || ret->value_.size() != 1) return std::nullopt;
+
+  auto ret_var = As<Var>(ret->value_[0]);
+  if (!ret_var) return std::nullopt;
+
+  for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
+    if (param_directions[i] == ParamDirection::In) continue;
+    if (params[i].get() == ret_var.get()) return i;
+  }
+
+  return std::nullopt;
+}
 
 // ============================================================================
 // Recursive Affinity Analysis
@@ -759,6 +785,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   auto aiv_call = aiv_return_type ? std::make_shared<Call>(aiv_gvar, call_args, aiv_return_type, func->span_)
                                   : std::make_shared<Call>(aiv_gvar, call_args, func->span_);
+  auto returned_writable_param_index =
+      FindReturnedWritableParamIndex(aiv_cloned_body, aiv_params, func->param_directions_);
 
   // Build group body
   std::vector<StmtPtr> group_stmts;
@@ -766,6 +794,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   if (func->return_types_.empty()) {
     group_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, func->span_));
+  } else if (returned_writable_param_index.has_value()) {
+    group_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, func->span_));
+    std::vector<ExprPtr> return_exprs = {group_params[*returned_writable_param_index]};
+    group_stmts.push_back(std::make_shared<ReturnStmt>(return_exprs, func->span_));
   } else {
     // Assign AIV result and return it
     auto result_var = std::make_shared<Var>("result", aiv_return_type, func->span_);
@@ -775,9 +807,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   }
 
   auto group_body = SeqStmts::Flatten(std::move(group_stmts), func->span_);
-  auto group_func = std::make_shared<Function>(group_name, group_params, func->param_directions_,
-                                               func->return_types_, group_body, func->span_,
-                                               FunctionType::Group, std::nullopt, std::nullopt, func->attrs_);
+  auto group_func =
+      std::make_shared<Function>(group_name, group_params, func->param_directions_, func->return_types_,
+                                 group_body, func->span_, FunctionType::Group);
 
   return {aic_func, aiv_func, group_func};
 }
@@ -831,8 +863,7 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), group_func->span_);
   auto result =
       std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
-                                 group_func->return_types_, new_body, group_func->span_, FunctionType::Group,
-                                 group_func->level_, group_func->role_, group_func->attrs_);
+                                 group_func->return_types_, new_body, group_func->span_, FunctionType::Group);
   return result;
 }
 
@@ -1142,12 +1173,6 @@ Pass ExpandMixedKernel() {
                                                     std::nullopt, std::nullopt, func->attrs_);
         new_functions.push_back(converted);
         continue;
-      }
-      // Warn if split unset or is NONE — don't supported by pto-isa now.
-      auto split_mode = func->GetSplitMode();
-      if (!split_mode.has_value() || *split_mode == SplitMode::None) {
-        LOG_ERROR << "Mixed kernel '" << func->name_ << "' use none split mode not supported by isa now; "
-                  << "consider using split=pl.SplitMode.UP_DOWN on its auto_incore scope";
       }
 
       // Expand mixed kernel — skip Group wrapper if an existing Group caller exists

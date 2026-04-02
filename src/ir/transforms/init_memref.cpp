@@ -16,6 +16,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -65,10 +67,97 @@ std::optional<size_t> GetOutputReusesInputArg(const std::string& op_name) {
   return registry.GetEntry(op_name).GetOutputReusesInputArg();
 }
 
+/// Check if `var` is a writable (Out/InOut) parameter and return its index.
+std::optional<size_t> ResolveReturnedWritableParamIndex(const VarPtr& var, const std::vector<VarPtr>& params,
+                                                        const std::vector<ParamDirection>& param_directions) {
+  if (!var) return std::nullopt;
+  for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
+    if (param_directions[i] == ParamDirection::In) continue;
+    if (params[i].get() == var.get()) return i;
+  }
+  return std::nullopt;
+}
+
+/// For a Call, resolve whether its result reuses one of its input args as
+/// the output buffer (e.g. tile.store returns its output_tensor arg).
+/// Also checks cross-function aliases via known_return_alias_arg_index_by_func.
+std::optional<size_t> ResolveCallOutputReusesInputArg(
+    const CallPtr& call,
+    const std::unordered_map<std::string, size_t>& known_return_alias_arg_index_by_func) {
+  if (!call) return std::nullopt;
+
+  auto reuse_arg_idx = GetOutputReusesInputArg(call->op_->name_);
+  if (reuse_arg_idx.has_value()) return reuse_arg_idx;
+
+  if (auto callee = As<GlobalVar>(call->op_)) {
+    auto alias_it = known_return_alias_arg_index_by_func.find(callee->name_);
+    if (alias_it != known_return_alias_arg_index_by_func.end()) {
+      return alias_it->second;
+    }
+  }
+
+  return std::nullopt;
+}
+
+/// Walk backward through assign-chain and call-chain aliases to find whether
+/// a function's single return value ultimately aliases a writable parameter.
+/// Uses known_return_alias_arg_index_by_func for cross-function resolution
+/// (e.g. orchestrator calls InCore which returns its Out param).
+std::optional<size_t> FindReturnedWritableParamIndex(
+    const FunctionPtr& func,
+    const std::unordered_map<std::string, size_t>& known_return_alias_arg_index_by_func = {}) {
+  if (!func || !func->body_ || func->return_types_.size() != 1) return std::nullopt;
+
+  auto normalized_func = NormalizeStmtStructure(func);
+  std::vector<StmtPtr> stmts;
+  if (auto seq = As<SeqStmts>(normalized_func->body_)) {
+    stmts = seq->stmts_;
+  } else {
+    stmts = {normalized_func->body_};
+  }
+  if (stmts.empty()) return std::nullopt;
+
+  auto ret = As<ReturnStmt>(stmts.back());
+  if (!ret || ret->value_.size() != 1) return std::nullopt;
+
+  std::unordered_map<const Var*, ExprPtr> defs;
+  defs.reserve(stmts.size());
+  for (const auto& stmt : stmts) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) continue;
+    defs[assign->var_.get()] = assign->value_;
+  }
+
+  auto current_var = As<Var>(ret->value_[0]);
+  std::unordered_set<const Var*> visited;
+  while (current_var && visited.insert(current_var.get()).second) {
+    auto param_index = ResolveReturnedWritableParamIndex(current_var, normalized_func->params_,
+                                                         normalized_func->param_directions_);
+    if (param_index.has_value()) return param_index;
+
+    auto def_it = defs.find(current_var.get());
+    if (def_it == defs.end()) return std::nullopt;
+
+    if (auto alias_var = As<Var>(def_it->second)) {
+      current_var = alias_var;
+      continue;
+    }
+
+    auto call = As<Call>(def_it->second);
+    auto reuse_arg_idx = ResolveCallOutputReusesInputArg(call, known_return_alias_arg_index_by_func);
+    if (!reuse_arg_idx.has_value() || *reuse_arg_idx >= call->args_.size()) return std::nullopt;
+
+    current_var = As<Var>(call->args_[*reuse_arg_idx]);
+  }
+
+  return std::nullopt;
+}
+
 // Mutator to initialize MemRef for variables
 class InitMemRefMutator : public IRMutator {
  public:
-  InitMemRefMutator() = default;
+  explicit InitMemRefMutator(std::unordered_map<std::string, size_t> return_alias_arg_index_by_func = {})
+      : return_alias_arg_index_by_func_(std::move(return_alias_arg_index_by_func)) {}
 
   // Resolve memory space from TileType::memory_space_ field (set by InferTileMemorySpace),
   // falling back to DDR when default_to_ddr is true.
@@ -244,7 +333,7 @@ class InitMemRefMutator : public IRMutator {
       }
 
       // Handle ops whose output reuses a specific input arg's MemRef (registry-based)
-      auto reuse_arg_idx = GetOutputReusesInputArg(call->op_->name_);
+      auto reuse_arg_idx = ResolveCallOutputReusesInputArg(call, return_alias_arg_index_by_func_);
       if (reuse_arg_idx.has_value()) {
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);
         if (new_call && *reuse_arg_idx < new_call->args_.size()) {
@@ -406,6 +495,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
+  std::unordered_map<std::string, size_t> return_alias_arg_index_by_func_;
   uint64_t next_id_ = 0;
 };
 
@@ -489,12 +579,13 @@ StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& al
  * Memory space is read from TileType::memory_space_ (set by InferTileMemorySpace).
  * Variables without memory_space default to DDR.
  */
-FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
+FunctionPtr TransformFunctionInitMemRef(
+    const FunctionPtr& func, const std::unordered_map<std::string, size_t>& return_alias_arg_index_by_func) {
   // Step 1: Normalize statement structure to ensure SeqStmts
   auto normalized_func = NormalizeStmtStructure(func);
 
   // Step 2: Mutate variables to initialize their MemRef
-  InitMemRefMutator mutator;
+  InitMemRefMutator mutator(return_alias_arg_index_by_func);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());
@@ -536,11 +627,46 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
                                     result_func->attrs_);
 }
 
+/// Program-level InitMemRef: first resolve cross-function return-alias chains
+/// via fixed-point iteration (e.g. orchestrator→InCore→Out param), then run
+/// per-function MemRef initialization with the resolved alias information.
+ProgramPtr TransformInitMemRef(const ProgramPtr& program) {
+  if (!program) return program;
+
+  std::unordered_map<std::string, size_t> return_alias_arg_index_by_func;
+  // Fixed-point iteration: each iteration discovers at most one new entry per function,
+  // so convergence is bounded by O(F) iterations where F = number of functions.
+  bool changed = false;
+  do {
+    changed = false;
+    for (const auto& [gvar, func] : program->functions_) {
+      (void)gvar;
+      auto alias_arg_idx = FindReturnedWritableParamIndex(func, return_alias_arg_index_by_func);
+      if (!alias_arg_idx.has_value()) continue;
+
+      auto it = return_alias_arg_index_by_func.find(func->name_);
+      if (it == return_alias_arg_index_by_func.end() || it->second != *alias_arg_idx) {
+        return_alias_arg_index_by_func[func->name_] = *alias_arg_idx;
+        changed = true;
+      }
+    }
+  } while (changed);
+
+  std::vector<FunctionPtr> new_functions;
+  new_functions.reserve(program->functions_.size());
+  for (const auto& [gvar, func] : program->functions_) {
+    (void)gvar;
+    new_functions.push_back(TransformFunctionInitMemRef(func, return_alias_arg_index_by_func));
+  }
+
+  return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+}
+
 }  // namespace
 
 // Factory function
 namespace pass {
-Pass InitMemRef() { return CreateFunctionPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
+Pass InitMemRef() { return CreateProgramPass(TransformInitMemRef, "InitMemRef", kInitMemRefProperties); }
 }  // namespace pass
 
 // ============================================================================

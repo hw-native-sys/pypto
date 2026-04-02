@@ -109,6 +109,202 @@ def test_tensor_matmul_with_transpose():
     assert isinstance(result_type, ir.TensorType)
 
 
+def test_tensor_matmul_rejects_batched_inputs():
+    """Test tensor.matmul rejects non-2D tensors."""
+    span = ir.Span.unknown()
+
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP32)
+    rhs_type = ir.TensorType([dim2, dim8, dim16], DataType.FP32)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    with pytest.raises(Exception, match="2D"):
+        ir.op.tensor.matmul(lhs, rhs)
+
+
+def test_tensor_batch_matmul_3d():
+    """Test tensor.batch_matmul with 3D tensors."""
+    span = ir.Span.unknown()
+
+    # Create 3D tensors: [2, 4, 8] @ [2, 8, 16] -> [2, 4, 16]
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP32)
+    rhs_type = ir.TensorType([dim2, dim8, dim16], DataType.FP32)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = tensor.batch_matmul(lhs, rhs)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.batch_matmul"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 3
+
+
+def test_tensor_batch_matmul_4d_broadcast():
+    """Test tensor.batch_matmul with multiple batch dimensions and broadcasting."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim3 = ir.ConstInt(3, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim1, dim4, dim8], DataType.FP16)
+    rhs_type = ir.TensorType([dim1, dim3, dim8, dim16], DataType.FP16)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = tensor.batch_matmul(lhs, rhs)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.batch_matmul"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 4
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 3
+    assert isinstance(result_type.shape[2], ir.ConstInt) and result_type.shape[2].value == 4
+    assert isinstance(result_type.shape[3], ir.ConstInt) and result_type.shape[3].value == 16
+
+
+def test_tensor_batch_matmul_with_kwargs():
+    """Test tensor.batch_matmul with kwargs (out_dtype, transpose)."""
+    span = ir.Span.unknown()
+
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP16)
+    rhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP16)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = tensor.batch_matmul(lhs, rhs, out_dtype=DataType.FP32, a_trans=True)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.batch_matmul"
+    assert call.kwargs.get("out_dtype") == DataType.FP32
+    assert call.kwargs.get("a_trans") is True
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+
+
+def test_tensor_batch_matmul_rejects_2d_inputs():
+    """Test tensor.batch_matmul rejects 2D tensors."""
+    span = ir.Span.unknown()
+
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim4, dim8], DataType.FP32)
+    rhs_type = ir.TensorType([dim8, dim16], DataType.FP32)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    with pytest.raises(Exception, match="at least 3 dimensions"):
+        tensor.batch_matmul(lhs, rhs)
+
+
+def test_tensor_batch_matmul_b_trans_only():
+    """Test tensor.batch_matmul with b_trans=True only."""
+    span = ir.Span.unknown()
+
+    # [2, 4, 8] @ [2, 16, 8] with b_trans -> RHS is [2, N=16, K=8] transposed to [2, K=8, N=16]
+    # Result: [2, 4, 16]
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP16)
+    rhs_type = ir.TensorType([dim2, dim16, dim8], DataType.FP16)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = tensor.batch_matmul(lhs, rhs, b_trans=True)
+
+    assert isinstance(call, ir.Call)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 3
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 4
+    assert isinstance(result_type.shape[2], ir.ConstInt) and result_type.shape[2].value == 16
+
+
+def test_tensor_batch_matmul_both_trans():
+    """Test tensor.batch_matmul with both a_trans=True and b_trans=True."""
+    span = ir.Span.unknown()
+
+    # [2, K=8, M=4] with a_trans -> LHS is [2, M=4, K=8]
+    # [2, N=16, K=8] with b_trans -> RHS is [2, K=8, N=16]
+    # Result: [2, 4, 16]
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim8, dim4], DataType.FP16)
+    rhs_type = ir.TensorType([dim2, dim16, dim8], DataType.FP16)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = tensor.batch_matmul(lhs, rhs, a_trans=True, b_trans=True)
+
+    assert isinstance(call, ir.Call)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 3
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 4
+    assert isinstance(result_type.shape[2], ir.ConstInt) and result_type.shape[2].value == 16
+
+
+def test_tensor_batch_matmul_k_dimension_mismatch():
+    """Test tensor.batch_matmul rejects K dimension mismatch."""
+    span = ir.Span.unknown()
+
+    # [2, 4, 8] @ [2, 7, 16] -> K=8 vs K=7 mismatch
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim7 = ir.ConstInt(7, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    lhs_type = ir.TensorType([dim2, dim4, dim8], DataType.FP16)
+    rhs_type = ir.TensorType([dim2, dim7, dim16], DataType.FP16)
+
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    with pytest.raises(Exception):
+        tensor.batch_matmul(lhs, rhs)
+
+
 def test_tensor_matmul_acc():
     """Test tensor.matmul_acc operation."""
     span = ir.Span.unknown()
@@ -832,6 +1028,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.write")
     assert ir.is_op_registered("tensor.slice")
     assert ir.is_op_registered("tensor.matmul")
+    assert ir.is_op_registered("tensor.batch_matmul")
     assert ir.is_op_registered("tensor.row_max")
     assert ir.is_op_registered("tensor.row_sum")
     assert ir.is_op_registered("tensor.exp")
@@ -943,6 +1140,9 @@ def test_get_new_ops():
     """Test getting new operator instances."""
     matmul_op = ir.get_op("tensor.matmul")
     assert matmul_op.name == "tensor.matmul"
+
+    batch_matmul_op = ir.get_op("tensor.batch_matmul")
+    assert batch_matmul_op.name == "tensor.batch_matmul"
 
     exp_op = ir.get_op("tensor.exp")
     assert exp_op.name == "tensor.exp"

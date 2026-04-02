@@ -137,14 +137,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
     Emit("}");
   } else {
-    // Like loops, keep tile return values out of scf.if results. Pre-declare
-    // tile buffers for return_vars using the canonical MemRef address (assigned
-    // by MemoryReuse), and only use scf.if results for scalar-like SSA values.
-    // MemoryReuse's YieldFixupMutator ensures all branch yields already share
-    // the return_var's canonical MemRef, so no codegen-level tmov is needed.
+    // Like loops, keep tile return values out of scf.if results. Materialize
+    // them into pre-declared tile buffers inside each branch, and only use
+    // scf.if results for scalar-like SSA values.
     std::vector<bool> returns_via_scf(op->return_vars_.size(), false);
     std::vector<std::string> scf_return_names;
     std::vector<std::string> scf_return_types;
+    std::vector<std::string> tile_return_targets(op->return_vars_.size());
+    std::vector<std::string> tile_return_types(op->return_vars_.size());
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
@@ -177,6 +177,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string ret_name =
             AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
+        tile_return_targets[i] = ret_name;
+        tile_return_types[i] = tile_type_string;
       } else {
         INTERNAL_CHECK(false) << "Internal error: unsupported IfStmt return_var type for "
                               << return_var->name_hint_;
@@ -208,9 +210,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           scalar_yields.push_back(branch_yields[i]);
           continue;
         }
-        // Tile return_vars: MemoryReuse ensures branch yields share the return_var's
-        // canonical MemRef (same physical address). No codegen-level tmov needed —
-        // the IR-level tile.move (from MemoryReuse's YieldFixupMutator) handles the copy.
+        if (tile_return_targets[i].empty() || branch_yields[i].empty()) continue;
+        if (branch_yields[i] == tile_return_targets[i]) continue;
+
+        std::string src_type = GetSSATileBufType(branch_yields[i]);
+        INTERNAL_CHECK(!src_type.empty())
+            << "Internal error: missing tile type for IfStmt branch yield " << branch_yields[i];
+        Emit("pto.tmov ins(" + branch_yields[i] + " : " + src_type + ") outs(" + tile_return_targets[i] +
+             " : " + tile_return_types[i] + ")");
       }
 
       if (!scf_return_types.empty()) {

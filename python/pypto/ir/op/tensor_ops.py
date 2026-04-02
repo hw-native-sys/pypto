@@ -203,11 +203,11 @@ def matmul(
     c_matrix_nz: bool = False,
     span: Span | None = None,
 ) -> Call:
-    """Matrix multiplication with optional transpose.
+    """2D matrix multiplication with optional transpose.
 
     Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        lhs: Left-hand side tensor (2D)
+        rhs: Right-hand side tensor (2D)
         out_dtype: Output data type (optional, inferred if not provided)
         a_trans: Whether to transpose lhs
         b_trans: Whether to transpose rhs
@@ -215,7 +215,7 @@ def matmul(
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for matrix multiplication
+        Call expression for 2D matrix multiplication
     """
     actual_span = _get_span_or_capture(span)
     args = [lhs, rhs]
@@ -229,6 +229,40 @@ def matmul(
         kwargs["out_dtype"] = out_dtype
 
     return _ir_core.create_op_call("tensor.matmul", args, kwargs, actual_span)
+
+
+def batch_matmul(
+    lhs: Expr,
+    rhs: Expr,
+    out_dtype: int | DataType | None = None,
+    a_trans: bool = False,
+    b_trans: bool = False,
+    c_matrix_nz: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Batch matrix multiplication with optional transpose.
+
+    Args:
+        lhs: Left-hand side tensor (rank >= 3)
+        rhs: Right-hand side tensor (rank >= 3)
+        out_dtype: Output data type (optional, inferred if not provided)
+        a_trans: Whether to transpose lhs matrix dimensions
+        b_trans: Whether to transpose rhs matrix dimensions
+        c_matrix_nz: C matrix non-zero flag
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for batch matrix multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {
+        "a_trans": a_trans,
+        "b_trans": b_trans,
+        "c_matrix_nz": c_matrix_nz,
+    }
+    if out_dtype is not None:
+        kwargs["out_dtype"] = out_dtype
+    return _ir_core.create_op_call("tensor.batch_matmul", [lhs, rhs], kwargs, actual_span)
 
 
 def matmul_acc(
