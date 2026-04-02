@@ -32,14 +32,14 @@ import os
 import pypto.language as pl
 
 
-BATCH = 4
-MAX_SEQ = 64
-HIDDEN = 128
-NUM_HEADS = 4
-NUM_KV_HEADS = 2
-HEAD_DIM = 32
+BATCH = 64
+MAX_SEQ = 4096
+HIDDEN = 5120
+NUM_HEADS = 64
+NUM_KV_HEADS = 8
+HEAD_DIM = 128
 KV_HIDDEN = NUM_KV_HEADS * HEAD_DIM
-INTERMEDIATE = 512
+INTERMEDIATE = 25600
 
 EPS = 1e-6
 HIDDEN_INV = 1.0 / HIDDEN
@@ -50,9 +50,9 @@ MUON_BETA = 0.95
 MUON_ONE_MINUS_BETA = 1.0 - MUON_BETA
 MUON_NS_STEPS = 2
 
-K_CHUNK = 16
-Q_OUT_CHUNK = 32
-MLP_OUT_CHUNK = 64
+K_CHUNK = 64
+Q_OUT_CHUNK = 128
+MLP_OUT_CHUNK = 256
 TOK_TILE = 2
 
 
@@ -121,13 +121,20 @@ def build_qwen3_32b_training_forward_backward_program(
             pl.Tensor[[BATCH_CFG, MAX_SEQ_CFG, HIDDEN_CFG], pl.BF16],
             pl.Tensor[[1], pl.FP32],
         ]:
-            # Scope 1: Forward + backward + loss accumulation
             with pl.auto_incore():
+                grad_wq = pl.mul(grad_wq, 0.0)
+                grad_wk = pl.mul(grad_wk, 0.0)
+                grad_wv = pl.mul(grad_wv, 0.0)
+                grad_wo = pl.mul(grad_wo, 0.0)
+                grad_w_gate = pl.mul(grad_w_gate, 0.0)
+                grad_w_up = pl.mul(grad_w_up, 0.0)
+                grad_w_down = pl.mul(grad_w_down, 0.0)
+
                 loss_acc = pl.create_tensor([1, 1], dtype=pl.FP32)
                 loss_acc = pl.mul(loss_acc, 0.0)
 
                 tok_blocks = MAX_SEQ_CFG // TOK_TILE
-                for b in pl.parallel(BATCH_CFG, chunk=4):
+                for b in pl.parallel(0, BATCH_CFG, 1, chunk=4):
                     for p0_idx in pl.range(tok_blocks):
                         p0 = p0_idx * TOK_TILE
 
@@ -136,12 +143,9 @@ def build_qwen3_32b_training_forward_backward_program(
                         sq_sum = pl.mul(sq_sum, 0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            x_chunk = pl.reshape(
-                                pl.cast(
-                                    pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [b, p0, k0]),
-                                    target_type=pl.FP32,
-                                ),
-                                [TOK_TILE, K_CHUNK],
+                            x_chunk = pl.cast(
+                                pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [b, p0, k0]),
+                                target_type=pl.FP32,
                             )
                             sq_sum = pl.add(sq_sum, pl.row_sum(pl.mul(x_chunk, x_chunk)))
                         inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
@@ -149,12 +153,9 @@ def build_qwen3_32b_training_forward_backward_program(
                         normed_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.BF16)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            x_chunk = pl.reshape(
-                                pl.cast(
-                                    pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [b, p0, k0]),
-                                    target_type=pl.FP32,
-                                ),
-                                [TOK_TILE, K_CHUNK],
+                            x_chunk = pl.cast(
+                                pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [b, p0, k0]),
+                                target_type=pl.FP32,
                             )
                             gamma = pl.slice(input_rms_weight, [1, K_CHUNK], [0, k0])
                             normed = pl.col_expand_mul(
@@ -233,7 +234,7 @@ def build_qwen3_32b_training_forward_backward_program(
                             )
                             scores = pl.add(
                                 scores,
-                                pl.matmul(q_c, pl.transpose(k_c, 0, 1), out_dtype=pl.FP32),
+                                pl.matmul(q_c, k_c, b_trans=True, out_dtype=pl.FP32),
                             )
                         scores = pl.mul(scores, ATTN_SCALE)
 
@@ -277,12 +278,13 @@ def build_qwen3_32b_training_forward_backward_program(
                                 o_acc = pl.add(
                                     o_acc, pl.matmul(ctx_c, wo_c, out_dtype=pl.FP32)
                                 )
-                            resid = pl.reshape(
-                                pl.cast(
-                                    pl.slice(hidden_states, [1, TOK_TILE, Q_OUT_CHUNK], [b, p0, o0]),
-                                    target_type=pl.FP32,
+                            resid = pl.cast(
+                                pl.slice(
+                                    hidden_states,
+                                    [TOK_TILE, Q_OUT_CHUNK],
+                                    [b, p0, o0],
                                 ),
-                                [TOK_TILE, Q_OUT_CHUNK],
+                                target_type=pl.FP32,
                             )
                             resid1_tile = pl.assemble(
                                 resid1_tile, pl.add(o_acc, resid), [0, o0]
@@ -391,19 +393,13 @@ def build_qwen3_32b_training_forward_backward_program(
                             out_tile = pl.assemble(out_tile, out_chunk, [0, o0])
                             out = pl.assemble(
                                 out,
-                                pl.reshape(
-                                    pl.cast(out_chunk, target_type=pl.BF16),
-                                    [1, TOK_TILE, Q_OUT_CHUNK],
-                                ),
+                                pl.cast(out_chunk, target_type=pl.BF16),
                                 [b, p0, o0],
                             )
 
-                        tgt_tile = pl.reshape(
-                            pl.cast(
-                                pl.slice(target_states, [1, TOK_TILE, HIDDEN_CFG], [b, p0, 0]),
-                                target_type=pl.FP32,
-                            ),
-                            [TOK_TILE, HIDDEN_CFG],
+                        tgt_tile = pl.cast(
+                            pl.slice(target_states, [TOK_TILE, HIDDEN_CFG], [b, p0, 0]),
+                            target_type=pl.FP32,
                         )
                         diff_tile = pl.sub(out_tile, tgt_tile)
                         sq_tile = pl.mul(diff_tile, diff_tile)
@@ -479,9 +475,7 @@ def build_qwen3_32b_training_forward_backward_program(
                                 d_mlp = pl.add(
                                     d_mlp,
                                     pl.matmul(
-                                        pl.cast(dd_c, target_type=pl.BF16),
-                                        pl.transpose(wd_c, 0, 1),
-                                        out_dtype=pl.FP32,
+                                        dd_c, wd_c, b_trans=True, out_dtype=pl.FP32
                                     ),
                                 )
 
@@ -509,13 +503,15 @@ def build_qwen3_32b_training_forward_backward_program(
                                     dpn_old,
                                     pl.add(
                                         pl.matmul(
-                                            pl.cast(d_gate, target_type=pl.BF16),
-                                            pl.transpose(wg_c, 0, 1),
+                                            d_gate,
+                                            wg_c,
+                                            b_trans=True,
                                             out_dtype=pl.FP32,
                                         ),
                                         pl.matmul(
-                                            pl.cast(d_up, target_type=pl.BF16),
-                                            pl.transpose(wu_c, 0, 1),
+                                            d_up,
+                                            wu_c,
+                                            b_trans=True,
                                             out_dtype=pl.FP32,
                                         ),
                                     ),
@@ -564,40 +560,6 @@ def build_qwen3_32b_training_forward_backward_program(
                         bwd_energy = pl.add(bwd_energy, pl.row_sum(attn_w))
                         grad_sink = pl.mul(bwd_energy, 0.0)
 
-                loss_vec = pl.reshape(pl.slice(loss_acc, [1, 1], [0, 0]), [1])
-                loss_out = pl.assemble(loss_out, loss_vec, [0])
-
-            # Scope 2: Zero gradients (chunked to avoid full-tensor Vec allocation)
-            with pl.auto_incore():
-                for rb in pl.range(HIDDEN_BLOCKS):
-                    r0 = rb * K_CHUNK
-                    for cb in pl.range(Q_OUT_BLOCKS):
-                        c0 = cb * Q_OUT_CHUNK
-                        z = pl.create_tensor([K_CHUNK, Q_OUT_CHUNK], dtype=pl.FP32)
-                        z = pl.mul(z, 0.0)
-                        grad_wq = pl.assemble(grad_wq, z, [r0, c0])
-                        grad_wk = pl.assemble(grad_wk, z, [r0, c0])
-                        grad_wv = pl.assemble(grad_wv, z, [r0, c0])
-                        grad_wo = pl.assemble(grad_wo, z, [r0, c0])
-                for rb in pl.range(HIDDEN_BLOCKS):
-                    r0 = rb * K_CHUNK
-                    for cb in pl.range(MLP_OUT_BLOCKS):
-                        c0 = cb * MLP_OUT_CHUNK
-                        zg = pl.create_tensor([K_CHUNK, MLP_OUT_CHUNK], dtype=pl.FP32)
-                        zg = pl.mul(zg, 0.0)
-                        grad_w_gate = pl.assemble(grad_w_gate, zg, [r0, c0])
-                        grad_w_up = pl.assemble(grad_w_up, zg, [r0, c0])
-                for rb in pl.range(MLP_OUT_BLOCKS):
-                    r0 = rb * MLP_OUT_CHUNK
-                    for cb in pl.range(Q_OUT_BLOCKS):
-                        c0 = cb * Q_OUT_CHUNK
-                        zd = pl.create_tensor([MLP_OUT_CHUNK, Q_OUT_CHUNK], dtype=pl.FP32)
-                        zd = pl.mul(zd, 0.0)
-                        grad_w_down = pl.assemble(grad_w_down, zd, [r0, c0])
-
-            # Scope 3: Weight gradient + Muon optimizer
-            with pl.auto_incore():
-
                 # ====== WEIGHT GRADIENT + MUON OPTIMIZER ======
 
                 # Stage 1: grad_w_down + Muon
@@ -608,14 +570,11 @@ def build_qwen3_32b_training_forward_backward_program(
                 for qb in pl.range(Q_OUT_BLOCKS):
                     q0 = qb * Q_OUT_CHUNK
                     proxy_go = pl.cast(
-                        pl.reshape(
-                            pl.slice(target_states, [1, TOK_TILE, Q_OUT_CHUNK], [0, 0, q0]),
-                            [TOK_TILE, Q_OUT_CHUNK],
-                        ),
+                        pl.slice(target_states, [TOK_TILE, Q_OUT_CHUNK], [0, 0, q0]),
                         target_type=pl.BF16,
                     )
                     grad_down_raw = pl.matmul(
-                        pl.transpose(proxy_mlp, 0, 1), proxy_go, out_dtype=pl.FP32
+                        proxy_mlp, proxy_go, a_trans=True, out_dtype=pl.FP32
                     )
                     mom_down_prev = pl.slice(
                         mom_w_down, [MLP_OUT_CHUNK, Q_OUT_CHUNK], [0, q0]
@@ -627,7 +586,7 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_down = mom_down_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram = pl.matmul(
-                            pl.transpose(muon_down, 0, 1), muon_down, out_dtype=pl.FP32
+                            muon_down, muon_down, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_down = pl.add(
                             pl.mul(muon_down, 1.5),
@@ -643,25 +602,19 @@ def build_qwen3_32b_training_forward_backward_program(
                 # Stage 2: grad_wo / grad_wq / grad_wk / grad_wv + Muon
                 proxy_ctx = pl.slice(wq, [TOK_TILE, K_CHUNK], [0, 0])
                 proxy_n = pl.cast(
-                    pl.reshape(
-                        pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [0, 0, 0]),
-                        [TOK_TILE, K_CHUNK],
-                    ),
+                    pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [0, 0, 0]),
                     target_type=pl.BF16,
                 )
                 for qb in pl.range(Q_OUT_BLOCKS):
                     q0 = qb * Q_OUT_CHUNK
                     proxy_tgt = pl.cast(
-                        pl.reshape(
-                            pl.slice(target_states, [1, TOK_TILE, Q_OUT_CHUNK], [0, 0, q0]),
-                            [TOK_TILE, Q_OUT_CHUNK],
-                        ),
+                        pl.slice(target_states, [TOK_TILE, Q_OUT_CHUNK], [0, 0, q0]),
                         target_type=pl.BF16,
                     )
 
                     # -- wo --
                     grad_wo_raw = pl.matmul(
-                        pl.transpose(proxy_ctx, 0, 1), proxy_tgt, out_dtype=pl.FP32
+                        proxy_ctx, proxy_tgt, a_trans=True, out_dtype=pl.FP32
                     )
                     mom_wo_prev = pl.slice(mom_wo, [K_CHUNK, Q_OUT_CHUNK], [0, q0])
                     mom_wo_new = pl.add(
@@ -671,7 +624,7 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_wo = mom_wo_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram = pl.matmul(
-                            pl.transpose(muon_wo, 0, 1), muon_wo, out_dtype=pl.FP32
+                            muon_wo, muon_wo, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_wo = pl.add(
                             pl.mul(muon_wo, 1.5),
@@ -686,7 +639,7 @@ def build_qwen3_32b_training_forward_backward_program(
 
                     # -- wq --
                     grad_wq_raw = pl.matmul(
-                        pl.transpose(proxy_n, 0, 1), proxy_tgt, out_dtype=pl.FP32
+                        proxy_n, proxy_tgt, a_trans=True, out_dtype=pl.FP32
                     )
                     mom_wq_prev = pl.slice(mom_wq, [K_CHUNK, Q_OUT_CHUNK], [0, q0])
                     mom_wq_new = pl.add(
@@ -696,7 +649,7 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_wq = mom_wq_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram = pl.matmul(
-                            pl.transpose(muon_wq, 0, 1), muon_wq, out_dtype=pl.FP32
+                            muon_wq, muon_wq, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_wq = pl.add(
                             pl.mul(muon_wq, 1.5),
@@ -711,7 +664,7 @@ def build_qwen3_32b_training_forward_backward_program(
 
                     # -- wk --
                     grad_wk_raw = pl.matmul(
-                        pl.transpose(proxy_n, 0, 1), proxy_tgt, out_dtype=pl.FP32
+                        proxy_n, proxy_tgt, a_trans=True, out_dtype=pl.FP32
                     )
                     mom_wk_prev = pl.slice(mom_wk, [K_CHUNK, Q_OUT_CHUNK], [0, q0])
                     mom_wk_new = pl.add(
@@ -721,7 +674,7 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_wk = mom_wk_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram = pl.matmul(
-                            pl.transpose(muon_wk, 0, 1), muon_wk, out_dtype=pl.FP32
+                            muon_wk, muon_wk, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_wk = pl.add(
                             pl.mul(muon_wk, 1.5),
@@ -736,7 +689,7 @@ def build_qwen3_32b_training_forward_backward_program(
 
                     # -- wv --
                     grad_wv_raw = pl.matmul(
-                        pl.transpose(proxy_n, 0, 1), proxy_tgt, out_dtype=pl.FP32
+                        proxy_n, proxy_tgt, a_trans=True, out_dtype=pl.FP32
                     )
                     mom_wv_prev = pl.slice(mom_wv, [K_CHUNK, Q_OUT_CHUNK], [0, q0])
                     mom_wv_new = pl.add(
@@ -746,7 +699,7 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_wv = mom_wv_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram = pl.matmul(
-                            pl.transpose(muon_wv, 0, 1), muon_wv, out_dtype=pl.FP32
+                            muon_wv, muon_wv, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_wv = pl.add(
                             pl.mul(muon_wv, 1.5),
@@ -761,10 +714,7 @@ def build_qwen3_32b_training_forward_backward_program(
 
                 # Stage 3: grad_w_gate / grad_w_up + Muon
                 proxy_post = pl.cast(
-                    pl.reshape(
-                        pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [0, 0, K_CHUNK]),
-                        [TOK_TILE, K_CHUNK],
-                    ),
+                    pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [0, 0, K_CHUNK]),
                     target_type=pl.BF16,
                 )
                 for mb in pl.range(MLP_OUT_BLOCKS):
@@ -778,10 +728,10 @@ def build_qwen3_32b_training_forward_backward_program(
                         target_type=pl.BF16,
                     )
                     grad_wg_raw = pl.matmul(
-                        pl.transpose(proxy_post, 0, 1), proxy_gg, out_dtype=pl.FP32
+                        proxy_post, proxy_gg, a_trans=True, out_dtype=pl.FP32
                     )
                     grad_wu_raw = pl.matmul(
-                        pl.transpose(proxy_post, 0, 1), proxy_gu, out_dtype=pl.FP32
+                        proxy_post, proxy_gu, a_trans=True, out_dtype=pl.FP32
                     )
 
                     mom_wg_prev = pl.slice(
@@ -803,10 +753,10 @@ def build_qwen3_32b_training_forward_backward_program(
                     muon_wu = mom_wu_new
                     for _ in pl.range(MUON_NS_STEPS):
                         gram_wg = pl.matmul(
-                            pl.transpose(muon_wg, 0, 1), muon_wg, out_dtype=pl.FP32
+                            muon_wg, muon_wg, a_trans=True, out_dtype=pl.FP32
                         )
                         gram_wu = pl.matmul(
-                            pl.transpose(muon_wu, 0, 1), muon_wu, out_dtype=pl.FP32
+                            muon_wu, muon_wu, a_trans=True, out_dtype=pl.FP32
                         )
                         muon_wg = pl.add(
                             pl.mul(muon_wg, 1.5),
@@ -829,6 +779,9 @@ def build_qwen3_32b_training_forward_backward_program(
                     )
                     mom_w_gate = pl.assemble(mom_w_gate, mom_wg_new, [0, m0])
                     mom_w_up = pl.assemble(mom_w_up, mom_wu_new, [0, m0])
+
+                loss_vec = pl.slice(loss_acc, [1], [0, 0])
+                loss_out = pl.assemble(loss_out, loss_vec, [0])
 
             return (
                 grad_wq,
@@ -989,9 +942,6 @@ def compile_and_run(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
     )
-
-    print(program)
-
     tensor_specs = build_tensor_specs(
         batch=batch,
         max_seq_len=max_seq_len,
@@ -1018,7 +968,8 @@ def compile_and_run(
             atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=dump_passes,
-            backend_type=BackendType.Ascend950,
+            backend_type=BackendType.CCE,
+            work_dir=work_dir,
         ),
     )
     if not result.passed and result.error and "code_runner" in result.error:

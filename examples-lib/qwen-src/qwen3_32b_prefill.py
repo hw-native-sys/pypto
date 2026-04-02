@@ -97,7 +97,7 @@ def build_qwen3_single_layer_prefill_program(
             w_down: pl.Tensor[[INTER_CFG, HIDDEN_CFG], pl.BF16],
             out: pl.Tensor[[BATCH_CFG, MAX_SEQ_CFG, HIDDEN_CFG], pl.BF16],
         ) -> pl.Tensor[[BATCH_CFG, MAX_SEQ_CFG, HIDDEN_CFG], pl.BF16]:
-            for b in pl.parallel(0, BATCH_CFG, 1, chunk=4):
+            for b in pl.parallel(0, BATCH_CFG, 1):
                 seq_len_b = pl.tensor.read(seq_lens, [b])
                 tok_blocks = (seq_len_b + TOK_TILE - 1) // TOK_TILE
                 for p0_idx in pl.range(tok_blocks):
@@ -112,20 +112,20 @@ def build_qwen3_single_layer_prefill_program(
                         sq_sum = pl.mul(sq_sum, 0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            x_chunk = pl.cast(
-                                pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [b, p0, k0],
-                                        valid_shape=[valid_tok, K_CHUNK]),
-                                target_type=pl.FP32,
+                            x_chunk = pl.reshape(
+                                pl.cast(
+                                    pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [b, p0, k0],
+                                            valid_shape=[1, valid_tok, K_CHUNK]),
+                                    target_type=pl.FP32,
+                                ),
+                                [TOK_TILE, K_CHUNK]
                             )
                             sq_sum = pl.add(sq_sum, pl.row_sum(pl.mul(x_chunk, x_chunk)))
 
                         inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
-                        q_proj_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.BF16,
-                                                       valid_shape=[valid_tok, HIDDEN_CFG])
-                        k_proj_tile = pl.create_tensor([TOK_TILE, KV_HIDDEN_CFG], dtype=pl.BF16,
-                                                       valid_shape=[valid_tok, KV_HIDDEN_CFG])
-                        v_proj_tile = pl.create_tensor([TOK_TILE, KV_HIDDEN_CFG], dtype=pl.BF16,
-                                                       valid_shape=[valid_tok, KV_HIDDEN_CFG])
+                        q_proj_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.BF16)
+                        k_proj_tile = pl.create_tensor([TOK_TILE, KV_HIDDEN_CFG], dtype=pl.BF16)
+                        v_proj_tile = pl.create_tensor([TOK_TILE, KV_HIDDEN_CFG], dtype=pl.BF16)
 
                         for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
                             q0 = ob * Q_OUT_CHUNK
@@ -133,11 +133,14 @@ def build_qwen3_single_layer_prefill_program(
                             q_acc = pl.mul(q_acc, 0.0)
                             for kb in pl.range(HIDDEN_BLOCKS):
                                 k0 = kb * K_CHUNK
-                                x_chunk = pl.cast(
-                                    pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [b, p0, k0],
-                                            valid_shape=[valid_tok, K_CHUNK]),
+                                x_chunk = pl.reshape(
+                                pl.cast(
+                                    pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [b, p0, k0],
+                                            valid_shape=[1, valid_tok, K_CHUNK]),
                                     target_type=pl.FP32,
-                                )
+                                ),
+                                [TOK_TILE, K_CHUNK]
+                            )
                                 gamma = pl.slice(input_rms_weight, [1, K_CHUNK], [0, k0])
                                 normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms), gamma)
                                 wq_chunk = pl.slice(wq, [K_CHUNK, Q_OUT_CHUNK], [k0, q0])
@@ -152,11 +155,14 @@ def build_qwen3_single_layer_prefill_program(
                             v_acc = pl.mul(v_acc, 0.0)
                             for kb in pl.range(HIDDEN_BLOCKS):
                                 k0 = kb * K_CHUNK
-                                x_chunk = pl.cast(
-                                    pl.slice(hidden_states, [TOK_TILE, K_CHUNK], [b, p0, k0],
-                                            valid_shape=[valid_tok, K_CHUNK]),
+                                x_chunk = pl.reshape(
+                                pl.cast(
+                                    pl.slice(hidden_states, [1, TOK_TILE, K_CHUNK], [b, p0, k0],
+                                            valid_shape=[1, valid_tok, K_CHUNK]),
                                     target_type=pl.FP32,
-                                )
+                                ),
+                                [TOK_TILE, K_CHUNK]
+                            )
                                 gamma = pl.slice(input_rms_weight, [1, K_CHUNK], [0, k0])
                                 normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms), gamma)
                                 normed_bf16 = pl.cast(normed, target_type=pl.BF16)
@@ -172,56 +178,58 @@ def build_qwen3_single_layer_prefill_program(
                     # to avoid writing garbage into the KV cache.  Padding rows in
                     # attn_tile stay zero; scope 3 writes them to the padding area
                     # of `out` which the caller ignores.
-                    with pl.auto_incore():
-                        attn_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32,
-                                                     valid_shape=[valid_tok, HIDDEN_CFG])
-                        attn_tile = pl.mul(attn_tile, 0.0)
-                        for ti in pl.range(valid_tok):
-                            pos = p0 + ti
-                            ctx_len = pos + 1
-                            ctx_blocks = (ctx_len + SEQ_TILE - 1) // SEQ_TILE
-                            cos_row = pl.slice(rope_cos, [1, HEAD_DIM_CFG], [pos, 0])
-                            sin_row = pl.slice(rope_sin, [1, HEAD_DIM_CFG], [pos, 0])
-                            cos_lo = pl.slice(cos_row, [1, HEAD_DIM_CFG // 2], [0, 0])
-                            cos_hi = pl.slice(cos_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
-                            sin_lo = pl.slice(sin_row, [1, HEAD_DIM_CFG // 2], [0, 0])
-                            sin_hi = pl.slice(sin_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
+                    attn_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32)
+                    attn_tile = pl.mul(attn_tile, 0.0)
+                    for ti in pl.range(valid_tok):
+                        pos = p0 + ti
+                        ctx_len = pos + 1
+                        ctx_blocks = (ctx_len + SEQ_TILE - 1) // SEQ_TILE
+                        cos_row = pl.slice(rope_cos, [1, HEAD_DIM_CFG], [pos, 0])
+                        sin_row = pl.slice(rope_sin, [1, HEAD_DIM_CFG], [pos, 0])
+                        cos_lo = pl.slice(cos_row, [1, HEAD_DIM_CFG // 2], [0, 0])
+                        cos_hi = pl.slice(cos_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
+                        sin_lo = pl.slice(sin_row, [1, HEAD_DIM_CFG // 2], [0, 0])
+                        sin_hi = pl.slice(sin_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
 
+                        with pl.auto_incore():
                             attn_row = pl.create_tensor([1, HIDDEN_CFG], dtype=pl.FP32)
                             attn_row = pl.mul(attn_row, 0.0)
+                            # First loop: update KV cache (separate from attention to avoid tensor view issues)
+                            for kvh in pl.parallel(0, NUM_KV_HEADS_CFG, 1, chunk=4):
+                                kv_col = kvh * HEAD_DIM_CFG
+                                k_row = pl.cast(
+                                    pl.slice(k_proj_tile, [1, HEAD_DIM_CFG], [ti, kv_col]),
+                                    target_type=pl.FP32,
+                                )
+                                k_lo = pl.slice(k_row, [1, HEAD_DIM_CFG // 2], [0, 0])
+                                k_hi = pl.slice(k_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
+                                k_rot = pl.create_tensor([1, HEAD_DIM_CFG], dtype=pl.FP32)
+                                k_rot = pl.assemble(
+                                    k_rot,
+                                    pl.sub(pl.col_expand_mul(k_lo, cos_lo), pl.col_expand_mul(k_hi, sin_lo)),
+                                    [0, 0],
+                                )
+                                k_rot = pl.assemble(
+                                    k_rot,
+                                    pl.add(pl.col_expand_mul(k_hi, cos_hi), pl.col_expand_mul(k_lo, sin_hi)),
+                                    [0, HEAD_DIM_CFG // 2],
+                                )
+                                cache_row = b * NUM_KV_HEADS_CFG * MAX_SEQ_CFG + kvh * MAX_SEQ_CFG + pos
+                                k_cache = pl.assemble(
+                                    k_cache,
+                                    pl.cast(k_rot, target_type=pl.BF16),
+                                    [cache_row, 0],
+                                )
+                                v_cache = pl.assemble(
+                                    v_cache,
+                                    pl.slice(v_proj_tile, [1, HEAD_DIM_CFG], [ti, kv_col]),
+                                    [cache_row, 0],
+                                )
+
+                            # Second loop: compute attention
                             for h in pl.parallel(0, NUM_HEADS_CFG, 1, chunk=8):
                                 kvh = h // Q_PER_KV_CFG
                                 q_col = h * HEAD_DIM_CFG
-                                if h % Q_PER_KV_CFG == 0:
-                                    kv_col = kvh * HEAD_DIM_CFG
-                                    k_row = pl.cast(
-                                        pl.slice(k_proj_tile, [1, HEAD_DIM_CFG], [ti, kv_col]),
-                                        target_type=pl.FP32,
-                                    )
-                                    k_lo = pl.slice(k_row, [1, HEAD_DIM_CFG // 2], [0, 0])
-                                    k_hi = pl.slice(k_row, [1, HEAD_DIM_CFG // 2], [0, HEAD_DIM_CFG // 2])
-                                    k_rot = pl.create_tensor([1, HEAD_DIM_CFG], dtype=pl.FP32)
-                                    k_rot = pl.assemble(
-                                        k_rot,
-                                        pl.sub(pl.col_expand_mul(k_lo, cos_lo), pl.col_expand_mul(k_hi, sin_lo)),
-                                        [0, 0],
-                                    )
-                                    k_rot = pl.assemble(
-                                        k_rot,
-                                        pl.add(pl.col_expand_mul(k_hi, cos_hi), pl.col_expand_mul(k_lo, sin_hi)),
-                                        [0, HEAD_DIM_CFG // 2],
-                                    )
-                                    cache_row = b * NUM_KV_HEADS_CFG * MAX_SEQ_CFG + kvh * MAX_SEQ_CFG + pos
-                                    k_cache = pl.assemble(
-                                        k_cache,
-                                        pl.cast(k_rot, target_type=pl.BF16),
-                                        [cache_row, 0],
-                                    )
-                                    v_cache = pl.assemble(
-                                        v_cache,
-                                        pl.slice(v_proj_tile, [1, HEAD_DIM_CFG], [ti, kv_col]),
-                                        [cache_row, 0],
-                                    )
                                 q_row = pl.cast(
                                     pl.slice(q_proj_tile, [1, HEAD_DIM_CFG], [ti, q_col]),
                                     target_type=pl.FP32,
@@ -260,7 +268,12 @@ def build_qwen3_single_layer_prefill_program(
                                     # TODO(valid_shape): once the compiler propagates valid_shape
                                     # from k_tile, scores will auto-get vs=[1, valid_len] and the
                                     # manual scores_valid view + exp_pad can be removed.
-                                    scores_valid = pl.slice(scores, [1, valid_len], [0, 0])
+                                    scores_valid = pl.slice(
+                                        scores,
+                                        [1, SEQ_TILE],
+                                        [0, 0],
+                                        valid_shape=[1, valid_len],
+                                    )
                                     cur_mi = pl.cast(pl.row_max(scores_valid), target_type=pl.FP32)
                                     exp_scores = pl.exp(pl.row_expand_sub(scores_valid, cur_mi))
                                     cur_li = pl.cast(pl.row_sum(exp_scores), target_type=pl.FP32)
@@ -289,8 +302,7 @@ def build_qwen3_single_layer_prefill_program(
 
                     # Scope 3: output projection + residual + post-rms + MLP + residual.
                     with pl.auto_incore():
-                        resid1_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32,
-                                                       valid_shape=[valid_tok, HIDDEN_CFG])
+                        resid1_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32)
                         for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
                             o0 = ob * Q_OUT_CHUNK
                             o_acc = pl.create_tensor([TOK_TILE, Q_OUT_CHUNK], dtype=pl.FP32)
@@ -303,11 +315,11 @@ def build_qwen3_single_layer_prefill_program(
                                 )
                                 w_chunk = pl.slice(wo, [K_CHUNK, Q_OUT_CHUNK], [k0, o0])
                                 o_acc = pl.add(o_acc, pl.matmul(a_chunk, w_chunk))
-                            resid = pl.cast(
-                                pl.slice(hidden_states, [TOK_TILE, Q_OUT_CHUNK], [b, p0, o0],
-                                        valid_shape=[valid_tok, Q_OUT_CHUNK]),
+                            resid = pl.reshape(pl.cast(
+                                pl.slice(hidden_states, [1, TOK_TILE, Q_OUT_CHUNK], [b, p0, o0],
+                                        valid_shape=[1, valid_tok, Q_OUT_CHUNK]),
                                 target_type=pl.FP32,
-                            )
+                            ), [TOK_TILE, Q_OUT_CHUNK])
                             resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
 
                         sq_sum = pl.create_tensor([TOK_TILE, 1], dtype=pl.FP32)
@@ -318,10 +330,8 @@ def build_qwen3_single_layer_prefill_program(
                             sq_sum = pl.add(sq_sum, pl.row_sum(pl.mul(x_chunk, x_chunk)))
                         inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
 
-                        post_norm_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.BF16,
-                                                          valid_shape=[valid_tok, HIDDEN_CFG])
-                        down_proj_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32,
-                                                          valid_shape=[valid_tok, HIDDEN_CFG])
+                        post_norm_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.BF16)
+                        down_proj_tile = pl.create_tensor([TOK_TILE, HIDDEN_CFG], dtype=pl.FP32)
                         down_proj_tile = pl.mul(down_proj_tile, 0.0)
 
                         for kb in pl.range(HIDDEN_BLOCKS):
@@ -373,6 +383,7 @@ def build_qwen3_single_layer_prefill_program(
             return out
 
     return Qwen3SingleLayerPrefill
+
 
 # ---------------------------------------------------------------------------
 # Build / run helpers
@@ -426,7 +437,6 @@ def compile_and_run(
     intermediate_size: int = INTERMEDIATE,
     platform: str = "a2a3",
     device_id: int = 11,
-    work_dir: str | None = None,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType
@@ -442,8 +452,6 @@ def compile_and_run(
         head_dim=head_dim,
         intermediate_size=intermediate_size,
     )
-
-    print(program)
 
     tensor_specs = build_tensor_specs(
         batch=batch,
@@ -471,6 +479,7 @@ def compile_and_run(
     )
     if not result.passed and result.error and "code_runner" in result.error:
         print("Result: COMPILE OK — device run skipped (code_runner not found).")
+        return result
     if not result.passed and result.error:
         print(f"Result: {result.error}")
     return result

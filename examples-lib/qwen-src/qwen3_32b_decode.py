@@ -129,10 +129,10 @@ def build_qwen3_single_layer_decode_program(
                         q_acc = pl.mul(q_acc, 0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            x_chunk_bf16 = pl.slice(hidden_states, [BATCH_TILE, K_CHUNK], [b0, k0])
-                            x_chunk = pl.cast(x_chunk_bf16, target_type=pl.FP32)
+                            x_chunk_bf16_q = pl.slice(hidden_states, [BATCH_TILE, K_CHUNK], [b0, k0])
+                            x_chunk_q = pl.cast(x_chunk_bf16_q, target_type=pl.FP32)
                             gamma = pl.slice(input_rms_weight, [1, K_CHUNK], [0, k0])
-                            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms_tile), gamma)
+                            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk_q, inv_rms_tile), gamma)
                             wq_chunk = pl.slice(wq, [K_CHUNK, Q_OUT_CHUNK], [k0, q0])
                             q_acc = pl.add(q_acc, pl.matmul(pl.cast(normed, target_type=pl.BF16), wq_chunk))
                         q_proj = pl.assemble(q_proj, pl.cast(q_acc, target_type=pl.BF16), [b0, q0])
@@ -145,10 +145,10 @@ def build_qwen3_single_layer_decode_program(
                         v_acc = pl.mul(v_acc, 0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            x_chunk_bf16 = pl.slice(hidden_states, [BATCH_TILE, K_CHUNK], [b0, k0])
-                            x_chunk = pl.cast(x_chunk_bf16, target_type=pl.FP32)
+                            x_chunk_bf16_kv = pl.slice(hidden_states, [BATCH_TILE, K_CHUNK], [b0, k0])
+                            x_chunk_kv = pl.cast(x_chunk_bf16_kv, target_type=pl.FP32)
                             gamma = pl.slice(input_rms_weight, [1, K_CHUNK], [0, k0])
-                            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms_tile), gamma)
+                            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk_kv, inv_rms_tile), gamma)
                             normed_bf16 = pl.cast(normed, target_type=pl.BF16)
                             wk_chunk = pl.slice(wk, [K_CHUNK, KV_OUT_CHUNK], [k0, kv0])
                             wv_chunk = pl.slice(wv, [K_CHUNK, KV_OUT_CHUNK], [k0, kv0])
@@ -260,17 +260,12 @@ def build_qwen3_single_layer_decode_program(
                                 out_dtype=pl.FP32,
                             )
 
-                            if sb == 0:
-                                oi = oi_tmp
-                                li = cur_li
-                                mi = cur_mi
-                            else:
-                                mi_new = pl.maximum(mi, cur_mi)
-                                alpha = pl.exp(pl.sub(mi, mi_new))
-                                beta = pl.exp(pl.sub(cur_mi, mi_new))
-                                li = pl.add(pl.mul(alpha, li), pl.mul(beta, cur_li))
-                                oi = pl.add(pl.row_expand_mul(oi, alpha), pl.row_expand_mul(oi_tmp, beta))
-                                mi = mi_new
+                            mi_new = pl.maximum(mi, cur_mi)
+                            alpha = pl.exp(pl.sub(mi, mi_new))
+                            beta = pl.exp(pl.sub(cur_mi, mi_new))
+                            li = pl.add(pl.mul(alpha, li), pl.mul(beta, cur_li))
+                            oi = pl.add(pl.row_expand_mul(oi, alpha), pl.row_expand_mul(oi_tmp, beta))
+                            mi = mi_new
 
                         ctx = pl.row_expand_div(oi, li)
                         attn_row = pl.assemble(attn_row, ctx, [0, q_col])
@@ -300,13 +295,13 @@ def build_qwen3_single_layer_decode_program(
                         )
                         resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
 
-                    sq_sum = pl.create_tensor([BATCH_TILE, 1], dtype=pl.FP32)
-                    sq_sum = pl.mul(sq_sum, 0.0)
+                    sq_sum_post = pl.create_tensor([BATCH_TILE, 1], dtype=pl.FP32)
+                    sq_sum_post = pl.mul(sq_sum_post, 0.0)
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
-                        x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                        sq_sum = pl.add(sq_sum, pl.row_sum(pl.mul(x_chunk, x_chunk)))
-                    inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
+                        x_chunk_post = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
+                        sq_sum_post = pl.add(sq_sum_post, pl.row_sum(pl.mul(x_chunk_post, x_chunk_post)))
+                    inv_rms_post = pl.rsqrt(pl.add(pl.mul(sq_sum_post, HIDDEN_INV), EPS))
 
                     post_norm_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.BF16)
                     down_proj_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
@@ -314,9 +309,9 @@ def build_qwen3_single_layer_decode_program(
 
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
-                        x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
+                        x_chunk_post = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
                         gamma = pl.slice(post_rms_weight, [1, K_CHUNK], [0, k0])
-                        normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms), gamma)
+                        normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk_post, inv_rms_post), gamma)
                         post_norm_tile = pl.assemble(post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0])
 
                     for ob in pl.range(MLP_OUT_BLOCKS):
@@ -426,8 +421,6 @@ def compile_and_run(
         head_dim=head_dim,
         intermediate_size=intermediate_size,
     )
-
-    print(program)
 
     tensor_specs = build_tensor_specs(
         batch=batch,
