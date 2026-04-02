@@ -328,6 +328,56 @@ class TestPassthrough:
 
         ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
 
+    def test_pure_vector_with_split_attr_clears_split(self):
+        """InCore with split=UP_DOWN but only vector ops -> AIV with split cleared (Fixes #841)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile = pl.load(x, [0], [64])
+                y_tile = pl.add(x_tile, x_tile)
+                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+
+        func = After.get_function("main_incore_0")
+        assert func is not None
+        assert func.func_type == pl.FunctionType.AIV
+        assert func.split is None, f"Expected split=None for pure AIV, got {func.split}"
+
+    def test_pure_cube_with_split_attr_clears_split(self):
+        """InCore with split=UP_DOWN but only cube ops -> AIC with split cleared (Fixes #841)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0_store
+
+        After = _expand_raw(Before)
+
+        func = After.get_function("main_incore_0")
+        assert func is not None
+        assert func.func_type == pl.FunctionType.AIC
+        assert func.split is None, f"Expected split=None for pure AIC, got {func.split}"
+
 
 # ---------------------------------------------------------------------------
 # Split structure: AIC / AIV / Group function properties

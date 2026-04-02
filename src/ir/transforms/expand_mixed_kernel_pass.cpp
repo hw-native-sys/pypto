@@ -1137,9 +1137,14 @@ Pass ExpandMixedKernel() {
       if (!is_mixed) {
         // Not mixed — convert InCore to the corresponding AIC or AIV type
         FunctionType new_type = (combined == CoreAffinity::CUBE) ? FunctionType::AIC : FunctionType::AIV;
+        // Clear split mode — pure AIC/AIV functions don't need vector splitting
+        auto attrs = func->attrs_;
+        attrs.erase(
+            std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
+            attrs.end());
         auto converted = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                                     func->return_types_, func->body_, func->span_, new_type,
-                                                    std::nullopt, std::nullopt, func->attrs_);
+                                                    std::nullopt, std::nullopt, attrs);
         new_functions.push_back(converted);
         continue;
       }
