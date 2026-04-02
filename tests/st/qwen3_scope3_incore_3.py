@@ -39,7 +39,7 @@ def build_program():
             w_up: pl.Tensor[[HIDDEN, MLP_OUT_CHUNK], pl.BF16],
             mlp_chunk_bf16_out: pl.Tensor[[BATCH_TILE, MLP_OUT_CHUNK], pl.BF16],
         ) -> pl.Tensor[[BATCH_TILE, MLP_OUT_CHUNK], pl.BF16]:
-            with pl.auto_incore():
+            with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
                 gate_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
                 up_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
 
@@ -87,8 +87,8 @@ def build_tensor_specs():
 
 
 def compile_and_run(
-    platform: str = "a5sim",
-    device_id: int = 11,
+    platform: str = "a5",
+    device_id: int = 0,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType

@@ -32,21 +32,18 @@ def build_program():
         @pl.function(type=pl.FunctionType.Opaque)
         def scope3_incore_0(
             self,
-            attn_out: pl.Tensor[[BATCH_TILE, HIDDEN], pl.FP32],
+            attn_out: pl.Tensor[[BATCH_TILE, HIDDEN], pl.BF16],
             hidden_states: pl.Tensor[[BATCH_TILE, HIDDEN], pl.BF16],
             wo: pl.Tensor[[HIDDEN, HIDDEN], pl.BF16],
             resid1_tile: pl.Tensor[[BATCH_TILE, HIDDEN], pl.FP32],
         ) -> pl.Tensor[[BATCH_TILE, HIDDEN], pl.FP32]:
-            with pl.auto_incore():
+            with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
                 for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
                     o0 = ob * Q_OUT_CHUNK
                     o_acc = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
-                        a_chunk = pl.cast(
-                            pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [0, k0]),
-                            target_type=pl.BF16,
-                        )
+                        a_chunk = pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [0, k0])
                         w_chunk = pl.slice(wo, [K_CHUNK, Q_OUT_CHUNK], [k0, o0])
                         o_acc = pl.add(o_acc, pl.matmul(a_chunk, w_chunk))
                     resid = pl.cast(
@@ -66,7 +63,7 @@ def golden(tensors: dict, params: dict | None = None) -> None:
     hidden_states = tensors["hidden_states"]  # [4, 5120] BF16
     wo = tensors["wo"]  # [5120, 5120] BF16
 
-    o_proj = torch.matmul(attn_out.bfloat16().float(), wo.float())
+    o_proj = torch.matmul(attn_out.float(), wo.float())
     tensors["resid1_tile"][:] = o_proj + hidden_states.float()
 
 
@@ -75,7 +72,7 @@ def build_tensor_specs():
     from pypto.runtime import TensorSpec
 
     return [
-        TensorSpec("attn_out", [BATCH_TILE, HIDDEN], torch.float32, init_value=torch.randn),
+        TensorSpec("attn_out", [BATCH_TILE, HIDDEN], torch.bfloat16, init_value=torch.randn),
         TensorSpec("hidden_states", [BATCH_TILE, HIDDEN], torch.bfloat16, init_value=torch.randn),
         TensorSpec("wo", [HIDDEN, HIDDEN], torch.bfloat16, init_value=torch.randn),
         TensorSpec("resid1_tile", [BATCH_TILE, HIDDEN], torch.float32, is_output=True),
@@ -83,8 +80,8 @@ def build_tensor_specs():
 
 
 def compile_and_run(
-    platform: str = "a5sim",
-    device_id: int = 11,
+    platform: str = "a5",
+    device_id: int = 0,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType

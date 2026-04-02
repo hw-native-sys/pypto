@@ -35,7 +35,7 @@ def build_program():
             w_down: pl.Tensor[[MLP_OUT_CHUNK, HIDDEN], pl.BF16],
             down_proj_tile: pl.Tensor[[BATCH_TILE, HIDDEN], pl.FP32],
         ) -> pl.Tensor[[BATCH_TILE, HIDDEN], pl.FP32]:
-            with pl.auto_incore():
+            with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
                 for dob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4):
                     d0 = dob * K_CHUNK
                     down_prev = pl.slice(down_proj_tile, [BATCH_TILE, K_CHUNK], [0, d0])
@@ -71,8 +71,8 @@ def build_tensor_specs():
 
 
 def compile_and_run(
-    platform: str = "a2a3",
-    device_id: int = 14,
+    platform: str = "a5",
+    device_id: int = 0,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType

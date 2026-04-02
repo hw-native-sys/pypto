@@ -30,7 +30,7 @@ HIDDEN_INV = 1.0 / HIDDEN
 K_CHUNK = 128
 Q_OUT_CHUNK = 64
 MLP_OUT_CHUNK = 64
-BATCH_TILE = 4
+BATCH_TILE = 16
 
 
 def build_qwen3_scope3_program(
@@ -51,7 +51,7 @@ def build_qwen3_scope3_program(
         @pl.function(type=pl.FunctionType.Opaque)
         def scope3(
             self,
-            attn_out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.FP32],
+            attn_out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
             hidden_states: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
             wo: pl.Tensor[[HIDDEN_CFG, HIDDEN_CFG], pl.BF16],
             post_rms_weight: pl.Tensor[[1, HIDDEN_CFG], pl.FP32],
@@ -60,21 +60,17 @@ def build_qwen3_scope3_program(
             w_down: pl.Tensor[[INTER_CFG, HIDDEN_CFG], pl.BF16],
             out: pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16],
         ) -> pl.Tensor[[BATCH_CFG, HIDDEN_CFG], pl.BF16]:
-            with pl.auto_incore():
+            with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
                 for b0 in pl.range(0, BATCH_CFG, BATCH_TILE):
                     resid1_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
 
                     # Output projection: attn_out × wo, tiled by Q_OUT_CHUNK.
                     for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
                         o0 = ob * Q_OUT_CHUNK
-                        o_acc = pl.create_tensor([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32)
-                        o_acc = pl.mul(o_acc, 0.0)
+                        o_acc = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
-                            a_chunk = pl.cast(
-                                pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [b0, k0]),
-                                target_type=pl.BF16,
-                            )
+                            a_chunk = pl.slice(attn_out, [BATCH_TILE, K_CHUNK], [b0, k0])
                             w_chunk = pl.slice(wo, [K_CHUNK, Q_OUT_CHUNK], [k0, o0])
                             o_acc = pl.add(o_acc, pl.matmul(a_chunk, w_chunk))
                         resid = pl.cast(
@@ -84,12 +80,11 @@ def build_qwen3_scope3_program(
                         resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
 
                     # Post-attention RMSNorm: compute inv_rms over resid1_tile.
-                    sq_sum = pl.create_tensor([BATCH_TILE, 1], dtype=pl.FP32)
-                    sq_sum = pl.mul(sq_sum, 0.0)
+                    sq_sum = pl.full([1, BATCH_TILE], dtype=pl.FP32, value=0.0)
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
                         x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                        sq_sum = pl.add(sq_sum, pl.row_sum(pl.mul(x_chunk, x_chunk)))
+                        sq_sum = pl.add(sq_sum, pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, BATCH_TILE]))
                     inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
 
                     # Normalize and zero-init down_proj accumulator.
@@ -97,15 +92,14 @@ def build_qwen3_scope3_program(
                     down_proj_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
                     for zi in pl.range(HIDDEN_BLOCKS):
                         z0 = zi * K_CHUNK
-                        down_zero_chunk = pl.create_tensor([BATCH_TILE, K_CHUNK], dtype=pl.FP32)
-                        down_zero_chunk = pl.mul(down_zero_chunk, 0.0)
+                        down_zero_chunk = pl.full([BATCH_TILE, K_CHUNK], dtype=pl.FP32, value=0.0)
                         down_proj_tile = pl.assemble(down_proj_tile, down_zero_chunk, [0, z0])
 
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
                         x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
                         gamma = pl.slice(post_rms_weight, [1, K_CHUNK], [0, k0])
-                        normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms), gamma)
+                        normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, pl.reshape(inv_rms, [BATCH_TILE, 1])), gamma)
                         post_norm_tile = pl.assemble(
                             post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0]
                         )
@@ -113,10 +107,8 @@ def build_qwen3_scope3_program(
                     # MLP: gate/up projections + SiLU + down projection.
                     for ob in pl.range(MLP_OUT_BLOCKS):
                         o0 = ob * MLP_OUT_CHUNK
-                        gate_acc = pl.create_tensor([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32)
-                        up_acc = pl.create_tensor([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32)
-                        gate_acc = pl.mul(gate_acc, 0.0)
-                        up_acc = pl.mul(up_acc, 0.0)
+                        gate_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+                        up_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
 
                         for kb in pl.range(HIDDEN_BLOCKS):
                             k0 = kb * K_CHUNK
@@ -174,7 +166,7 @@ def golden(tensors: dict, params: dict | None = None) -> None:
     eps = 1e-6
 
     # 1. Output projection (BF16 inputs, FP32 accumulation) + residual.
-    o_proj = torch.matmul(attn_out.bfloat16().float(), wo.float())
+    o_proj = torch.matmul(attn_out.float(), wo.float())
     resid1 = o_proj + hidden_states.float()
 
     # 2. Post-attention RMSNorm.
@@ -201,7 +193,7 @@ def build_tensor_specs(
     from pypto.runtime import TensorSpec
 
     return [
-        TensorSpec("attn_out", [batch, hidden_size], torch.float32, init_value=torch.randn),
+        TensorSpec("attn_out", [batch, hidden_size], torch.bfloat16, init_value=torch.randn),
         TensorSpec("hidden_states", [batch, hidden_size], torch.bfloat16, init_value=torch.randn),
         TensorSpec("wo", [hidden_size, hidden_size], torch.bfloat16, init_value=torch.randn),
         TensorSpec("post_rms_weight", [1, hidden_size], torch.float32, init_value=torch.randn),

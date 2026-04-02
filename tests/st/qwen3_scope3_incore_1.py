@@ -39,8 +39,7 @@ def build_program():
                 for kb in pl.range(HIDDEN_BLOCKS):
                     k0 = kb * K_CHUNK
                     x_chunk = pl.slice(resid1_tile, [BATCH_TILE, K_CHUNK], [0, k0])
-                    tmp = pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, 16])
-                    sq_sum = pl.add(sq_sum, tmp)
+                    sq_sum = pl.add(sq_sum, pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, BATCH_TILE]))
                 inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS))
                 inv_rms_out = pl.assemble(inv_rms_out, inv_rms, [0, 0])
             return inv_rms_out
@@ -67,8 +66,8 @@ def build_tensor_specs():
 
 
 def compile_and_run(
-    platform: str = "a2a3",
-    device_id: int = 14,
+    platform: str = "a5",
+    device_id: int = 0,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType
@@ -86,7 +85,7 @@ def compile_and_run(
             atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=dump_passes,
-            backend_type=BackendType.Ascend910B,
+            backend_type=BackendType.Ascend950,
         ),
     )
     if not result.passed and result.error and "code_runner" in result.error:

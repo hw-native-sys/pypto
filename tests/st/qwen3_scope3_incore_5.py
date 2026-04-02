@@ -66,8 +66,8 @@ def build_tensor_specs():
 
 
 def compile_and_run(
-    platform: str = "a2a3",
-    device_id: int = 14,
+    platform: str = "a5",
+    device_id: int = 0,
     dump_passes: bool = True,
 ):
     from pypto.backend import BackendType
@@ -85,7 +85,7 @@ def compile_and_run(
             atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=dump_passes,
-            backend_type=BackendType.Ascend910B,
+            backend_type=BackendType.Ascend950,
         ),
     )
     if not result.passed and result.error and "code_runner" in result.error:
