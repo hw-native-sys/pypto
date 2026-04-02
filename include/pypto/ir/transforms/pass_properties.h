@@ -83,6 +83,12 @@ inline const PassProperties kConvertTensorToTileOpsProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure}};
 
+// -- Tile op substitution pass ----------------------------------------------
+
+inline const PassProperties kSubstituteTilesProperties{
+    .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure}};
+
 // -- Tile ND-to-2D flattening pass --------------------------------------------
 
 inline const PassProperties kFlattenTileNdTo2DProperties{

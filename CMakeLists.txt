@@ -148,6 +148,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
     src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp
+    src/ir/transforms/substitute_tiles_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/resolve_backend_op_layouts_pass.cpp

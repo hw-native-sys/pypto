@@ -18,6 +18,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -144,6 +146,75 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
   tile_view.valid_shape = tile_type->shape_;
   InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, *result_dtype, std::nullopt, tile_view);
+}
+
+TypePtr DeduceTileExpandCloneType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  CHECK(args.size() == 2) << op_name << "requires exactly 2 arguments (input, shape), but got "
+                          << args.size();
+
+  // First argument must be TileType
+  auto tile_type = As<TileType>(args[0]->GetType());
+  CHECK(tile_type) << op_name << "requires first argument to be a TileType, but got "
+                   << args[0]->GetType()->TypeName();
+
+  // Second argument must be TupleType (shape)
+  auto shape_tuple_type = As<TupleType>(args[1]->GetType());
+  CHECK(shape_tuple_type) << op_name << "requires shape to be TupleType, but got "
+                          << args[1]->GetType()->TypeName();
+
+  // Validate all shape elements are ScalarType(INT64, UINT64, or INDEX)
+  ValidateIndexTupleElements(shape_tuple_type, "tile.expand_clone", "shape");
+
+  // Extract new shape dimensions
+  // If args[1] is MakeTuple, extract elements directly to preserve constants
+  // Otherwise use TupleGetItemExpr for runtime tuples
+  std::vector<ExprPtr> new_shape;
+  new_shape.reserve(shape_tuple_type->types_.size());
+
+  if (auto make_tuple = As<MakeTuple>(args[1])) {
+    // MakeTuple: extract elements directly to preserve ConstInt
+    new_shape = make_tuple->elements_;
+  } else {
+    // Runtime tuple: use TupleGetItemExpr
+    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+      new_shape.emplace_back(
+          std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
+    }
+  }
+
+  // Validate broadcast rules between input shape and new shape
+  const auto& input_shape = tile_type->shape_;
+  CHECK(input_shape.size() == new_shape.size()) << op_name << " requires input rank (" << input_shape.size()
+                                                << ") to match target rank (" << new_shape.size() << ")";
+
+  size_t broadcast_dims = 0;
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    if (DimensionsEqual(input_shape[i], new_shape[i])) {
+      continue;
+    }
+
+    auto input_const = GetConstantDimension(input_shape[i]);
+    CHECK(input_const && *input_const == 1)
+        << op_name << " only allows broadcasting from dimension 1, but input shape "
+        << FormatShape(input_shape) << " cannot be expanded to " << FormatShape(new_shape) << " at dim " << i
+        << " (got " << input_shape[i] << " -> " << new_shape[i] << ")";
+
+    ++broadcast_dims;
+  }
+
+  CHECK(broadcast_dims <= 1) << op_name << " allows broadcasting in at most one dimension, but got "
+                             << broadcast_dims << " (input shape " << FormatShape(input_shape)
+                             << ", target shape " << FormatShape(new_shape) << ")";
+
+  // Return new TileType with expanded dimensions and same dtype
+  TileView tile_view;
+  tile_view.valid_shape = new_shape;
+
+  tile_view.blayout = InferTileLayoutFromShape(new_shape);
+
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
 // ============================================================================
@@ -287,6 +358,19 @@ REGISTER_OP("tile.expands")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileExpandScalarType(args, kwargs, "tile.expands");
+    });
+
+REGISTER_OP("tile.expand_clone")
+    .set_op_category("TileOp")
+    .set_description(
+        "Expand tile to target shape by cloning data (allows broadcasting in at most one dimension)")
+    .add_argument("input", "Input tile to expand (TileType)")
+    .add_argument("shape",
+                  "Target shape as a tuple of dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .set_output_memory_inherit_input()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileExpandCloneType(args, kwargs, "tile.expand_clone");
     });
 
 }  // namespace ir

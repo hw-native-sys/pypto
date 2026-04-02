@@ -332,6 +332,9 @@ def outline_hierarchy_scopes() -> Pass:
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
+def substitute_tiles() -> Pass:
+    """Create a pass that substitutes unsupported tile ops with PTO-supported tile ops."""
+
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
@@ -443,6 +446,7 @@ __all__ = [
     "outline_cluster_scopes",
     "outline_hierarchy_scopes",
     "convert_tensor_to_tile_ops",
+    "substitute_tiles",
     "flatten_tile_nd_to_2d",
     "infer_tile_memory_space",
     "expand_mixed_kernel",

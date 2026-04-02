@@ -266,6 +266,17 @@ Pass OutlineClusterScopes();
 Pass ConvertTensorToTileOps();
 
 /**
+ * @brief Substitute unsupported tile ops with PTO-supported tile ops
+ *
+ * Rewrites tile ops that lack direct PTO instruction support into equivalent
+ * combinations of supported tile ops.
+ *
+ * Requirements:
+ * - Input IR must have tile ops (run ConvertTensorToTileOps first)
+ */
+Pass SubstituteTiles();
+
+/**
  * @brief Flatten ND tile ops to 2D in InCore functions
  *
  * Merges all dimensions except the last into a single dimension.

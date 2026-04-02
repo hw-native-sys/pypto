@@ -21,6 +21,7 @@
 #ifndef PYPTO_IR_TYPE_INFERENCE_H_
 #define PYPTO_IR_TYPE_INFERENCE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -186,6 +187,17 @@ bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim);
  * @return String representation of the shape
  */
 std::string FormatShape(const std::vector<ExprPtr>& shape);
+
+int NormalizeAxis(int axis, size_t ndim);
+
+int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape);
+
+bool IsIndexLikeDtype(DataType dtype);
+
+TileLayout InferTileLayoutFromShape(const std::vector<ExprPtr>& shape);
+
+void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::string& op_name,
+                                const std::string& arg_name);
 
 /**
  * @brief Propagate blayout and pad from a source TileType's tile_view into a new TileView

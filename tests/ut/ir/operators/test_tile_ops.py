@@ -710,6 +710,25 @@ class TestTileBroadcastOps:
         ir_str = str(Program)
         assert "tile.expands" in ir_str
 
+    def test_tile_expand_clone(self):
+        """Test tile.expand_clone operator - expand tile by cloning elements."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[4, 1, 32], pl.FP32],
+                output: pl.Tensor[[4, 8, 32], pl.FP32],
+            ) -> pl.Tensor[[4, 8, 32], pl.FP32]:
+                tile_a: pl.Tile[[4, 1, 32], pl.FP32] = pl.load(a, [0, 0, 0], [4, 1, 32])
+                tile_c: pl.Tile[[4, 8, 32], pl.FP32] = pl.expand_clone(tile_a, [4, 8, 32])
+                result: pl.Tensor[[4, 8, 32], pl.FP32] = pl.store(tile_c, [0, 0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.expand_clone" in ir_str
+
 
 class TestTileMatMulOps:
     """Test suite for tile-level matrix multiplication operators."""

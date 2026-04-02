@@ -149,6 +149,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.col_expand_sub", "tile.col_expand_sub");
   RegisterSimple("tensor.col_expand_div", "tile.col_expand_div");
   RegisterSimple("tensor.expands", "tile.expands");
+  RegisterSimple("tensor.expand_clone", "tile.expand_clone");
 
   // Transform ops
   RegisterSimple("tensor.reshape", "tile.reshape");

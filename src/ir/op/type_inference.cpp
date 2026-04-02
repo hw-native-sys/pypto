@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/printer.h"
@@ -258,6 +259,76 @@ std::string FormatShape(const std::vector<ExprPtr>& shape) {
   }
   oss << "]";
   return oss.str();
+}
+
+/**
+ * @brief Normalize axis index to handle negative indexing
+ *
+ * @param axis The axis index (can be negative)
+ * @param ndim The number of dimensions
+ * @return The normalized axis index
+ */
+int NormalizeAxis(int axis, size_t ndim) {
+  if (axis < 0) {
+    axis += static_cast<int>(ndim);
+  }
+  CHECK(axis >= 0 && axis < static_cast<int>(ndim))
+      << "Axis " << axis << " is out of range for " << ndim << "D tile";
+  return axis;
+}
+
+/**
+ * @brief Compute the product of shape dimensions (for static shapes)
+ *
+ * @param shape The shape dimensions
+ * @return The product if all dimensions are ConstInt, -1 otherwise
+ */
+int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
+  int64_t product = 1;
+  for (const auto& dim : shape) {
+    auto const_dim = As<ConstInt>(dim);
+    if (!const_dim) {
+      return -1;  // Dynamic shape, cannot compute product
+    }
+    product *= const_dim->value_;
+  }
+  return product;
+}
+
+bool IsIndexLikeDtype(DataType dtype) {
+  return dtype == DataType::INT64 || dtype == DataType::UINT64 || dtype == DataType::INDEX;
+}
+
+TileLayout InferTileLayoutFromShape(const std::vector<ExprPtr>& shape) {
+  if (shape.size() != 2) {
+    return TileLayout::row_major;
+  }
+
+  auto rows_const = As<ConstInt>(shape[0]);
+  auto cols_const = As<ConstInt>(shape[1]);
+  if (!rows_const || !cols_const) {
+    return TileLayout::row_major;
+  }
+  return (cols_const->value_ == 1 && rows_const->value_ > 1) ? TileLayout::col_major : TileLayout::row_major;
+}
+
+/**
+ * @brief Validate that all elements of a TupleType are ScalarType with an index-like dtype
+ *
+ * @param tuple_type The tuple type whose elements to validate
+ * @param op_name Name of the operation (for error messages)
+ * @param arg_name Name of the argument (for error messages), e.g. "shape" or "offset"
+ */
+void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::string& op_name,
+                                const std::string& arg_name) {
+  for (size_t i = 0; i < tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(tuple_type->types_[i]);
+    CHECK(scalar_type) << op_name << " " << arg_name << " tuple element " << i
+                       << " must be ScalarType, but got " << tuple_type->types_[i]->TypeName();
+    CHECK(IsIndexLikeDtype(scalar_type->dtype_))
+        << op_name << " " << arg_name << " tuple element " << i
+        << " must have dtype INT64, UINT64, or INDEX, but got " << scalar_type->dtype_.ToString();
+  }
 }
 
 }  // namespace ir

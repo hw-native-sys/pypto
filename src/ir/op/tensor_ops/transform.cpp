@@ -33,51 +33,10 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
-
-namespace {
-// ============================================================================
-// Helper Functions (file-local)
-// ============================================================================
-
-/**
- * @brief Normalize axis index to handle negative indexing
- *
- * @param axis The axis index (can be negative)
- * @param ndim The number of dimensions
- * @return The normalized axis index
- */
-int NormalizeAxis(int axis, size_t ndim) {
-  if (axis < 0) {
-    axis += static_cast<int>(ndim);
-  }
-  CHECK(axis >= 0 && axis < static_cast<int>(ndim))
-      << "Axis " << axis << " is out of range for " << ndim << "D tensor";
-  return axis;
-}
-
-/**
- * @brief Compute the product of shape dimensions (for static shapes)
- *
- * @param shape The shape dimensions
- * @return The product if all dimensions are ConstInt, -1 otherwise
- */
-int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
-  int64_t product = 1;
-  for (const auto& dim : shape) {
-    auto const_dim = As<ConstInt>(dim);
-    if (!const_dim) {
-      return -1;  // Dynamic shape, cannot compute product
-    }
-    product *= const_dim->value_;
-  }
-  return product;
-}
-
-}  // anonymous namespace
-
 // ============================================================================
 // Type Inference Functions
 // ============================================================================

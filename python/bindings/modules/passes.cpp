@@ -312,6 +312,8 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
+  passes.def("substitute_tiles", &pass::SubstituteTiles,
+             "Create a pass that substitutes unsupported tile ops with PTO-supported tile ops");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"
