@@ -1,0 +1,263 @@
+4 function(s) failed to compile:
+
+  Function                                                | Error
+  --------------------------------------------------------+-----------------------------------------------------------
+  qwen3_32b_training_forward_and_backward_layer_incore_2  | Tensor view not found for parameter: btrans_scratch__tile
+  --------------------------------------------------------+-----------------------------------------------------------
+  qwen3_32b_training_forward_and_backward_layer_incore_4  | Tensor view not found for parameter: proxy_scratch__tile
+  --------------------------------------------------------+-----------------------------------------------------------
+  qwen3_32b_training_forward_and_backward_layer_incore_7  | Tensor view not found for parameter: proxy_scratch__tile
+  --------------------------------------------------------+-----------------------------------------------------------
+  qwen3_32b_training_forward_and_backward_layer_incore_9  | Tensor view not found for parameter: proxy_scratch__tile
+  --------------------------------------------------------+-----------------------------------------------------------
+
+  [qwen3_32b_training_forward_and_backward_layer_incore_2]
+Tensor view not found for parameter: btrans_scratch__tile
+Check failed: false at /home/d84424862/work/pypto/src/codegen/pto/pto_codegen.cpp:1023
+
+C++ Traceback (most recent call last):
+ File "./src/ir/verifier/property_verifier_registry.cpp", line 100
+   throw VerificationError(report, std::move(diagnostics));
+ File "../csu/libc-start.c", line 392
+ File "../sysdeps/nptl/libc_start_call_main.h", line 58
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 268
+   } else if (!out_roots.empty() && out_roots[0]) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1313
+   scalar_params.push_back({emit_name, stype});
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1325
+   if (emit_name_map.count(body_var) == 0) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1355
+   "int orch_thread_num, int orch_thread_index) {\n";
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1045
+   (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
+ File "./src/codegen/pto/pto_codegen.cpp", line 1089
+   }
+ File "./src/ir/serialization/serializer.cpp", line 525
+   return ctx_.SerializeDataType(field, zone_);
+ File "./src/ir/transforms/infer_tile_memory_space_pass.cpp", line 312
+   INTERNAL_CHECK(cache_it != var_cache_.end()) << "Internal error: producer var not in cache";
+ File "./src/ir/transforms/ctrl_flow_transform_pass.cpp", line 800
+   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+ File "./src/codegen/pto/pto_codegen.cpp", line 183
+   GenerateFunction(func);
+ File "./src/codegen/pto/pto_codegen.cpp", line 380
+   VisitStmt(stmt);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 206
+   STMT_FUNCTOR_DISPATCH(AssignStmt);
+ File "./src/codegen/pto/pto_codegen.cpp", line 838
+   VisitExpr(op->value_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 114
+   EXPR_FUNCTOR_DISPATCH(Call);
+ File "./src/codegen/pto/pto_codegen.cpp", line 881
+   std::string mlir_line = op_info->codegen_func(op, *this);
+ File "./src/backend/common/pto_ops_common.cpp", line 1105
+   return MakeTileLoadCodegenPTO(op, codegen);
+ File "./src/backend/common/pto_ops_common.cpp", line 364
+   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+ File "./src/codegen/pto/pto_codegen.cpp", line 1023
+   INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+ File "./include/pypto/core/logging.h", line 530
+   throw ExceptionType(ss.str());
+
+========================================================================
+  [qwen3_32b_training_forward_and_backward_layer_incore_4]
+Tensor view not found for parameter: proxy_scratch__tile
+Check failed: false at /home/d84424862/work/pypto/src/codegen/pto/pto_codegen.cpp:1023
+
+C++ Traceback (most recent call last):
+ File "./src/ir/verifier/property_verifier_registry.cpp", line 100
+   throw VerificationError(report, std::move(diagnostics));
+ File "../csu/libc-start.c", line 392
+ File "../sysdeps/nptl/libc_start_call_main.h", line 58
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 268
+   } else if (!out_roots.empty() && out_roots[0]) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1313
+   scalar_params.push_back({emit_name, stype});
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1325
+   if (emit_name_map.count(body_var) == 0) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1355
+   "int orch_thread_num, int orch_thread_index) {\n";
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1045
+   (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
+ File "./src/codegen/pto/pto_codegen.cpp", line 1089
+   }
+ File "./src/ir/serialization/serializer.cpp", line 525
+   return ctx_.SerializeDataType(field, zone_);
+ File "./src/ir/transforms/infer_tile_memory_space_pass.cpp", line 104
+   if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+ File "./src/ir/transforms/ctrl_flow_transform_pass.cpp", line 800
+   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+ File "./src/codegen/pto/pto_codegen.cpp", line 183
+   GenerateFunction(func);
+ File "./src/codegen/pto/pto_codegen.cpp", line 386
+   VisitStmt(func->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 206
+   STMT_FUNCTOR_DISPATCH(AssignStmt);
+ File "./src/codegen/pto/pto_codegen.cpp", line 838
+   VisitExpr(op->value_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 114
+   EXPR_FUNCTOR_DISPATCH(Call);
+ File "./src/codegen/pto/pto_codegen.cpp", line 881
+   std::string mlir_line = op_info->codegen_func(op, *this);
+ File "./src/backend/common/pto_ops_common.cpp", line 1105
+   return MakeTileLoadCodegenPTO(op, codegen);
+ File "./src/backend/common/pto_ops_common.cpp", line 364
+   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+ File "./src/codegen/pto/pto_codegen.cpp", line 1023
+   INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+ File "./include/pypto/core/logging.h", line 530
+   throw ExceptionType(ss.str());
+
+========================================================================
+  [qwen3_32b_training_forward_and_backward_layer_incore_7]
+Tensor view not found for parameter: proxy_scratch__tile
+Check failed: false at /home/d84424862/work/pypto/src/codegen/pto/pto_codegen.cpp:1023
+
+C++ Traceback (most recent call last):
+ File "./src/ir/verifier/property_verifier_registry.cpp", line 100
+   throw VerificationError(report, std::move(diagnostics));
+ File "../csu/libc-start.c", line 392
+ File "../sysdeps/nptl/libc_start_call_main.h", line 58
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 268
+   } else if (!out_roots.empty() && out_roots[0]) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1313
+   scalar_params.push_back({emit_name, stype});
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1325
+   if (emit_name_map.count(body_var) == 0) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1355
+   "int orch_thread_num, int orch_thread_index) {\n";
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1045
+   (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
+ File "./src/codegen/pto/pto_codegen.cpp", line 1089
+   }
+ File "./src/ir/serialization/serializer.cpp", line 525
+   return ctx_.SerializeDataType(field, zone_);
+ File "./src/ir/transforms/infer_tile_memory_space_pass.cpp", line 104
+   if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+ File "./src/ir/transforms/ctrl_flow_transform_pass.cpp", line 800
+   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+ File "./src/codegen/pto/pto_codegen.cpp", line 183
+   GenerateFunction(func);
+ File "./src/codegen/pto/pto_codegen.cpp", line 386
+   VisitStmt(func->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 206
+   STMT_FUNCTOR_DISPATCH(AssignStmt);
+ File "./src/codegen/pto/pto_codegen.cpp", line 838
+   VisitExpr(op->value_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 114
+   EXPR_FUNCTOR_DISPATCH(Call);
+ File "./src/codegen/pto/pto_codegen.cpp", line 881
+   std::string mlir_line = op_info->codegen_func(op, *this);
+ File "./src/backend/common/pto_ops_common.cpp", line 1105
+   return MakeTileLoadCodegenPTO(op, codegen);
+ File "./src/backend/common/pto_ops_common.cpp", line 364
+   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+ File "./src/codegen/pto/pto_codegen.cpp", line 1023
+   INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+ File "./include/pypto/core/logging.h", line 530
+   throw ExceptionType(ss.str());
+
+========================================================================
+  [qwen3_32b_training_forward_and_backward_layer_incore_9]
+Tensor view not found for parameter: proxy_scratch__tile
+Check failed: false at /home/d84424862/work/pypto/src/codegen/pto/pto_codegen.cpp:1023
+
+C++ Traceback (most recent call last):
+ File "./src/ir/verifier/property_verifier_registry.cpp", line 100
+   throw VerificationError(report, std::move(diagnostics));
+ File "../csu/libc-start.c", line 392
+ File "../sysdeps/nptl/libc_start_call_main.h", line 58
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 268
+   } else if (!out_roots.empty() && out_roots[0]) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1313
+   scalar_params.push_back({emit_name, stype});
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1325
+   if (emit_name_map.count(body_var) == 0) {
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1355
+   "int orch_thread_num, int orch_thread_index) {\n";
+ File "./src/codegen/orchestration/orchestration_codegen.cpp", line 1045
+   (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
+ File "./src/codegen/pto/pto_codegen.cpp", line 1089
+   }
+ File "./src/ir/serialization/serializer.cpp", line 525
+   return ctx_.SerializeDataType(field, zone_);
+ File "./src/ir/transforms/infer_tile_memory_space_pass.cpp", line 104
+   if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
+ File "./src/ir/transforms/ctrl_flow_transform_pass.cpp", line 800
+   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+ File "./src/codegen/pto/pto_codegen.cpp", line 183
+   GenerateFunction(func);
+ File "./src/codegen/pto/pto_codegen.cpp", line 380
+   VisitStmt(stmt);
+ File "./include/pypto/ir/transforms/base/functor.h", line 210
+   STMT_FUNCTOR_DISPATCH(ForStmt);
+ File "./src/codegen/pto/pto_control_flow_codegen.cpp", line 344
+   VisitStmt(op->body_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 213
+   STMT_FUNCTOR_DISPATCH(SeqStmts);
+ File "./src/ir/transforms/visitor.cpp", line 222
+   VisitStmt(op->stmts_[i]);
+ File "./include/pypto/ir/transforms/base/functor.h", line 206
+   STMT_FUNCTOR_DISPATCH(AssignStmt);
+ File "./src/codegen/pto/pto_codegen.cpp", line 838
+   VisitExpr(op->value_);
+ File "./include/pypto/ir/transforms/base/functor.h", line 114
+   EXPR_FUNCTOR_DISPATCH(Call);
+ File "./src/codegen/pto/pto_codegen.cpp", line 881
+   std::string mlir_line = op_info->codegen_func(op, *this);
+ File "./src/backend/common/pto_ops_common.cpp", line 1105
+   return MakeTileLoadCodegenPTO(op, codegen);
+ File "./src/backend/common/pto_ops_common.cpp", line 364
+   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+ File "./src/codegen/pto/pto_codegen.cpp", line 1023
+   INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+ File "./include/pypto/core/logging.h", line 530
+   throw ExceptionType(ss.str());

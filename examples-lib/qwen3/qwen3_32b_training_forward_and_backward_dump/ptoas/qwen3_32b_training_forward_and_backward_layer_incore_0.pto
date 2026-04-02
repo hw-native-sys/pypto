@@ -1,0 +1,80 @@
+module attributes {pto.target_arch = "a5"} {
+  func.func @qwen3_32b_training_forward_and_backward_layer_incore_0(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>, %arg2: !pto.ptr<f32>, %arg3: !pto.ptr<f32>, %arg4: !pto.ptr<f32>, %arg5: !pto.ptr<f32>, %arg6: !pto.ptr<f32>, %arg7: !pto.ptr<f32>, %arg8: !pto.ptr<f32>, %arg9: !pto.ptr<f32>, %arg10: !pto.ptr<f32>, %arg11: !pto.ptr<f32>, %arg12: !pto.ptr<f32>, %arg13: !pto.ptr<f32>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  %c0i = arith.constant 0 : i64
+  %c32000 = arith.constant 32000 : i64
+  %c64000 = arith.constant 64000 : i64
+  %c96000 = arith.constant 96000 : i64
+  %c121600 = arith.constant 121600 : i64
+  %c147200 = arith.constant 147200 : i64
+  %c172800 = arith.constant 172800 : i64
+  %c100 = arith.constant 100 : index
+  %c80 = arith.constant 80 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  %cst = arith.constant 0.000000e+00 : f32
+  %grad_w_down__ssa_v0_view = pto.make_tensor_view %arg0, shape = [%c100, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_w_gate__ssa_v0_view = pto.make_tensor_view %arg1, shape = [%c80, %c100], strides = [%c100, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_w_up__ssa_v0_view = pto.make_tensor_view %arg2, shape = [%c80, %c100], strides = [%c100, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_wk__ssa_v0_view = pto.make_tensor_view %arg3, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_wo__ssa_v0_view = pto.make_tensor_view %arg4, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_wq__ssa_v0_view = pto.make_tensor_view %arg5, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_wv__ssa_v0_view = pto.make_tensor_view %arg6, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret0__out_view = pto.make_tensor_view %arg7, shape = [%c100, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret1__out_view = pto.make_tensor_view %arg8, shape = [%c80, %c100], strides = [%c100, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret2__out_view = pto.make_tensor_view %arg9, shape = [%c80, %c100], strides = [%c100, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret3__out_view = pto.make_tensor_view %arg10, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret4__out_view = pto.make_tensor_view %arg11, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret5__out_view = pto.make_tensor_view %arg12, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %ret6__out_view = pto.make_tensor_view %arg13, shape = [%c80, %c80], strides = [%c80, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xf32>
+  %grad_w_down__tile = pto.alloc_tile addr = %c0i : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_w_down__ssa_v0_pview = pto.partition_view %grad_w_down__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c100, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<100x80xf32>
+  pto.tload ins(%grad_w_down__ssa_v0_pview : !pto.partition_tensor_view<100x80xf32>) outs(%grad_w_down__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_w_gate__tile = pto.alloc_tile addr = %c32000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_w_gate__ssa_v0_pview = pto.partition_view %grad_w_gate__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c100] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x100xf32>
+  pto.tload ins(%grad_w_gate__ssa_v0_pview : !pto.partition_tensor_view<80x100xf32>) outs(%grad_w_gate__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_w_up__tile = pto.alloc_tile addr = %c64000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_w_up__ssa_v0_pview = pto.partition_view %grad_w_up__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c100] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x100xf32>
+  pto.tload ins(%grad_w_up__ssa_v0_pview : !pto.partition_tensor_view<80x100xf32>) outs(%grad_w_up__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_wk__tile = pto.alloc_tile addr = %c96000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_wk__ssa_v0_pview = pto.partition_view %grad_wk__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tload ins(%grad_wk__ssa_v0_pview : !pto.partition_tensor_view<80x80xf32>) outs(%grad_wk__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_wo__tile = pto.alloc_tile addr = %c121600 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_wo__ssa_v0_pview = pto.partition_view %grad_wo__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tload ins(%grad_wo__ssa_v0_pview : !pto.partition_tensor_view<80x80xf32>) outs(%grad_wo__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_wq__tile = pto.alloc_tile addr = %c147200 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_wq__ssa_v0_pview = pto.partition_view %grad_wq__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tload ins(%grad_wq__ssa_v0_pview : !pto.partition_tensor_view<80x80xf32>) outs(%grad_wq__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %grad_wv__tile = pto.alloc_tile addr = %c172800 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %grad_wv__ssa_v0_pview = pto.partition_view %grad_wv__ssa_v0_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tload ins(%grad_wv__ssa_v0_pview : !pto.partition_tensor_view<80x80xf32>) outs(%grad_wv__tile : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %0 = pto.alloc_tile addr = %c147200 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_wq__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%0 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %1 = pto.alloc_tile addr = %c96000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_wk__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%1 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %2 = pto.alloc_tile addr = %c172800 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_wv__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%2 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %3 = pto.alloc_tile addr = %c121600 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_wo__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%3 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %4 = pto.alloc_tile addr = %c32000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_w_gate__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%4 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %5 = pto.alloc_tile addr = %c64000 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_w_up__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%5 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %6 = pto.alloc_tile addr = %c0i : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tmuls ins(%grad_w_down__tile, %cst : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>, f32) outs(%6 : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %ret0__out_pview = pto.partition_view %ret0__out_view, offsets = [%c0, %c0], sizes = [%c100, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<100x80xf32>
+  pto.tstore ins(%6 : !pto.tile_buf<loc=vec, dtype=f32, rows=100, cols=80, v_row=100, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret0__out_pview : !pto.partition_tensor_view<100x80xf32>)
+  %ret1__out_pview = pto.partition_view %ret1__out_view, offsets = [%c0, %c0], sizes = [%c80, %c100] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x100xf32>
+  pto.tstore ins(%4 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret1__out_pview : !pto.partition_tensor_view<80x100xf32>)
+  %ret2__out_pview = pto.partition_view %ret2__out_view, offsets = [%c0, %c0], sizes = [%c80, %c100] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x100xf32>
+  pto.tstore ins(%5 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=100, v_row=80, v_col=100, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret2__out_pview : !pto.partition_tensor_view<80x100xf32>)
+  %ret3__out_pview = pto.partition_view %ret3__out_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tstore ins(%1 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret3__out_pview : !pto.partition_tensor_view<80x80xf32>)
+  %ret4__out_pview = pto.partition_view %ret4__out_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tstore ins(%3 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret4__out_pview : !pto.partition_tensor_view<80x80xf32>)
+  %ret5__out_pview = pto.partition_view %ret5__out_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tstore ins(%0 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret5__out_pview : !pto.partition_tensor_view<80x80xf32>)
+  %ret6__out_pview = pto.partition_view %ret6__out_view, offsets = [%c0, %c0], sizes = [%c80, %c80] : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<80x80xf32>
+  pto.tstore ins(%2 : !pto.tile_buf<loc=vec, dtype=f32, rows=80, cols=80, v_row=80, v_col=80, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret6__out_pview : !pto.partition_tensor_view<80x80xf32>)
+  return
+  }
+}

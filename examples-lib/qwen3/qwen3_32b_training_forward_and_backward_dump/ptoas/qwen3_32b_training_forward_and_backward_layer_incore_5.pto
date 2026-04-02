@@ -1,0 +1,19 @@
+module attributes {pto.target_arch = "a5"} {
+  func.func @qwen3_32b_training_forward_and_backward_layer_incore_5(%arg0: !pto.ptr<bf16>, %arg1: !pto.ptr<bf16>) attributes {pto.kernel_kind = #pto.kernel_kind<vector>} {
+  %c0i = arith.constant 0 : i64
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  %c1 = arith.constant 1 : index
+  %c0 = arith.constant 0 : index
+  %t__tmp_v83_view = pto.make_tensor_view %arg0, shape = [%c2, %c4], strides = [%c4, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xbf16>
+  %ret0__out_view = pto.make_tensor_view %arg1, shape = [%c2, %c4], strides = [%c4, %c1] {layout = #pto.layout<nd>}: !pto.tensor_view<?x?xbf16>
+  %t__tile = pto.alloc_tile addr = %c0i : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  %t__tmp_v83_pview = pto.partition_view %t__tmp_v83_view, offsets = [%c0, %c0], sizes = [%c2, %c4] : !pto.tensor_view<?x?xbf16> -> !pto.partition_tensor_view<2x4xbf16>
+  pto.tload ins(%t__tmp_v83_pview : !pto.partition_tensor_view<2x4xbf16>) outs(%t__tile : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %proxy_ctx__tile = pto.alloc_tile addr = %c0i : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>
+  pto.tcvt ins(%t__tile{rmode = #pto<round_mode ROUND>} : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%proxy_ctx__tile : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>)
+  %ret0__out_pview = pto.partition_view %ret0__out_view, offsets = [%c0, %c0], sizes = [%c2, %c4] : !pto.tensor_view<?x?xbf16> -> !pto.partition_tensor_view<2x4xbf16>
+  pto.tstore ins(%proxy_ctx__tile : !pto.tile_buf<loc=vec, dtype=bf16, rows=2, cols=4, v_row=2, v_col=4, blayout=row_major, slayout=none_box, fractal=512, pad=0>) outs(%ret0__out_pview : !pto.partition_tensor_view<2x4xbf16>)
+  return
+  }
+}

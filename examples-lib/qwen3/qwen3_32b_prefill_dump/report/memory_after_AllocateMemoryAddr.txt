@@ -1,0 +1,125 @@
+=== Memory Usage Report ===
+Pass: AllocateMemoryAddr
+Backend: 950
+Functions: 17 compute functions
+
+--- qwen3_prefill_layer_incore_0 ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    10.1 KB  |   248.0 KB  |    4.1%  |  7
+
+--- qwen3_prefill_layer_incore_10_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |     8.5 KB  |   512.0 KB  |    1.7%  |  2
+  Left   |      512 B  |    64.0 KB  |    0.8%  |  1
+  Right  |     8.0 KB  |    64.0 KB  |   12.5%  |  1
+  Acc    |     1.0 KB  |   256.0 KB  |    0.4%  |  1
+
+--- qwen3_prefill_layer_incore_10_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    11.5 KB  |   248.0 KB  |    4.6%  |  4
+
+--- qwen3_prefill_layer_incore_1_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |    42.0 KB  |   512.0 KB  |    8.2%  |  2
+  Left   |     2.0 KB  |    64.0 KB  |    3.1%  |  1
+  Right  |    32.0 KB  |    64.0 KB  |   50.0%  |  1
+  Acc    |     1.0 KB  |   256.0 KB  |    0.4%  |  1
+
+--- qwen3_prefill_layer_incore_1_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    18.5 KB  |   248.0 KB  |    7.5%  |  8
+
+--- qwen3_prefill_layer_incore_2_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |    26.0 KB  |   512.0 KB  |    5.1%  |  2
+  Left   |     2.0 KB  |    64.0 KB  |    3.1%  |  1
+  Right  |    32.0 KB  |    64.0 KB  |   50.0%  |  2
+  Acc    |      512 B  |   256.0 KB  |    0.2%  |  1
+
+--- qwen3_prefill_layer_incore_2_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    17.8 KB  |   248.0 KB  |    7.2%  |  10
+
+--- qwen3_prefill_layer_incore_3 ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    20.0 KB  |   248.0 KB  |    8.1%  |  1
+
+--- qwen3_prefill_layer_incore_4 ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |     2.8 KB  |   248.0 KB  |    1.1%  |  9
+
+--- qwen3_prefill_layer_incore_5_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |    62.5 KB  |   512.0 KB  |   12.2%  |  4
+  Left   |      496 B  |    64.0 KB  |    0.8%  |  2
+  Right  |    60.0 KB  |    64.0 KB  |   93.8%  |  2
+  Acc    |      992 B  |   256.0 KB  |    0.4%  |  2
+
+--- qwen3_prefill_layer_incore_5_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |     8.7 KB  |   248.0 KB  |    3.5%  |  28
+  Acc    |      512 B  |   256.0 KB  |    0.2%  |  1
+
+--- qwen3_prefill_layer_incore_6_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |    42.0 KB  |   512.0 KB  |    8.2%  |  2
+  Left   |     2.0 KB  |    64.0 KB  |    3.1%  |  1
+  Right  |    32.0 KB  |    64.0 KB  |   50.0%  |  1
+  Acc    |     1.0 KB  |   256.0 KB  |    0.4%  |  1
+
+--- qwen3_prefill_layer_incore_6_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    17.5 KB  |   248.0 KB  |    7.1%  |  6
+
+--- qwen3_prefill_layer_incore_7 ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |     8.1 KB  |   248.0 KB  |    3.3%  |  6
+
+--- qwen3_prefill_layer_incore_8 ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    87.0 KB  |   248.0 KB  |   35.1%  |  5
+
+--- qwen3_prefill_layer_incore_9_aic ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Mat    |    34.0 KB  |   512.0 KB  |    6.6%  |  2
+  Left   |     2.0 KB  |    64.0 KB  |    3.1%  |  1
+  Right  |    64.0 KB  |    64.0 KB  |  100.0%  |  2
+  Acc    |     1.0 KB  |   256.0 KB  |    0.4%  |  1
+
+--- qwen3_prefill_layer_incore_9_aiv ---
+
+  Space  |  Used       |  Limit      |  Usage   |  MemRefs
+  -------+-------------+-------------+----------+---------
+  Vec    |    13.5 KB  |   248.0 KB  |    5.4%  |  6

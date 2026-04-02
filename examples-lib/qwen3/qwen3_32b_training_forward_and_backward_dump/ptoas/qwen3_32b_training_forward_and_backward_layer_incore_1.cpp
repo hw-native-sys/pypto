@@ -1,0 +1,63 @@
+#include "pto/pto-inst.hpp"
+using namespace pto;
+
+enum class PTOAutoSyncTailMode : int {
+  kBarrierAll = 0,
+  kSetWaitMte3ToSEvent0 = 1,
+};
+
+static AICORE inline void ptoas_auto_sync_tail(
+    PTOAutoSyncTailMode mode = PTOAutoSyncTailMode::kBarrierAll) {
+  switch (mode) {
+  case PTOAutoSyncTailMode::kSetWaitMte3ToSEvent0:
+    set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+    break;
+  case PTOAutoSyncTailMode::kBarrierAll:
+  default:
+    pipe_barrier(PIPE_ALL);
+    break;
+  }
+}
+
+__global__ AICORE void qwen3_32b_training_forward_and_backward_layer_incore_1(__gm__ float* v1, __gm__ float* v2) {
+  unsigned v3 = 2;
+  unsigned v4 = 1;
+  unsigned v5 = 0;
+  float v6 = 0.0f;
+  int32_t v7 = 1;
+  int32_t v8 = 2;
+  int64_t v9 = 32;
+  int64_t v10 = 0;
+  using T = float;
+
+  #if defined(__DAV_VEC__)
+  set_mask_norm();
+  set_vector_mask(-1, -1);
+  Tile<TileType::Vec, float, 2, 1, BLayout::ColMajor, 2, 1, SLayout::NoneBox, 512, PadValue::Null> v11;
+  TASSIGN(v11, v10);
+  pto::Shape<1, 1, 1, 2, 1> v12 = pto::Shape<1, 1, 1, 2, 1>();
+  pto::Stride<2, 2, 2, 1, 2> v13 = pto::Stride<2, 2, 2, 1, 2>();
+  GlobalTensor<float, pto::Shape<1, 1, 1, 2, 1>, pto::Stride<2, 2, 2, 1, 2>, pto::Layout::DN> v14 = GlobalTensor<float, pto::Shape<1, 1, 1, 2, 1>, pto::Stride<2, 2, 2, 1, 2>, pto::Layout::DN>(v1 + (v5 + v5 * (unsigned) v7 + v5 * (unsigned) v8), v12, v13);
+  TLOAD(v11, v14);
+  set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+  Tile<TileType::Vec, float, 1, 2, BLayout::RowMajor, 1, 2, SLayout::NoneBox, 512, PadValue::Null> v15;
+  TASSIGN(v15, v10);
+  Tile<TileType::Vec, float, 1, 2, BLayout::RowMajor, 1, 2, SLayout::NoneBox, 512, PadValue::Null> v16;
+  TASSIGN(v16, v9);
+  wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+  TMULS(v16, v15, v6);
+  set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  Tile<TileType::Vec, float, 2, 1, BLayout::ColMajor, 2, 1, SLayout::NoneBox, 512, PadValue::Null> v17;
+  TASSIGN(v17, v9);
+  pto::Shape<1, 1, 1, 2, 1> v18 = pto::Shape<1, 1, 1, 2, 1>();
+  pto::Stride<2, 2, 2, 1, 2> v19 = pto::Stride<2, 2, 2, 1, 2>();
+  GlobalTensor<float, pto::Shape<1, 1, 1, 2, 1>, pto::Stride<2, 2, 2, 1, 2>, pto::Layout::DN> v20 = GlobalTensor<float, pto::Shape<1, 1, 1, 2, 1>, pto::Stride<2, 2, 2, 1, 2>, pto::Layout::DN>(v2 + (v5 + v5 * (unsigned) v7 + v5 * (unsigned) v8), v18, v19);
+  wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  TSTORE(v20, v17);
+  ptoas_auto_sync_tail(PTOAutoSyncTailMode::kBarrierAll);
+  #endif // __DAV_VEC__
+
+  return;
+}
+
