@@ -63,6 +63,10 @@ def build_qwen3_scope3_program(
             with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
                 for b0 in pl.range(0, BATCH_CFG, BATCH_TILE):
                     resid1_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
+                    for ob in pl.parallel(0, Q_OUT_BLOCKS):
+                        o0 = ob * Q_OUT_CHUNK
+                        zero_resid1 = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
+                        resid1_tile = pl.assemble(resid1_tile, zero_resid1, [0, o0])
 
                     # Output projection: attn_out × wo, tiled by Q_OUT_CHUNK.
                     for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
@@ -192,14 +196,31 @@ def build_tensor_specs(
     import torch  # type: ignore[import]
     from pypto.runtime import TensorSpec
 
+    def xavier_bf16(shape: list[int]) -> torch.Tensor:
+        """Generate in FP32 with Xavier (1/sqrt(fan_in)) scaling, then cast to BF16."""
+        fan_in = shape[1]
+        return (torch.randn(shape, dtype=torch.float32) / (fan_in ** 0.5)).to(torch.bfloat16)
+
+    def xavier_fp32(shape: list[int]) -> torch.Tensor:
+        """Generate in FP32 with Xavier (1/sqrt(fan_in)) scaling."""
+        fan_in = shape[1]
+        return torch.randn(shape, dtype=torch.float32) / (fan_in ** 0.5)
+
     return [
-        TensorSpec("attn_out", [batch, hidden_size], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("hidden_states", [batch, hidden_size], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("wo", [hidden_size, hidden_size], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("post_rms_weight", [1, hidden_size], torch.float32, init_value=torch.randn),
-        TensorSpec("w_gate", [hidden_size, intermediate_size], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("w_up", [hidden_size, intermediate_size], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("w_down", [intermediate_size, hidden_size], torch.bfloat16, init_value=torch.randn),
+        TensorSpec("attn_out", [batch, hidden_size], torch.bfloat16,
+                   init_value=xavier_bf16([batch, hidden_size])),
+        TensorSpec("hidden_states", [batch, hidden_size], torch.bfloat16,
+                   init_value=xavier_bf16([batch, hidden_size])),
+        TensorSpec("wo", [hidden_size, hidden_size], torch.bfloat16,
+                   init_value=xavier_bf16([hidden_size, hidden_size])),
+        TensorSpec("post_rms_weight", [1, hidden_size], torch.float32,
+                   init_value=xavier_fp32([1, hidden_size])),
+        TensorSpec("w_gate", [hidden_size, intermediate_size], torch.bfloat16,
+                   init_value=xavier_bf16([hidden_size, intermediate_size])),
+        TensorSpec("w_up", [hidden_size, intermediate_size], torch.bfloat16,
+                   init_value=xavier_bf16([hidden_size, intermediate_size])),
+        TensorSpec("w_down", [intermediate_size, hidden_size], torch.bfloat16,
+                   init_value=xavier_bf16([intermediate_size, hidden_size])),
         TensorSpec("out", [batch, hidden_size], torch.bfloat16, is_output=True),
     ]
 
@@ -209,7 +230,7 @@ def compile_and_run(
     hidden_size: int = HIDDEN,
     intermediate_size: int = INTERMEDIATE,
     platform: str = "a5",
-    device_id: int = 11,
+    device_id: int = 0,
     work_dir: str | None = None,
     dump_passes: bool = True,
 ):
@@ -236,8 +257,8 @@ def compile_and_run(
         config=RunConfig(
             platform=platform,
             device_id=device_id,
-            rtol=2e-2,
-            atol=2e-2,
+            rtol=1e-3,
+            atol=1e-3,
             strategy=OptimizationStrategy.Default,
             dump_passes=dump_passes,
             backend_type=BackendType.Ascend950,
