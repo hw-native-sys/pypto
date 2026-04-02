@@ -374,6 +374,20 @@ Pass FlattenCallExpr();
 Pass NormalizeStmtStructure();
 
 /**
+ * @brief Normalize return tuple order in InCore functions
+ *
+ * Reorders ReturnStmt::value_ so that return[i] corresponds to the i-th
+ * Out/InOut parameter in declaration order, and updates TupleGetItemExpr
+ * indices at call sites accordingly.  After this pass, orchestration codegen
+ * can map tuple element indices to output parameters sequentially without
+ * tracing through tile.store / ForStmt yield chains.
+ *
+ * Requirements:
+ * - Input IR must have InCore scopes outlined and tile ops
+ */
+Pass NormalizeReturnOrder();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

@@ -148,6 +148,11 @@ inline const PassProperties kAllocateMemoryAddrProperties{
                  IRProperty::TileOps2D},
     .produced = {IRProperty::AllocatedMemoryAddr}};
 
+// -- Return order normalization pass ------------------------------------------
+
+inline const PassProperties kNormalizeReturnOrderProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

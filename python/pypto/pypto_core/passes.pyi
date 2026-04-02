@@ -279,6 +279,9 @@ def legalize_pto_buffer_reuse() -> Pass:
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
 
+def normalize_return_order() -> Pass:
+    """Create a return order normalization pass."""
+
 class VerificationError:
     """Unified verification error information."""
 

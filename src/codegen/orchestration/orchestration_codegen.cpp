@@ -714,61 +714,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   // --- Alias generation helpers ---
 
-  static std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& callee) {
-    std::vector<size_t> mapping;
-    if (!callee || !callee->body_) return mapping;
-
-    auto seq = As<SeqStmts>(callee->body_);
-    if (!seq || seq->stmts_.empty()) return mapping;
-    auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
-    if (!return_stmt) return mapping;
-
-    auto find_param_index = [&](const Var* v) -> size_t {
-      for (size_t pi = 0; pi < callee->params_.size(); ++pi) {
-        if (callee->params_[pi].get() == v) return pi;
-      }
-      return SIZE_MAX;
-    };
-
-    std::unordered_map<const Var*, size_t> var_to_out_param;
-    for (size_t si = 0; si + 1 < seq->stmts_.size(); ++si) {
-      if (auto assign = As<AssignStmt>(seq->stmts_[si])) {
-        if (!assign->var_) continue;
-        auto call = As<Call>(assign->value_);
-        if (call && call->op_ && call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
-          auto out_param = As<Var>(call->args_[2]);
-          if (out_param) {
-            var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
-          }
-        }
-      } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
-        for (size_t ri = 0; ri < for_stmt->return_vars_.size() && ri < for_stmt->iter_args_.size(); ++ri) {
-          const auto& iter_arg = for_stmt->iter_args_[ri];
-          if (!iter_arg || !iter_arg->initValue_ || !for_stmt->return_vars_[ri]) continue;
-          auto init_var = As<Var>(iter_arg->initValue_);
-          if (init_var) {
-            var_to_out_param[for_stmt->return_vars_[ri].get()] = find_param_index(init_var.get());
-          }
-        }
-      }
-    }
-
-    for (const auto& ret_expr : return_stmt->value_) {
-      auto var = As<Var>(ret_expr);
-      if (!var) {
-        mapping.push_back(SIZE_MAX);
-        continue;
-      }
-      auto it = var_to_out_param.find(var.get());
-      if (it != var_to_out_param.end()) {
-        mapping.push_back(it->second);
-        continue;
-      }
-      mapping.push_back(find_param_index(var.get()));
-    }
-    return mapping;
-  }
-
   static std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
     std::vector<size_t> out_indices;
     for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
@@ -806,19 +751,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto out_indices = CollectOutIndices(callee);
 
-    auto ret_to_param = BuildReturnToParamMapping(callee);
-
     for (const auto& elem : elements_it->second) {
-      size_t param_idx;
-      if (static_cast<size_t>(elem.index) < ret_to_param.size() &&
-          ret_to_param[static_cast<size_t>(elem.index)] != SIZE_MAX) {
-        param_idx = ret_to_param[static_cast<size_t>(elem.index)];
-      } else {
-        INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
-            << "Internal error: tuple element index " << elem.index << " out of range for "
-            << call->op_->name_ << " (has " << out_indices.size() << " Out/InOut params)";
-        param_idx = out_indices[static_cast<size_t>(elem.index)];
-      }
+      INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
+          << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
+          << " (has " << out_indices.size() << " Out/InOut params)";
+      size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
       INTERNAL_CHECK(param_idx < callee->param_directions_.size())
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
           << " (has " << callee->param_directions_.size() << " params)";

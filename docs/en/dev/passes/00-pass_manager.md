@@ -71,6 +71,7 @@ struct PassProperties {
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
+| NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
@@ -364,10 +365,12 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 3. `ResolveTransposeLayout`
 4. `ResolveBackendOpLayouts`
 5. `ExpandMixedKernel`
-6. `InitMemRef`
-7. `MemoryReuse`
-8. `LegalizePTOBufferReuse`
-9. `AllocateMemoryAddr`
+6. `SplitVectorKernel`
+7. `NormalizeReturnOrder`
+8. `InitMemRef`
+9. `MemoryReuse`
+10. `LegalizePTOBufferReuse`
+11. `AllocateMemoryAddr`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
@@ -379,6 +382,14 @@ rewrites `[N, 1]` vector operands into `[1, N] row_major` `tile.reshape`
 operations at the constrained use site, where row-major is inferred from the
 target shape. It then reshapes the result back to the original vector shape
 when needed.
+
+`NormalizeReturnOrder` reorders `ReturnStmt::value_` in InCore functions so that
+`return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
+and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
+orchestration codegen map tuple element indices to output parameters with a
+direct `out_indices[i]` lookup, without tracing through `tile.store`/yield
+chains. The pass is placed before `InitMemRef` so it runs after all kernel
+splitting but before memory allocation.
 
 ### Using PassPipeline Directly
 

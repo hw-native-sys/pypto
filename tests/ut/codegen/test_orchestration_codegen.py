@@ -1709,10 +1709,10 @@ class TestTensorReadWriteOffsetCodegen:
     def test_mixed_loop_carried_and_full_tuple_return(self):
         """ForStmt yield + tile.store outputs in same kernel get correct return-to-param mapping.
 
-        Regression test for a bug where BuildReturnToParamMapping could not trace
-        ForStmt yield return values back to their Out parameters.  The sequential
-        fallback then mapped them to the wrong get_ref index, corrupting downstream
-        tensor aliases.
+        The NormalizeReturnOrder pass reorders ReturnStmt values so that
+        return[i] corresponds to the i-th Out/InOut parameter in declaration
+        order.  This test verifies that mixed ForStmt yield and tile.store
+        returns produce distinct get_ref indices and distinct consumer inputs.
         """
 
         backend.reset_for_testing()
