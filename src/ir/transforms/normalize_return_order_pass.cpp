@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <climits>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -34,12 +36,15 @@ namespace {
 // corresponds to.  This replicates the analysis that was previously inlined
 // in orchestration codegen (BuildReturnToParamMapping).
 //
-// For each statement before the final ReturnStmt:
-//   - tile.store assignments:  assigned_var  -> param index of args[2]
-//   - ForStmt:                 return_vars[i] -> param index of iter_args[i]->initValue_
+// Traverses the function body (excluding the final ReturnStmt) and builds
+// var_to_out_param, a map from Var* to the parameter index of the Out/InOut
+// parameter it ultimately originates from.  Handles:
+//   - tile.store assignments:    lhs -> param index of store's output arg
+//   - Var-to-Var assignments:    lhs -> lookup(rhs) if rhs is already mapped
+//   - ForStmt iter_args:         return_var[i] -> lookup(initValue) or find_param
 //
-// For each ReturnStmt value, look up the var in the map above, falling back
-// to direct param-identity matching.
+// For each ReturnStmt value, the var is looked up in var_to_out_param first,
+// then falls back to direct param-identity matching.
 std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
   std::vector<size_t> mapping;
   if (!func || !func->body_) return mapping;
@@ -56,24 +61,39 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
     return SIZE_MAX;
   };
 
+  // Look up v in var_to_out_param; if not found, fall back to direct param match.
+  auto lookup = [&](const std::unordered_map<const Var*, size_t>& m, const Var* v) -> size_t {
+    auto it = m.find(v);
+    return it != m.end() ? it->second : find_param_index(v);
+  };
+
   std::unordered_map<const Var*, size_t> var_to_out_param;
   for (size_t si = 0; si + 1 < seq->stmts_.size(); ++si) {
     if (auto assign = As<AssignStmt>(seq->stmts_[si])) {
       if (!assign->var_) continue;
-      auto call = As<Call>(assign->value_);
-      if (call && call->op_ && call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
-        auto out_param = As<Var>(call->args_[2]);
-        if (out_param) {
-          var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
+      if (auto call = As<Call>(assign->value_)) {
+        // tile.store(tile, offsets, out_param, ...) → lhs tracks out_param
+        if (call->op_ && call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
+          if (auto out_param = As<Var>(call->args_[2])) {
+            var_to_out_param[assign->var_.get()] = find_param_index(out_param.get());
+          }
+        }
+      } else if (auto src_var = As<Var>(assign->value_)) {
+        // Var-to-var assignment: propagate existing mapping
+        size_t idx = lookup(var_to_out_param, src_var.get());
+        if (idx != SIZE_MAX) {
+          var_to_out_param[assign->var_.get()] = idx;
         }
       }
     } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
       for (size_t ri = 0; ri < for_stmt->return_vars_.size() && ri < for_stmt->iter_args_.size(); ++ri) {
         const auto& iter_arg = for_stmt->iter_args_[ri];
         if (!iter_arg || !iter_arg->initValue_ || !for_stmt->return_vars_[ri]) continue;
-        auto init_var = As<Var>(iter_arg->initValue_);
-        if (init_var) {
-          var_to_out_param[for_stmt->return_vars_[ri].get()] = find_param_index(init_var.get());
+        if (auto init_var = As<Var>(iter_arg->initValue_)) {
+          size_t idx = lookup(var_to_out_param, init_var.get());
+          if (idx != SIZE_MAX) {
+            var_to_out_param[for_stmt->return_vars_[ri].get()] = idx;
+          }
         }
       }
     }
@@ -85,12 +105,7 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
       mapping.push_back(SIZE_MAX);
       continue;
     }
-    auto it = var_to_out_param.find(var.get());
-    if (it != var_to_out_param.end()) {
-      mapping.push_back(it->second);
-      continue;
-    }
-    mapping.push_back(find_param_index(var.get()));
+    mapping.push_back(lookup(var_to_out_param, var.get()));
   }
   return mapping;
 }
@@ -116,6 +131,11 @@ std::vector<size_t> ComputeReturnPermutation(const FunctionPtr& func) {
 
   auto out_indices = CollectOutIndices(func);
   if (out_indices.empty()) return {};
+
+  // If there are more Out params than return values the mapping is incomplete
+  // (e.g. some outputs are not yet covered by the IR analysis).  Skip reorder
+  // to avoid constructing an out-of-bounds permutation.
+  if (out_indices.size() > ret_to_param.size()) return {};
 
   // Map param_index -> position in out_indices
   std::unordered_map<size_t, size_t> param_to_out_pos;
@@ -161,7 +181,7 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<size_t>& p
     INTERNAL_CHECK(permutation[i] < new_values.size())
         << "NormalizeReturnOrder: permutation index out of range";
     new_values[permutation[i]] = return_stmt->value_[i];
-    if (i < func->return_types_.size()) {
+    if (i < func->return_types_.size() && permutation[i] < new_return_types.size()) {
       new_return_types[permutation[i]] = func->return_types_[i];
     }
   }
@@ -188,17 +208,24 @@ class TupleIndexPermutationMutator : public IRMutator {
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = VisitExpr(op->value_);
 
-    // Track call results to reordered functions so we can remap
-    // TupleGetItemExpr indices on those results later.
-    if (auto call = As<Call>(new_value)) {
-      if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
-        auto perm_it = permutations_.find(global_var->name_);
-        if (perm_it != permutations_.end() && !perm_it->second.empty()) {
-          auto result_var = op->var_;
-          if (result_var) {
-            reordered_tuple_vars_[result_var.get()] = &perm_it->second;
+    if (op->var_) {
+      if (auto call = As<Call>(new_value)) {
+        // Track call results to reordered functions so we can remap
+        // TupleGetItemExpr indices on those results later.
+        if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+          auto perm_it = permutations_.find(global_var->name_);
+          if (perm_it != permutations_.end() && !perm_it->second.empty()) {
+            reordered_tuple_vars_[op->var_.get()] = &perm_it->second;
+          } else {
+            // Variable reassigned to a non-reordered call: remove stale entry.
+            reordered_tuple_vars_.erase(op->var_.get());
           }
+        } else {
+          reordered_tuple_vars_.erase(op->var_.get());
         }
+      } else {
+        // Non-call assignment: any previous tuple mapping for this var is stale.
+        reordered_tuple_vars_.erase(op->var_.get());
       }
     }
 
@@ -212,16 +239,10 @@ class TupleIndexPermutationMutator : public IRMutator {
     auto new_tuple = IRMutator::VisitExpr(op->tuple_);
 
     int new_index = op->index_;
-    // Check if the tuple source is a call result that was reordered.
-    const Var* tuple_var = nullptr;
+    // Only consider the transformed tuple node (new_tuple).  If VisitExpr
+    // replaced it, any identity-based lookup on op->tuple_ would be stale.
     if (auto var = As<Var>(new_tuple)) {
-      tuple_var = var.get();
-    } else if (auto var = As<Var>(op->tuple_)) {
-      tuple_var = var.get();
-    }
-
-    if (tuple_var) {
-      auto it = reordered_tuple_vars_.find(tuple_var);
+      auto it = reordered_tuple_vars_.find(var.get());
       if (it != reordered_tuple_vars_.end()) {
         const auto& perm = *it->second;
         if (static_cast<size_t>(op->index_) < perm.size() &&
