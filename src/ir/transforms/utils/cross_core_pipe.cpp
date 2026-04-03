@@ -126,21 +126,20 @@ int GetSlotNumForDirMask(int dir_mask) {
 }
 
 std::optional<int64_t> GetCommonSlotSizeBytes(const CrossCorePipeMetadata& metadata) {
-  std::optional<int64_t> common_slot_size;
+  int64_t max_slot_size = 0;
+  bool found_any = false;
   for (const auto* direction : {&metadata.c2v, &metadata.v2c}) {
     if (!direction->has_ops) continue;
-    if (direction->has_inconsistent_slot_size || !direction->slot_size_bytes.has_value()) {
+    // When any observed size is non-static, we cannot infer a slot size.
+    if (direction->observed_slot_sizes.empty()) {
       return std::nullopt;
     }
-    if (!common_slot_size.has_value()) {
-      common_slot_size = direction->slot_size_bytes;
-      continue;
-    }
-    if (common_slot_size.value() != direction->slot_size_bytes.value()) {
-      return std::nullopt;
+    for (int64_t sz : direction->observed_slot_sizes) {
+      max_slot_size = std::max(max_slot_size, sz);
+      found_any = true;
     }
   }
-  return common_slot_size;
+  return found_any ? std::optional<int64_t>(max_slot_size) : std::nullopt;
 }
 
 std::string BuildPipeBufferName(const std::string& func_name, core_affinity::PipeDirection direction) {

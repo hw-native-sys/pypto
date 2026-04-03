@@ -85,10 +85,13 @@ TypePtr DeduceTileRowExpandType(const std::vector<ExprPtr>& args,
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
                       << tile_type->dtype_.ToString() << " and " << row_type->dtype_.ToString();
 
-  // Output has the same shape as the main tile, inheriting pad and blayout from src0
+  // Row-expand ops require row_major destination per hardware ISA.  Inherit
+  // pad/fractal from the main tile but force blayout to row_major so the
+  // resolve pass doesn't need to insert extra reshapes.
   TileView tile_view;
   tile_view.valid_shape = tile_shape;
   InheritTileViewLayout(tile_view, tile_type);
+  tile_view.blayout = TileLayout::row_major;
   return std::make_shared<TileType>(tile_shape, *result_dtype, std::nullopt, tile_view);
 }
 

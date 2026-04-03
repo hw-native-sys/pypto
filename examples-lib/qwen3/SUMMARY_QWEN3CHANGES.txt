@@ -1,0 +1,266 @@
+================================================================================
+SUMMARY OF CHANGES: qwen-src/ → qwen3/
+================================================================================
+
+This document summarizes all differences between the original files in
+examples-lib/qwen-src/ and the adapted files in examples-lib/qwen3/.
+
+File mapping:
+  qwen-src/qwen3-32b.py                              → qwen3/qwen3_32b_new.py
+  qwen-src/qwen3_32b_prefill.py                      → qwen3/qwen3_32b_prefill_new.py
+  qwen-src/qwen3_32b_prefill_tilelet.py               → qwen3/qwen3_32b_prefill_tilelet_new.py
+  qwen-src/qwen3_32b_decode.py                       → qwen3/qwen3_32b_decode_new.py
+  qwen-src/qwen3_32b_decode_scope2.py                → qwen3/qwen3_32b_decode_scope2_new.py
+  qwen-src/qwen3_32b_decode_tilelet.py               → qwen3/qwen3_32b_decode_tilelet_new.py
+  qwen-src/qwen3_32b_training_forward_and_backward.py → qwen3/qwen3_32b_training_forward_and_backward_new.py
+
+
+================================================================================
+1. CROSS-CUTTING CHANGES (applied to most or all files)
+================================================================================
+
+1.1  Backend / RunConfig
+  - BackendType changed: CCE → Ascend950.
+  - RunConfig field changes: removed work_dir=, added save_kernels=True and
+    save_kernels_dir=work_dir.
+  - compile_and_run now returns early when "code_runner" is in result.error
+    (print compile-OK message only, no double-printing).
+
+1.2  pl.full / pl.concat removed
+  - pl.full(..., value=0.0) replaced by pl.create_tensor(...) + pl.mul(..., 0.0).
+  - pl.concat replaced by pl.create_tensor + pl.assemble at column offsets
+    (used in RoPE construction).
+
+1.3  pl.reshape for 3D→2D slicing
+  - When slicing from 3D tensors (hidden_states, target_states), the new code
+    uses a 3D slice shape [1, TOK_TILE, CHUNK] then pl.reshape to [TOK_TILE,
+    CHUNK], instead of slicing directly as 2D.
+
+1.4  Error handling
+  - compile_and_run returns immediately after printing "COMPILE OK — device run
+    skipped" on code_runner-missing path, preventing double error output.
+
+
+================================================================================
+2. qwen3-32b.py → qwen3_32b_new.py  (Decode, single-layer)
+================================================================================
+
+2.1  Constants
+  - SEQ_TILE: 120 → 64.
+  - New: Q_HEAD_BATCH = 8, Q_HEAD_PAD = 16 (grouped Q-heads + cube padding).
+
+2.2  Scope 2 — K path (cache write)
+  - Old: per-head parallel loop (pl.parallel with chunk=4), per-head [1, HEAD_DIM]
+    RoPE with create_tensor + assemble halves, direct k_cache/v_cache assemble.
+  - New: three staged pl.incore() blocks:
+    (1) Build k_group [NUM_KV_HEADS, HEAD_DIM] FP32 from k_proj.
+    (2) Batched RoPE on k_group → k_rot_tensor.
+    (3) Loop ki: write k_rot_tensor rows to k_cache, v_proj to v_cache.
+
+2.3  Scope 2 — Attention (GQA grouping)
+  - Old: pl.parallel over heads (chunk=8); per-head [1, HEAD_DIM] Q, RoPE,
+    online softmax with [1, HEAD_DIM]/[1,1] accumulators.
+  - New: pl.parallel over TOTAL_Q_GROUPS (no chunk); each group processes
+    Q_HEAD_BATCH=8 heads sharing one KV head.
+  - Q padded to [Q_HEAD_PAD, HEAD_DIM] for cube fractal alignment.
+  - Online softmax accumulators: [Q_HEAD_BATCH, HEAD_DIM], [Q_HEAD_BATCH, 1].
+  - QK matmul: padded Q × K with b_trans=True → FP32 scores.
+  - Softmax: fillpad(min) then scale (scale moved after pad); BF16 round-trip
+    on exp for cur_li computation.
+  - SV matmul: padded exp × V → slice result to [Q_HEAD_BATCH, HEAD_DIM].
+  - Write back: pl.reshape ctx to [1, Q_HEAD_BATCH * HEAD_DIM], assemble at
+    q_base * HEAD_DIM offset.
+
+2.4  Scope 2 — Wrapping
+  - Old: one large pl.auto_incore() around entire attention.
+  - New: many explicit pl.incore() stages (avoids MixedKernelExpanded issues).
+
+2.5  Batch loop
+  - pl.parallel(0, BATCH, 1, chunk=4) → pl.parallel(BATCH).
+
+2.6  New helpers
+  - build_tensor_specs, compile_and_run, __main__ block added (old file had
+    none of these).
+
+
+================================================================================
+3. qwen3_32b_prefill.py → qwen3_32b_prefill_new.py
+================================================================================
+
+  - Kernel/graph: identical (byte-for-byte same PyPTO program).
+  - Only changes:
+    (a) import os added.
+    (b) compile_and_run gains optional work_dir parameter.
+    (c) RunConfig adds save_kernels=True, save_kernels_dir=work_dir.
+    (d) Default work_dir derived from __file__ path (qwen3_32b_prefill_dump).
+
+
+================================================================================
+4. qwen3_32b_prefill_tilelet.py → qwen3_32b_prefill_tilelet_new.py
+================================================================================
+
+  - Only change in kernel: RoPE construction.
+    Old: pl.concat(low_half, high_half) for both K and Q RoPE.
+    New: pl.create_tensor + two pl.assemble calls at column offsets [0,0] and
+         [0, HEAD_DIM//2].
+  - Rest of kernel (Scope 1, attention, Scope 3): unchanged.
+  - Helpers/RunConfig: unchanged.
+
+
+================================================================================
+5. qwen3_32b_decode.py → qwen3_32b_decode_new.py
+================================================================================
+
+  Same changes as section 2 (qwen3-32b.py → qwen3_32b_new.py):
+  - SEQ_TILE 120 → 64, Q_HEAD_BATCH=8, Q_HEAD_PAD=16.
+  - K path: parallel per-head → staged incore batched RoPE.
+  - Attention: per-head → grouped Q with padding, fillpad softmax, BF16 exp
+    round-trip, first-seq-block special-case for online softmax.
+  - Wrapping: auto_incore → explicit incore stages.
+  - compile_and_run: early return on code_runner-missing.
+
+
+================================================================================
+6. qwen3_32b_decode_scope2.py → qwen3_32b_decode_scope2_new.py
+================================================================================
+
+  - Only change in kernel: oi/li/mi accumulator initialization.
+    Old: pl.full([...], value=0.0) + pl.reshape for li/mi.
+    New: pl.create_tensor outside incore, then pl.mul(..., 0.0) inside incore.
+  - compile_and_run: early return on code_runner-missing (no double-print).
+
+
+================================================================================
+7. qwen3_32b_decode_tilelet.py → qwen3_32b_decode_tilelet_new.py
+================================================================================
+
+  - Same accumulator init change as decode_scope2 (pl.full → create_tensor +
+    mul(0.0)).
+  - Removed unused backend variable from compile_and_run.
+  - compile_and_run: early return on code_runner-missing.
+
+
+================================================================================
+8. qwen3_32b_training_forward_and_backward.py →
+   qwen3_32b_training_forward_and_backward_new.py
+================================================================================
+
+8.1  Constants (scaled down for testing)
+  - BATCH: 64 → 1  (64//64).
+  - MAX_SEQ: 4096 → 4  (4096//1024).
+  - HIDDEN: 5120 → 80  (5120//64).
+  - INTERMEDIATE: 25600 → 400  (25600//64).
+  - K_CHUNK: 64 → 4  (64//16).
+  - Q_OUT_CHUNK: 128 → 8  (128//16).
+  - MLP_OUT_CHUNK: 256 → 16  (256//16).
+
+8.2  Top-level tensor allocation
+  - loss_acc [TOK_TILE, 1] FP32 created outside all incore scopes (was
+    previously inside the single auto_incore).
+  - muon_buf [MLP_OUT_CHUNK, MLP_OUT_CHUNK] FP32 created at top level as
+    staging buffer for Newton-Schulz iterations (written by assemble,
+    read back by slice in separate incore scopes to force memory
+    round-trip).
+  - Old scratch buffers (muon_scratch, proxy_scratch, btrans_scratch) removed.
+
+8.3  Incore scope structure (major restructuring)
+  Original: one monolithic pl.auto_incore() around the entire function body.
+  New: split into many separate incore scopes to stay within Vec buffer
+  limit (253952 bytes):
+    (a) Gradient zeroing: two pl.incore() blocks — one for small grad
+        tensors (wq/wk/wv/wo), one for large grads (w_gate/w_up/w_down)
+        with chunked MLP_OUT_BLOCKS loop.
+    (b) Forward + backward: per-token pl.auto_incore() inside the batch/
+        position loop body.
+    (c) Weight gradient stages: per-block pl.auto_incore() (see 8.7).
+    (d) Loss extraction: separate pl.incore() at the end.
+
+8.4  Forward pass
+  - 3D→2D slicing: pl.reshape(pl.slice(tensor, [1, TOK, CHUNK], ...),
+    [TOK, CHUNK]) pattern used for hidden_states and target_states.
+  - Attention scores: k_c loaded directly from k_proj_tile and used with
+    b_trans=True in matmul (no staging buffer needed).
+  - Attention context: explicit ctx_acc zeroed via pl.mul(ctx_acc, 0.0)
+    then accumulated via pl.add(ctx_acc, matmul(...)).
+  - O projection residual: reshape-after-slice for hidden_states.
+
+8.5  Loss accumulation
+  - Old: per-token loop with tensor.read and [1,1] scalar tensors.
+  - New: vector add with [TOK_TILE, 1] accumulator (loss_prev + sq_row).
+  - loss_out changed from [1] to [TOK_TILE, 1] to match loss_acc directly,
+    avoiding layout mismatch (nd vs dn) during tile.store.
+
+8.6  Backward pass
+  - MLP backward: d_mlp cast to BF16 before matmul with w_down chunk.
+  - Gate/up gradients: d_gate_bf16 / d_up_bf16 intermediate BF16 casts,
+    sequential add pattern instead of fused add(add(matmul, matmul)).
+  - Attention backward: q_c/k_c renamed to q_bwd/k_bwd to avoid type
+    reassignment with forward-pass variables of different shapes.
+
+8.7  Weight gradients + Muon optimizer (major rewrite)
+  Three stages, each processing one weight block per iteration with
+  the outer loop OUTSIDE the incore scope:
+
+  Stage 1 (grad_w_down): for each Q_OUT block:
+    - One auto_incore: compute proxy gradient (a_trans=True matmul of
+      proxy_mlp × proxy_go), momentum update, assemble into muon_buf.
+    - Newton-Schulz loop (MUON_NS_STEPS iterations, each in its own
+      auto_incore): slice muon iterate from muon_buf in memory, compute
+      Gram matrix G'=X@X^T via b_trans=True, update X←1.5X−0.5·G'@X,
+      assemble result back to muon_buf.
+    - One auto_incore: extract final iterate, apply learning rate, assemble
+      into grad_w_down.
+
+  Stage 2 (grad_wo/wq/wk/wv): same pattern per Q_OUT block, with each
+    weight (wo, wq, wk, wv) having its own gradient+momentum+NS sequence.
+
+  Stage 3 (grad_w_gate/w_up): same pattern per MLP_OUT block.
+
+  Key design decisions for the Muon Newton-Schulz implementation:
+    (a) Gram matrix reformulated: uses b_trans=True (G'=X@X^T) instead of
+        a_trans=True (G=X^T@X). Update becomes G'@X instead of X@G.
+        Mathematically equivalent by associativity: X@(X^T@X) = (X@X^T)@X.
+    (b) The b_trans=True formulation generates tile.load(transpose=True)
+        from memory to Mem.Mat, instead of tile.transpose in Mem.Vec which
+        triggers a codegen bug (matmul K-dimension mismatch) during PTO
+        code generation for non-square operands.
+    (c) NS loop placed outside auto_incore so each step's matmul operands
+        come from pl.slice of muon_buf (a tensor in memory), not from
+        computed Vec tiles. This forces the converter to use transposed
+        memory loads rather than Vec transposes.
+    (d) muon_buf serves as the staging tensor — written via pl.assemble at
+        end of each NS step, read back via pl.slice at start of next step.
+        The loop boundary prevents the optimizer from eliminating the
+        memory round-trip.
+
+8.8  Variable naming
+  - Unique variable names per stage to avoid PyPTO type reassignment errors:
+    mu_s1/gram_s1/ns_update_s1 (stage 1), mu_wo/gram_wo/ns_upd_wo (stage 2
+    wo), mu_wq/gram_wq/ns_upd_wq (stage 2 wq), etc.
+  - proxy_tgt_q/proxy_tgt_k/proxy_tgt_v, proxy_n_k/proxy_n_v,
+    proxy_post_g/proxy_post_u to avoid reusing names across different shapes.
+
+8.9  Backend
+  - BackendType.CCE → BackendType.Ascend950.
+  - save_kernels / save_kernels_dir added to RunConfig.
+
+
+================================================================================
+SUMMARY TABLE
+================================================================================
+
+File pair                  | Key changes
+---------------------------+-----------------------------------------------------
+qwen3-32b → _new           | SEQ_TILE 120→64, grouped Q (Q_HEAD_BATCH=8),
+                           | multi-stage incore, fillpad softmax, helpers added
+prefill → _new             | save_kernels config only
+prefill_tilelet → _new     | RoPE: concat → create_tensor+assemble
+decode → _new              | Same as qwen3-32b (grouped Q, staged incore, etc.)
+decode_scope2 → _new       | Accumulator init: full → create_tensor+mul
+decode_tilelet → _new      | Accumulator init: full → create_tensor+mul
+training_fwd_bwd → _new    | Scaled constants, multi-scope incore, reshape-after-
+                           | slice, Muon NS with muon_buf staging & b_trans Gram,
+                           | vector loss, unique variable names, Ascend950
+---------------------------+-----------------------------------------------------
+All files                  | CCE→Ascend950, save_kernels, early return on
+                           | code_runner error, pl.full removed

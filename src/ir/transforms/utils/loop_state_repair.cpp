@@ -13,8 +13,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -107,9 +109,18 @@ StmtPtr FilterYieldStmt(const StmtPtr& stmt, const std::vector<size_t>& kept_ind
   });
 }
 
-StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>& iter_args,
-                             const std::unordered_set<const Var*>& defined_vars) {
-  return TransformLastStmt(stmt, [&](const StmtPtr& s) -> StmtPtr {
+namespace {
+
+std::string ExtractBaseName(const std::string& name_hint) {
+  auto pos = name_hint.find("__");
+  return pos != std::string::npos ? name_hint.substr(0, pos) : name_hint;
+}
+
+using YieldFixFn = std::function<StmtPtr(const StmtPtr&)>;
+
+YieldFixFn MakeYieldFixer(const std::vector<IterArgPtr>& mapped_args,
+                          const std::unordered_set<const Var*>& defined_vars) {
+  return [&mapped_args, &defined_vars](const StmtPtr& s) -> StmtPtr {
     auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(s);
     if (!yield_stmt) return s;
 
@@ -119,14 +130,56 @@ StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>&
       refs.VisitExpr(yield_stmt->value_[i]);
       bool has_undefined = std::any_of(refs.var_refs.begin(), refs.var_refs.end(),
                                        [&](const Var* ref) { return !defined_vars.count(ref); });
-      if (has_undefined && i < iter_args.size()) {
-        new_values.push_back(iter_args[i]);
+      if (has_undefined && i < mapped_args.size() && mapped_args[i]) {
+        new_values.push_back(mapped_args[i]);
       } else {
         new_values.push_back(yield_stmt->value_[i]);
       }
     }
     return std::make_shared<YieldStmt>(new_values, yield_stmt->span_);
-  });
+  };
+}
+
+}  // namespace
+
+StmtPtr FixDanglingYieldStmt(const StmtPtr& stmt, const std::vector<IterArgPtr>& iter_args,
+                             const std::unordered_set<const Var*>& defined_vars) {
+  // IfStmt branch yields correspond to the IfStmt's return_vars, not to the
+  // enclosing loop's iter_args.  Build a per-return-var mapping so that a
+  // dangling yield at position k is replaced with the iter_arg whose base
+  // name matches return_vars_[k], rather than iter_args[k].
+  if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+    std::vector<IterArgPtr> rv_mapped_args;
+    rv_mapped_args.reserve(if_stmt->return_vars_.size());
+    for (const auto& rv : if_stmt->return_vars_) {
+      std::string rv_base = ExtractBaseName(rv->name_hint_);
+      IterArgPtr match;
+      for (const auto& ia : iter_args) {
+        if (ExtractBaseName(ia->name_hint_) == rv_base) {
+          match = std::dynamic_pointer_cast<const IterArg>(ia);
+          if (!match) match = ia;
+          break;
+        }
+      }
+      rv_mapped_args.push_back(match);
+    }
+
+    auto fixer = MakeYieldFixer(rv_mapped_args, defined_vars);
+    auto then_stmts = transform_utils::FlattenToStmts(if_stmt->then_body_);
+    if (!then_stmts.empty()) {
+      then_stmts.back() = TransformLastStmt(then_stmts.back(), fixer);
+    }
+    auto else_stmts = ProcessElseBranch(if_stmt, [&](std::vector<StmtPtr> es) {
+      if (!es.empty()) {
+        es.back() = TransformLastStmt(es.back(), fixer);
+      }
+      return es;
+    });
+    return RebuildIfStmt(if_stmt, then_stmts, else_stmts);
+  }
+
+  auto fixer = MakeYieldFixer(iter_args, defined_vars);
+  return TransformLastStmt(stmt, fixer);
 }
 
 std::vector<StmtPtr> FixDanglingLoopBodyYields(const std::vector<StmtPtr>& stmts,
@@ -332,6 +385,12 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       body_def_collector.VisitStmt(body);
       auto all_defined = defined_so_far;
       all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
+      for (const auto& ia : iter_args) {
+        all_defined.insert(ia.get());
+      }
+      if (for_stmt) {
+        all_defined.insert(for_stmt->loop_var_.get());
+      }
 
       auto body_stmts = FixupDanglingYieldValues(FlattenBody(body));
       body_stmts = FixDanglingLoopBodyYields(body_stmts, iter_args, all_defined);

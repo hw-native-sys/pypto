@@ -313,10 +313,20 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   };
 
   if (metadata.c2v.has_inconsistent_slot_size) {
-    report_slot_issue("with inconsistent slot sizes", metadata.c2v, "C2V");
+    diagnostics.emplace_back(DiagnosticSeverity::Warning, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ + "' uses C2V cross-core tiles " +
+                                 "with inconsistent slot sizes: " +
+                                 FormatObservedSlotSizes(metadata.c2v.observed_slot_sizes) +
+                                 "; using max as common slot size",
+                             func->span_);
   }
   if (metadata.v2c.has_inconsistent_slot_size) {
-    report_slot_issue("with inconsistent slot sizes", metadata.v2c, "V2C");
+    diagnostics.emplace_back(DiagnosticSeverity::Warning, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ + "' uses V2C cross-core tiles " +
+                                 "with inconsistent slot sizes: " +
+                                 FormatObservedSlotSizes(metadata.v2c.observed_slot_sizes) +
+                                 "; using max as common slot size",
+                             func->span_);
   }
   if ((metadata.c2v.has_ops && !metadata.c2v.slot_size_bytes.has_value()) ||
       (metadata.v2c.has_ops && !metadata.v2c.slot_size_bytes.has_value())) {
@@ -330,13 +340,13 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   if (metadata.c2v.has_ops && metadata.v2c.has_ops && metadata.c2v.slot_size_bytes.has_value() &&
       metadata.v2c.slot_size_bytes.has_value() &&
       metadata.c2v.slot_size_bytes.value() != metadata.v2c.slot_size_bytes.value()) {
-    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+    diagnostics.emplace_back(DiagnosticSeverity::Warning, "MixedKernelExpanded", 0,
                              "Function '" + func->name_ +
                                  "' uses bidirectional cross-core tiles with different "
                                  "slot sizes (C2V=" +
                                  std::to_string(metadata.c2v.slot_size_bytes.value()) +
                                  ", V2C=" + std::to_string(metadata.v2c.slot_size_bytes.value()) +
-                                 "); single initialize_pipe slot_size is unsupported",
+                                 "); using max as common slot size",
                              func->span_);
   }
 

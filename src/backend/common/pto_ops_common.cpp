@@ -86,6 +86,8 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
       "tile.subsc",
+      // Tile extract/slice
+      "tile.extract",
   };
   return kRowMajorOps.count(op_name) > 0;
 }
@@ -1145,6 +1147,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       }
       reg_entry.set_output_layout(ir::TileLayout::row_major);
     }
+    // Row-expand broadcast ops: only the main tile (input 0) must be
+    // row_major; the row/col vector (input 1) keeps its native layout.
+    static const std::unordered_set<std::string_view> kRowExpandOps = {
+        "tile.row_expand_mul", "tile.row_expand_sub",
+        "tile.row_expand_div", "tile.row_expand_add",
+    };
+    if (kRowExpandOps.count(entry.op_name) > 0) {
+      reg_entry.set_input_layout(0, ir::TileLayout::row_major);
+      reg_entry.set_output_layout(ir::TileLayout::row_major);
+    }
   }
 
   // Register ops with custom codegen logic
@@ -1365,49 +1377,52 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     return std::string("");
   });
-  reg("tile.slice", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
-    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-    CHECK(op->args_.size() == 3 || op->args_.size() == 4)
-        << "Operation:[tile.slice] requires 3 or 4 arguments (tile, shape, offset[, valid_shape]), but got "
-        << op->args_.size();
+  if (exclude_ops.count("tile.slice") == 0) {
+    auto slice_entry = backend.RegisterOp("tile.slice");
+    slice_entry.f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+      CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+          << "Operation:[tile.slice] requires 3 or 4 arguments (tile, shape, offset[, valid_shape]), but got "
+          << op->args_.size();
 
-    std::string src = codegen.GetExprAsCode(op->args_[0]);
-    std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+      std::string src = codegen.GetExprAsCode(op->args_[0]);
+      std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
-    auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
-    INTERNAL_CHECK(offset_tuple) << "tile.slice third argument must be a tuple (offset)";
-    INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
-        << "tile.slice offset tuple must have at least 2 elements (row, col), got "
-        << offset_tuple->elements_.size();
-    std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+      auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
+      INTERNAL_CHECK(offset_tuple) << "tile.slice third argument must be a tuple (offset)";
+      INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
+          << "tile.slice offset tuple must have at least 2 elements (row, col), got "
+          << offset_tuple->elements_.size();
+      std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
+      std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
 
-    std::string result_target = codegen.GetCurrentResultTarget();
-    std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
+      std::string result_target = codegen.GetCurrentResultTarget();
+      std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
 
-    // With per-var alloc model, prefer the pre-declared alloc SSA if its type
-    // matches the slice result type
-    auto existing_type = codegen.GetSSATileBufType(result_target);
-    if (!result_type.empty() && existing_type != result_type) {
-      result_target = codegen.AllocNewTileBuf(result_type, "slice_buf");
-      codegen.SetCurrentResultBuf(result_target);
-    } else if (!result_type.empty()) {
-      codegen.RegisterTileBufType(result_target, result_type);
-    }
+      auto existing_type = codegen.GetSSATileBufType(result_target);
+      if (!result_type.empty() && existing_type != result_type) {
+        result_target = codegen.AllocNewTileBuf(result_type, "slice_buf");
+        codegen.SetCurrentResultBuf(result_target);
+      } else if (!result_type.empty()) {
+        codegen.RegisterTileBufType(result_target, result_type);
+      }
 
-    std::ostringstream oss;
-    oss << "pto.textract ins(" << src << ", " << row_off << ", " << col_off;
-    if (!src_type.empty()) {
-      oss << " : " << src_type << ", index, index";
-    }
-    oss << ") outs(" << result_target;
-    if (!result_type.empty()) {
-      oss << " : " << result_type;
-    }
-    oss << ")";
-    codegen.Emit(oss.str());
-    return std::string("");
-  });
+      std::ostringstream oss;
+      oss << "pto.textract ins(" << src << ", " << row_off << ", " << col_off;
+      if (!src_type.empty()) {
+        oss << " : " << src_type << ", index, index";
+      }
+      oss << ") outs(" << result_target;
+      if (!result_type.empty()) {
+        oss << " : " << result_type;
+      }
+      oss << ")";
+      codegen.Emit(oss.str());
+      return std::string("");
+    });
+    slice_entry.set_input_layout(0, ir::TileLayout::row_major);
+    slice_entry.set_output_layout(ir::TileLayout::row_major);
+  }
   reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAssembleCodegenPTO(op, codegen);
   });

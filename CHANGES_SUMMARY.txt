@@ -1,0 +1,145 @@
+Qwen3 Prefill Compilation Fixes — Change Summary
+==================================================
+
+Branch: pypto_changed (commit f9e934c)
+Base: main
+Date: 2026-03-27
+
+9 files changed, 210 insertions(+), 73 deletions(-)
+
+
+1. loop_state_repair.cpp — Fix scf.if yield type mismatch
+---------------------------------------------------------------
+File: src/ir/transforms/utils/loop_state_repair.cpp (+71 -2)
+
+Problem:
+  The else-branch of an scf.if in qwen3_prefill_layer_incore_10 yielded a
+  2D FP32 tensor but the return variable was annotated as 3D BF16.
+  FixDanglingYieldStmt didn't correctly map IfStmt return_vars to loop
+  iter_args.
+
+Fix:
+  - Added ExtractBaseName helper to strip SSA suffixes from variable names.
+  - Added MakeYieldFixer to create a lambda for yield fixes.
+  - Modified FixDanglingYieldStmt to build a mapping (rv_mapped_args) from
+    IfStmt return_vars to corresponding iter_args by matching base names.
+  - Added loop iterators and loop variables to the all_defined set in
+    FixupDanglingYieldValues.
+
+
+2. broadcast.cpp — Force row_major on row_expand op outputs
+---------------------------------------------------------------
+File: src/ir/op/tile_ops/broadcast.cpp (+5 -1)
+
+Problem:
+  tile.row_expand_mul and similar ops inherited col_major layout from
+  tile.matmul outputs via InheritTileViewLayout, but the hardware ISA
+  requires row_major destinations for these ops.
+
+Fix:
+  In DeduceTileRowExpandType, after calling InheritTileViewLayout,
+  explicitly set tile_view.blayout = TileLayout::row_major.
+
+
+3. pto_control_flow_codegen.cpp — Fix IfStmt phi buffer memory space
+---------------------------------------------------------------
+File: src/codegen/pto/pto_control_flow_codegen.cpp (+19)
+
+Problem:
+  When an IfStmt then-branch produced an Acc tile (from tile.matmul) and
+  the else-branch produced a Vec tile, the phi buffer was allocated in Acc
+  memory. The else-branch then tried to emit an unsupported vec->acc tmov.
+
+Fix:
+  - When allocating phi buffers: if the return variable is acc-typed,
+    override to Vec with row_major layout (preserving the original MemRef).
+    This ensures both branches emit supported moves (acc->vec and vec->vec).
+  - When emitting branch yield tmov: skip when both source and destination
+    are acc (they share the same physical buffer, no move needed).
+
+
+4. resolve_backend_op_layouts_pass.cpp — Generalize col_major repair
+---------------------------------------------------------------
+File: src/ir/transforms/resolve_backend_op_layouts_pass.cpp (+28 -6)
+
+Problem:
+  The resolve pass previously only fixed col_major column vectors ([N,1]).
+  Other col_major tiles (e.g. [1, 120] from tile.matmul -> tile.move ->
+  tile.muls) were ignored, causing downstream textract errors.
+
+Fix:
+  - Added NeedsLayoutRepair helper: returns true for any non-row_major tile.
+  - Replaced IsColumnVectorColMajor with NeedsLayoutRepair in
+    IsRepairableCall.
+  - Generalized VisitStmt_ (AssignStmt and EvalStmt): if the input is a
+    column vector, reshape-transpose to [1, N]; if it's any other col_major
+    tile, insert a same-shape reshape to force row_major.
+
+
+5. pto_ops_common.cpp — Register layout requirements for tile.slice
+                         and tile.row_expand_* ops
+---------------------------------------------------------------
+File: src/backend/common/pto_ops_common.cpp (+99 -73)
+
+Problem (tile.slice/tile.extract):
+  tile.slice (which emits pto.textract) is a custom codegen op that was
+  never registered with layout requirements. The resolve pass didn't know
+  tile.slice inputs need row_major, so col_major inputs passed through
+  uncorrected.
+
+Fix:
+  - Added "tile.extract" to the kRowMajorOps set in RequiresRowMajorLayout.
+  - Changed tile.slice registration from the reg() helper to a direct
+    backend.RegisterOp("tile.slice") call with set_input_layout(0, row_major)
+    and set_output_layout(row_major).
+
+Problem (tile.row_expand_*):
+  Adding tile.row_expand_mul to kRowMajorOps caused the resolve pass to
+  incorrectly transpose the second argument ([M,1] column vector -> [1,M]),
+  violating the op's argument requirements.
+
+Fix:
+  - Added a dedicated kRowExpandOps set for tile.row_expand_mul/sub/div/add.
+  - These get specialized layout registration: set_input_layout(0, row_major)
+    and set_output_layout(row_major) only. Input 1 (column vector) is left
+    unconstrained so the resolve pass doesn't reshape it.
+
+
+6. pto_codegen.cpp — Fix [N,1] column vector tensor layout inference
+---------------------------------------------------------------
+File: src/codegen/pto/pto_codegen.cpp (+16 -1)
+
+Problem:
+  2D column vectors ([N,1] with N > 1) produce degenerate strides [1,1]
+  under ND layout. ptoas infers DN for such strides. But [1,1] scalar
+  tiles were also caught by this rule, breaking ops like trowexpandmul
+  that require row-major destinations.
+
+Fix:
+  - In EmitMakeTensorViews: detect [N,1] column vectors with N > 1
+    (excluding [1,1] scalars) and set layout_DN = true.
+  - Fixed layout string emission to use the computed layout_DN flag
+    ("dn" vs "nd").
+
+
+7. runner.py — Allow golden=None for compile-only runs
+---------------------------------------------------------------
+File: python/pypto/runtime/runner.py (+10 -1)
+
+Problem:
+  run() unconditionally called write_golden() even when golden=None
+  (compile-only mode), causing ValueError.
+
+Fix:
+  - Changed golden parameter type to Callable | None = None.
+  - Guarded write_golden and _execute_on_device with if golden is not None.
+
+
+8. cross_core_pipe.cpp — Pre-existing fix (not part of this effort)
+---------------------------------------------------------------
+File: src/ir/transforms/utils/cross_core_pipe.cpp (+17 -7)
+
+
+9. mixed_kernel_expanded_verifier.cpp — Pre-existing fix (not part of this effort)
+---------------------------------------------------------------
+File: src/ir/verifier/mixed_kernel_expanded_verifier.cpp (+18 -4)

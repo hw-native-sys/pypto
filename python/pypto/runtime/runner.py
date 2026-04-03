@@ -361,7 +361,7 @@ def compile_program(
 def run(
     program: Any,
     tensor_specs: list[TensorSpec],
-    golden: Callable,
+    golden: Callable | None = None,
     config: RunConfig | None = None,
 ) -> RunResult:
     """Compile *program* and run it on device, validating against *golden*.
@@ -417,19 +417,21 @@ def run(
             disabled_warnings=config.disabled_warnings,
         )
 
-        # 3. Write golden.py
+        # 3. Write golden.py (skip when no golden function is provided)
         golden_path = work_dir / "golden.py"
-        write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
+        if golden is not None:
+            write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
 
         # 4. Execute via Simpler's CodeRunner
-        _execute_on_device(
-            work_dir,
-            golden_path,
-            config.platform,
-            config.device_id,
-            config.pto_isa_commit,
-            config.enable_profiling,
-        )
+        if golden is not None:
+            _execute_on_device(
+                work_dir,
+                golden_path,
+                config.platform,
+                config.device_id,
+                config.pto_isa_commit,
+                config.enable_profiling,
+            )
 
         return RunResult(passed=True, execution_time=time.time() - start_time)
 

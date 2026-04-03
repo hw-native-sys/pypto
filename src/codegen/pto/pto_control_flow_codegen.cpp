@@ -165,6 +165,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         INTERNAL_CHECK(tile_type->memref_.has_value())
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
         std::string tile_type_string = GetTileBufTypeStringFromTileType(tile_type);
+        // IfStmt phi buffers must be in vec memory so both branches can emit
+        // supported tmov (acc→vec from then-branch, vec→vec from else-branch).
+        // Hardware does not support vec→acc tmov.
+        if (tile_type_string.find("loc=acc") != std::string::npos) {
+          ir::TileView vec_view;
+          vec_view.valid_shape = tile_type->shape_;
+          vec_view.blayout = ir::TileLayout::row_major;
+          vec_view.slayout = ir::TileLayout::none_box;
+          auto vec_tile_type = std::make_shared<ir::TileType>(
+              tile_type->shape_, tile_type->dtype_, tile_type->memref_,
+              vec_view, ir::MemorySpace::Vec);
+          tile_type_string = GetTileBufTypeStringFromTileType(vec_tile_type);
+        }
         std::string addr_ssa;
         std::string valid_row_ssa;
         std::string valid_col_ssa;
