@@ -273,10 +273,13 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
                                           const std::vector<ExprPtr>& args,
                                           const std::vector<TypePtr>& return_types) {
   if (return_types.empty()) return return_types;
+  CHECK(callee_params.size() == args.size())
+      << "DeduceCallReturnType: callee_params size (" << callee_params.size() << ") must match args size ("
+      << args.size() << ")";
 
   // 1. Build Var* -> ExprPtr mapping from param shapes vs arg shapes
   std::unordered_map<const Var*, ExprPtr> var_map;
-  size_t n = std::min(callee_params.size(), args.size());
+  size_t n = callee_params.size();
   for (size_t i = 0; i < n; ++i) {
     auto param_type = callee_params[i]->GetType();
     auto arg_type = args[i]->GetType();
