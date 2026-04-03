@@ -809,6 +809,40 @@ class TestEdgeCases:
         After = passes.convert_to_ssa()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_tensor_view_valid_shape_substitution(self):
+        """Variables in TensorView.valid_shape must be renamed after SSA (issue #853)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                valid_len: pl.Scalar[pl.INDEX] = pl.min(n, 64)
+                chunk: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.slice(
+                    x, [8, 64], [0, 0], valid_shape=[8, valid_len]
+                )
+                return chunk
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 64], pl.FP32]:
+                valid_len_0: pl.Scalar[pl.INDEX] = pl.min(n, 64)
+                chunk_0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.slice(
+                    x, [8, 64], [0, 0], valid_shape=[8, valid_len_0]
+                )
+                return chunk_0
+
+        After = passes.convert_to_ssa()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_unused_variable(self):
         """Unused variable should still be versioned."""
 
