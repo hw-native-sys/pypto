@@ -2,6 +2,19 @@
 
 ## 概述
 
+PyPTO 是一个面向 AI 加速器的编译框架。用户使用 Python DSL 描述计算程序，经过编译管线最终生成可在硬件上执行的 C++ 内核代码。
+
+![PyPTO 架构](../../../images/pypto-arch.png)
+
+编译管线由四个主要层次组成：
+
+| 层次 | 描述 |
+| ---- | ---- |
+| **Python DSL** | 用户通过 `@pl.program` / `@pl.function` 描述计算逻辑 |
+| **IR** | 不可变树结构，贯穿整个编译过程 |
+| **Pass 管线** | 一系列变换 Pass，将高层 IR 逐步降级为可生成代码的形式 |
+| **CodeGen** | 生成内核 C++（InCore/Cluster）和 Orchestration C++ |
+
 PyPTO 的中间表示 (IR) 是一种基于树的不可变数据结构，用于在编译过程中表示程序。IR 是程序变换、优化和代码生成 (CodeGen) 的基础。
 
 **核心设计原则：**

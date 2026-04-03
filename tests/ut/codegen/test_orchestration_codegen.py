@@ -109,33 +109,6 @@ class TestOrchestration:
                 };
             }
 
-
-            static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(addr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
-            }
-
-            static inline Tensor make_tensor_2d_dn(
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(nullptr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
-            }
-
             __attribute__((visibility("default")))
             void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args, int orch_thread_num, int orch_thread_index) {
                 (void)orch_thread_num;
@@ -379,33 +352,6 @@ class TestOrchestration:
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 3,
                 };
-            }
-
-
-            static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(addr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
-            }
-
-            static inline Tensor make_tensor_2d_dn(
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(nullptr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
             }
 
             __attribute__((visibility("default")))
@@ -786,33 +732,6 @@ class TestOrchestration:
                 return PTO2OrchestrationConfig{
                     .expected_arg_count = 7,
                 };
-            }
-
-
-            static inline Tensor make_tensor_external_2d_dn(void* addr,
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(addr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
-            }
-
-            static inline Tensor make_tensor_2d_dn(
-                const uint32_t shapes[],
-                uint32_t ndims,
-                DataType dtype = DataType::FLOAT32,
-                int32_t version = 0) {
-                debug_assert(ndims == 2);
-                static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-                uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-                Tensor base = make_tensor_external(nullptr, raw_shapes, ndims, dtype, false, version);
-                uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-                return base.view(logical_shapes, zero_offsets);
             }
 
             __attribute__((visibility("default")))

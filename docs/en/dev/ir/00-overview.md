@@ -2,6 +2,19 @@
 
 ## Overview
 
+PyPTO is a compiler framework for AI accelerators. Users describe computation programs using the Python DSL, which then flows through the compilation pipeline to produce C++ kernel code that runs on the target hardware.
+
+![PyPTO Architecture](../../../images/pypto-arch.png)
+
+The compilation pipeline is organized into four main layers:
+
+| Layer | Description |
+| ----- | ----------- |
+| **Python DSL** | Users describe computation logic via `@pl.program` / `@pl.function` |
+| **IR** | Immutable tree structure that spans the entire compilation process |
+| **Pass Pipeline** | A sequence of transformation passes that progressively lower the IR toward code-generatable form |
+| **CodeGen** | Generates InCore/Cluster kernel C++ and Orchestration C++ |
+
 PyPTO's Intermediate Representation (IR) is a tree-based, immutable data structure used to represent programs during compilation. The IR serves as the foundation for program transformation, optimization, and code generation.
 
 **Key Design Principles:**

@@ -60,10 +60,8 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   // tensor.create emits TensorCreateInfo for runtime memory allocation via add_output().
-  // For non-DN tensors, the Tensor binding is emitted at the task submission site:
+  // The Tensor binding is emitted at the task submission site:
   //   const Tensor& var = outs_tN.get_ref(i);
-  // For DN tensors, a null-addr placeholder with view transformation is pre-declared here,
-  // and copy-assigned at the submission site (unchanged behavior).
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 
@@ -81,15 +79,6 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   std::string dtype_str = codegen.GetRuntimeDataTypeString(result_type->dtype_);
   oss << "TensorCreateInfo " << result_var << "_ci(" << result_var << "_ci_shapes, " << ndim << ", "
       << dtype_str << ");";
-
-  // DN layout: pre-declare null Tensor with logical view (copy-assigned after submit).
-  bool is_dn = result_type->IsDNLayout();
-  if (is_dn) {
-    CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
-    oss << "\nTensor " << result_var << " = make_tensor_2d_dn(" << result_var << "_ci_shapes, " << ndim
-        << ", " << dtype_str << ");";
-  }
-  // Non-DN: no placeholder; const Tensor& var declared at submit site via outs_tN.get_ref(i).
   return oss.str();
 }
 

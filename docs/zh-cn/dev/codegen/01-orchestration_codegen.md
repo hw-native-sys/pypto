@@ -65,55 +65,45 @@ REGISTER_ORCHESTRATION_OP("tensor.slice", TensorSliceHandler);
 
 `GenerateOrchestration()` 分 9 个阶段生成 C++：
 
-### 阶段 1–2：模板代码
+### 阶段 1：模板代码
 
 ```cpp
-// 阶段 1：头文件包含
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "pto_orchestration_api.h"
-
-// 阶段 2：辅助函数
-static uint64_t float_to_u64(float f) { ... }
-static inline Tensor make_tensor_external_2d_dn(...) { ... }
-static inline Tensor make_tensor_2d_dn(...) { ... }
 ```
 
-### 阶段 3–4：入口点
+### 阶段 2–3：入口点
 
 ```cpp
-// 阶段 3：配置函数 — 返回期望的参数数量
+// 阶段 2：配置函数 — 返回期望的参数数量
 PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-// 阶段 4：入口函数签名
+// 阶段 3：入口函数签名
 void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
     int orch_thread_num, int orch_thread_index) {
 ```
 
-### 阶段 5–6：张量设置
+### 阶段 4–5：张量设置
 
 ```cpp
-// 阶段 5：外部张量 — ND 布局调用 from_tensor_arg()
+// 阶段 4：外部张量 — 所有布局统一调用 from_tensor_arg()
 Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
 Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
+Tensor ext_dn = from_tensor_arg(orch_args.tensor(2));
 
-// DN 布局：传入逻辑形状 — make_tensor_external_2d_dn 内部处理轴转置
-uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shapes[1]};
-Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
-
-// 阶段 6：内部张量（来自 pl.create_tensor — 仅中间变量）
-// 此处仅生成 TensorCreateInfo。Tensor 变量在提交处绑定：
-//   non-DN: const Tensor& tmp = outs_t0.get_ref(0);  （提交处声明）
-//   DN:     Tensor tmp = make_tensor_2d_dn(...);       （此处声明，提交后 copy-assign）
+// 阶段 5：内部张量（来自 pl.create_tensor — 仅中间变量）
+// TensorCreateInfo 在此处生成，Tensor 变量在提交处绑定：
+//   const Tensor& tmp = outs_t0.get_ref(0);
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
-### 阶段 7–9：任务提交与控制流
+### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `PTO2_SCOPE()` 中：
 
@@ -139,10 +129,8 @@ PTO2_SCOPE() {
 
 | 类型 | 来源 | C++ 构造方式 | 命名 |
 | ---- | ---- | ------------ | ---- |
-| 外部（ND） | 函数参数（`In`/`Out`/`InOut`） | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
-| 外部（DN） | 函数参数，DN 布局 | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
-| 内部（non-DN） | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + 提交处 `const Tensor& var` 绑定 | `<name>`（无前缀） |
-| 内部（DN） | 函数体中的 `pl.create_tensor(...)`，DN 布局 | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_2d_dn(...)` | `<name>`（无前缀） |
+| 外部（ND/DN） | 函数参数（`In`/`Out`/`InOut`） | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
+| 内部 | 函数体中的 `pl.create_tensor(...)` | `TensorCreateInfo var_ci(...)` + 提交处 `const Tensor& var` 绑定 | `<name>`（无前缀） |
 
 外部张量封装从主机通过 `ChipStorageTaskArgs` 传入的设备内存指针。内部张量在传入 `add_output(var_ci)` 时由运行时从环形缓冲区分配。
 
@@ -154,18 +142,16 @@ PTO2_SCOPE() {
 | ---- | ----------- | ------------ | ---- |
 | `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读；若为 `pl.create_tensor` 变量，首次使用改用 `add_output` 分配内存 |
 | `Out`（外部） | `pl.Out[pl.Tensor[...]]`（参数） | `params.add_inout(ext_x)` | 预分配缓冲区 |
-| `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)`（non-DN）或 `x = outs.get_ref(i)`（DN） | 运行时环形缓冲区分配 |
+| `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` | 运行时环形缓冲区分配 |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（独立 scalar 槽位） |
 
-使用 `add_output` 时，提交调用返回 `TaskOutputTensors`。non-DN 张量在提交处声明
-`const Tensor& var = outs.get_ref(i)` 绑定；DN 张量在 `tensor.create` 处预先声明
-`Tensor var = make_tensor_2d_dn(...)`（空数据指针，附带逻辑视图），提交后 copy-assign。
+使用 `add_output` 时，提交调用返回 `TaskOutputTensors`，并在提交处声明 `const Tensor& var = outs.get_ref(i)` 绑定。
 
 ### 标量参数编码
 
 标量参数占用 `ChipStorageTaskArgs` 的 scalar 槽位（从 0 开始独立索引，与张量槽位分离）。
-浮点标量使用 `float_to_u64(f)` 进行位转换，其他整数/bool 标量强制转换为 `uint64_t`。
+浮点标量使用 `to_u64(f)` 进行位转换，其他整数/bool 标量强制转换为 `(uint64_t)`。
 接收端使用联合体（union）进行类型双关，将 `uint64_t` 重新解释为目标 C 类型：
 
 ```cpp
@@ -218,7 +204,7 @@ params_t0.add_input(ext_sij);
 params_t0.add_inout(ext_pij);
 params_t0.add_inout(ext_mij);
 params_t0.add_inout(ext_lij);
-params_t0.add_scalar(float_to_u64(scale));  // 标量在所有张量之后
+params_t0.add_scalar(to_u64(scale));  // 标量在所有张量之后
 pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
@@ -238,7 +224,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR 操作 | C++ 代码生成 | 描述 |
 | ------- | ------------ | ---- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` | 环形缓冲区分配信息；non-DN: 提交处 `const Tensor& var` 绑定；DN: 此处声明 `Tensor var = make_tensor_2d_dn(...)` |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` | 环形缓冲区分配信息；提交处 `const Tensor& var` 绑定 |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
@@ -270,8 +256,6 @@ def orch_basic(
 #include <stdint.h>
 #include <stdio.h>
 #include "pto_orchestration_api.h"
-
-static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 

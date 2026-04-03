@@ -115,34 +115,6 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
   return oss.str();
 }
 
-const char TENSOR_HELPER_FUNCTION[] = R"(
-static inline Tensor make_tensor_external_2d_dn(void* addr,
-    const uint32_t shapes[],
-    uint32_t ndims,
-    DataType dtype = DataType::FLOAT32,
-    int32_t version = 0) {
-    debug_assert(ndims == 2);
-    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-    uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-    Tensor base = make_tensor_external(addr, raw_shapes, ndims, dtype, false, version);
-    uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-    return base.view(logical_shapes, zero_offsets);
-}
-
-static inline Tensor make_tensor_2d_dn(
-    const uint32_t shapes[],
-    uint32_t ndims,
-    DataType dtype = DataType::FLOAT32,
-    int32_t version = 0) {
-    debug_assert(ndims == 2);
-    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-    uint32_t raw_shapes[2] = {shapes[1], shapes[0]};
-    Tensor base = make_tensor_external(nullptr, raw_shapes, ndims, dtype, false, version);
-    uint32_t logical_shapes[2] = {shapes[0], shapes[1]};
-    return base.view(logical_shapes, zero_offsets);
-}
-)";
-
 std::string GenerateConfigFunction(int expected_arg_count) {
   std::ostringstream oss;
   oss << "__attribute__((visibility(\"default\")))\n";
@@ -152,8 +124,6 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   oss << "        .expected_arg_count = " << expected_arg_count << ",\n";
   oss << "    };\n";
   oss << "}\n\n";
-
-  oss << TENSOR_HELPER_FUNCTION << "\n";
   return oss.str();
 }
 
@@ -167,22 +137,7 @@ std::string CoreTypeToSubmitPrefix(CoreType core_type) {
 std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_index,
                                        const TensorTypePtr& tensor_type, const CodegenBase& codegen) {
   std::ostringstream oss;
-
-  bool is_dn = tensor_type->IsDNLayout();
-
-  if (is_dn) {
-    size_t ndim = tensor_type->shape_.size();
-    CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
-    oss << "    uint32_t " << var_name << "_shapes[2] = {"
-        << "orch_args.tensor(" << orch_index << ").shapes[1], "
-        << "orch_args.tensor(" << orch_index << ").shapes[0]};\n";
-    oss << "    Tensor ext_" << var_name << " = make_tensor_external_2d_dn("
-        << "orch_args.tensor(" << orch_index << ").data_as<void>(), " << var_name << "_shapes, " << ndim
-        << ", " << codegen.GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
-  } else {
-    oss << "    Tensor ext_" << var_name << " = from_tensor_arg(orch_args.tensor(" << orch_index << "));\n";
-  }
-
+  oss << "    Tensor ext_" << var_name << " = from_tensor_arg(orch_args.tensor(" << orch_index << "));\n";
   return oss.str();
 }
 
@@ -301,7 +256,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
       emit_name_map_[iter_arg.get()] = init_var_name;
       emit_name_map_[return_var.get()] = init_var_name;
       auto tensor_type = As<TensorType>(return_var->GetType());
-      bool is_dn = tensor_type && tensor_type->IsDNLayout();
       auto init_var = AsVarLike(iter_arg->initValue_);
       // Transfer create-pending status from init_var to iter_arg.
       // init_var is only referenced at the loop boundary; iter_arg is what
@@ -311,7 +265,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         tensor_create_var_names_.erase(init_var.get());
         tensor_create_var_names_.insert(iter_arg.get());
       }
-      if (escaping_loop_returns_.count(return_var.get()) > 0 && is_create_pending && !is_dn) {
+      if (escaping_loop_returns_.count(return_var.get()) > 0 && is_create_pending) {
         std::string state_name = ReserveSyntheticEmitName(init_var_name + "__loop_state");
         INTERNAL_CHECK(tensor_type) << "Internal error: escaping loop-carried output must be a tensor";
         code_ << Indent() << "Tensor " << state_name << " = make_tensor_external(nullptr, " << init_var_name
@@ -478,14 +432,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     ParamKind kind;
     std::string value;    // expression passed to the method
     std::string out_var;  // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
-    bool out_var_is_new_decl = false;  // true: emit "const Tensor& var = get_ref()" (non-DN);
-                                       // false: emit "var = get_ref()" (DN, pre-declared placeholder)
     const Var* out_var_ptr = nullptr;  // raw pointer into tensor_create_var_names_
   };
 
   struct InternalOutVar {
     std::string name;
-    bool is_new_decl;
     const Var* var_ptr = nullptr;
   };
 
@@ -512,10 +463,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         // Push an "add_output" entry for a tensor.create-allocated argument.
         auto push_create_output = [&]() {
-          auto tt = As<TensorType>(arg->GetType());
-          bool is_dn = tt && tt->IsDNLayout();
-          params.push_back(
-              {ParamKind::Output, var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn, arg_var.get()});
+          params.push_back({ParamKind::Output, var_name + "_ci", var_name, arg_var.get()});
         };
 
         ParamDirection dir = callee_func->param_directions_[arg_idx];
@@ -524,7 +472,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
             if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
               push_create_output();
             } else {
-              params.push_back({ParamKind::InOut, ext_name, "", false});
+              params.push_back({ParamKind::InOut, ext_name, ""});
             }
             break;
           case ParamDirection::InOut:
@@ -640,7 +588,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<InternalOutVar> internal_out_vars;
     for (const auto& p : params) {
       if (p.kind == ParamKind::Output && !p.out_var.empty()) {
-        internal_out_vars.push_back({p.out_var, p.out_var_is_new_decl, p.out_var_ptr});
+        internal_out_vars.push_back({p.out_var, p.out_var_ptr});
       }
     }
 
@@ -652,14 +600,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
       for (size_t i = 0; i < internal_out_vars.size(); ++i) {
         const auto& ov = internal_out_vars[i];
-        if (ov.is_new_decl) {
-          code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
-          auto state_it = active_loop_output_states_.find(ov.name);
-          if (state_it != active_loop_output_states_.end()) {
-            code_ << ind << state_it->second << " = " << ov.name << ";\n";
-          }
-        } else {
-          code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
+        auto state_it = active_loop_output_states_.find(ov.name);
+        if (state_it != active_loop_output_states_.end()) {
+          code_ << ind << state_it->second << " = " << ov.name << ";\n";
         }
         if (ov.var_ptr) tensor_create_var_names_.erase(ov.var_ptr);
       }

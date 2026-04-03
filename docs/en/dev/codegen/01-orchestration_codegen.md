@@ -65,55 +65,45 @@ This allows extensible operation codegen without modifying the core visitor.
 
 `GenerateOrchestration()` produces C++ in 9 phases:
 
-### Phase 1–2: Boilerplate
+### Phase 1: Boilerplate
 
 ```cpp
-// Phase 1: Includes
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "pto_orchestration_api.h"
-
-// Phase 2: Helper functions
-static uint64_t float_to_u64(float f) { ... }
-static inline Tensor make_tensor_external_2d_dn(...) { ... }
-static inline Tensor make_tensor_2d_dn(...) { ... }
 ```
 
-### Phase 3–4: Entry Points
+### Phase 2–3: Entry Points
 
 ```cpp
-// Phase 3: Config function — returns expected argument count
+// Phase 2: Config function — returns expected argument count
 PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-// Phase 4: Entry function signature
+// Phase 3: Entry function signature
 void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
     int orch_thread_num, int orch_thread_index) {
 ```
 
-### Phase 5–6: Tensor Setup
+### Phase 4–5: Tensor Setup
 
 ```cpp
-// Phase 5: External tensors — ND layout via from_tensor_arg()
+// Phase 4: External tensors — all layouts via from_tensor_arg()
 Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
 Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
+Tensor ext_dn = from_tensor_arg(orch_args.tensor(2));
 
-// DN layout: pass logical shape — make_tensor_external_2d_dn handles axis transposition internally
-uint32_t dn_shapes[2] = {orch_args.tensor(2).shapes[0], orch_args.tensor(2).shapes[1]};
-Tensor ext_dn = make_tensor_external_2d_dn(orch_args.tensor(2).data_as<void>(), dn_shapes, 2, DataType::FLOAT32);
-
-// Phase 6: Internal tensors (from pl.create_tensor — intermediates only)
-// Only TensorCreateInfo is emitted here. The Tensor variable is bound at the submit site:
-//   non-DN: const Tensor& tmp = outs_t0.get_ref(0);   (declared at submit)
-//   DN:     Tensor tmp = make_tensor_2d_dn(...);        (declared here, copy-assigned at submit)
+// Phase 5: Internal tensors (from pl.create_tensor — intermediates only)
+// TensorCreateInfo is emitted here. The Tensor variable is bound at the submit site:
+//   const Tensor& tmp = outs_t0.get_ref(0);
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
 ```
 
-### Phase 7–9: Task Submission and Control Flow
+### Phase 6–8: Task Submission and Control Flow
 
 All task submission is wrapped in a top-level `PTO2_SCOPE()`:
 
@@ -139,10 +129,8 @@ PTO2_SCOPE() {
 
 | Type | Source | C++ Construction | Naming |
 | ---- | ------ | ---------------- | ------ |
-| External (ND) | Function parameters (`In`/`Out`/`InOut`) | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
-| External (DN) | Function parameters, DN layout | `make_tensor_external_2d_dn(orch_args.tensor(N).data_as<void>(), {...}, ...)` | `ext_<name>` |
-| Internal (non-DN) | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `const Tensor& var` bound at submit | `<name>` (no prefix) |
-| Internal (DN) | `pl.create_tensor(...)` with DN layout | `TensorCreateInfo var_ci(...)` + `Tensor var = make_tensor_2d_dn(...)` | `<name>` (no prefix) |
+| External (ND/DN) | Function parameters | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
+| Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `const Tensor& var` bound at submit | `<name>` (no prefix) |
 
 External tensors wrap device memory pointers passed from the host via `ChipStorageTaskArgs`. Internal tensors are allocated by the runtime from a ring buffer when passed to `add_output(var_ci)`.
 
@@ -154,19 +142,16 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 | --------- | ----------------- | -------------- | --------- |
 | `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only; if the tensor is from `pl.create_tensor`, uses `add_output` for first-time allocation |
 | `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_inout(ext_x)` | Pre-allocated buffer |
-| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` (non-DN) or `x = outs.get_ref(i)` (DN) | Runtime ring-buffer alloc |
+| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` | Runtime ring-buffer alloc |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (separate scalar slot) |
 
-When `add_output` is used, the submit call returns `TaskOutputTensors`. For non-DN tensors,
-a `const Tensor& var = outs.get_ref(i)` binding is declared at the submit site. For DN tensors,
-a `Tensor var = make_tensor_2d_dn(...)` placeholder (null data pointer, with logical view) is
-pre-declared at the `tensor.create` site and copy-assigned after submit.
+When `add_output` is used, the submit call returns `TaskOutputTensors` and a `const Tensor& var = outs.get_ref(i)` binding is declared at the submit site.
 
 ### Scalar Parameter Encoding
 
 Scalar params occupy `ChipStorageTaskArgs` scalar slots (0-indexed, separate from tensor slots).
-Float scalars use `float_to_u64(f)` (bit-cast). Other integer/bool scalars are cast to `uint64_t`.
+Float scalars use `to_u64(f)` (bit-cast). Other integer/bool scalars are cast to `(uint64_t)`.
 At the receiving end, union-based type punning is used to reinterpret the `uint64_t` as the target C type:
 
 ```cpp
@@ -219,7 +204,7 @@ params_t0.add_input(ext_sij);
 params_t0.add_inout(ext_pij);
 params_t0.add_inout(ext_mij);
 params_t0.add_inout(ext_lij);
-params_t0.add_scalar(float_to_u64(scale));  // scalar after all tensors
+params_t0.add_scalar(to_u64(scale));  // scalar after all tensors
 pto2_rt_submit_aiv_task(0, params_t0);
 ```
 
@@ -239,7 +224,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR Operation | C++ Codegen | Description |
 | ------------ | ----------- | ----------- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` | Ring-buffer alloc info; non-DN: `const Tensor& var` bound at submit; DN: `Tensor var = make_tensor_2d_dn(...)` declared before submit |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` | Ring-buffer alloc info; `const Tensor& var` bound at submit |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
@@ -271,8 +256,6 @@ def orch_basic(
 #include <stdint.h>
 #include <stdio.h>
 #include "pto_orchestration_api.h"
-
-static uint64_t float_to_u64(float f) { /* ... */ }
 
 extern "C" {
 
