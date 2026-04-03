@@ -1135,5 +1135,35 @@ class TestControlFlow:
         _assert_not_shares_memref(func, "o_acc_z", "resid")
 
 
+class TestMetadata:
+    """Function metadata should survive MemoryReuse rewrites."""
+
+    def test_preserves_split_metadata(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def vector_producer(
+                self,
+                input_tensor: pl.Tensor[[16, 16], pl.FP16],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                tile_a: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [16, 16]
+                )
+                tile_b: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Vec] = pl.add(tile_a, tile_a)
+                result: pl.Tensor[[16, 16], pl.FP16] = pl.store(tile_b, [0, 0], output)
+                return result
+
+        before = passes.init_mem_ref()(Before)
+        before_vector_producer = before.get_function("vector_producer")
+        assert before_vector_producer is not None
+        assert before_vector_producer.split == ir.SplitMode.UP_DOWN
+
+        after = passes.memory_reuse()(before)
+        after_vector_producer = after.get_function("vector_producer")
+        assert after_vector_producer is not None
+        assert after_vector_producer.split == ir.SplitMode.UP_DOWN
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
