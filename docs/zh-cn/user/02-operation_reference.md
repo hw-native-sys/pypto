@@ -2,7 +2,7 @@
 
 所有操作通过 `import pypto.language as pl` 访问。
 
-**符号说明：** `T` = `Tensor` 或 `Tile`（统一分发）。`IntLike` = `int | Scalar | Expr`。`Mem` = `pl.Mem`（`pl.MemorySpace` 的简写别名，两者等价）。
+**符号说明：** `T` = `Tensor` 或 `Tile`（统一分发）。`IntLike` = `int | Scalar | Expr | DynVar`。`Mem` = `pl.Mem`（`pl.MemorySpace` 的简写别名，两者等价）。
 
 ## 统一分发（`pl.*`）
 

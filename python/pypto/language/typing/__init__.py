@@ -26,7 +26,7 @@ from pypto.language.typing.tile import Tile
 from pypto.language.typing.tuple import Tuple
 from pypto.pypto_core.ir import Expr
 
-IntLike: TypeAlias = int | Scalar | Expr
-"""Type alias for shape/offset parameters that accept int literals, Scalar DSL values, or raw Expr."""
+IntLike: TypeAlias = int | Scalar | Expr | DynVar
+"""Type alias for shape/offset parameters that accept int literals, Scalar DSL values, raw Expr, or DynVar."""
 
 __all__ = ["DynVar", "InOut", "IntLike", "Out", "Scalar", "Tensor", "Tile", "Tuple", "dynamic"]

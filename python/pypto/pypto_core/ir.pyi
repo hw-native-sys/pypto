@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, overload
 
 from pypto import DataType
+from pypto.language.typing.dynamic import DynVar
 
 class Span:
     """Source location information tracking file, line, and column positions."""
@@ -381,16 +382,16 @@ class TensorView:
     @overload
     def __init__(
         self,
-        stride: Sequence[Expr | int],
+        stride: Sequence[Expr | int | DynVar],
         layout: TensorLayout,
-        valid_shape: Sequence[Expr | int] = ...,
+        valid_shape: Sequence[Expr | int | DynVar] = ...,
     ) -> None:
         """Create a tensor view with stride, layout and optional valid shape.
 
         Args:
-            stride: Stride for each dimension (Expr or int, ints auto-converted to ConstInt)
+            stride: Stride for each dimension (Expr, int, or DynVar)
             layout: Tensor layout type (ND, DN, or NZ)
-            valid_shape: Valid shape for each dimension (optional, defaults to empty)
+            valid_shape: Valid shape for each dimension (Expr, int, or DynVar; optional, defaults to empty)
         """
 
 class TensorType(ShapedType):
@@ -502,9 +503,9 @@ class TileView:
     @overload
     def __init__(
         self,
-        valid_shape: Sequence[Expr | int],
-        stride: Sequence[Expr | int],
-        start_offset: Expr | int,
+        valid_shape: Sequence[Expr | int | DynVar],
+        stride: Sequence[Expr | int | DynVar],
+        start_offset: Expr | int | DynVar,
         blayout: TileLayout = ...,
         slayout: TileLayout = ...,
         fractal: int = ...,
@@ -513,9 +514,9 @@ class TileView:
         """Create a tile view with all parameters.
 
         Args:
-            valid_shape: Valid shape dimensions (Expr or int, ints auto-converted to ConstInt)
-            stride: Stride for each dimension (Expr or int, ints auto-converted to ConstInt)
-            start_offset: Starting offset (Expr or int, int auto-converted to ConstInt)
+            valid_shape: Valid shape dimensions (Expr, int, or DynVar)
+            stride: Stride for each dimension (Expr, int, or DynVar)
+            start_offset: Starting offset (Expr, int, or DynVar)
             blayout: Block layout (default: row_major)
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size (default: 512)

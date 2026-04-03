@@ -2,7 +2,7 @@
 
 All operations are accessed via `import pypto.language as pl`.
 
-**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar | Expr`. `Mem` = `MemorySpace` (short alias; both `pl.Mem` and `pl.MemorySpace` work).
+**Notation:** `T` = `Tensor` or `Tile` (unified dispatch). `IntLike` = `int | Scalar | Expr | DynVar`. `Mem` = `MemorySpace` (short alias; both `pl.Mem` and `pl.MemorySpace` work).
 
 ## Unified Dispatch (`pl.*`)
 
