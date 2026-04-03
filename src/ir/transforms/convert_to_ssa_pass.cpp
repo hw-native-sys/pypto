@@ -268,7 +268,7 @@ class SSAConverter {
 
   class ExprSubstituter : public IRMutator {
    public:
-    explicit ExprSubstituter(const std::unordered_map<const Var*, VarPtr>& versions) : versions_(versions) {}
+    explicit ExprSubstituter(SSAConverter& converter) : converter_(converter), versions_(converter.cur_) {}
 
    protected:
     ExprPtr VisitExpr_(const VarPtr& op) override {
@@ -279,23 +279,24 @@ class SSAConverter {
       auto it = versions_.find(op.get());
       return it != versions_.end() ? it->second : op;
     }
-
-   private:
-    const std::unordered_map<const Var*, VarPtr>& versions_;
-  };
-
-  ExprPtr SubstExpr(const ExprPtr& e) {
-    if (!e) return e;
-    auto result = ExprSubstituter(cur_).VisitExpr(e);
-    // Also substitute within the Call's return type (e.g., TensorView.valid_shape)
-    if (auto call = As<Call>(result)) {
-      auto new_type = SubstType(call->GetType());
+    ExprPtr VisitExpr_(const CallPtr& op) override {
+      // Substitute arguments first (base class recurses into nested Calls)
+      auto result = IRMutator::VisitExpr_(op);
+      // Then substitute within the Call's return type (e.g., TensorView.valid_shape)
+      auto call = std::static_pointer_cast<const Call>(result);
+      auto new_type = converter_.SubstType(call->GetType());
       if (new_type.get() != call->GetType().get()) {
         return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
       }
+      return result;
     }
-    return result;
-  }
+
+   private:
+    SSAConverter& converter_;
+    const std::unordered_map<const Var*, VarPtr>& versions_;
+  };
+
+  ExprPtr SubstExpr(const ExprPtr& e) { return e ? ExprSubstituter(*this).VisitExpr(e) : e; }
 
   /// Substitute all expressions in a vector, returning the new vector and whether anything changed.
   std::pair<std::vector<ExprPtr>, bool> SubstExprVec(const std::vector<ExprPtr>& vec) {
