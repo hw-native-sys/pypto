@@ -457,6 +457,11 @@ class TensorType : public ShapedType {
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }
   [[nodiscard]] std::optional<MemorySpace> GetMemorySpace() const override { return MemorySpace::DDR; }
 
+  /// Returns true when this tensor uses DN (data-normal / transposed) layout.
+  [[nodiscard]] bool IsDNLayout() const {
+    return tensor_view_.has_value() && tensor_view_->layout == TensorLayout::DN;
+  }
+
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(ShapedType::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&TensorType::tensor_view_, "tensor_view")));

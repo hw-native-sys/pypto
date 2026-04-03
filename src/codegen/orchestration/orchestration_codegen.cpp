@@ -168,7 +168,7 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
                                        const TensorTypePtr& tensor_type, const CodegenBase& codegen) {
   std::ostringstream oss;
 
-  bool is_dn = tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
+  bool is_dn = tensor_type->IsDNLayout();
 
   if (is_dn) {
     size_t ndim = tensor_type->shape_.size();
@@ -194,7 +194,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
                                     std::map<std::string, CoreType>* core_types, int* next_id,
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
-                                    std::unordered_map<const Var*, const Var*> var_to_param,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index)
       : program_(prog),
@@ -202,7 +201,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
         func_name_to_core_type_(core_types),
         next_func_id_(next_id),
         emit_name_map_(std::move(param_to_emit_name)),
-        var_to_param_(std::move(var_to_param)),
         param_name_set_(std::move(param_name_set)),
         param_name_to_orch_index_(std::move(param_name_to_orch_index)) {
     declared_var_names_ = param_name_set_;
@@ -303,10 +301,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
       emit_name_map_[iter_arg.get()] = init_var_name;
       emit_name_map_[return_var.get()] = init_var_name;
       auto tensor_type = As<TensorType>(return_var->GetType());
-      bool is_dn = tensor_type && tensor_type->tensor_view_.has_value() &&
-                   tensor_type->tensor_view_->layout == TensorLayout::DN;
-      if (escaping_loop_returns_.count(return_var.get()) > 0 &&
-          tensor_create_var_names_.count(init_var_name) > 0 && !is_dn) {
+      bool is_dn = tensor_type && tensor_type->IsDNLayout();
+      auto init_var = AsVarLike(iter_arg->initValue_);
+      // Transfer create-pending status from init_var to iter_arg.
+      // init_var is only referenced at the loop boundary; iter_arg is what
+      // BuildTaskParams will see when the var is passed inside the loop body.
+      bool is_create_pending = init_var && tensor_create_var_names_.count(init_var.get()) > 0;
+      if (is_create_pending) {
+        tensor_create_var_names_.erase(init_var.get());
+        tensor_create_var_names_.insert(iter_arg.get());
+      }
+      if (escaping_loop_returns_.count(return_var.get()) > 0 && is_create_pending && !is_dn) {
         std::string state_name = ReserveSyntheticEmitName(init_var_name + "__loop_state");
         INTERNAL_CHECK(tensor_type) << "Internal error: escaping loop-carried output must be a tensor";
         code_ << Indent() << "Tensor " << state_name << " = make_tensor_external(nullptr, " << init_var_name
@@ -433,6 +438,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return "auto";
   }
 
+  // Encode a scalar variable for the orchestration API.
+  // float variables must be bit-cast via to_u64(); other types pass through as-is.
+  static std::string EncodeScalarVar(const std::string& var_name, const std::string& cpp_type) {
+    return cpp_type == "float" ? "to_u64(" + var_name + ")" : var_name;
+  }
+
+  // Encode a scalar constant expression for the orchestration API.
+  // float literals need to_u64() and an "f" suffix; other types need an explicit (uint64_t) cast.
+  static std::string EncodeScalarConst(const std::string& value, const std::string& cpp_type) {
+    return cpp_type == "float" ? "to_u64(" + value + "f)" : "(uint64_t)" + value;
+  }
+
   [[nodiscard]] std::string GetExternalTensorName(const std::string& name) const override {
     if (param_name_set_.count(name)) {
       return "ext_" + name;
@@ -440,17 +457,36 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return name;
   }
 
+  enum class ParamKind { Input, Output, InOut, Scalar };
+
+  static const char* ParamKindToMethodName(ParamKind kind) {
+    switch (kind) {
+      case ParamKind::Input:
+        return "add_input";
+      case ParamKind::Output:
+        return "add_output";
+      case ParamKind::InOut:
+        return "add_inout";
+      case ParamKind::Scalar:
+        return "add_scalar";
+    }
+    INTERNAL_CHECK(false) << "Internal error: unexpected ParamKind value";
+    return "";
+  }
+
   struct ParamEntry {
-    std::string kind;     // "add_input", "add_output", "add_inout", "add_scalar"
+    ParamKind kind;
     std::string value;    // expression passed to the method
     std::string out_var;  // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
     bool out_var_is_new_decl = false;  // true: emit "const Tensor& var = get_ref()" (non-DN);
                                        // false: emit "var = get_ref()" (DN, pre-declared placeholder)
+    const Var* out_var_ptr = nullptr;  // raw pointer into tensor_create_var_names_
   };
 
   struct InternalOutVar {
     std::string name;
     bool is_new_decl;
+    const Var* var_ptr = nullptr;
   };
 
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
@@ -463,63 +499,64 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!var_name.empty()) {
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          if (cpp_type == "float") {
-            params.push_back({"add_scalar", "to_u64(" + var_name + ")", ""});
-          } else {
-            params.push_back({"add_scalar", var_name, ""});
-          }
+          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type), ""});
           continue;
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
+        auto arg_var = AsVarLike(arg);
 
         INTERNAL_CHECK(arg_idx < callee_func->param_directions_.size())
             << "arg count (" << call->args_.size() << ") exceeds param count ("
             << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
+
+        // Push an "add_output" entry for a tensor.create-allocated argument.
+        auto push_create_output = [&]() {
+          auto tt = As<TensorType>(arg->GetType());
+          bool is_dn = tt && tt->IsDNLayout();
+          params.push_back(
+              {ParamKind::Output, var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn, arg_var.get()});
+        };
+
         ParamDirection dir = callee_func->param_directions_[arg_idx];
-        if (dir == ParamDirection::Out) {
-          if (tensor_create_var_names_.count(var_name)) {
-            bool is_dn = false;
-            if (auto tt = As<TensorType>(arg->GetType())) {
-              is_dn = tt->tensor_view_.has_value() && tt->tensor_view_->layout == TensorLayout::DN;
+        switch (dir) {
+          case ParamDirection::Out:
+            if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
+              push_create_output();
+            } else {
+              params.push_back({ParamKind::InOut, ext_name, "", false});
             }
-            params.push_back({"add_output", var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn});
-          } else {
-            params.push_back({"add_inout", ext_name, "", false});
-          }
-        } else if (dir == ParamDirection::InOut) {
-          params.push_back({"add_inout", ext_name, ""});
-        } else {
-          if (tensor_create_var_names_.count(var_name)) {
-            bool is_dn = false;
-            if (auto tt = As<TensorType>(arg->GetType())) {
-              is_dn = tt->tensor_view_.has_value() && tt->tensor_view_->layout == TensorLayout::DN;
+            break;
+          case ParamDirection::InOut:
+            params.push_back({ParamKind::InOut, ext_name, ""});
+            break;
+          case ParamDirection::In:
+            if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
+              push_create_output();
+            } else {
+              params.push_back({ParamKind::Input, ext_name, ""});
             }
-            params.push_back({"add_output", var_name + "_ci", var_name, /*out_var_is_new_decl=*/!is_dn});
-          } else {
-            params.push_back({"add_input", ext_name, ""});
-          }
+            break;
+          default:
+            INTERNAL_CHECK(false) << "Internal error: unexpected ParamDirection value "
+                                  << static_cast<int>(dir);
         }
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({"add_scalar", "(uint64_t)" + value, ""});
+        params.push_back({ParamKind::Scalar, "(uint64_t)" + value, ""});
       } else if (auto const_float = As<ConstFloat>(arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
-        if (cpp_type == "float") {
-          params.push_back({"add_scalar", "to_u64(" + value + "f)", ""});
-        } else {
-          params.push_back({"add_scalar", "(uint64_t)" + value, ""});
-        }
+        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type), ""});
       } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({"add_scalar", const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
+        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
       }
     }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
     std::stable_partition(params.begin(), params.end(),
-                          [](const ParamEntry& p) { return p.kind != "add_scalar"; });
+                          [](const ParamEntry& p) { return p.kind != ParamKind::Scalar; });
 
     return params;
   }
@@ -533,11 +570,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return;
     }
 
-    if (op_name == "tensor.create" && assign_var && declared_var_ptrs_.count(assign_var.get())) {
-      return;
-    }
-
-    if (op_name == "tensor.create" && assign_var && param_name_set_.count(GetVarName(assign_var))) {
+    if (op_name == "tensor.create" && assign_var &&
+        (declared_var_ptrs_.count(assign_var.get()) || param_name_set_.count(GetVarName(assign_var)))) {
       return;
     }
 
@@ -555,7 +589,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (assemble_view.has_value()) {
         gen_code = *assemble_view;
       } else {
-        tensor_create_var_names_.insert(emit_var);
+        tensor_create_var_names_.insert(assign_var.get());
       }
     }
     if (gen_code.empty()) {
@@ -605,8 +639,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void EmitTaskSubmitAndBind(const std::string& submit_expr, const std::vector<ParamEntry>& params) {
     std::vector<InternalOutVar> internal_out_vars;
     for (const auto& p : params) {
-      if (p.kind == "add_output" && !p.out_var.empty()) {
-        internal_out_vars.push_back({p.out_var, p.out_var_is_new_decl});
+      if (p.kind == ParamKind::Output && !p.out_var.empty()) {
+        internal_out_vars.push_back({p.out_var, p.out_var_is_new_decl, p.out_var_ptr});
       }
     }
 
@@ -627,7 +661,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else {
           code_ << ind << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
         }
-        tensor_create_var_names_.erase(ov.name);
+        if (ov.var_ptr) tensor_create_var_names_.erase(ov.var_ptr);
       }
     }
 
@@ -659,7 +693,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
+      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
 
     std::string submit_expr =
@@ -700,7 +734,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV)\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << task_var << "." << p.kind << "(" << p.value << ");\n";
+      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
     auto split_mode = group_func->GetSplitMode();
     std::string third_id = split_mode.has_value() ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
@@ -890,14 +924,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int* next_func_id_;
   std::unordered_map<const Var*, std::string> emit_name_map_;
   std::set<std::string> declared_var_names_;
-  std::unordered_map<const Var*, const Var*> var_to_param_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
   std::unordered_map<const Var*, const Var*> buffer_root_map_;
   std::unordered_map<const Var*, AssembleViewInfo> assemble_view_infos_;
   std::unordered_set<const Var*> non_optimizable_assemble_roots_;
   std::unordered_set<const Var*> emitted_assemble_view_roots_;
-  std::set<std::string> tensor_create_var_names_;
+  std::unordered_set<const Var*> tensor_create_var_names_;
   std::ostringstream code_;
   int indent_ = 4;
   std::string current_result_var_;
@@ -928,9 +961,12 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
 
-  OrchestrationBufferInfoCollector buffer_info(program);
+  BufferRootCollector buffer_info(program);
   buffer_info.Initialize(func->params_);
   buffer_info.VisitStmt(func->body_);
+
+  AssembleViewOptimizer assemble_opt(buffer_info.buffer_roots);
+  assemble_opt.VisitStmt(func->body_);
 
   LoopEscapeInfoCollector loop_escape_info;
   loop_escape_info.VisitStmt(func->body_);
@@ -970,13 +1006,13 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   std::ostringstream oss;
 
   OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
-                                        std::move(emit_name_map), std::move(lineage.var_to_param),
-                                        std::move(param_name_set), std::move(param_name_to_orch_index));
+                                        std::move(emit_name_map), std::move(param_name_set),
+                                        std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
-  stmt_codegen.SetAssembleViewInfos(buffer_info.assemble_view_infos);
-  stmt_codegen.SetNonOptimizableAssembleRoots(buffer_info.non_optimizable_assemble_roots);
+  stmt_codegen.SetAssembleViewInfos(assemble_opt.assemble_view_infos);
+  stmt_codegen.SetNonOptimizableAssembleRoots(assemble_opt.non_optimizable_roots);
   stmt_codegen.SetEscapingLoopReturns(loop_escape_info.escaping_loop_returns);
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);

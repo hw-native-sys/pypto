@@ -81,25 +81,50 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
 };
 
 /**
- * @brief Track buffer roots and assemble-view optimization opportunities
+ * @brief Determine the canonical buffer root for every Var in the function body
  *
- * Walks the IR to determine which Var* ultimately owns each tensor buffer,
- * detect tensor.assemble patterns eligible for view optimization, and
- * propagate root information through loops, assignments, and function calls.
+ * Walks the IR and maps each Var* to the Var* that owns its underlying buffer.
+ * Propagates root identity through assignments, loops, and function calls.
+ * This is a pure structural analysis with no optimization logic.
  */
-class OrchestrationBufferInfoCollector : public ir::IRVisitor {
+class BufferRootCollector : public ir::IRVisitor {
  public:
-  explicit OrchestrationBufferInfoCollector(ir::ProgramPtr program);
+  explicit BufferRootCollector(ir::ProgramPtr program);
 
   void Initialize(const std::vector<ir::VarPtr>& params);
 
   std::unordered_map<const ir::Var*, const ir::Var*> buffer_roots;
-  std::unordered_map<const ir::Var*, AssembleViewInfo> assemble_view_infos;
-  std::unordered_set<const ir::Var*> non_optimizable_assemble_roots;
 
  protected:
   void VisitStmt_(const ir::ForStmtPtr& for_stmt) override;
   void VisitStmt_(const ir::WhileStmtPtr& while_stmt) override;
+  void VisitStmt_(const ir::AssignStmtPtr& assign) override;
+
+ private:
+  [[nodiscard]] const ir::Var* ResolveVar(const ir::Var* var) const;
+  [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
+  [[nodiscard]] std::vector<const ir::Var*> CollectCallOutputRoots(const ir::CallPtr& call) const;
+
+  ir::ProgramPtr program_;
+  std::unordered_map<const ir::Var*, std::vector<const ir::Var*>> tuple_output_roots_;
+};
+
+/**
+ * @brief Detect tensor.assemble patterns eligible for view optimization
+ *
+ * Walks the IR in a second pass over a completed buffer_roots map.
+ * Records (source_root → target, offsets) pairs for assembles that can be
+ * lowered to a single .view() call, and marks roots with multiple assembles
+ * as non-optimizable.
+ */
+class AssembleViewOptimizer : public ir::IRVisitor {
+ public:
+  explicit AssembleViewOptimizer(const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots);
+
+  std::unordered_map<const ir::Var*, AssembleViewInfo> assemble_view_infos;
+  std::unordered_set<const ir::Var*> non_optimizable_roots;
+
+ protected:
   void VisitStmt_(const ir::AssignStmtPtr& assign) override;
 
  private:
@@ -108,10 +133,8 @@ class OrchestrationBufferInfoCollector : public ir::IRVisitor {
   [[nodiscard]] const ir::Var* ResolveVar(const ir::Var* var) const;
   [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
   [[nodiscard]] ir::MakeTuplePtr ResolveTupleExpr(const ir::ExprPtr& expr) const;
-  [[nodiscard]] std::vector<const ir::Var*> CollectCallOutputRoots(const ir::CallPtr& call) const;
 
-  ir::ProgramPtr program_;
-  std::unordered_map<const ir::Var*, std::vector<const ir::Var*>> tuple_output_roots_;
+  const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots_;
   std::unordered_map<const ir::Var*, ir::MakeTuplePtr> tuple_values_;
 };
 

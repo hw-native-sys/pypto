@@ -17,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -143,19 +144,18 @@ void OrchestrationInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
 }
 
 // ---------------------------------------------------------------------------
-// OrchestrationBufferInfoCollector
+// BufferRootCollector
 // ---------------------------------------------------------------------------
 
-OrchestrationBufferInfoCollector::OrchestrationBufferInfoCollector(ProgramPtr program)
-    : program_(std::move(program)) {}
+BufferRootCollector::BufferRootCollector(ProgramPtr program) : program_(std::move(program)) {}
 
-void OrchestrationBufferInfoCollector::Initialize(const std::vector<VarPtr>& params) {
+void BufferRootCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
     buffer_roots[param.get()] = param.get();
   }
 }
 
-void OrchestrationBufferInfoCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
+void BufferRootCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
   for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
     const auto& iter_arg = for_stmt->iter_args_[i];
     const Var* root = ResolveExpr(iter_arg->initValue_);
@@ -169,7 +169,7 @@ void OrchestrationBufferInfoCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
   IRVisitor::VisitStmt_(for_stmt);
 }
 
-void OrchestrationBufferInfoCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
+void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
   for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
     const auto& iter_arg = while_stmt->iter_args_[i];
     const Var* root = ResolveExpr(iter_arg->initValue_);
@@ -183,21 +183,13 @@ void OrchestrationBufferInfoCollector::VisitStmt_(const WhileStmtPtr& while_stmt
   IRVisitor::VisitStmt_(while_stmt);
 }
 
-void OrchestrationBufferInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
-  tuple_values_.erase(assign->var_.get());
-  if (auto tuple_value = As<MakeTuple>(assign->value_)) {
-    tuple_values_[assign->var_.get()] = tuple_value;
-  } else if (auto call = As<Call>(assign->value_)) {
+void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
+  if (auto call = As<Call>(assign->value_)) {
     const std::string& op_name = call->op_->name_;
     if (op_name == "tensor.create" || op_name == "tensor.slice") {
       buffer_roots[assign->var_.get()] = assign->var_.get();
     } else if (op_name == "tensor.assemble") {
       if (call->args_.size() == 3) {
-        const Var* source_root = ResolveExpr(call->args_[1]);
-        auto offset_tuple = ResolveTupleExpr(call->args_[2]);
-        if (source_root && offset_tuple) {
-          RecordAssembleViewInfo(source_root, call->args_[0], offset_tuple);
-        }
         if (const Var* target_root = ResolveExpr(call->args_[0])) {
           buffer_roots[assign->var_.get()] = target_root;
         }
@@ -222,52 +214,23 @@ void OrchestrationBufferInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
     if (const Var* root = ResolveVar(src_var.get())) {
       buffer_roots[assign->var_.get()] = root;
     }
-    if (auto it = tuple_values_.find(src_var.get()); it != tuple_values_.end()) {
-      tuple_values_[assign->var_.get()] = it->second;
-    }
   }
   IRVisitor::VisitStmt_(assign);
 }
 
-void OrchestrationBufferInfoCollector::RecordAssembleViewInfo(const Var* source_root,
-                                                              const ExprPtr& target_expr,
-                                                              const MakeTuplePtr& offset_tuple) {
-  if (non_optimizable_assemble_roots.count(source_root) > 0) {
-    return;
-  }
-  auto [it, inserted] = assemble_view_infos.emplace(source_root, AssembleViewInfo{target_expr, offset_tuple});
-  if (!inserted) {
-    assemble_view_infos.erase(source_root);
-    non_optimizable_assemble_roots.insert(source_root);
-  }
-}
-
-const Var* OrchestrationBufferInfoCollector::ResolveVar(const Var* var) const {
+const Var* BufferRootCollector::ResolveVar(const Var* var) const {
   auto it = buffer_roots.find(var);
   return it != buffer_roots.end() ? it->second : nullptr;
 }
 
-const Var* OrchestrationBufferInfoCollector::ResolveExpr(const ExprPtr& expr) const {
+const Var* BufferRootCollector::ResolveExpr(const ExprPtr& expr) const {
   if (auto var = AsVarLike(expr)) {
     return ResolveVar(var.get());
   }
   return nullptr;
 }
 
-MakeTuplePtr OrchestrationBufferInfoCollector::ResolveTupleExpr(const ExprPtr& expr) const {
-  if (auto tuple = As<MakeTuple>(expr)) {
-    return tuple;
-  }
-  if (auto var = AsVarLike(expr)) {
-    auto it = tuple_values_.find(var.get());
-    if (it != tuple_values_.end()) {
-      return it->second;
-    }
-  }
-  return nullptr;
-}
-
-std::vector<const Var*> OrchestrationBufferInfoCollector::CollectCallOutputRoots(const CallPtr& call) const {
+std::vector<const Var*> BufferRootCollector::CollectCallOutputRoots(const CallPtr& call) const {
   auto callee = program_->GetFunction(call->op_->name_);
   if (!callee) return {};
 
@@ -284,6 +247,70 @@ std::vector<const Var*> OrchestrationBufferInfoCollector::CollectCallOutputRoots
     }
   }
   return roots;
+}
+
+// ---------------------------------------------------------------------------
+// AssembleViewOptimizer
+// ---------------------------------------------------------------------------
+
+AssembleViewOptimizer::AssembleViewOptimizer(const std::unordered_map<const Var*, const Var*>& buffer_roots)
+    : buffer_roots_(buffer_roots) {}
+
+void AssembleViewOptimizer::VisitStmt_(const AssignStmtPtr& assign) {
+  tuple_values_.erase(assign->var_.get());
+  if (auto tuple_value = As<MakeTuple>(assign->value_)) {
+    tuple_values_[assign->var_.get()] = tuple_value;
+  } else if (auto call = As<Call>(assign->value_)) {
+    if (call->op_->name_ == "tensor.assemble" && call->args_.size() == 3) {
+      const Var* source_root = ResolveExpr(call->args_[1]);
+      auto offset_tuple = ResolveTupleExpr(call->args_[2]);
+      if (source_root && offset_tuple) {
+        RecordAssembleViewInfo(source_root, call->args_[0], offset_tuple);
+      }
+    }
+  } else if (auto src_var = AsVarLike(assign->value_)) {
+    if (auto it = tuple_values_.find(src_var.get()); it != tuple_values_.end()) {
+      tuple_values_[assign->var_.get()] = it->second;
+    }
+  }
+  IRVisitor::VisitStmt_(assign);
+}
+
+void AssembleViewOptimizer::RecordAssembleViewInfo(const Var* source_root, const ExprPtr& target_expr,
+                                                   const MakeTuplePtr& offset_tuple) {
+  if (non_optimizable_roots.count(source_root) > 0) {
+    return;
+  }
+  auto [it, inserted] = assemble_view_infos.emplace(source_root, AssembleViewInfo{target_expr, offset_tuple});
+  if (!inserted) {
+    assemble_view_infos.erase(source_root);
+    non_optimizable_roots.insert(source_root);
+  }
+}
+
+const Var* AssembleViewOptimizer::ResolveVar(const Var* var) const {
+  auto it = buffer_roots_.find(var);
+  return it != buffer_roots_.end() ? it->second : nullptr;
+}
+
+const Var* AssembleViewOptimizer::ResolveExpr(const ExprPtr& expr) const {
+  if (auto var = AsVarLike(expr)) {
+    return ResolveVar(var.get());
+  }
+  return nullptr;
+}
+
+MakeTuplePtr AssembleViewOptimizer::ResolveTupleExpr(const ExprPtr& expr) const {
+  if (auto tuple = As<MakeTuple>(expr)) {
+    return tuple;
+  }
+  if (auto var = AsVarLike(expr)) {
+    auto it = tuple_values_.find(var.get());
+    if (it != tuple_values_.end()) {
+      return it->second;
+    }
+  }
+  return nullptr;
 }
 
 // ---------------------------------------------------------------------------

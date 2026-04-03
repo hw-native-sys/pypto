@@ -83,7 +83,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
       << dtype_str << ");";
 
   // DN layout: pre-declare null Tensor with logical view (copy-assigned after submit).
-  bool is_dn = result_type->tensor_view_.has_value() && result_type->tensor_view_->layout == TensorLayout::DN;
+  bool is_dn = result_type->IsDNLayout();
   if (is_dn) {
     CHECK(ndim == 2) << "only support 2D tensor for DN layout now";
     oss << "\nTensor " << result_var << " = make_tensor_2d_dn(" << result_var << "_ci_shapes, " << ndim
