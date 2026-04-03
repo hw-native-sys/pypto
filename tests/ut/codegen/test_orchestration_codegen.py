@@ -15,7 +15,7 @@ import textwrap
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
+from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import ir
@@ -1689,6 +1689,79 @@ class TestTensorReadWriteOffsetCodegen:
         assert len(set(t1_inputs)) == len(t1_inputs), (
             f"Consumer inputs should all be distinct tensors, got {t1_inputs}"
         )
+
+    def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
+        """Cross-core split inferred from pipe ops should activate both AIV slots."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SplitGroupProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_producer(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ):
+                v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
+                tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+                pl.tpush_to_aic(tile_a, split=1)
+
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_consumer(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
+                received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
+                pl.tfree_to_aiv(received)
+                updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+                return updated
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                updated = self.cube_consumer(a, out)
+                self.vector_producer(a, out)
+                return updated
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                updated = self.group_func(a, out)
+                return updated
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SplitGroupProgram)
+        vector_producer = transformed.get_function("vector_producer")
+        vector_producer_aiv1 = transformed.get_function("vector_producer__aiv1")
+        cube_consumer = transformed.get_function("cube_consumer")
+        assert vector_producer is not None
+        assert vector_producer_aiv1 is not None
+        assert cube_consumer is not None
+        assert vector_producer.split == ir.SplitMode.UP_DOWN
+        assert vector_producer_aiv1.split == ir.SplitMode.UP_DOWN
+        assert cube_consumer.split == ir.SplitMode.UP_DOWN
+
+        orch_result = _generate_orch_result(transformed)
+        code = orch_result.code
+        expected_ids = (
+            orch_result.func_name_to_id["cube_consumer"],
+            orch_result.func_name_to_id["vector_producer"],
+            orch_result.func_name_to_id["vector_producer__aiv1"],
+        )
+
+        assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
+        assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
 
 if __name__ == "__main__":

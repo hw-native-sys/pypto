@@ -933,9 +933,9 @@ void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
   }
 }
 
-FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func) {
-  auto gm_type =
-      std::make_shared<TensorType>(std::vector<int64_t>{1}, DataType::FP32, std::nullopt, std::nullopt);
+FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func, int64_t gm_buffer_elems) {
+  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
+                                              std::nullopt, std::nullopt);
   auto gm_var = std::make_shared<Var>(kGMPipeBufferName, gm_type, func->span_);
   auto new_params = func->params_;
   new_params.push_back(gm_var);
@@ -1018,12 +1018,74 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
 
+/// Compute the GM pipe buffer size in bytes by scanning for initialize_pipe ops.
+int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions) {
+  int64_t max_bytes = 0;
+  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
+  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
+    for (const auto& stmt : stmts) {
+      CallPtr call;
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+        call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+      }
+      if (call) {
+        auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+        if (op && (op->name_ == "system.aic_initialize_pipe" || op->name_ == "system.aiv_initialize_pipe")) {
+          int ss = call->GetKwarg<int>("slot_size", 0);
+          int dm = call->GetKwarg<int>("dir_mask", 0);
+          if (ss > 0 && dm != 0) {
+            int64_t bytes =
+                static_cast<int64_t>(ss) * static_cast<int64_t>(cross_core_pipe::GetSlotNumForDirMask(dm));
+            if (bytes > max_bytes) {
+              max_bytes = bytes;
+            }
+          }
+        }
+      }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        scan_stmts(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        scan_stmts(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) {
+          scan_stmts(FlattenBody(if_stmt->else_body_.value()));
+        }
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        scan_stmts(FlattenBody(while_stmt->body_));
+      }
+    }
+  };
+  for (const auto& func : functions) {
+    if (!func->body_) continue;
+    scan_stmts(FlattenBody(func->body_));
+  }
+  return max_bytes;
+}
+
+/// Create a tensor.create Call for the GM pipe buffer workspace.
+CallPtr CreateGMPipeBufferTensorCreate(int64_t buffer_size_bytes, const Span& span) {
+  int64_t shape_dim = (buffer_size_bytes + 3) / 4;  // FP32 elements (ceil)
+  auto shape_elem = std::make_shared<ConstInt>(shape_dim, DataType::INT64, span);
+  auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{shape_elem}, span);
+  return OpRegistry::GetInstance().Create("tensor.create", {shape_tuple},
+                                          {{"dtype", std::any(DataType::FP32)},
+                                           {"layout", std::any(TensorLayout::ND)},
+                                           {"manual_dep", std::any(true)}},
+                                          span);
+}
+
 /// Inject __gm_pipe_buffer into pipe-using functions and propagate through callers.
+/// Orchestration functions get a tensor.create call instead of a parameter.
 void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   if (!backend::BackendConfig::IsConfigured() ||
       backend::GetBackendType() != backend::BackendType::Ascend910B) {
     return;
   }
+
+  // Build function name → FunctionPtr map and call graph
+  std::unordered_map<std::string, FunctionPtr*> func_by_name;
+  for (auto& func : functions) func_by_name[func->name_] = &func;
 
   std::unordered_map<std::string, std::unordered_set<std::string>> callers, callees;
   BuildCallGraphFromFunctions(functions, callers, callees);
@@ -1036,28 +1098,42 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   }
   if (pipe_funcs.empty()) return;
 
-  // Propagate upward
-  std::unordered_set<std::string> needs_gm = pipe_funcs;
+  int64_t gm_buffer_bytes = ComputeGMBufferSizeFromPipeOps(functions);
+  INTERNAL_CHECK(gm_buffer_bytes > 0) << "Internal error: cross-core pipe functions found but no "
+                                         "initialize_pipe ops to determine buffer size";
+  int64_t gm_buffer_elems = (gm_buffer_bytes + 3) / 4;
+
+  // Propagate upward, but stop at Orchestration functions
+  std::unordered_set<std::string> needs_gm_param = pipe_funcs;
+  std::unordered_set<std::string> orch_needs_tensor_create;
   std::vector<std::string> worklist(pipe_funcs.begin(), pipe_funcs.end());
   while (!worklist.empty()) {
     std::string name = worklist.back();
     worklist.pop_back();
     auto it = callers.find(name);
     if (it == callers.end()) continue;
-    for (const auto& c : it->second) {
-      if (needs_gm.insert(c).second) worklist.push_back(c);
+    for (const auto& caller_name : it->second) {
+      auto fit = func_by_name.find(caller_name);
+      if (fit == func_by_name.end()) continue;
+      if ((*fit->second)->func_type_ == FunctionType::Orchestration) {
+        // Orchestration: don't add param, will insert tensor.create instead
+        orch_needs_tensor_create.insert(caller_name);
+      } else {
+        if (needs_gm_param.insert(caller_name).second) worklist.push_back(caller_name);
+      }
     }
   }
 
-  // Add params then rewrite call sites
+  // Add __gm_pipe_buffer param to non-Orchestration functions that need it
   for (auto& func : functions) {
-    if (needs_gm.count(func->name_) && !HasGMPipeBufferParam(func)) {
-      func = AddGMSlotBufferParam(func);
+    if (needs_gm_param.count(func->name_) && !HasGMPipeBufferParam(func)) {
+      func = AddGMSlotBufferParam(func, gm_buffer_elems);
     }
   }
 
+  // Rewrite call sites in non-Orchestration functions (pass existing param through)
   for (auto& func : functions) {
-    if (!needs_gm.count(func->name_)) continue;
+    if (!needs_gm_param.count(func->name_)) continue;
 
     VarPtr gm_param;
     for (const auto& p : func->params_) {
@@ -1072,7 +1148,7 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     auto ci = callees.find(func->name_);
     if (ci != callees.end()) {
       for (const auto& c : ci->second) {
-        if (needs_gm.count(c)) mod_callees.insert(c);
+        if (needs_gm_param.count(c)) mod_callees.insert(c);
       }
     }
 
@@ -1082,6 +1158,48 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
                                         func->return_types_, nb, func->span_, func->func_type_, func->level_,
                                         func->role_, func->attrs_);
     }
+  }
+
+  // For Orchestration functions: insert tensor.create + rewrite calls to pass the buffer
+  if (orch_needs_tensor_create.empty()) return;
+
+  for (auto& func : functions) {
+    if (!orch_needs_tensor_create.count(func->name_)) continue;
+
+    Span span = func->span_;
+    // Create: gm_pipe_buffer = tensor.create(shape, dtype=FP32)
+    // Use "gm_pipe_buffer" (no leading "__") to avoid auto_name::Parse splitting on "__".
+    static constexpr const char* kOrchGMBufferName = "gm_pipe_buffer";
+    auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
+                                                std::nullopt, std::nullopt);
+    auto gm_var = std::make_shared<Var>(kOrchGMBufferName, gm_type, span);
+    auto create_call = CreateGMPipeBufferTensorCreate(gm_buffer_bytes, span);
+    auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
+
+    // Rewrite calls to Group/InCore functions that need __gm_pipe_buffer
+    std::unordered_set<std::string> mod_callees;
+    auto ci = callees.find(func->name_);
+    if (ci != callees.end()) {
+      for (const auto& c : ci->second) {
+        if (needs_gm_param.count(c)) mod_callees.insert(c);
+      }
+    }
+
+    auto body = func->body_;
+    if (!mod_callees.empty()) {
+      body = RewriteCallsForGMBuffer(body, mod_callees, gm_var);
+    }
+
+    // Prepend tensor.create to body
+    auto body_stmts = FlattenBody(body);
+    std::vector<StmtPtr> new_stmts;
+    new_stmts.push_back(create_stmt);
+    new_stmts.insert(new_stmts.end(), body_stmts.begin(), body_stmts.end());
+    auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
+
+    func =
+        std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                   new_body, span, func->func_type_, func->level_, func->role_, func->attrs_);
   }
 }
 
