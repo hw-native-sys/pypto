@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <climits>
-#include <cstddef>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -32,6 +31,9 @@ namespace pypto {
 namespace ir {
 namespace {
 
+// Sentinel meaning "no matching parameter found".
+static constexpr int kNoParam = -1;
+
 // Build a mapping from each return value index to the parameter index it
 // corresponds to.  This replicates the analysis that was previously inlined
 // in orchestration codegen (BuildReturnToParamMapping).
@@ -45,8 +47,8 @@ namespace {
 //
 // For each ReturnStmt value, the var is looked up in var_to_out_param first,
 // then falls back to direct param-identity matching.
-std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
-  std::vector<size_t> mapping;
+std::vector<int> BuildReturnToParamMapping(const FunctionPtr& func) {
+  std::vector<int> mapping;
   if (!func || !func->body_) return mapping;
 
   auto seq = As<SeqStmts>(func->body_);
@@ -54,21 +56,21 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
   auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
   if (!return_stmt) return mapping;
 
-  auto find_param_index = [&](const Var* v) -> size_t {
-    for (size_t pi = 0; pi < func->params_.size(); ++pi) {
+  auto find_param_index = [&](const Var* v) -> int {
+    for (int pi = 0; pi < static_cast<int>(func->params_.size()); ++pi) {
       if (func->params_[pi].get() == v) return pi;
     }
-    return SIZE_MAX;
+    return kNoParam;
   };
 
   // Look up v in var_to_out_param; if not found, fall back to direct param match.
-  auto lookup = [&](const std::unordered_map<const Var*, size_t>& m, const Var* v) -> size_t {
+  auto lookup = [&](const std::unordered_map<const Var*, int>& m, const Var* v) -> int {
     auto it = m.find(v);
     return it != m.end() ? it->second : find_param_index(v);
   };
 
-  std::unordered_map<const Var*, size_t> var_to_out_param;
-  for (size_t si = 0; si + 1 < seq->stmts_.size(); ++si) {
+  std::unordered_map<const Var*, int> var_to_out_param;
+  for (int si = 0; si + 1 < static_cast<int>(seq->stmts_.size()); ++si) {
     if (auto assign = As<AssignStmt>(seq->stmts_[si])) {
       if (!assign->var_) continue;
       if (auto call = As<Call>(assign->value_)) {
@@ -80,18 +82,20 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
         }
       } else if (auto src_var = As<Var>(assign->value_)) {
         // Var-to-var assignment: propagate existing mapping
-        size_t idx = lookup(var_to_out_param, src_var.get());
-        if (idx != SIZE_MAX) {
+        int idx = lookup(var_to_out_param, src_var.get());
+        if (idx != kNoParam) {
           var_to_out_param[assign->var_.get()] = idx;
         }
       }
     } else if (auto for_stmt = As<ForStmt>(seq->stmts_[si])) {
-      for (size_t ri = 0; ri < for_stmt->return_vars_.size() && ri < for_stmt->iter_args_.size(); ++ri) {
+      int n = std::min(static_cast<int>(for_stmt->return_vars_.size()),
+                       static_cast<int>(for_stmt->iter_args_.size()));
+      for (int ri = 0; ri < n; ++ri) {
         const auto& iter_arg = for_stmt->iter_args_[ri];
         if (!iter_arg || !iter_arg->initValue_ || !for_stmt->return_vars_[ri]) continue;
         if (auto init_var = As<Var>(iter_arg->initValue_)) {
-          size_t idx = lookup(var_to_out_param, init_var.get());
-          if (idx != SIZE_MAX) {
+          int idx = lookup(var_to_out_param, init_var.get());
+          if (idx != kNoParam) {
             var_to_out_param[for_stmt->return_vars_[ri].get()] = idx;
           }
         }
@@ -102,7 +106,7 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
   for (const auto& ret_expr : return_stmt->value_) {
     auto var = As<Var>(ret_expr);
     if (!var) {
-      mapping.push_back(SIZE_MAX);
+      mapping.push_back(kNoParam);
       continue;
     }
     mapping.push_back(lookup(var_to_out_param, var.get()));
@@ -110,9 +114,9 @@ std::vector<size_t> BuildReturnToParamMapping(const FunctionPtr& func) {
   return mapping;
 }
 
-std::vector<size_t> CollectOutIndices(const FunctionPtr& func) {
-  std::vector<size_t> out_indices;
-  for (size_t i = 0; i < func->param_directions_.size(); ++i) {
+std::vector<int> CollectOutIndices(const FunctionPtr& func) {
+  std::vector<int> out_indices;
+  for (int i = 0; i < static_cast<int>(func->param_directions_.size()); ++i) {
     if (func->param_directions_[i] == ParamDirection::Out ||
         func->param_directions_[i] == ParamDirection::InOut) {
       out_indices.push_back(i);
@@ -125,7 +129,7 @@ std::vector<size_t> CollectOutIndices(const FunctionPtr& func) {
 // to out_indices[k].  Returns an empty vector when no reordering is needed.
 //
 // permutation[old_index] = new_index
-std::vector<size_t> ComputeReturnPermutation(const FunctionPtr& func) {
+std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
   auto ret_to_param = BuildReturnToParamMapping(func);
   if (ret_to_param.empty()) return {};
 
@@ -135,19 +139,19 @@ std::vector<size_t> ComputeReturnPermutation(const FunctionPtr& func) {
   // If there are more Out params than return values the mapping is incomplete
   // (e.g. some outputs are not yet covered by the IR analysis).  Skip reorder
   // to avoid constructing an out-of-bounds permutation.
-  if (out_indices.size() > ret_to_param.size()) return {};
+  if (static_cast<int>(out_indices.size()) > static_cast<int>(ret_to_param.size())) return {};
 
   // Map param_index -> position in out_indices
-  std::unordered_map<size_t, size_t> param_to_out_pos;
-  for (size_t k = 0; k < out_indices.size(); ++k) {
+  std::unordered_map<int, int> param_to_out_pos;
+  for (int k = 0; k < static_cast<int>(out_indices.size()); ++k) {
     param_to_out_pos[out_indices[k]] = k;
   }
 
-  std::vector<size_t> permutation(ret_to_param.size(), SIZE_MAX);
+  std::vector<int> permutation(ret_to_param.size(), kNoParam);
   bool needs_reorder = false;
 
-  for (size_t i = 0; i < ret_to_param.size(); ++i) {
-    if (ret_to_param[i] == SIZE_MAX) {
+  for (int i = 0; i < static_cast<int>(ret_to_param.size()); ++i) {
+    if (ret_to_param[i] == kNoParam) {
       permutation[i] = i;
       continue;
     }
@@ -166,7 +170,7 @@ std::vector<size_t> ComputeReturnPermutation(const FunctionPtr& func) {
 
 // Reorder return values and return types of an InCore function according to
 // the given permutation.  Returns a new Function with the reordered return.
-FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<size_t>& permutation) {
+FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& permutation) {
   auto seq = As<SeqStmts>(func->body_);
   INTERNAL_CHECK(seq && !seq->stmts_.empty()) << "NormalizeReturnOrder: function body has no statements";
   auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
@@ -177,11 +181,12 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<size_t>& p
   std::vector<ExprPtr> new_values(return_stmt->value_.size());
   std::vector<TypePtr> new_return_types(func->return_types_.size());
 
-  for (size_t i = 0; i < permutation.size(); ++i) {
-    INTERNAL_CHECK(permutation[i] < new_values.size())
+  for (int i = 0; i < static_cast<int>(permutation.size()); ++i) {
+    INTERNAL_CHECK(permutation[i] >= 0 && permutation[i] < static_cast<int>(new_values.size()))
         << "NormalizeReturnOrder: permutation index out of range";
     new_values[permutation[i]] = return_stmt->value_[i];
-    if (i < func->return_types_.size() && permutation[i] < new_return_types.size()) {
+    if (i < static_cast<int>(func->return_types_.size()) &&
+        permutation[i] < static_cast<int>(new_return_types.size())) {
       new_return_types[permutation[i]] = func->return_types_[i];
     }
   }
@@ -200,8 +205,7 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<size_t>& p
 // in orchestration / opaque functions that call reordered InCore functions.
 class TupleIndexPermutationMutator : public IRMutator {
  public:
-  explicit TupleIndexPermutationMutator(
-      const std::unordered_map<std::string, std::vector<size_t>>& permutations)
+  explicit TupleIndexPermutationMutator(const std::unordered_map<std::string, std::vector<int>>& permutations)
       : permutations_(permutations) {}
 
  protected:
@@ -245,9 +249,8 @@ class TupleIndexPermutationMutator : public IRMutator {
       auto it = reordered_tuple_vars_.find(var.get());
       if (it != reordered_tuple_vars_.end()) {
         const auto& perm = *it->second;
-        if (static_cast<size_t>(op->index_) < perm.size() &&
-            perm[static_cast<size_t>(op->index_)] != SIZE_MAX) {
-          new_index = static_cast<int>(perm[static_cast<size_t>(op->index_)]);
+        if (op->index_ >= 0 && op->index_ < static_cast<int>(perm.size()) && perm[op->index_] != kNoParam) {
+          new_index = perm[op->index_];
         }
       }
     }
@@ -259,8 +262,8 @@ class TupleIndexPermutationMutator : public IRMutator {
   }
 
  private:
-  const std::unordered_map<std::string, std::vector<size_t>>& permutations_;
-  std::unordered_map<const Var*, const std::vector<size_t>*> reordered_tuple_vars_;
+  const std::unordered_map<std::string, std::vector<int>>& permutations_;
+  std::unordered_map<const Var*, const std::vector<int>*> reordered_tuple_vars_;
 };
 
 }  // namespace
@@ -270,7 +273,7 @@ namespace pass {
 Pass NormalizeReturnOrder() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     // Step A: Analyze InCore functions and compute permutations.
-    std::unordered_map<std::string, std::vector<size_t>> permutations;
+    std::unordered_map<std::string, std::vector<int>> permutations;
     std::vector<FunctionPtr> functions;
     bool modified = false;
 
