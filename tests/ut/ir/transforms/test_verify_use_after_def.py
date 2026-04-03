@@ -185,6 +185,61 @@ def test_use_after_def_is_structural_property():
     assert structural.contains(passes.IRProperty.UseAfterDef)
 
 
+def test_invalid_undefined_var_in_tensor_view_valid_shape():
+    """Var in TensorView.valid_shape that is not defined should be flagged."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    # param 'a' has a plain tensor type (no TensorView, no dynamic vars)
+    plain_type = ir.TensorType([dim16, dim16], DataType.FP32)
+    a = ir.Var("a", plain_type, span)
+    # 'n' is a stale var — never defined by any statement or param type
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    tensor_view = ir.TensorView([], ir.TensorLayout.ND, [n, dim16])
+    view_type = ir.TensorType([dim16, dim16], DataType.FP32, None, tensor_view)
+    t = ir.Var("t", view_type, span)
+
+    # t is defined via assign, but n (in its type's valid_shape) is never defined
+    def_t = ir.AssignStmt(t, a, span)
+    ret = ir.ReturnStmt([t], span)
+    body = ir.SeqStmts([def_t, ret], span)
+    func = ir.Function("bad_type", [a], [plain_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    errors = _errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))
+    assert len(errors) >= 1
+    assert any("n" in d.message for d in errors)
+
+
+def test_valid_type_dynamic_var_in_param_shape():
+    """Var in parameter's TensorType shape should not be flagged (type-dynamic)."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    tensor_type = ir.TensorType([n], DataType.FP32)
+    t = ir.Var("t", tensor_type, span)
+
+    body = ir.ReturnStmt([t], span)
+    func = ir.Function("dynamic_shape", [t], [tensor_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
+def test_valid_type_dynamic_var_in_param_tensor_view():
+    """Var in parameter's TensorView.valid_shape should not be flagged (type-dynamic)."""
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(DataType.INT64), span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_view = ir.TensorView([], ir.TensorLayout.ND, [n])
+    tensor_type = ir.TensorType([dim16], DataType.FP32, None, tensor_view)
+    t = ir.Var("t", tensor_type, span)
+
+    body = ir.ReturnStmt([t], span)
+    func = ir.Function("dynamic_view", [t], [tensor_type], body, span)
+    program = ir.Program([func], "prog", span)
+
+    assert len(_errors(passes.PropertyVerifierRegistry.verify(_use_after_def_props(), program))) == 0
+
+
 def test_valid_then_only_leak_visible_after_if():
     """Variable defined only in then-branch (no else, no return_vars) is visible after if.
 
