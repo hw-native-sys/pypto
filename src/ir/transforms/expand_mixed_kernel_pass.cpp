@@ -701,9 +701,10 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
     };
     walk_origins(stmts);
 
-    outline_utils::VarRefCollector aiv_ref_collector;
+    outline_utils::VarDefUseCollector aiv_ref_collector;
     aiv_ref_collector.VisitStmt(aiv_body_stmt);
-    for (const Var* ref_ptr : aiv_ref_collector.var_refs) {
+    auto aiv_all_refs = aiv_ref_collector.GetAllVarRefs();
+    for (const Var* ref_ptr : aiv_all_refs) {
       if (!ref_ptr || aiv_def_collector.var_defs.count(ref_ptr) || aiv_map.count(ref_ptr)) {
         continue;
       }

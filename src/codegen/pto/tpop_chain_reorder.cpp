@@ -49,20 +49,22 @@ static std::unordered_set<const ir::Var*> CollectStmtVarRefs(const ir::StmtPtr& 
         if (auto v = ir::AsVarLike(arg)) {
           refs.insert(v.get());
         } else {
-          ir::outline_utils::VarRefCollector collector;
+          ir::outline_utils::VarDefUseCollector collector;
           collector.VisitExpr(arg);
-          refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+          refs.insert(collector.var_uses.begin(), collector.var_uses.end());
         }
       }
     } else {
-      ir::outline_utils::VarRefCollector collector;
+      ir::outline_utils::VarDefUseCollector collector;
       collector.VisitStmt(stmt);
-      refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+      auto all_refs = collector.GetAllVarRefs();
+      refs.insert(all_refs.begin(), all_refs.end());
     }
   } else {
-    ir::outline_utils::VarRefCollector collector;
+    ir::outline_utils::VarDefUseCollector collector;
     collector.VisitStmt(stmt);
-    refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+    auto all_refs = collector.GetAllVarRefs();
+    refs.insert(all_refs.begin(), all_refs.end());
   }
   return refs;
 }

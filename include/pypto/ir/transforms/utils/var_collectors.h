@@ -31,50 +31,6 @@ namespace var_collectors {
 // Visitor-based collectors
 // ============================================================================
 
-/// Collect all variable references in an IR subtree (by pointer identity).
-///
-/// Traverses the full subtree and records every Var/IterArg pointer encountered
-/// in expressions, including definition-site variables (AssignStmt::var_, etc.).
-/// For IterArgs defined by ForStmt/WhileStmt, their initValue_ expressions are
-/// visited explicitly so that outer-scope references are captured.
-class VarRefCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> var_refs;
-
- protected:
-  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op.get()); }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    var_refs.insert(op.get());
-    // Do not traverse initValue_: when an IterArg appears as an expression
-    // reference (defined by an outer loop), its initValue_ belongs to that
-    // outer loop's initialization, not to the scope being analyzed.
-    // InitValues of IterArgs defined by inner ForStmt/WhileStmt are visited
-    // explicitly in VisitStmt_ overrides below.
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Explicitly visit initValue_ for IterArgs defined by THIS ForStmt.
-    // These are genuine references to variables from the enclosing scope
-    // that must be captured as inputs when outlining.
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
-
 /// Combined collector that gathers both definition and use sites in a single pass.
 ///
 /// var_defs: variables defined by statements (AssignStmt::var_, loop_var_,
@@ -89,6 +45,13 @@ class VarDefUseCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> var_defs;
   std::unordered_set<const Var*> var_uses;
+
+  /// Return var_defs ∪ var_uses — all variables referenced in the subtree.
+  std::unordered_set<const Var*> GetAllVarRefs() const {
+    auto result = var_defs;
+    result.insert(var_uses.begin(), var_uses.end());
+    return result;
+  }
 
  protected:
   void VisitExpr_(const VarPtr& op) override { var_uses.insert(op.get()); }
@@ -133,9 +96,10 @@ class VarDefUseCollector : public IRVisitor {
   }
 };
 
-/// Backward-compatible aliases — callers read .var_defs or .var_uses as needed.
+/// Backward-compatible aliases — callers read .var_defs, .var_uses, or GetAllVarRefs().
 using VarDefCollector = VarDefUseCollector;
 using VarUseCollector = VarDefUseCollector;
+using VarRefCollector = VarDefUseCollector;
 
 // ============================================================================
 // Free-function collectors
@@ -286,9 +250,9 @@ inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
 /// variables that are implicitly defined by appearing in function parameter
 /// or return type annotations.
 inline std::unordered_set<const Var*> CollectTypeVars(const TypePtr& type) {
-  VarRefCollector collector;
+  VarDefUseCollector collector;
   VisitTypeExprFields(collector, type);
-  return collector.var_refs;
+  return collector.var_uses;
 }
 
 // ============================================================================

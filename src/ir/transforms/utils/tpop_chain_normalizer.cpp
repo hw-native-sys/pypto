@@ -97,9 +97,9 @@ bool IsTfreeStmt(const StmtPtr& stmt, VarPtr* tile_var, std::string* op_name) {
 }
 
 std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt) {
-  outline_utils::VarRefCollector refs;
-  refs.VisitStmt(stmt);
-  return refs.var_refs;
+  outline_utils::VarDefUseCollector collector;
+  collector.VisitStmt(stmt);
+  return collector.GetAllVarRefs();
 }
 
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
@@ -113,9 +113,9 @@ std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
 
   std::unordered_set<const Var*> refs_set;
   for (const auto& arg : call->args_) {
-    outline_utils::VarRefCollector refs;
-    refs.VisitExpr(arg);
-    refs_set.insert(refs.var_refs.begin(), refs.var_refs.end());
+    outline_utils::VarDefUseCollector collector;
+    collector.VisitExpr(arg);
+    refs_set.insert(collector.var_uses.begin(), collector.var_uses.end());
   }
   return refs_set;
 }
@@ -192,9 +192,9 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
           refs.insert(var_like.get());
           return;
         }
-        outline_utils::VarRefCollector collector;
+        outline_utils::VarDefUseCollector collector;
         collector.VisitExpr(expr);
-        refs.insert(collector.var_refs.begin(), collector.var_refs.end());
+        refs.insert(collector.var_uses.begin(), collector.var_uses.end());
       };
       for (const auto& arg : call->args_) {
         CollectExprRefs(arg);

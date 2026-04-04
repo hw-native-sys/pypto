@@ -11,10 +11,10 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 
 | Utility | What it collects |
 | ------- | ---------------- |
-| `VarRefCollector` | ALL var references (both def and use sites). Recursive visitor. |
-| `VarDefUseCollector` | Def sites AND use sites in a single pass. Recursive visitor. |
+| `VarDefUseCollector` | Def sites AND use sites in a single pass. `.GetAllVarRefs()` returns the union. |
 | `VarDefCollector` | Alias for `VarDefUseCollector` — read `.var_defs`. |
 | `VarUseCollector` | Alias for `VarDefUseCollector` — read `.var_uses`. |
+| `VarRefCollector` | Alias for `VarDefUseCollector` — use `.GetAllVarRefs()`. |
 | `CollectStmtDefinedVars()` | Vars visible after a single statement. Non-recursive. |
 | `CollectVarDefsInOrder()` | Same scope as VarDefCollector but ordered (DFS). Appends to output vector or returns new one. |
 | `CollectAssignDefs()` | AssignStmt var\_ only (no loop vars). Recursive. |
@@ -28,7 +28,7 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 What do you need?
   |
   |-- Both defs and uses in one pass? ------> VarDefUseCollector
-  |-- All vars referenced in a subtree? ----> VarRefCollector
+  |-- All vars referenced in a subtree? ----> VarDefUseCollector (.GetAllVarRefs())
   |-- Only vars defined in a subtree? ------> VarDefCollector (read .var_defs)
   |-- Only vars used (read, not defined)? --> VarUseCollector (read .var_uses)
   |-- Only AssignStmt definitions? ----------> CollectAssignDefs()
@@ -58,11 +58,9 @@ separately.
 and control-flow `return_vars_` but excludes `loop_var_` and
 `iter_args_` (which are scoped to the loop body).
 
-**VarRefCollector** vs **VarDefUseCollector**:
-
-- `VarRefCollector` captures *every* Var pointer in the subtree
-  via default IRVisitor recursion — including definition-site LHS variables
-- `VarDefUseCollector` explicitly separates defs from uses into two sets
+For valid IR, `GetAllVarRefs()` (var\_defs ∪ var\_uses) equals the set
+of all variable pointers in the subtree.  `VarRefCollector` is a
+backward-compatible alias for `VarDefUseCollector`.
 
 ### Usage Examples
 
@@ -72,16 +70,15 @@ and control-flow `return_vars_` but excludes `loop_var_` and
 using namespace pypto::ir;
 
 // Example 1: Find vars defined in a scope but used after it
-var_collectors::VarRefCollector refs;
-refs.VisitStmt(after_scope_stmts);
+var_collectors::VarDefUseCollector collector;
+collector.VisitStmt(scope_body);
 
-var_collectors::VarDefCollector defs;
-defs.VisitStmt(scope_body);
-
-std::vector<VarPtr> outputs;
-for (const Var* def : defs.var_defs) {
-  if (refs.var_refs.count(def)) {
-    outputs.push_back(/* resolve VarPtr */);
+// var_defs: vars defined inside the scope
+// var_uses: vars used (read) inside the scope
+// Inputs = uses not satisfied by local defs:
+for (const Var* use : collector.var_uses) {
+  if (!collector.var_defs.count(use)) {
+    // 'use' comes from the enclosing scope — it's an input
   }
 }
 

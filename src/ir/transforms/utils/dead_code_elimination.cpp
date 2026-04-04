@@ -87,24 +87,25 @@ void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_se
   for (const auto& stmt : stmts) {
     if (std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
         std::dynamic_pointer_cast<const YieldStmt>(stmt) || IsSideEffectOp(stmt)) {
-      outline_utils::VarRefCollector refs;
-      refs.VisitStmt(stmt);
-      live.insert(refs.var_refs.begin(), refs.var_refs.end());
+      outline_utils::VarDefUseCollector collector;
+      collector.VisitStmt(stmt);
+      auto all_refs = collector.GetAllVarRefs();
+      live.insert(all_refs.begin(), all_refs.end());
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
         live.insert(assign->var_.get());
       }
     }
     auto collect_iter_arg_refs = [&](const auto& loop_stmt) {
       for (const auto& iter_arg : loop_stmt->iter_args_) {
-        outline_utils::VarRefCollector refs;
-        refs.VisitExpr(iter_arg->initValue_);
-        live.insert(refs.var_refs.begin(), refs.var_refs.end());
+        outline_utils::VarDefUseCollector collector;
+        collector.VisitExpr(iter_arg->initValue_);
+        live.insert(collector.var_uses.begin(), collector.var_uses.end());
       }
     };
     auto collect_expr_refs = [&](const ExprPtr& expr) {
-      outline_utils::VarRefCollector refs;
-      refs.VisitExpr(expr);
-      live.insert(refs.var_refs.begin(), refs.var_refs.end());
+      outline_utils::VarDefUseCollector collector;
+      collector.VisitExpr(expr);
+      live.insert(collector.var_uses.begin(), collector.var_uses.end());
     };
 
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
@@ -177,9 +178,9 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
     for (auto it = all_assigns.rbegin(); it != all_assigns.rend(); ++it) {
       if (!live.count((*it)->var_.get())) continue;
 
-      outline_utils::VarRefCollector refs;
-      refs.VisitExpr((*it)->value_);
-      for (const Var* ref : refs.var_refs) {
+      outline_utils::VarDefUseCollector collector;
+      collector.VisitExpr((*it)->value_);
+      for (const Var* ref : collector.var_uses) {
         if (!live.count(ref)) {
           live.insert(ref);
           changed = true;

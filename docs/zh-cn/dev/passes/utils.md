@@ -11,10 +11,10 @@
 
 | 工具 | 收集内容 |
 | ---- | -------- |
-| `VarRefCollector` | 所有变量引用（定义和使用点）。递归。 |
-| `VarDefUseCollector` | 定义点和使用点，单次遍历。递归。 |
+| `VarDefUseCollector` | 定义点和使用点，单次遍历。`.GetAllVarRefs()` 返回并集。 |
 | `VarDefCollector` | `VarDefUseCollector` 的别名 — 读取 `.var_defs`。 |
 | `VarUseCollector` | `VarDefUseCollector` 的别名 — 读取 `.var_uses`。 |
+| `VarRefCollector` | `VarDefUseCollector` 的别名 — 使用 `.GetAllVarRefs()`。 |
 | `CollectStmtDefinedVars()` | 语句后可见的变量。非递归。 |
 | `CollectVarDefsInOrder()` | 同 VarDefCollector 但有序（DFS）。追加到输出 vector 或返回新 vector。 |
 | `CollectAssignDefs()` | 仅 AssignStmt var\_（不含循环变量）。递归。 |
@@ -28,7 +28,7 @@
 你需要什么？
   |
   |-- 单次遍历同时获取定义和使用？ ------> VarDefUseCollector
-  |-- 子树中所有引用的变量？ ------------> VarRefCollector
+  |-- 子树中所有引用的变量？ ------------> VarDefUseCollector（.GetAllVarRefs()）
   |-- 仅定义的变量？ --------------------> VarDefCollector（读取 .var_defs）
   |-- 仅使用（读取，非定义）的变量？ ----> VarUseCollector（读取 .var_uses）
   |-- 仅 AssignStmt 定义？ ----------> CollectAssignDefs()
@@ -56,11 +56,9 @@
 包含 `AssignStmt::var_` 和控制流 `return_vars_`，但不包含
 `loop_var_` 和 `iter_args_`（它们的作用域仅限循环体内）。
 
-**VarRefCollector** 与 **VarDefUseCollector**：
-
-- `VarRefCollector` 通过默认 IRVisitor 递归捕获子树中*每个* Var 指针，
-  包括定义点的左值变量
-- `VarDefUseCollector` 将定义和使用显式分离到两个集合中
+对于合法 IR，`GetAllVarRefs()`（var\_defs ∪ var\_uses）等于子树中
+所有变量指针的集合。`VarRefCollector` 是 `VarDefUseCollector` 的
+向后兼容别名。
 
 ### 使用示例
 
@@ -69,17 +67,16 @@
 
 using namespace pypto::ir;
 
-// 示例 1：查找在作用域中定义但在之后使用的变量
-var_collectors::VarRefCollector refs;
-refs.VisitStmt(after_scope_stmts);
+// 示例 1：单次遍历确定作用域的输入变量
+var_collectors::VarDefUseCollector collector;
+collector.VisitStmt(scope_body);
 
-var_collectors::VarDefCollector defs;
-defs.VisitStmt(scope_body);
-
-std::vector<VarPtr> outputs;
-for (const Var* def : defs.var_defs) {
-  if (refs.var_refs.count(def)) {
-    outputs.push_back(/* resolve VarPtr */);
+// var_defs: 作用域内定义的变量
+// var_uses: 作用域内使用（读取）的变量
+// 输入 = 使用但未在本地定义的变量：
+for (const Var* use : collector.var_uses) {
+  if (!collector.var_defs.count(use)) {
+    // 'use' 来自外层作用域 — 是输入
   }
 }
 
