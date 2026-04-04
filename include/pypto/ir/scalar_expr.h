@@ -557,6 +557,11 @@ inline bool IsConstValue(const ExprPtr& expr, int64_t value) {
   return c && c->value_ == value;
 }
 
+/// Overload for plain integer literals (avoids int64_t/double ambiguity).
+inline bool IsConstValue(const ExprPtr& expr, int value) {
+  return IsConstValue(expr, static_cast<int64_t>(value));
+}
+
 /// Check if an expression is a ConstFloat with a specific value.
 inline bool IsConstValue(const ExprPtr& expr, double value) {
   auto c = std::dynamic_pointer_cast<const ConstFloat>(expr);

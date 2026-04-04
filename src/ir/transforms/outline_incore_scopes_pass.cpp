@@ -22,6 +22,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {

@@ -13,13 +13,19 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_MEMREF_COLLECTORS_H_
 
 #include <map>
-#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {

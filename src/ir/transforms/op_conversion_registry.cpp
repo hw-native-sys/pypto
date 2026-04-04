@@ -50,7 +50,7 @@ ExprPtr MakeShapesTuple(const std::vector<ExprPtr>& shape, const Span& span) {
   return std::make_shared<MakeTuple>(shape, span);
 }
 
-bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, static_cast<int64_t>(1)); }
+bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
 
 // Detect row-broadcast pattern: [M, N] op [M, 1] or [M, 1] op [M, N]
 // Returns {wider_arg_idx, narrower_arg_idx} if broadcast detected, empty otherwise
