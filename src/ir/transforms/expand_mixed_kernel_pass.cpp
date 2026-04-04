@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -703,7 +704,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
     outline_utils::VarDefUseCollector aiv_ref_collector;
     aiv_ref_collector.VisitStmt(aiv_body_stmt);
-    auto aiv_all_refs = aiv_ref_collector.GetAllVarRefs();
+    auto aiv_all_refs = var_collectors::GetSortedVarRefs(aiv_ref_collector.GetAllVarRefs());
     for (const Var* ref_ptr : aiv_all_refs) {
       if (!ref_ptr || aiv_def_collector.var_defs.count(ref_ptr) || aiv_map.count(ref_ptr)) {
         continue;
