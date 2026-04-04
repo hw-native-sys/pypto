@@ -364,7 +364,13 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   CHECK(op->args_.size() == 1) << "Operation:" << pto_op_name << "] requires 1 argument, but got "
                                << op->args_.size();
   std::string src = codegen.GetExprAsCode(op->args_[0]);
-  codegen.Emit(pto_op_name + " ins(" + src + " | !pto.partition_tensor_view<MxNxdtype>)");
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string line = pto_op_name + " ins(" + src;
+  if (!src_type.empty()) {
+    line += " : " + src_type;
+  }
+  line += ")";
+  codegen.Emit(line);
   return "";
 }
 
@@ -1234,9 +1240,11 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.mrgsort", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
   });
-  reg("tile.print", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  auto make_tprint = [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
-  });
+  };
+  reg("tile.runtime_print", make_tprint);
+  reg("tensor.runtime_print", make_tprint);
 
   // In-place accumulation ops (matmul_acc, gemv_acc): ptoas expects the
   // accumulator in ins() to be the same SSA value as outs().  InitMemRef

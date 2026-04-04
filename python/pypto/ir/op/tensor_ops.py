@@ -940,3 +940,19 @@ def scatter_update(
     op_args: list[Expr] = [input, index, src]
     kwargs: dict[str, Any] = {"dim": dim_val}
     return _ir_core.create_op_call("tensor.scatter_update", op_args, kwargs, actual_span)
+
+
+def runtime_print(tensor: Expr, span: Span | None = None) -> Call:
+    """Print tensor contents at runtime for debugging.
+
+    Generates a pto.tprint instruction in the compiled output.
+
+    Args:
+        tensor: Input tensor expression (TensorType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression (type is pass-through TensorType)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.runtime_print", [tensor], {}, actual_span)
