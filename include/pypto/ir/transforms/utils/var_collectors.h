@@ -120,11 +120,14 @@ class VarDefCollector : public IRVisitor {
   }
 };
 
-/// Collect variable use-sites only (skips definition-site LHS variables).
+/// Collect variable use-sites only (skips definition-site variables).
 ///
 /// Unlike VarRefCollector which captures every Var pointer including definitions,
 /// this collector only records variables that appear as RHS uses — i.e., variables
-/// that are read, not defined. AssignStmt LHS is explicitly skipped.
+/// that are read, not defined. Definition-site variables (AssignStmt::var_,
+/// ForStmt::loop_var_/return_vars_, WhileStmt::return_vars_, IfStmt::return_vars_)
+/// are explicitly skipped. IterArg init values ARE visited as uses since they
+/// reference variables from the enclosing scope.
 class VarUseCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> var_uses;
@@ -132,9 +135,34 @@ class VarUseCollector : public IRVisitor {
  protected:
   void VisitExpr_(const VarPtr& op) override { var_uses.insert(op.get()); }
   void VisitExpr_(const IterArgPtr& op) override { var_uses.insert(op.get()); }
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    // Only visit RHS value, not LHS var — definitions are not uses.
-    VisitExpr(op->value_);
+
+  void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    if (op->chunk_size_.has_value() && *op->chunk_size_) {
+      VisitExpr(*op->chunk_size_);
+    }
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitStmt(op->then_body_);
+    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
   }
 };
 
@@ -172,8 +200,8 @@ inline std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt
 ///
 /// Similar scope to VarDefCollector but preserves traversal order:
 /// AssignStmt::var_, ForStmt::loop_var_/return_vars_/iter_args_,
-/// IfStmt/WhileStmt::return_vars_. Recurses into all control-flow bodies
-/// and ScopeStmt.
+/// WhileStmt::return_vars_/iter_args_, IfStmt::return_vars_.
+/// Recurses into all control-flow bodies and ScopeStmt.
 inline void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& out) {
   if (!stmt) return;
   if (auto assign = As<AssignStmt>(stmt)) {
@@ -189,12 +217,20 @@ inline void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& 
     if (if_stmt->else_body_.has_value()) CollectVarDefsInOrder(*if_stmt->else_body_, out);
   } else if (auto while_stmt = As<WhileStmt>(stmt)) {
     for (auto& rv : while_stmt->return_vars_) out.push_back(rv.get());
+    for (auto& ia : while_stmt->iter_args_) out.push_back(ia.get());
     CollectVarDefsInOrder(while_stmt->body_, out);
   } else if (auto seq = As<SeqStmts>(stmt)) {
     for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
   } else if (auto scope = As<ScopeStmt>(stmt)) {
     CollectVarDefsInOrder(scope->body_, out);
   }
+}
+
+/// Convenience overload: collect def sites and return them as a new vector.
+inline std::vector<const Var*> CollectVarDefsInOrder(const StmtPtr& stmt) {
+  std::vector<const Var*> out;
+  CollectVarDefsInOrder(stmt, out);
+  return out;
 }
 
 /// Collect only AssignStmt variable definitions recursively.

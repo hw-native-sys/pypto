@@ -15,7 +15,7 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 | `VarRefCollector` | ALL var references (both def and use sites). Recursive visitor. |
 | `VarUseCollector` | USE sites only (skips AssignStmt LHS). Recursive visitor. |
 | `CollectStmtDefinedVars()` | Vars visible after a single statement. Non-recursive. |
-| `CollectVarDefsInOrder()` | Same scope as VarDefCollector but ordered (DFS). Returns vector. |
+| `CollectVarDefsInOrder()` | Same scope as VarDefCollector but ordered (DFS). Appends to output vector or returns new one. |
 | `CollectAssignDefs()` | AssignStmt var\_ only (no loop vars). Recursive. |
 | `CollectTypeVars()` | Vars in type shapes (dynamic dims). Walks type tree. |
 | `VisitTypeExprFields()` | Dispatch visitor over type expr fields. |

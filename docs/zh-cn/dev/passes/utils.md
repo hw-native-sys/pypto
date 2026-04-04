@@ -15,7 +15,7 @@
 | `VarRefCollector` | 所有变量引用（定义和使用点）。递归。 |
 | `VarUseCollector` | 仅使用点（跳过 AssignStmt 左值）。递归。 |
 | `CollectStmtDefinedVars()` | 语句后可见的变量。非递归。 |
-| `CollectVarDefsInOrder()` | 同 VarDefCollector 但有序（DFS）。返回 vector。 |
+| `CollectVarDefsInOrder()` | 同 VarDefCollector 但有序（DFS）。追加到输出 vector 或返回新 vector。 |
 | `CollectAssignDefs()` | 仅 AssignStmt var\_（不含循环变量）。递归。 |
 | `CollectTypeVars()` | 类型形状中的变量（动态维度）。遍历类型树。 |
 | `VisitTypeExprFields()` | 在类型表达式字段上分派 visitor。 |
