@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -42,88 +43,9 @@ namespace ir {
 using transform_utils::SubstituteStmt;
 namespace outline_utils {
 
-// ============================================================================
-// Helper visitors/mutators shared by scope-outlining passes
-// ============================================================================
-
-/** @brief Visitor to collect all variable references in an IR subtree (by pointer identity). */
-class VarRefCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> var_refs;
-
- protected:
-  void VisitExpr_(const VarPtr& op) override { var_refs.insert(op.get()); }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    var_refs.insert(op.get());
-    // Do not traverse initValue_: when an IterArg appears as an expression
-    // reference (defined by an outer loop), its initValue_ belongs to that
-    // outer loop's initialization, not to the scope being analyzed.
-    // InitValues of IterArgs defined by inner ForStmt/WhileStmt are visited
-    // explicitly in VisitStmt_ overrides below.
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Explicitly visit initValue_ for IterArgs defined by THIS ForStmt.
-    // These are genuine references to variables from the enclosing scope
-    // that must be captured as inputs when outlining.
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      if (iter_arg->initValue_) {
-        VisitExpr(iter_arg->initValue_);
-      }
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
-
-/** @brief Visitor to collect all variable definitions in an IR subtree (by pointer identity). */
-class VarDefCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> var_defs;
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    var_defs.insert(op->var_.get());
-    // Don't visit the RHS - we only care about definitions
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    var_defs.insert(op->loop_var_.get());
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
+// Re-export from var_collectors for backward compatibility
+using var_collectors::VarDefCollector;
+using var_collectors::VarRefCollector;
 
 /**
  * @brief Visitor to collect target tensors of tile.store calls (by pointer identity).

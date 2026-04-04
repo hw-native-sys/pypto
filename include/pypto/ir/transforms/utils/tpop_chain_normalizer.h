@@ -38,9 +38,7 @@ std::string GetTfreeOpName(core_affinity::CoreSide side);
 CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span);
 
 std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt);
-std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt);
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt);
-std::vector<const Var*> GetSortedVarRefs(const std::unordered_set<const Var*>& refs);
 
 bool StmtReferencesVar(const StmtPtr& stmt, const Var* var);
 

@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -424,25 +425,6 @@ ExprPtr ResolveTileAlias(const ExprPtr& expr, const TileAliasMap& alias_map) {
   }
   return current;
 }
-
-/// Visitor that collects all Var pointers used as RHS expressions.
-/// Overrides AssignStmt handling to skip LHS definitions — only captures actual uses.
-/// Uses IRVisitor's built-in recursion to handle nested control flow (IfStmt, ForStmt, etc.).
-class VarUseCollector : public IRVisitor {
- public:
-  const std::unordered_set<const Var*>& uses() const { return uses_; }
-
- protected:
-  void VisitExpr_(const VarPtr& op) override { uses_.insert(op.get()); }
-  void VisitExpr_(const IterArgPtr& op) override { uses_.insert(op.get()); }
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    // Only visit RHS value, not LHS var — definitions are not uses.
-    VisitExpr(op->value_);
-  }
-
- private:
-  std::unordered_set<const Var*> uses_;
-};
 
 /// Find the index of the YieldStmt in a flat statement list (backward search).
 /// Returns stmts.size() if not found.
@@ -1656,9 +1638,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
 
           // Full IR walk to collect all var uses (handles nested control flow).
           // Only remove aliases whose var is truly unused.
-          VarUseCollector collector;
+          var_collectors::VarUseCollector collector;
           for (const auto& s : stmts) collector.VisitStmt(s);
-          const auto& used = collector.uses();
+          const auto& used = collector.var_uses;
           stmts.erase(std::remove_if(stmts.begin(), stmts.end(),
                                      [&candidates, &used](const StmtPtr& s) {
                                        auto assign = As<AssignStmt>(s);

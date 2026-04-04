@@ -32,6 +32,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 
 namespace pypto {
 namespace ir {
@@ -101,26 +102,6 @@ std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt) {
   return refs.var_refs;
 }
 
-std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt) {
-  std::unordered_set<const Var*> defs;
-  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    defs.insert(assign->var_.get());
-  } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    for (const auto& ret : for_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    for (const auto& ret : if_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    for (const auto& ret : while_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  }
-  return defs;
-}
-
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
   CallPtr call;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -137,16 +118,6 @@ std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt) {
     refs_set.insert(refs.var_refs.begin(), refs.var_refs.end());
   }
   return refs_set;
-}
-
-std::vector<const Var*> GetSortedVarRefs(const std::unordered_set<const Var*>& refs) {
-  std::vector<const Var*> sorted_refs(refs.begin(), refs.end());
-  std::sort(sorted_refs.begin(), sorted_refs.end(), [](const Var* lhs, const Var* rhs) {
-    if (lhs == rhs) return false;
-    if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
-    return lhs->UniqueId() < rhs->UniqueId();
-  });
-  return sorted_refs;
 }
 
 bool StmtReferencesVar(const StmtPtr& stmt, const Var* var) {
@@ -177,8 +148,8 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
 
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(normalized_inputs[i]);
-    const auto stmt_defs = CollectStmtDefinedVars(normalized_inputs[i]);
-    for (const auto* def : GetSortedVarRefs(stmt_defs)) {
+    const auto stmt_defs = var_collectors::CollectStmtDefinedVars(normalized_inputs[i]);
+    for (const auto* def : var_collectors::GetSortedVarRefs(stmt_defs)) {
       def_indices.try_emplace(def, i);
     }
     VarPtr tpop_var;
@@ -231,7 +202,7 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
     } else {
       refs = CollectStmtVarRefs(normalized_inputs[i]);
     }
-    const auto sorted_refs = GetSortedVarRefs(refs);
+    const auto sorted_refs = var_collectors::GetSortedVarRefs(refs);
     for (const auto* ref : sorted_refs) {
       const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
       if (canonical_ref && chains.count(canonical_ref) > 0) {

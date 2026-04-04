@@ -27,41 +27,12 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 
 namespace pypto {
 namespace codegen {
 
 using ir::As;
-
-static std::vector<const ir::Var*> GetSortedVarRefs(const std::unordered_set<const ir::Var*>& refs) {
-  std::vector<const ir::Var*> sorted_refs(refs.begin(), refs.end());
-  std::sort(sorted_refs.begin(), sorted_refs.end(), [](const ir::Var* lhs, const ir::Var* rhs) {
-    if (lhs == rhs) return false;
-    if (lhs->name_hint_ != rhs->name_hint_) return lhs->name_hint_ < rhs->name_hint_;
-    return lhs->UniqueId() < rhs->UniqueId();
-  });
-  return sorted_refs;
-}
-
-static std::unordered_set<const ir::Var*> CollectStmtDefinedVars(const ir::StmtPtr& stmt) {
-  std::unordered_set<const ir::Var*> defs;
-  if (auto assign = As<ir::AssignStmt>(stmt)) {
-    defs.insert(assign->var_.get());
-  } else if (auto for_stmt = As<ir::ForStmt>(stmt)) {
-    for (const auto& ret : for_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  } else if (auto if_stmt = As<ir::IfStmt>(stmt)) {
-    for (const auto& ret : if_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  } else if (auto while_stmt = As<ir::WhileStmt>(stmt)) {
-    for (const auto& ret : while_stmt->return_vars_) {
-      defs.insert(ret.get());
-    }
-  }
-  return defs;
-}
 
 /// Collect variable references from a statement and classify against tpop chains.
 struct StmtChainClassification {
@@ -101,7 +72,7 @@ static StmtChainClassification ClassifyStmtForTpopChain(
     const std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars,
     const std::set<const ir::Var*>& defined_since_first_tpop) {
   StmtChainClassification result;
-  const auto sorted_refs = GetSortedVarRefs(refs);
+  const auto sorted_refs = ir::var_collectors::GetSortedVarRefs(refs);
   for (const auto* var_ref : sorted_refs) {
     if (tpop_result_vars.count(var_ref) > 0) {
       if (result.tpop_ref && result.tpop_ref != var_ref) {
@@ -177,7 +148,7 @@ std::vector<ir::StmtPtr> ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts
   std::set<const ir::Var*> defined_since_first_tpop;
   bool seen_first_tpop = false;
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
-    const auto stmt_defined_vars = CollectStmtDefinedVars(normalized_inputs[i]);
+    const auto stmt_defined_vars = ir::var_collectors::CollectStmtDefinedVars(normalized_inputs[i]);
 
     if (auto assign = As<ir::AssignStmt>(normalized_inputs[i])) {
       if (tpop_result_vars.count(assign->var_.get()) > 0) {

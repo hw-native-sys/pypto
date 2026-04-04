@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -66,35 +67,6 @@ static std::string BuildAutoNamedVersion(const std::string& name, const std::str
 // occurrence of the same source-level variable already carries the same
 // Var*, so no name-based canonicalization is needed.
 // ═══════════════════════════════════════════════════════════════════════════
-
-class AssignmentCollector : public IRVisitor {
- public:
-  std::unordered_set<const Var*> assigned;
-  void Collect(const StmtPtr& stmt) {
-    if (stmt) VisitStmt(stmt);
-  }
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    assigned.insert(op->var_.get());
-    VisitExpr(op->value_);
-  }
-  void VisitStmt_(const ForStmtPtr& op) override {
-    // Don't record loop_var — it's scoped to the loop body, not an outer assignment
-    VisitStmt(op->body_);
-  }
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    VisitExpr(op->condition_);
-    VisitStmt(op->body_);
-  }
-  void VisitStmt_(const IfStmtPtr& op) override {
-    VisitStmt(op->then_body_);
-    if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
-  }
-  void VisitStmt_(const SeqStmtsPtr& op) override {
-    for (const auto& s : op->stmts_) VisitStmt(s);
-  }
-};
 
 class TypeCollector : public IRVisitor {
  public:
@@ -220,9 +192,8 @@ static std::unordered_set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr
     for (const auto& v : stmt_li) {  // NOLINT: set insertion is order-independent
       if (!defined.count(v)) live_in.insert(v);
     }
-    AssignmentCollector ac;
-    ac.Collect(s);
-    defined.insert(ac.assigned.begin(), ac.assigned.end());
+    auto assigned = var_collectors::CollectAssignDefs(s);
+    defined.insert(assigned.begin(), assigned.end());
   }
   return live_in;
 }
@@ -423,11 +394,10 @@ class SSAConverter {
     std::vector<std::unordered_set<const Var*>> suffix_needs(n + 1);
     for (size_t j = n; j > 0; --j) {
       auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1]);
-      AssignmentCollector ac;
-      ac.Collect(op->stmts_[j - 1]);
+      auto assigned = var_collectors::CollectAssignDefs(op->stmts_[j - 1]);
       suffix_needs[j - 1] = live_in;
       for (const auto& v : suffix_needs[j]) {
-        if (!ac.assigned.count(v)) {
+        if (!assigned.count(v)) {
           suffix_needs[j - 1].insert(v);
         }
       }
@@ -466,13 +436,12 @@ class SSAConverter {
     }
 
     // Pre-analysis: classify assigned variables
-    AssignmentCollector ac;
-    ac.Collect(op->body_);
+    auto assigned = var_collectors::CollectAssignDefs(op->body_);
     auto lv_key = op->loop_var_.get();
 
     // Loop-carried: assigned in body AND existed before AND not loop_var/existing iter_arg
     std::vector<const Var*> carried;
-    for (const auto& assigned_var : ac.assigned) {
+    for (const auto& assigned_var : assigned) {  // NOLINT: result is sorted below
       if (assigned_var == lv_key) continue;
       bool is_existing_ia = false;
       for (const auto& ia : op->iter_args_) {
@@ -494,7 +463,7 @@ class SSAConverter {
     TypeCollector tc;
     tc.Collect(op->body_);
     std::vector<const Var*> escaping;
-    for (const auto& assigned_var : ac.assigned) {
+    for (const auto& assigned_var : assigned) {  // NOLINT: result is sorted below
       if (assigned_var == lv_key) continue;
       if (before.count(assigned_var)) continue;
       if (!saved_future_needs.count(assigned_var)) continue;
@@ -609,12 +578,11 @@ class SSAConverter {
     }
 
     // Pre-analysis
-    AssignmentCollector ac;
-    ac.Collect(op->body_);
+    auto assigned = var_collectors::CollectAssignDefs(op->body_);
 
     // Loop-carried classification
     std::vector<const Var*> carried;
-    for (const auto& assigned_var : ac.assigned) {
+    for (const auto& assigned_var : assigned) {  // NOLINT: result is sorted below
       bool is_existing_ia = false;
       for (const auto& ia : op->iter_args_) {
         if (ia.get() == assigned_var) {
@@ -632,7 +600,7 @@ class SSAConverter {
     TypeCollector tc;
     tc.Collect(op->body_);
     std::vector<const Var*> escaping;
-    for (const auto& assigned_var : ac.assigned) {
+    for (const auto& assigned_var : assigned) {  // NOLINT: result is sorted below
       if (before.count(assigned_var)) continue;
       if (!saved_future_needs.count(assigned_var)) continue;
       bool is_existing_ia = false;

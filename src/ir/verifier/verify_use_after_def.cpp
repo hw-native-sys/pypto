@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -23,6 +22,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -42,75 +42,6 @@ std::string ErrorTypeToString(ErrorType type) {
 }  // namespace use_after_def
 
 namespace {
-
-/**
- * @brief Collects all Var pointers referenced in expression trees.
- *
- * Used to find type-dynamic variables embedded in parameter type annotations
- * (shape, valid_shape, stride, etc.) that are not defined by any statement.
- */
-class VarCollector : public IRVisitor {
- public:
-  std::vector<const Var*> vars_;
-
- protected:
-  void VisitVarLike_(const VarPtr& op) override {
-    if (op) vars_.push_back(op.get());
-    // Don't recurse into the var's type — prevents infinite traversal.
-  }
-};
-
-/**
- * @brief Visit all expression fields in a type using the given visitor.
- *
- * Covers: TensorType shape_, tensor_view_.{valid_shape, stride};
- *         TileType shape_, tile_view_.{valid_shape, stride, start_offset};
- *         TupleType elements (recursively).
- */
-static void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
-  if (!type) return;
-
-  auto visit_exprs = [&visitor](const std::vector<ExprPtr>& exprs) {
-    for (const auto& e : exprs) {
-      if (e) visitor.VisitExpr(e);
-    }
-  };
-
-  if (auto tensor_type = As<TensorType>(type)) {
-    visit_exprs(tensor_type->shape_);
-    if (tensor_type->tensor_view_.has_value()) {
-      const auto& tv = tensor_type->tensor_view_.value();
-      visit_exprs(tv.valid_shape);
-      visit_exprs(tv.stride);
-    }
-  } else if (auto tile_type = As<TileType>(type)) {
-    visit_exprs(tile_type->shape_);
-    if (tile_type->tile_view_.has_value()) {
-      const auto& tv = tile_type->tile_view_.value();
-      visit_exprs(tv.valid_shape);
-      visit_exprs(tv.stride);
-      if (tv.start_offset) visitor.VisitExpr(tv.start_offset);
-    }
-  } else if (auto tuple_type = As<TupleType>(type)) {
-    for (const auto& elem : tuple_type->types_) {
-      VisitTypeExprFields(visitor, elem);
-    }
-  }
-}
-
-/**
- * @brief Collect all Var pointers from a type's expression fields.
- *
- * Recursively walks expression trees in shape, valid_shape, stride, and
- * start_offset to find all referenced Var nodes and registers them via callback.
- */
-static void CollectTypeVars(const TypePtr& type, const std::function<void(const Var*)>& register_var) {
-  VarCollector collector;
-  VisitTypeExprFields(collector, type);
-  for (const auto* var : collector.vars_) {
-    register_var(var);
-  }
-}
 
 /**
  * @brief Visitor that checks every Var use is preceded by a definition.
@@ -153,7 +84,7 @@ class UseAfterDefChecker : public IRVisitor {
     // don't contain further view expressions, but the flag ensures safety.
     if (!visiting_type_) {
       visiting_type_ = true;
-      VisitTypeExprFields(*this, op->GetType());
+      var_collectors::VisitTypeExprFields(*this, op->GetType());
       visiting_type_ = false;
     }
   }
@@ -305,12 +236,17 @@ class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
       // Type-dynamic vars in this function's parameter and return types are
       // implicitly in scope.  E.g., Tensor[[N, M], FP32] where N, M are
       // dynamic shape vars that exist only in the function signature.
-      auto add_def = [&checker](const Var* v) { checker.AddDefinition(v); };
       for (const auto& param : func->params_) {
-        if (param) CollectTypeVars(param->GetType(), add_def);
+        if (param) {
+          for (const auto* v : var_collectors::CollectTypeVars(param->GetType())) {
+            checker.AddDefinition(v);
+          }
+        }
       }
       for (const auto& ret_type : func->return_types_) {
-        CollectTypeVars(ret_type, add_def);
+        for (const auto* v : var_collectors::CollectTypeVars(ret_type)) {
+          checker.AddDefinition(v);
+        }
       }
 
       if (func->body_) checker.VisitStmt(func->body_);
