@@ -296,7 +296,7 @@ std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
       result.insert(result.end(), missing_defs.begin(), missing_defs.end());
     }
 
-    outline_utils::VarDefCollector stmt_defs;
+    outline_utils::VarDefUseCollector stmt_defs;
     stmt_defs.VisitStmt(stmt);
     defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
 
@@ -330,7 +330,7 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
       const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
 
-      outline_utils::VarDefCollector body_def_collector;
+      outline_utils::VarDefUseCollector body_def_collector;
       body_def_collector.VisitStmt(body);
       auto all_defined = defined_so_far;
       all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
@@ -353,7 +353,7 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       result.push_back(stmt);
     }
 
-    outline_utils::VarDefCollector stmt_defs;
+    outline_utils::VarDefUseCollector stmt_defs;
     stmt_defs.VisitStmt(stmt);
     defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
   }

@@ -1638,7 +1638,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
 
           // Full IR walk to collect all var uses (handles nested control flow).
           // Only remove aliases whose var is truly unused.
-          var_collectors::VarUseCollector collector;
+          var_collectors::VarDefUseCollector collector;
           for (const auto& s : stmts) collector.VisitStmt(s);
           const auto& used = collector.var_uses;
           stmts.erase(std::remove_if(stmts.begin(), stmts.end(),

@@ -602,7 +602,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // references to the fresh parameter corresponding to the store's output tensor.
   {
     // Collect all vars defined in the AIV body
-    outline_utils::VarDefCollector aiv_def_collector;
+    outline_utils::VarDefUseCollector aiv_def_collector;
     auto aiv_body_stmt = MakeBody(aiv_final, func->span_);
     aiv_def_collector.VisitStmt(aiv_body_stmt);
 

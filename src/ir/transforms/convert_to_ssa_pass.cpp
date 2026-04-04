@@ -192,8 +192,9 @@ static std::unordered_set<const Var*> ComputeSeqLiveIn(const std::vector<StmtPtr
     for (const auto& v : stmt_li) {  // NOLINT: set insertion is order-independent
       if (!defined.count(v)) live_in.insert(v);
     }
-    auto assigned = var_collectors::CollectAssignDefs(s);
-    defined.insert(assigned.begin(), assigned.end());
+    var_collectors::VarDefUseCollector stmt_collector;
+    stmt_collector.VisitStmt(s);
+    defined.insert(stmt_collector.var_assign_defs.begin(), stmt_collector.var_assign_defs.end());
   }
   return live_in;
 }
@@ -394,10 +395,11 @@ class SSAConverter {
     std::vector<std::unordered_set<const Var*>> suffix_needs(n + 1);
     for (size_t j = n; j > 0; --j) {
       auto live_in = ComputeStmtLiveIn(op->stmts_[j - 1]);
-      auto assigned = var_collectors::CollectAssignDefs(op->stmts_[j - 1]);
+      var_collectors::VarDefUseCollector stmt_collector;
+      stmt_collector.VisitStmt(op->stmts_[j - 1]);
       suffix_needs[j - 1] = live_in;
       for (const auto& v : suffix_needs[j]) {
-        if (!assigned.count(v)) {
+        if (!stmt_collector.var_assign_defs.count(v)) {
           suffix_needs[j - 1].insert(v);
         }
       }
@@ -436,7 +438,9 @@ class SSAConverter {
     }
 
     // Pre-analysis: classify assigned variables
-    auto assigned = var_collectors::CollectAssignDefs(op->body_);
+    var_collectors::VarDefUseCollector body_collector;
+    body_collector.VisitStmt(op->body_);
+    const auto& assigned = body_collector.var_assign_defs;
     auto lv_key = op->loop_var_.get();
 
     // Loop-carried: assigned in body AND existed before AND not loop_var/existing iter_arg
@@ -578,7 +582,9 @@ class SSAConverter {
     }
 
     // Pre-analysis
-    auto assigned = var_collectors::CollectAssignDefs(op->body_);
+    var_collectors::VarDefUseCollector body_collector;
+    body_collector.VisitStmt(op->body_);
+    const auto& assigned = body_collector.var_assign_defs;
 
     // Loop-carried classification
     std::vector<const Var*> carried;

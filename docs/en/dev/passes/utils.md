@@ -2,7 +2,7 @@
 
 Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 
-## Variable Collectors (`var_collectors.h`)
+## Variable Collector (`var_collectors.h`)
 
 **Header:** `#include "pypto/ir/transforms/utils/var_collectors.h"`
 **Namespace:** `pypto::ir::var_collectors`
@@ -11,56 +11,30 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 
 | Utility | What it collects |
 | ------- | ---------------- |
-| `VarDefUseCollector` | Def sites AND use sites in a single pass. `.GetAllVarRefs()` returns the union. |
-| `VarDefCollector` | Alias for `VarDefUseCollector` — read `.var_defs`. |
-| `VarUseCollector` | Alias for `VarDefUseCollector` — read `.var_uses`. |
-| `VarRefCollector` | Alias for `VarDefUseCollector` — use `.GetAllVarRefs()`. |
+| `VarDefUseCollector` | All defs, uses, assign-only defs, and ordered defs in a single pass. |
 | `CollectStmtDefinedVars()` | Vars visible after a single statement. Non-recursive. |
-| `CollectVarDefsInOrder()` | Same scope as VarDefCollector but ordered (DFS). Appends to output vector or returns new one. |
-| `CollectAssignDefs()` | AssignStmt var\_ only (no loop vars). Recursive. |
 | `CollectTypeVars()` | Vars in type shapes (dynamic dims). Walks type tree. |
 | `VisitTypeExprFields()` | Dispatch visitor over type expr fields. |
 | `GetSortedVarRefs()` | Deterministic sort by name + ID. |
 
-### Choosing the Right Collector
+### VarDefUseCollector Fields
 
-```text
-What do you need?
-  |
-  |-- Both defs and uses in one pass? ------> VarDefUseCollector
-  |-- All vars referenced in a subtree? ----> VarDefUseCollector (.GetAllVarRefs())
-  |-- Only vars defined in a subtree? ------> VarDefCollector (read .var_defs)
-  |-- Only vars used (read, not defined)? --> VarUseCollector (read .var_uses)
-  |-- Only AssignStmt definitions? ----------> CollectAssignDefs()
-  |-- Vars output by a single statement? ---> CollectStmtDefinedVars()
-  |-- Ordered list of defs (DFS)? -----------> CollectVarDefsInOrder()
-  |-- Dynamic shape vars from types? -------> CollectTypeVars()
-  |-- Deterministic iteration order? -------> GetSortedVarRefs()
-```
+| Field | Content |
+| ----- | ------- |
+| `var_defs` | All def sites (unordered set). |
+| `var_uses` | All use sites (unordered set). |
+| `var_defs_ordered` | Def sites in DFS pre-order (vector). |
+| `var_assign_defs` | AssignStmt LHS only (unordered set). |
+| `GetAllVarRefs()` | Returns `var_defs ∪ var_uses`. |
 
-### Semantic Differences
+### What Each Statement Populates
 
-**VarDefUseCollector** collects both *definitions* and *uses* in a single traversal:
-
-| Statement | `var_defs` | `var_uses` |
-| --------- | ---------- | ---------- |
-| `AssignStmt` | `var_` | RHS `value_` |
-| `ForStmt` | `loop_var_`, `iter_args_`, `return_vars_` | `start_`, `stop_`, `step_`, `chunk_size_`, initValues |
-| `WhileStmt` | `iter_args_`, `return_vars_` | `condition_`, initValues |
-| `IfStmt` | `return_vars_` | `condition_` |
-
-**CollectAssignDefs** collects only `AssignStmt::var_` — useful for
-SSA analysis where loop variables and return variables are handled
-separately.
-
-**CollectStmtDefinedVars** is non-recursive and collects vars
-*visible after* a single statement. It includes `AssignStmt::var_`
-and control-flow `return_vars_` but excludes `loop_var_` and
-`iter_args_` (which are scoped to the loop body).
-
-For valid IR, `GetAllVarRefs()` (var\_defs ∪ var\_uses) equals the set
-of all variable pointers in the subtree.  `VarRefCollector` is a
-backward-compatible alias for `VarDefUseCollector`.
+| Statement | `var_defs` / `var_defs_ordered` | `var_assign_defs` | `var_uses` |
+| --------- | ------------------------------- | ----------------- | ---------- |
+| `AssignStmt` | `var_` | `var_` | RHS `value_` |
+| `ForStmt` | `loop_var_`, `return_vars_`, `iter_args_` | — | bounds, `chunk_size_`, initValues |
+| `WhileStmt` | `return_vars_`, `iter_args_` | — | `condition_`, initValues |
+| `IfStmt` | `return_vars_` | — | `condition_` |
 
 ### Usage Examples
 
@@ -69,53 +43,34 @@ backward-compatible alias for `VarDefUseCollector`.
 
 using namespace pypto::ir;
 
-// Example 1: Find vars defined in a scope but used after it
+// Single traversal gives defs, uses, and ordered defs
 var_collectors::VarDefUseCollector collector;
 collector.VisitStmt(scope_body);
 
-// var_defs: vars defined inside the scope
-// var_uses: vars used (read) inside the scope
-// Inputs = uses not satisfied by local defs:
+// Inputs = uses not satisfied by local defs
 for (const Var* use : collector.var_uses) {
   if (!collector.var_defs.count(use)) {
-    // 'use' comes from the enclosing scope — it's an input
+    // 'use' comes from the enclosing scope
   }
 }
 
-// Example 2: Classify assigned vars for SSA conversion
-auto assigned = var_collectors::CollectAssignDefs(loop_body);
-for (const Var* var : assigned) {
-  if (outer_scope.count(var)) {
-    // Loop-carried variable — needs iter_arg
-  }
+// SSA: find assign-only defs (excludes loop vars, iter_args)
+for (const Var* v : collector.var_assign_defs) {
+  // candidate for loop-carried state or escaping var
 }
 
-// Example 3: Build definition index with deterministic ordering
-auto stmt_defs = var_collectors::CollectStmtDefinedVars(stmt);
-for (const auto* def :
-     var_collectors::GetSortedVarRefs(stmt_defs)) {
-  def_index[def] = stmt_position;
-}
-
-// Example 4: Collect dynamic shape vars from function params
-for (const auto& param : func->params_) {
-  auto type_vars =
-      var_collectors::CollectTypeVars(param->GetType());
-  // type_vars has Var nodes like N, M in Tensor[[N, M], FP32]
+// Deterministic def ordering for rename maps
+for (const Var* def : collector.var_defs_ordered) {
+  rename_map[def] = next_name();
 }
 ```
 
 ### Type Expression Visitors
 
 `VisitTypeExprFields(visitor, type)` dispatches a visitor over all
-expression fields in a type: `TensorType::shape_`,
-`TensorView::{valid_shape, stride}`, `TileType::shape_`,
-`TileView::{valid_shape, stride, start_offset}`, and `TupleType`
-elements (recursively). Use this when you need to find dynamic
-dimension variables embedded in type annotations.
-
-`CollectTypeVars(type)` is a convenience wrapper that returns all
-`Var` pointers found in a type's expression fields.
+expression fields in a type. `CollectTypeVars(type)` is a convenience
+wrapper returning all `Var` pointers found. These operate on types
+(not IR statements), so they remain free functions.
 
 ## Other Shared Utilities
 

@@ -44,14 +44,13 @@ using transform_utils::SubstituteStmt;
 namespace outline_utils {
 
 // Re-export from var_collectors for backward compatibility
-using var_collectors::VarDefCollector;
 using var_collectors::VarDefUseCollector;
 
 /**
  * @brief Visitor to collect target tensors of tile.store calls (by pointer identity).
  *
  * These tensors are modified via side-effect inside scopes but are not
- * captured by VarDefCollector since they are defined externally.  The third
+ * captured by VarDefUseCollector since they are defined externally.  The third
  * argument of store is the output tensor.
  */
 class StoreTargetCollector : public IRVisitor {
@@ -260,7 +259,7 @@ class ScopeOutliner : public IRMutator {
         // body (if/for/while) where the outer context hasn't propagated
         // required_outputs_.
         if (used_after.empty()) {
-          VarDefCollector fallback_def;
+          VarDefUseCollector fallback_def;
           fallback_def.VisitStmt(scope->body_);
           StoreTargetCollector fallback_store;
           fallback_store.VisitStmt(scope->body_);
@@ -299,7 +298,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Without context, treat all defined variables + store targets as outputs
-    VarDefCollector def_collector;
+    VarDefUseCollector def_collector;
     def_collector.VisitStmt(op->body_);
 
     StoreTargetCollector store_collector;

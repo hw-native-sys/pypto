@@ -1171,7 +1171,11 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   // Collect all Var def-sites in DFS pre-order: params first, then body.
   std::vector<const Var*> defs;
   for (auto& p : func->params_) defs.push_back(p.get());
-  if (func->body_) var_collectors::CollectVarDefsInOrder(func->body_, defs);
+  if (func->body_) {
+    var_collectors::VarDefUseCollector body_collector;
+    body_collector.VisitStmt(func->body_);
+    defs.insert(defs.end(), body_collector.var_defs_ordered.begin(), body_collector.var_defs_ordered.end());
+  }
   auto_name::BuildRenameMapForDefs(defs, var_rename_map_);
 }
 
@@ -1478,9 +1482,9 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     }
     if (func->body_) {
       collector.VisitStmt(func->body_);
-      std::vector<const Var*> body_defs;
-      var_collectors::CollectVarDefsInOrder(func->body_, body_defs);
-      defined_vars.insert(body_defs.begin(), body_defs.end());
+      var_collectors::VarDefUseCollector body_def_collector;
+      body_def_collector.VisitStmt(func->body_);
+      defined_vars.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
     }
   }
 

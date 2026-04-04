@@ -28,23 +28,25 @@ namespace ir {
 namespace var_collectors {
 
 // ============================================================================
-// Visitor-based collectors
+// Visitor-based collector
 // ============================================================================
 
-/// Combined collector that gathers both definition and use sites in a single pass.
+/// Collects variable definitions and uses from an IR subtree in a single pass.
 ///
-/// var_defs: variables defined by statements (AssignStmt::var_, loop_var_,
-///           iter_args_, return_vars_).
-/// var_uses: variables referenced in expressions (RHS of assigns, loop bounds,
-///           conditions, iter_arg init values, etc.).
+/// Fields:
+///   var_defs         — variables defined by statements (unordered).
+///   var_uses         — variables referenced in expressions (unordered).
+///   var_defs_ordered — same as var_defs but in DFS pre-order.
+///   var_assign_defs  — subset of var_defs: only AssignStmt::var_.
 ///
-/// Each statement type is handled once, recording def-site vars into var_defs
-/// and traversing use-site expressions into var_uses.  Callers read whichever
-/// field they need — use both when def/use classification matters (e.g. SSA).
+/// Definition order within each statement follows CollectVarDefsInOrder
+/// convention: loop_var → return_vars → iter_args → recurse body.
 class VarDefUseCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> var_defs;
   std::unordered_set<const Var*> var_uses;
+  std::vector<const Var*> var_defs_ordered;
+  std::unordered_set<const Var*> var_assign_defs;
 
   /// Return var_defs ∪ var_uses — all variables referenced in the subtree.
   std::unordered_set<const Var*> GetAllVarRefs() const {
@@ -59,16 +61,25 @@ class VarDefUseCollector : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     var_defs.insert(op->var_.get());
+    var_defs_ordered.push_back(op->var_.get());
+    var_assign_defs.insert(op->var_.get());
     VisitExpr(op->value_);
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    // Defs: loop_var → return_vars → iter_args (matches DFS pre-order convention)
     var_defs.insert(op->loop_var_.get());
+    var_defs_ordered.push_back(op->loop_var_.get());
+    for (const auto& rv : op->return_vars_) {
+      var_defs.insert(rv.get());
+      var_defs_ordered.push_back(rv.get());
+    }
     for (const auto& ia : op->iter_args_) {
       var_defs.insert(ia.get());
+      var_defs_ordered.push_back(ia.get());
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }
-    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
+    // Uses: loop bounds and body
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
@@ -79,27 +90,30 @@ class VarDefUseCollector : public IRVisitor {
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
+    // Defs: return_vars → iter_args
+    for (const auto& rv : op->return_vars_) {
+      var_defs.insert(rv.get());
+      var_defs_ordered.push_back(rv.get());
+    }
     for (const auto& ia : op->iter_args_) {
       var_defs.insert(ia.get());
+      var_defs_ordered.push_back(ia.get());
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }
-    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
     VisitExpr(op->condition_);
     VisitStmt(op->body_);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
-    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
+    for (const auto& rv : op->return_vars_) {
+      var_defs.insert(rv.get());
+      var_defs_ordered.push_back(rv.get());
+    }
     VisitExpr(op->condition_);
     VisitStmt(op->then_body_);
     if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
   }
 };
-
-/// Backward-compatible aliases — callers read .var_defs, .var_uses, or GetAllVarRefs().
-using VarDefCollector = VarDefUseCollector;
-using VarUseCollector = VarDefUseCollector;
-using VarRefCollector = VarDefUseCollector;
 
 // ============================================================================
 // Free-function collectors
@@ -131,74 +145,6 @@ inline std::unordered_set<const Var*> CollectStmtDefinedVars(const StmtPtr& stmt
   return defs;
 }
 
-/// Collect all variable definition sites in DFS pre-order.
-///
-/// Similar scope to VarDefCollector but preserves traversal order:
-/// AssignStmt::var_, ForStmt::loop_var_/return_vars_/iter_args_,
-/// WhileStmt::return_vars_/iter_args_, IfStmt::return_vars_.
-/// Recurses into all control-flow bodies and ScopeStmt.
-inline void CollectVarDefsInOrder(const StmtPtr& stmt, std::vector<const Var*>& out) {
-  if (!stmt) return;
-  if (auto assign = As<AssignStmt>(stmt)) {
-    out.push_back(assign->var_.get());
-  } else if (auto for_stmt = As<ForStmt>(stmt)) {
-    out.push_back(for_stmt->loop_var_.get());
-    for (auto& rv : for_stmt->return_vars_) out.push_back(rv.get());
-    for (auto& ia : for_stmt->iter_args_) out.push_back(ia.get());
-    CollectVarDefsInOrder(for_stmt->body_, out);
-  } else if (auto if_stmt = As<IfStmt>(stmt)) {
-    for (auto& rv : if_stmt->return_vars_) out.push_back(rv.get());
-    CollectVarDefsInOrder(if_stmt->then_body_, out);
-    if (if_stmt->else_body_.has_value()) CollectVarDefsInOrder(*if_stmt->else_body_, out);
-  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-    for (auto& rv : while_stmt->return_vars_) out.push_back(rv.get());
-    for (auto& ia : while_stmt->iter_args_) out.push_back(ia.get());
-    CollectVarDefsInOrder(while_stmt->body_, out);
-  } else if (auto seq = As<SeqStmts>(stmt)) {
-    for (auto& s : seq->stmts_) CollectVarDefsInOrder(s, out);
-  } else if (auto scope = As<ScopeStmt>(stmt)) {
-    CollectVarDefsInOrder(scope->body_, out);
-  }
-}
-
-/// Convenience overload: collect def sites and return them as a new vector.
-inline std::vector<const Var*> CollectVarDefsInOrder(const StmtPtr& stmt) {
-  std::vector<const Var*> out;
-  CollectVarDefsInOrder(stmt, out);
-  return out;
-}
-
-/// Collect only AssignStmt variable definitions recursively.
-///
-/// Unlike VarDefCollector which also collects loop variables, iter_args, and
-/// return_vars, this function collects only variables on the LHS of
-/// AssignStmt nodes. Recurses into all control-flow bodies.
-inline void CollectAssignDefs(const StmtPtr& stmt, std::unordered_set<const Var*>& result) {
-  if (!stmt) return;
-  if (auto assign = As<AssignStmt>(stmt)) {
-    result.insert(assign->var_.get());
-  } else if (auto for_stmt = As<ForStmt>(stmt)) {
-    // Don't record loop_var — it's scoped to the loop body, not an outer assignment
-    CollectAssignDefs(for_stmt->body_, result);
-  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-    CollectAssignDefs(while_stmt->body_, result);
-  } else if (auto if_stmt = As<IfStmt>(stmt)) {
-    CollectAssignDefs(if_stmt->then_body_, result);
-    if (if_stmt->else_body_.has_value()) CollectAssignDefs(*if_stmt->else_body_, result);
-  } else if (auto seq = As<SeqStmts>(stmt)) {
-    for (auto& s : seq->stmts_) CollectAssignDefs(s, result);
-  } else if (auto scope = As<ScopeStmt>(stmt)) {
-    CollectAssignDefs(scope->body_, result);
-  }
-}
-
-/// Convenience overload returning a new set.
-inline std::unordered_set<const Var*> CollectAssignDefs(const StmtPtr& stmt) {
-  std::unordered_set<const Var*> result;
-  CollectAssignDefs(stmt, result);
-  return result;
-}
-
 // ============================================================================
 // Type expression visitors
 // ============================================================================
@@ -208,10 +154,6 @@ inline std::unordered_set<const Var*> CollectAssignDefs(const StmtPtr& stmt) {
 /// Covers: TensorType::shape_, tensor_view_.{valid_shape, stride};
 ///         TileType::shape_, tile_view_.{valid_shape, stride, start_offset};
 ///         TupleType elements (recursively).
-///
-/// This captures dynamic shape variables (ScalarExpr/Var nodes) that appear
-/// inside type annotations — e.g., Tensor[[N, M], FP32] where N, M are
-/// dynamic dimension vars.
 inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
   if (!type) return;
 
@@ -244,11 +186,7 @@ inline void VisitTypeExprFields(IRVisitor& visitor, const TypePtr& type) {
 }
 
 /// Collect all Var pointers from a type's expression fields (shape, view, etc.).
-///
-/// Walks expression trees in shape, valid_shape, stride, and start_offset
-/// to find all referenced Var nodes. These represent dynamic dimension
-/// variables that are implicitly defined by appearing in function parameter
-/// or return type annotations.
+/// Operates on types (not IR statements), so kept as a free function.
 inline std::unordered_set<const Var*> CollectTypeVars(const TypePtr& type) {
   VarDefUseCollector collector;
   VisitTypeExprFields(collector, type);
@@ -262,7 +200,7 @@ inline std::unordered_set<const Var*> CollectTypeVars(const TypePtr& type) {
 /// Sort a set of Var pointers deterministically by name_hint_ then UniqueId().
 ///
 /// Useful for iteration-order-sensitive algorithms that process var sets
-/// built from unordered containers.
+/// built from unordered containers (e.g. CollectStmtDefinedVars results).
 inline std::vector<const Var*> GetSortedVarRefs(const std::unordered_set<const Var*>& refs) {
   std::vector<const Var*> sorted_refs(refs.begin(), refs.end());
   std::sort(sorted_refs.begin(), sorted_refs.end(), [](const Var* lhs, const Var* rhs) {
