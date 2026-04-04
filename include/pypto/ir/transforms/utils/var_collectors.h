@@ -75,96 +75,67 @@ class VarRefCollector : public IRVisitor {
   }
 };
 
-/// Collect all variable definitions in an IR subtree (by pointer identity).
+/// Combined collector that gathers both definition and use sites in a single pass.
 ///
-/// Records every variable that is *defined* by a statement node:
-/// AssignStmt::var_, ForStmt::loop_var_/iter_args_/return_vars_,
-/// WhileStmt::iter_args_/return_vars_, IfStmt::return_vars_.
-/// Traverses the full subtree recursively.
-class VarDefCollector : public IRVisitor {
+/// var_defs: variables defined by statements (AssignStmt::var_, loop_var_,
+///           iter_args_, return_vars_).
+/// var_uses: variables referenced in expressions (RHS of assigns, loop bounds,
+///           conditions, iter_arg init values, etc.).
+///
+/// Each statement type is handled once, recording def-site vars into var_defs
+/// and traversing use-site expressions into var_uses.  Callers read whichever
+/// field they need — use both when def/use classification matters (e.g. SSA).
+class VarDefUseCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> var_defs;
-
- protected:
-  void VisitStmt_(const AssignStmtPtr& op) override {
-    var_defs.insert(op->var_.get());
-    // Don't visit the RHS - we only care about definitions
-  }
-
-  void VisitStmt_(const ForStmtPtr& op) override {
-    var_defs.insert(op->loop_var_.get());
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    for (const auto& iter_arg : op->iter_args_) {
-      var_defs.insert(iter_arg.get());
-    }
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const IfStmtPtr& op) override {
-    for (const auto& return_var : op->return_vars_) {
-      var_defs.insert(return_var.get());
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-};
-
-/// Collect variable use-sites only (skips definition-site variables).
-///
-/// Unlike VarRefCollector which captures every Var pointer including definitions,
-/// this collector only records variables that appear as RHS uses — i.e., variables
-/// that are read, not defined. Definition-site variables (AssignStmt::var_,
-/// ForStmt::loop_var_/return_vars_, WhileStmt::return_vars_, IfStmt::return_vars_)
-/// are explicitly skipped. IterArg init values ARE visited as uses since they
-/// reference variables from the enclosing scope.
-class VarUseCollector : public IRVisitor {
- public:
   std::unordered_set<const Var*> var_uses;
 
  protected:
   void VisitExpr_(const VarPtr& op) override { var_uses.insert(op.get()); }
   void VisitExpr_(const IterArgPtr& op) override { var_uses.insert(op.get()); }
 
-  void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    var_defs.insert(op->var_.get());
+    VisitExpr(op->value_);
+  }
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    var_defs.insert(op->loop_var_.get());
+    for (const auto& ia : op->iter_args_) {
+      var_defs.insert(ia.get());
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
     if (op->chunk_size_.has_value() && *op->chunk_size_) {
       VisitExpr(*op->chunk_size_);
     }
-    for (const auto& ia : op->iter_args_) {
-      if (ia->initValue_) VisitExpr(ia->initValue_);
-    }
     VisitStmt(op->body_);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    VisitExpr(op->condition_);
     for (const auto& ia : op->iter_args_) {
+      var_defs.insert(ia.get());
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }
+    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
+    VisitExpr(op->condition_);
     VisitStmt(op->body_);
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& rv : op->return_vars_) var_defs.insert(rv.get());
     VisitExpr(op->condition_);
     VisitStmt(op->then_body_);
     if (op->else_body_.has_value()) VisitStmt(*op->else_body_);
   }
 };
+
+/// Backward-compatible aliases — callers read .var_defs or .var_uses as needed.
+using VarDefCollector = VarDefUseCollector;
+using VarUseCollector = VarDefUseCollector;
 
 // ============================================================================
 // Free-function collectors

@@ -11,9 +11,10 @@
 
 | 工具 | 收集内容 |
 | ---- | -------- |
-| `VarDefCollector` | 所有定义点（AssignStmt var、loop\_var、iter\_args、return\_vars）。递归。 |
 | `VarRefCollector` | 所有变量引用（定义和使用点）。递归。 |
-| `VarUseCollector` | 仅使用点（跳过 AssignStmt 左值）。递归。 |
+| `VarDefUseCollector` | 定义点和使用点，单次遍历。递归。 |
+| `VarDefCollector` | `VarDefUseCollector` 的别名 — 读取 `.var_defs`。 |
+| `VarUseCollector` | `VarDefUseCollector` 的别名 — 读取 `.var_uses`。 |
 | `CollectStmtDefinedVars()` | 语句后可见的变量。非递归。 |
 | `CollectVarDefsInOrder()` | 同 VarDefCollector 但有序（DFS）。追加到输出 vector 或返回新 vector。 |
 | `CollectAssignDefs()` | 仅 AssignStmt var\_（不含循环变量）。递归。 |
@@ -26,9 +27,10 @@
 ```text
 你需要什么？
   |
-  |-- 子树中所有定义的变量？ ---------> VarDefCollector
-  |-- 子树中所有引用的变量？ ---------> VarRefCollector
-  |-- 仅使用（读取，非定义）的变量？ --> VarUseCollector
+  |-- 单次遍历同时获取定义和使用？ ------> VarDefUseCollector
+  |-- 子树中所有引用的变量？ ------------> VarRefCollector
+  |-- 仅定义的变量？ --------------------> VarDefCollector（读取 .var_defs）
+  |-- 仅使用（读取，非定义）的变量？ ----> VarUseCollector（读取 .var_uses）
   |-- 仅 AssignStmt 定义？ ----------> CollectAssignDefs()
   |-- 单条语句输出的变量？ -----------> CollectStmtDefinedVars()
   |-- 有序定义列表（DFS）？ ----------> CollectVarDefsInOrder()
@@ -38,14 +40,14 @@
 
 ### 语义差异
 
-**VarDefCollector** 收集语句引入的*所有*变量：
+**VarDefUseCollector** 在单次遍历中同时收集*定义*和*使用*：
 
-| 语句 | 收集的变量 |
-| ---- | ---------- |
-| `AssignStmt` | `var_` |
-| `ForStmt` | `loop_var_`、`iter_args_`、`return_vars_` |
-| `WhileStmt` | `iter_args_`、`return_vars_` |
-| `IfStmt` | `return_vars_` |
+| 语句 | `var_defs` | `var_uses` |
+| ---- | ---------- | ---------- |
+| `AssignStmt` | `var_` | 右值 `value_` |
+| `ForStmt` | `loop_var_`、`iter_args_`、`return_vars_` | `start_`、`stop_`、`step_`、`chunk_size_`、initValues |
+| `WhileStmt` | `iter_args_`、`return_vars_` | `condition_`、initValues |
+| `IfStmt` | `return_vars_` | `condition_` |
 
 **CollectAssignDefs** 仅收集 `AssignStmt::var_` — 适用于 SSA
 分析，循环变量和返回变量需单独处理。
@@ -54,12 +56,11 @@
 包含 `AssignStmt::var_` 和控制流 `return_vars_`，但不包含
 `loop_var_` 和 `iter_args_`（它们的作用域仅限循环体内）。
 
-**VarRefCollector** 与 **VarUseCollector**：
+**VarRefCollector** 与 **VarDefUseCollector**：
 
-- `VarRefCollector` 捕获子树中*每个* Var 指针，
+- `VarRefCollector` 通过默认 IRVisitor 递归捕获子树中*每个* Var 指针，
   包括定义点的左值变量
-- `VarUseCollector` 跳过 `AssignStmt::var_`（被定义的变量），
-  仅捕获读取点
+- `VarDefUseCollector` 将定义和使用显式分离到两个集合中
 
 ### 使用示例
 

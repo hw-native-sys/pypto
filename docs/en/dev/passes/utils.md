@@ -11,9 +11,10 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 
 | Utility | What it collects |
 | ------- | ---------------- |
-| `VarDefCollector` | ALL def sites (AssignStmt var, loop\_var, iter\_args, return\_vars). Recursive visitor. |
 | `VarRefCollector` | ALL var references (both def and use sites). Recursive visitor. |
-| `VarUseCollector` | USE sites only (skips AssignStmt LHS). Recursive visitor. |
+| `VarDefUseCollector` | Def sites AND use sites in a single pass. Recursive visitor. |
+| `VarDefCollector` | Alias for `VarDefUseCollector` — read `.var_defs`. |
+| `VarUseCollector` | Alias for `VarDefUseCollector` — read `.var_uses`. |
 | `CollectStmtDefinedVars()` | Vars visible after a single statement. Non-recursive. |
 | `CollectVarDefsInOrder()` | Same scope as VarDefCollector but ordered (DFS). Appends to output vector or returns new one. |
 | `CollectAssignDefs()` | AssignStmt var\_ only (no loop vars). Recursive. |
@@ -26,9 +27,10 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 ```text
 What do you need?
   |
-  |-- All vars defined in a subtree? -------> VarDefCollector
+  |-- Both defs and uses in one pass? ------> VarDefUseCollector
   |-- All vars referenced in a subtree? ----> VarRefCollector
-  |-- Only vars used (read, not defined)? --> VarUseCollector
+  |-- Only vars defined in a subtree? ------> VarDefCollector (read .var_defs)
+  |-- Only vars used (read, not defined)? --> VarUseCollector (read .var_uses)
   |-- Only AssignStmt definitions? ----------> CollectAssignDefs()
   |-- Vars output by a single statement? ---> CollectStmtDefinedVars()
   |-- Ordered list of defs (DFS)? -----------> CollectVarDefsInOrder()
@@ -38,14 +40,14 @@ What do you need?
 
 ### Semantic Differences
 
-**VarDefCollector** collects *all* variables introduced by statements:
+**VarDefUseCollector** collects both *definitions* and *uses* in a single traversal:
 
-| Statement | Variables collected |
-| --------- | ------------------- |
-| `AssignStmt` | `var_` |
-| `ForStmt` | `loop_var_`, `iter_args_`, `return_vars_` |
-| `WhileStmt` | `iter_args_`, `return_vars_` |
-| `IfStmt` | `return_vars_` |
+| Statement | `var_defs` | `var_uses` |
+| --------- | ---------- | ---------- |
+| `AssignStmt` | `var_` | RHS `value_` |
+| `ForStmt` | `loop_var_`, `iter_args_`, `return_vars_` | `start_`, `stop_`, `step_`, `chunk_size_`, initValues |
+| `WhileStmt` | `iter_args_`, `return_vars_` | `condition_`, initValues |
+| `IfStmt` | `return_vars_` | `condition_` |
 
 **CollectAssignDefs** collects only `AssignStmt::var_` — useful for
 SSA analysis where loop variables and return variables are handled
@@ -56,12 +58,11 @@ separately.
 and control-flow `return_vars_` but excludes `loop_var_` and
 `iter_args_` (which are scoped to the loop body).
 
-**VarRefCollector** vs **VarUseCollector**:
+**VarRefCollector** vs **VarDefUseCollector**:
 
-- `VarRefCollector` captures *every* Var pointer in the subtree,
-  including definition-site LHS variables
-- `VarUseCollector` skips `AssignStmt::var_` (the defined variable)
-  and only captures read sites
+- `VarRefCollector` captures *every* Var pointer in the subtree
+  via default IRVisitor recursion — including definition-site LHS variables
+- `VarDefUseCollector` explicitly separates defs from uses into two sets
 
 ### Usage Examples
 
