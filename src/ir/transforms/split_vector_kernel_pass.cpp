@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <memory>
 #include <optional>
@@ -22,13 +23,16 @@
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -38,6 +42,84 @@ namespace ir {
 namespace {
 
 int SplitDimension(SplitMode mode) { return (mode == SplitMode::UpDown) ? 0 : 1; }
+
+std::string SplitAivLane1Name(const std::string& base_name) { return base_name + "__aiv1"; }
+
+bool IsCrossCoreSplitOp(const std::string& op_name) {
+  return op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic" ||
+         op_name == "tile.tpop_from_aiv" || op_name == "tile.tpop_from_aic";
+}
+
+std::optional<SplitMode> SplitModeFromInt(int split) {
+  if (split == 0) return std::nullopt;
+  if (split == 1) return SplitMode::UpDown;
+  if (split == 2) return SplitMode::LeftRight;
+  throw pypto::ValueError("SplitVectorKernel found invalid cross-core split attribute: " +
+                          std::to_string(split));
+}
+
+class CrossCoreSplitCollector : public IRVisitor {
+ public:
+  [[nodiscard]] std::optional<SplitMode> GetInferredMode() const { return inferred_mode_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    ConsiderCall(As<Call>(op->value_));
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    ConsiderCall(As<Call>(op->expr_));
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::optional<SplitMode> inferred_mode_;
+
+  void ConsiderCall(const CallPtr& call) {
+    if (!call || !call->op_ || !IsCrossCoreSplitOp(call->op_->name_)) return;
+
+    auto mode = SplitModeFromInt(call->GetKwarg<int>("split", 0));
+    if (!mode.has_value()) return;
+
+    if (!inferred_mode_.has_value()) {
+      inferred_mode_ = mode;
+      return;
+    }
+
+    if (inferred_mode_.value() != mode.value()) {
+      throw pypto::ValueError("SplitVectorKernel found conflicting cross-core split modes in function body");
+    }
+  }
+};
+
+std::optional<SplitMode> ResolveSplitMode(const FunctionPtr& func) {
+  CrossCoreSplitCollector collector;
+  if (func->body_) {
+    collector.VisitStmt(func->body_);
+  }
+  auto inferred_mode = collector.GetInferredMode();
+
+  auto func_split_mode = func->GetSplitMode();
+  if (func_split_mode.has_value() && func_split_mode.value() != SplitMode::None) {
+    if (inferred_mode.has_value() && inferred_mode.value() != func_split_mode.value()) {
+      throw pypto::ValueError("SplitVectorKernel found conflicting function split and cross-core op split");
+    }
+    return func_split_mode;
+  }
+
+  return inferred_mode;
+}
+
+std::vector<std::pair<std::string, std::any>> WithSplitAttr(const FunctionPtr& func, SplitMode mode) {
+  auto attrs = func->attrs_;
+  attrs.erase(std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
+              attrs.end());
+  if (mode != SplitMode::None) {
+    attrs.emplace_back("split", static_cast<int>(mode));
+  }
+  return attrs;
+}
 
 ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
@@ -53,12 +135,17 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
 
 CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   std::vector<std::pair<std::string, std::any>> new_kwargs;
+  bool has_split = false;
   for (const auto& [key, val] : call->kwargs_) {
     if (key == "split") {
       new_kwargs.emplace_back("split", std::any(split_int));
+      has_split = true;
     } else {
       new_kwargs.emplace_back(key, val);
     }
+  }
+  if (!has_split) {
+    new_kwargs.emplace_back("split", std::any(split_int));
   }
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }
@@ -72,8 +159,8 @@ TypePtr HalveTileShape(const TypePtr& type, int dim) {
 
   // Keep TileView.valid_shape consistent with halved physical shape (was left at pre-split size).
   std::optional<TileView> new_tile_view = tt->tile_view_;
-  if (tt->tile_view_.has_value()) {
-    TileView tv = *tt->tile_view_;
+  if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
+    TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
       tv.valid_shape[dim] = ComputeHalfDimSize(tv.valid_shape[dim]);
     }
@@ -95,12 +182,17 @@ CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split
   auto new_result_type = HalveTileShape(call->GetType(), split_dim);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
+  bool has_split = false;
   for (const auto& [key, val] : call->kwargs_) {
     if (key == "split") {
       new_kwargs.emplace_back("split", std::any(split_int));
+      has_split = true;
     } else {
       new_kwargs.emplace_back(key, val);
     }
+  }
+  if (!has_split) {
+    new_kwargs.emplace_back("split", std::any(split_int));
   }
 
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), new_result_type, call->span_);
@@ -111,7 +203,7 @@ struct TileInfo {
 };
 
 ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr& half_size,
-                      const VarPtr& subblock_idx) {
+                      const ExprPtr& subblock_idx) {
   auto offsets = std::dynamic_pointer_cast<const MakeTuple>(offsets_expr);
   if (!offsets || split_dim < 0 || split_dim >= static_cast<int>(offsets->elements_.size())) {
     return offsets_expr;
@@ -120,9 +212,25 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   std::vector<ExprPtr> new_elements = offsets->elements_;
   auto original_offset = offsets->elements_[split_dim];
 
-  // offset = original + get_subblock_idx() * half_size
-  auto adjustment = MakeMul(subblock_idx, half_size, original_offset->span_);
-  auto adjusted = MakeAdd(original_offset, adjustment, original_offset->span_);
+  ExprPtr adjusted;
+  if (auto subblock_const = std::dynamic_pointer_cast<const ConstInt>(subblock_idx)) {
+    if (subblock_const->value_ == 0) {
+      adjusted = original_offset;
+    } else if (subblock_const->value_ == 1) {
+      if (auto original_const = std::dynamic_pointer_cast<const ConstInt>(original_offset);
+          original_const && original_const->value_ == 0) {
+        adjusted = half_size;
+      } else {
+        adjusted = MakeAdd(original_offset, half_size, original_offset->span_);
+      }
+    }
+  }
+
+  if (!adjusted) {
+    // offset = original + get_subblock_idx() * half_size
+    auto adjustment = MakeMul(subblock_idx, half_size, original_offset->span_);
+    adjusted = MakeAdd(original_offset, adjustment, original_offset->span_);
+  }
   new_elements[split_dim] = adjusted;
 
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
@@ -130,12 +238,12 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                  bool is_aiv, const VarPtr& subblock_idx,
+                                  bool is_aiv, const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements);
 
 StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int split_dim,
                     std::unordered_map<const Var*, TileInfo>& tile_vars, bool is_aiv,
-                    const VarPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements) {
+                    const ExprPtr& subblock_idx, std::unordered_map<const Var*, VarPtr>& var_replacements) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (!call || !call->op_) return stmt;
@@ -296,12 +404,13 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         (new_then.size() == 1) ? new_then[0] : std::make_shared<SeqStmts>(new_then, if_stmt->span_);
 
     std::optional<StmtPtr> new_else;
-    if (if_stmt->else_body_.has_value()) {
+    if (const auto& else_body_opt = if_stmt->else_body_; else_body_opt.has_value()) {
+      const StmtPtr& else_body = else_body_opt.value();
       auto else_flat = std::vector<StmtPtr>();
-      if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(if_stmt->else_body_.value())) {
+      if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(else_body)) {
         else_flat = seq->stmts_;
       } else {
-        else_flat.push_back(if_stmt->else_body_.value());
+        else_flat.push_back(else_body);
       }
       auto new_else_stmts = ProcessStmts(else_flat, mode, split_int, split_dim, tile_vars, is_aiv,
                                          subblock_idx, var_replacements);
@@ -323,7 +432,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
 
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
-                                  bool is_aiv, const VarPtr& subblock_idx,
+                                  bool is_aiv, const ExprPtr& subblock_idx,
                                   std::unordered_map<const Var*, VarPtr>& var_replacements) {
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
@@ -334,22 +443,28 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
   return result;
 }
 
-FunctionPtr ProcessFunction(const FunctionPtr& func) {
-  auto split_mode = func->GetSplitMode();
-  if (!split_mode.has_value()) {
+FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode,
+                            const std::optional<int>& fixed_subblock_idx = std::nullopt,
+                            const std::optional<std::string>& override_name = std::nullopt) {
+  if (mode == SplitMode::None) {
     return func;
   }
-
-  SplitMode mode = *split_mode;
   int split_int = static_cast<int>(mode);
   int split_dim = SplitDimension(mode);
   bool is_aiv = (func->func_type_ == FunctionType::AIV);
 
   std::unordered_map<const Var*, TileInfo> tile_vars;
   std::unordered_map<const Var*, VarPtr> var_replacements;
+  std::vector<VarPtr> new_params;
+  new_params.reserve(func->params_.size());
+  for (const auto& param : func->params_) {
+    auto new_param = std::make_shared<Var>(param->name_hint_, param->GetType(), param->span_);
+    new_params.push_back(new_param);
+    var_replacements[param.get()] = new_param;
+  }
 
   // For AIV functions, emit tile.get_subblock_idx() at the top
-  VarPtr subblock_idx_var;
+  ExprPtr subblock_idx_expr;
   std::vector<StmtPtr> body_stmts;
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
     body_stmts = seq->stmts_;
@@ -358,42 +473,52 @@ FunctionPtr ProcessFunction(const FunctionPtr& func) {
   }
 
   if (is_aiv) {
-    std::unordered_set<std::string> used_subblock_names;
-    for (const auto& p : func->params_) {
-      used_subblock_names.insert(p->name_hint_);
-    }
-    std::vector<VarPtr> def_vars;
-    transform_utils::CollectDefVars(func->body_, def_vars);
-    for (const auto& v : def_vars) {
-      used_subblock_names.insert(v->name_hint_);
-    }
-    std::string subblock_var_name = "subblock_idx";
-    if (used_subblock_names.count(subblock_var_name) != 0) {
-      subblock_var_name = auto_name::GenerateFreshNameLike("subblock_idx", used_subblock_names);
-    }
-
-    auto& op_reg = OpRegistry::GetInstance();
-    auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
     auto idx_type = std::make_shared<ScalarType>(DataType::INT64);
-    auto subblock_call =
-        std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
-                               std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
-    subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
-    auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
-    body_stmts.insert(body_stmts.begin(), assign_stmt);
+    if (fixed_subblock_idx.has_value()) {
+      subblock_idx_expr =
+          std::make_shared<ConstInt>(fixed_subblock_idx.value(), DataType::INT64, func->span_);
+    } else {
+      std::unordered_set<std::string> used_subblock_names;
+      for (const auto& p : func->params_) {
+        used_subblock_names.insert(p->name_hint_);
+      }
+      std::vector<VarPtr> def_vars;
+      transform_utils::CollectDefVars(func->body_, def_vars);
+      for (const auto& v : def_vars) {
+        used_subblock_names.insert(v->name_hint_);
+      }
+      std::string subblock_var_name = "subblock_idx";
+      if (used_subblock_names.count(subblock_var_name) != 0) {
+        subblock_var_name = auto_name::GenerateFreshNameLike("subblock_idx", used_subblock_names);
+      }
+
+      auto& op_reg = OpRegistry::GetInstance();
+      auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
+      auto subblock_call =
+          std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
+                                 std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
+      auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
+      auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
+      body_stmts.insert(body_stmts.begin(), assign_stmt);
+      subblock_idx_expr = subblock_idx_var;
+    }
   }
 
-  auto new_stmts = ProcessStmts(body_stmts, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx_var,
+  auto new_stmts = ProcessStmts(body_stmts, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx_expr,
                                 var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {
     new_body = transform_utils::SubstituteStmt(new_body, var_replacements);
   }
+  auto [cloned_body, clone_map_unused] = DeepClone(new_body);
+  (void)clone_map_unused;
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  const std::string& new_name = override_name.has_value() ? override_name.value() : func->name_;
+  auto attrs = WithSplitAttr(func, mode);
+  return std::make_shared<Function>(new_name, new_params, func->param_directions_, func->return_types_,
+                                    cloned_body, func->span_, func->func_type_, func->level_, func->role_,
+                                    attrs);
 }
 
 }  // namespace
@@ -406,11 +531,17 @@ Pass SplitVectorKernel() {
     bool changed = false;
 
     for (const auto& [gvar, func] : program->functions_) {
+      auto resolved_mode = ResolveSplitMode(func);
       // Only process AIC and AIV functions that have a non-None split mode
-      if ((func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC) &&
-          func->GetSplitMode().has_value()) {
-        auto new_func = ProcessFunction(func);
-        new_functions.push_back(new_func);
+      if (func->func_type_ == FunctionType::AIV && resolved_mode.has_value() &&
+          resolved_mode.value() != SplitMode::None) {
+        new_functions.push_back(ProcessFunction(func, resolved_mode.value(), 0));
+        new_functions.push_back(
+            ProcessFunction(func, resolved_mode.value(), 1, SplitAivLane1Name(func->name_)));
+        changed = true;
+      } else if (func->func_type_ == FunctionType::AIC && resolved_mode.has_value() &&
+                 resolved_mode.value() != SplitMode::None) {
+        new_functions.push_back(ProcessFunction(func, resolved_mode.value()));
         changed = true;
       } else {
         new_functions.push_back(func);

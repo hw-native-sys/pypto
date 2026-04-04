@@ -77,8 +77,13 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   oss << "};\n";
 
   std::string dtype_str = codegen.GetRuntimeDataTypeString(result_type->dtype_);
+  bool manual_dep = op->GetKwarg<bool>("manual_dep", false);
   oss << "TensorCreateInfo " << result_var << "_ci(" << result_var << "_ci_shapes, " << ndim << ", "
-      << dtype_str << ");";
+      << dtype_str;
+  if (manual_dep) {
+    oss << ", /*manual_dep=*/true";
+  }
+  oss << ");";
   return oss.str();
 }
 
