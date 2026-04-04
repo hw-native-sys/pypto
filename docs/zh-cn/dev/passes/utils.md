@@ -71,13 +71,54 @@ for (const Var* def : collector.var_defs_ordered) {
 分派 visitor。`CollectTypeVars(type)` 是便捷包装器，返回所有
 `Var` 指针。这些操作类型（非 IR 语句），因此保留为自由函数。
 
+## MemRef 收集器 (`memref_collectors.h`)
+
+**头文件:** `#include "pypto/ir/transforms/utils/memref_collectors.h"`
+**命名空间:** `pypto::ir::memref_collectors`
+
+### 快速参考
+
+| 工具 | 收集内容 |
+| ---- | -------- |
+| `MemRefWithSpaceCollector` | TileType 变量中唯一的 (MemRef, MemorySpace) 对。类形式，支持多次访问。 |
+| `CollectMemRefsWithSpace()` | 语句中所有 (MemRef, MemorySpace) 对。 |
+| `CollectNonDDRMemRefsWithSpace()` | 语句中非 DDR 的 (MemRef, MemorySpace) 对。 |
+| `CollectShapedTypeMemRefs()` | 表达式中任意 ShapedType（Tensor 或 Tile）的 MemRefPtr。 |
+| `CollectUsedMemRefPtrs()` | 语句中 TileType 变量的原始 MemRef 指针。 |
+
+### 使用示例
+
+```cpp
+#include "pypto/ir/transforms/utils/memref_collectors.h"
+
+using namespace pypto::ir;
+
+// 收集所有 MemRef 及其 memory space
+auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
+
+// 收集非 DDR MemRef（例如用于 tile.alloc 生成）
+auto non_ddr = memref_collectors::CollectNonDDRMemRefsWithSpace(func->body_);
+
+// 多次访问：同时收集参数和函数体
+memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/true);
+for (const auto& param : func->params_) collector.VisitExpr(param);
+collector.VisitStmt(func->body_);
+// 结果在 collector.memrefs 中
+
+// 从表达式收集（同时支持 TensorType 和 TileType）
+auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
+
+// 原始指针集合用于快速成员检查
+auto used = memref_collectors::CollectUsedMemRefPtrs(func->body_);
+```
+
 ## 其他共享工具
 
 | 头文件 | 工具 |
 | ------ | ---- |
-| `transform_utils.h` | `SubstituteExpr/Stmt`、`CollectDefVars`、`FindYieldStmt`、`FlattenToStmts` |
+| `transform_utils.h` | `Substitute`、`CollectDefVars`、`FindYieldStmt`、`FlattenToStmts`、`IsComputeTensorOp` |
 | `loop_state_repair.h` | `BuildDefMap`、循环重建辅助函数、`StripDeadIterArgs` |
-| `scope_outline_utils.h` | `VarCollector`、`StoreTargetCollector`、`ScopeOutliner` |
+| `scope_outline_utils.h` | `VarCollector`、`StoreTargetCollector`、`ScopeOutliner`、`ScopeKindAbsenceVerifier` |
 | `auto_name_utils.h` | SSA 名称生成、重命名映射、名称解析 |
 | `parent_stmt_analysis.h` | 父子语句映射 |
 | `dead_code_elimination.h` | 函数内死代码消除 |

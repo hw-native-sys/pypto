@@ -547,6 +547,22 @@ inline ExprPtr MakeOr(const ExprPtr& left, const ExprPtr& right, const Span& spa
   return std::make_shared<Or>(left, right, DataType::BOOL, span);
 }
 
+// ============================================================================
+// Constant value checks
+// ============================================================================
+
+/// Check if an expression is a ConstInt with a specific value.
+inline bool IsConstValue(const ExprPtr& expr, int64_t value) {
+  auto c = std::dynamic_pointer_cast<const ConstInt>(expr);
+  return c && c->value_ == value;
+}
+
+/// Check if an expression is a ConstFloat with a specific value.
+inline bool IsConstValue(const ExprPtr& expr, double value) {
+  auto c = std::dynamic_pointer_cast<const ConstFloat>(expr);
+  return c && c->value_ == value;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

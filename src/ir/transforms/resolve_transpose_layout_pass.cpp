@@ -32,7 +32,7 @@
 namespace pypto {
 namespace ir {
 
-using transform_utils::SubstituteStmt;
+using transform_utils::Substitute;
 
 namespace {
 
@@ -133,7 +133,7 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
     return func;
   }
 
-  auto new_body = SubstituteStmt(func->body_, substitutions);
+  auto new_body = Substitute(func->body_, substitutions);
 
   return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                     new_body, func->span_, func->func_type_, func->level_, func->role_,

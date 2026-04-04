@@ -1289,7 +1289,7 @@ void BindIR(nb::module_& m) {
         for (const auto& [orig, replacement] : var_map_pairs) {
           var_map[orig.get()] = replacement;
         }
-        return transform_utils::SubstituteExpr(expr, var_map);
+        return transform_utils::Substitute(expr, var_map);
       },
       nb::arg("expr"), nb::arg("var_map"),
       "Substitute variables in an expression using a list of (original_var, replacement_var) pairs.");
@@ -1301,7 +1301,7 @@ void BindIR(nb::module_& m) {
         for (const auto& [orig, replacement] : var_map_pairs) {
           var_map[orig.get()] = replacement;
         }
-        return transform_utils::SubstituteStmt(body, var_map);
+        return transform_utils::Substitute(body, var_map);
       },
       nb::arg("body"), nb::arg("var_map"),
       "Substitute variable references in a statement subtree using a list of (original_var, replacement_var) "

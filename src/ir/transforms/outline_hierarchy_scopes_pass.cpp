@@ -104,26 +104,7 @@ Pass OutlineHierarchyScopes() {
 
 namespace {
 
-/**
- * @brief Checks no Hierarchy ScopeStmts remain in any function.
- */
-class HierarchyOutlinedVerifier : public IRVisitor {
- public:
-  explicit HierarchyOutlinedVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
-
-  void VisitStmt_(const ScopeStmtPtr& op) override {
-    if (!op) return;
-    if (op->scope_kind_ == ScopeKind::Hierarchy) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "HierarchyOutlined", 0,
-                                "Hierarchy ScopeStmt found in function (should have been outlined)",
-                                op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  std::vector<Diagnostic>& diagnostics_;
-};
+using HierarchyOutlinedVerifier = outline_utils::ScopeKindAbsenceVerifier<ScopeKind::Hierarchy>;
 
 }  // namespace
 
@@ -138,7 +119,8 @@ class HierarchyOutlinedPropertyVerifierImpl : public PropertyVerifier {
       // Only check Opaque functions — the pass only processes Opaque functions,
       // so Hierarchy scopes in other function types are not expected to be outlined.
       if (func->func_type_ != FunctionType::Opaque) continue;
-      HierarchyOutlinedVerifier verifier(diagnostics);
+      HierarchyOutlinedVerifier verifier(diagnostics, "HierarchyOutlined",
+                                         "Hierarchy ScopeStmt found in function (should have been outlined)");
       verifier.VisitStmt(func->body_);
     }
   }

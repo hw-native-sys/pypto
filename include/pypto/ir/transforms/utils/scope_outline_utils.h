@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -40,7 +41,7 @@
 namespace pypto {
 namespace ir {
 
-using transform_utils::SubstituteStmt;
+using transform_utils::Substitute;
 namespace outline_utils {
 
 // Re-export from var_collectors for backward compatibility
@@ -483,7 +484,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Convert EvalStmt/AssignStmt(tile.store) to assign _store_ret vars BEFORE
-    // SubstituteStmt, since store_body_ptrs uses the original body Var pointers.
+    // Substitute, since store_body_ptrs uses the original body Var pointers.
     auto pre_sub_body = recursed_body;
     if (!store_output_set.empty()) {
       std::unordered_map<const Var*, VarPtr> store_target_vars;
@@ -498,7 +499,7 @@ class ScopeOutliner : public IRMutator {
     }
 
     // Apply pointer-based substitution after store results are materialized.
-    auto transformed_body = SubstituteStmt(pre_sub_body, var_substitution_map);
+    auto transformed_body = Substitute(pre_sub_body, var_substitution_map);
 
     // Build outlined function body (transformed body + return statement)
     StmtPtr outlined_body;
@@ -687,6 +688,38 @@ class ScopeOutliner : public IRMutator {
   std::string name_suffix_;
   int scope_counter_ = 0;
   std::vector<FunctionPtr> outlined_functions_;
+};
+
+// ============================================================================
+// Property verifier: ScopeKind absence
+// ============================================================================
+
+/// Verifies that a given ScopeKind does not appear in an IR subtree.
+///
+/// Used by outline passes to confirm that all scopes of a particular kind
+/// have been successfully outlined into separate functions.
+///
+/// Usage:
+///   ScopeKindAbsenceVerifier<ScopeKind::InCore> verifier(diagnostics, "PassName", "error message");
+///   verifier.VisitStmt(func->body_);
+template <ScopeKind Kind>
+class ScopeKindAbsenceVerifier : public IRVisitor {
+ public:
+  ScopeKindAbsenceVerifier(std::vector<Diagnostic>& diagnostics, std::string pass_name, std::string message)
+      : diagnostics_(diagnostics), pass_name_(std::move(pass_name)), message_(std::move(message)) {}
+
+  void VisitStmt_(const ScopeStmtPtr& op) override {
+    if (!op) return;
+    if (op->scope_kind_ == Kind) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, pass_name_, 0, message_, op->span_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  std::string pass_name_;
+  std::string message_;
 };
 
 }  // namespace outline_utils

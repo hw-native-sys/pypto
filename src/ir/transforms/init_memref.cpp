@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
@@ -408,38 +409,6 @@ class InitMemRefMutator : public IRMutator {
   uint64_t next_id_ = 0;
 };
 
-// Visitor to collect unique non-DDR MemRef objects from TileType variables
-class NonDDRMemRefCollector : public IRVisitor {
- public:
-  using MemRefAlloc = std::pair<MemRefPtr, MemorySpace>;
-
-  [[nodiscard]] const std::vector<MemRefAlloc>& GetMemRefs() const { return memrefs_; }
-
-  void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
-      AddMemRefIfUnique(tile_type);
-    }
-  }
-
- private:
-  std::vector<MemRefAlloc> memrefs_;
-  std::map<const MemRef*, MemorySpace> seen_ptrs_;
-
-  void AddMemRefIfUnique(const std::shared_ptr<const TileType>& tile_type) {
-    auto memory_space = tile_type->GetMemorySpace();
-    CHECK(memory_space.has_value())
-        << "TileType with MemRef must have memory_space before emitting tile.alloc";
-    CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef before emitting tile.alloc";
-    const MemorySpace canonical_space = memory_space.value();
-    if (canonical_space == MemorySpace::DDR) return;
-
-    const auto& memref = tile_type->memref_.value();
-    if (TryRegisterUniqueMemRef(memref, canonical_space, seen_ptrs_)) {
-      memrefs_.emplace_back(memref, canonical_space);
-    }
-  }
-};
-
 // Create tile.alloc AssignStmt for a MemRef with addr=-1 (unallocated)
 StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) {
   auto alloc_op = std::make_shared<Op>("tile.alloc");
@@ -511,13 +480,13 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
       normalized_func->role_, normalized_func->attrs_);
 
   // Step 3: Collect non-DDR MemRefs and create alloc statements
-  NonDDRMemRefCollector collector;
+  memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/true);
   for (const auto& param : new_params) {
     collector.VisitExpr(param);
   }
   collector.VisitStmt(new_body);
 
-  const auto& memrefs = collector.GetMemRefs();
+  const auto& memrefs = collector.memrefs;
   if (memrefs.empty()) return result_func;
 
   std::vector<StmtPtr> alloc_stmts;

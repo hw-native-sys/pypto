@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
@@ -942,21 +943,6 @@ class YieldFixupMutator : public IRMutator {
   }
 };
 
-// Collect all MemRef raw pointers currently referenced by TileType variables
-class UsedMemRefCollector : public IRVisitor {
- public:
-  [[nodiscard]] const std::set<const MemRef*>& GetUsedPtrs() const { return used_ptrs_; }
-
-  void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
-      used_ptrs_.insert(GetDefinedMemRef(tile_type).get());
-    }
-  }
-
- private:
-  std::set<const MemRef*> used_ptrs_;
-};
-
 // Check if a statement is a tile.alloc AssignStmt for an unused MemRef
 bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const MemRef*>& used_ptrs) {
   auto assign = As<AssignStmt>(stmt);
@@ -1021,9 +1007,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   new_body = yield_fixup.VisitStmt(new_body);
 
   // Step 5: Remove alloc statements for MemRefs no longer in use
-  UsedMemRefCollector used_collector;
-  used_collector.VisitStmt(new_body);
-  new_body = RemoveUnusedAllocStatements(new_body, used_collector.GetUsedPtrs());
+  auto used_ptrs = memref_collectors::CollectUsedMemRefPtrs(new_body);
+  new_body = RemoveUnusedAllocStatements(new_body, used_ptrs);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,

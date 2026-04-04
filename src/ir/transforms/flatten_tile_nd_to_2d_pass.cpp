@@ -42,7 +42,7 @@ namespace pypto {
 namespace ir {
 
 using transform_utils::FlattenToStmts;
-using transform_utils::SubstituteExpr;
+using transform_utils::Substitute;
 
 namespace {
 
@@ -243,7 +243,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       std::vector<ExprPtr> new_values;
       new_values.reserve(ret->value_.size());
       for (const auto& v : ret->value_) {
-        new_values.push_back(SubstituteExpr(v, ctx.var_map));
+        new_values.push_back(Substitute(v, ctx.var_map));
       }
       result.push_back(std::make_shared<ReturnStmt>(new_values, ret->span_));
       continue;
@@ -254,7 +254,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       std::vector<ExprPtr> new_values;
       new_values.reserve(yield->value_.size());
       for (const auto& v : yield->value_) {
-        new_values.push_back(SubstituteExpr(v, ctx.var_map));
+        new_values.push_back(Substitute(v, ctx.var_map));
       }
       result.push_back(std::make_shared<YieldStmt>(new_values, yield->span_));
       continue;
@@ -279,7 +279,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // IfStmt: recurse into branches, substitute return_vars
     if (auto if_stmt = As<IfStmt>(stmt)) {
-      auto new_cond = SubstituteExpr(if_stmt->condition_, ctx.var_map);
+      auto new_cond = Substitute(if_stmt->condition_, ctx.var_map);
 
       auto then_ctx = ctx;
       auto then_stmts = FlattenToStmts(if_stmt->then_body_);
@@ -320,15 +320,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // ForStmt: recurse into body, substitute return_vars
     if (auto for_stmt = As<ForStmt>(stmt)) {
-      auto new_start = SubstituteExpr(for_stmt->start_, ctx.var_map);
-      auto new_stop = SubstituteExpr(for_stmt->stop_, ctx.var_map);
-      auto new_step = SubstituteExpr(for_stmt->step_, ctx.var_map);
+      auto new_start = Substitute(for_stmt->start_, ctx.var_map);
+      auto new_stop = Substitute(for_stmt->stop_, ctx.var_map);
+      auto new_step = Substitute(for_stmt->step_, ctx.var_map);
 
       auto body_ctx = ctx;
       std::vector<IterArgPtr> new_iter_args;
       new_iter_args.reserve(for_stmt->iter_args_.size());
       for (const auto& ia : for_stmt->iter_args_) {
-        auto new_init = SubstituteExpr(ia->initValue_, ctx.var_map);
+        auto new_init = Substitute(ia->initValue_, ctx.var_map);
         auto new_ia = ia;
         if (new_init != ia->initValue_) {
           new_ia = std::make_shared<IterArg>(ia->name_hint_, new_init->GetType(), new_init, ia->span_);
@@ -370,7 +370,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       std::vector<IterArgPtr> new_iter_args;
       new_iter_args.reserve(while_stmt->iter_args_.size());
       for (const auto& ia : while_stmt->iter_args_) {
-        auto new_init = SubstituteExpr(ia->initValue_, ctx.var_map);
+        auto new_init = Substitute(ia->initValue_, ctx.var_map);
         auto new_ia = ia;
         if (new_init != ia->initValue_) {
           new_ia = std::make_shared<IterArg>(ia->name_hint_, new_init->GetType(), new_init, ia->span_);
@@ -381,7 +381,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         new_iter_args.push_back(new_ia);
       }
 
-      auto new_cond = SubstituteExpr(while_stmt->condition_, body_ctx.var_map);
+      auto new_cond = Substitute(while_stmt->condition_, body_ctx.var_map);
       auto body_stmts = FlattenToStmts(while_stmt->body_);
       auto new_body_stmts = TransformBody(body_stmts, body_ctx, op_registry, span);
       auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), while_stmt->body_->span_);
@@ -407,7 +407,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // EvalStmt: substitute variables in the expression
     if (auto eval = As<EvalStmt>(stmt)) {
-      auto new_expr = SubstituteExpr(eval->expr_, ctx.var_map);
+      auto new_expr = Substitute(eval->expr_, ctx.var_map);
       if (new_expr != eval->expr_) {
         // Re-create tile ops via OpRegistry for proper type deduction
         if (auto call = As<Call>(new_expr)) {
@@ -436,7 +436,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // Non-call assignment or function call (GlobalVar): substitute and pass through
     if (!call || global_var) {
-      auto new_value = SubstituteExpr(assign->value_, ctx.var_map);
+      auto new_value = Substitute(assign->value_, ctx.var_map);
       if (new_value != assign->value_) {
         auto new_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
@@ -457,7 +457,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       std::vector<ExprPtr> sub_args;
       sub_args.reserve(call->args_.size());
       for (const auto& arg : call->args_) {
-        sub_args.push_back(SubstituteExpr(arg, ctx.var_map));
+        sub_args.push_back(Substitute(arg, ctx.var_map));
       }
 
       auto result_tile = As<TileType>(call->GetType());
@@ -511,7 +511,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       new_args.reserve(call->args_.size() + 1);
       // Push all original args (tile, offsets, output_tensor) with substitution
       for (const auto& arg : call->args_) {
-        new_args.push_back(SubstituteExpr(arg, ctx.var_map));
+        new_args.push_back(Substitute(arg, ctx.var_map));
       }
       // Inject shapes tuple whenever the output tensor is ND (rank > 2).
       // Codegen always requires args[3] in that case regardless of tile rank.
@@ -554,7 +554,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         new_args.push_back(new_shape_tuple);
         // Remaining args (e.g., fill value for tile.full)
         for (size_t i = 1; i < call->args_.size(); ++i) {
-          new_args.push_back(SubstituteExpr(call->args_[i], ctx.var_map));
+          new_args.push_back(Substitute(call->args_[i], ctx.var_map));
         }
 
         auto new_call = op_registry.Create(op_name, new_args, call->kwargs_, span);
@@ -578,7 +578,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
           std::vector<ExprPtr> new_args;
           new_args.reserve(call->args_.size());
           for (const auto& arg : call->args_) {
-            new_args.push_back(SubstituteExpr(arg, ctx.var_map));
+            new_args.push_back(Substitute(arg, ctx.var_map));
           }
 
           // Update axis kwarg to 1 (last axis of 2D tile)
@@ -607,7 +607,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       new_args.reserve(call->args_.size());
       bool changed = false;
       for (const auto& arg : call->args_) {
-        auto new_arg = SubstituteExpr(arg, ctx.var_map);
+        auto new_arg = Substitute(arg, ctx.var_map);
         new_args.push_back(new_arg);
         if (new_arg != arg) changed = true;
       }

@@ -99,26 +99,7 @@ Pass OutlineClusterScopes() {
 
 namespace {
 
-/**
- * @brief Checks no Cluster ScopeStmts remain in non-Group functions.
- */
-class ClusterOutlinedVerifier : public IRVisitor {
- public:
-  explicit ClusterOutlinedVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
-
-  void VisitStmt_(const ScopeStmtPtr& op) override {
-    if (!op) return;
-    if (op->scope_kind_ == ScopeKind::Cluster) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "ClusterOutlined", 0,
-                                "Cluster ScopeStmt found in non-Group function (should have been outlined)",
-                                op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  std::vector<Diagnostic>& diagnostics_;
-};
+using ClusterOutlinedVerifier = outline_utils::ScopeKindAbsenceVerifier<ScopeKind::Cluster>;
 
 }  // namespace
 
@@ -132,7 +113,9 @@ class ClusterOutlinedPropertyVerifierImpl : public PropertyVerifier {
       if (!func || !func->body_) continue;
       // Group functions are expected to contain cluster content
       if (func->func_type_ == FunctionType::Group) continue;
-      ClusterOutlinedVerifier verifier(diagnostics);
+      ClusterOutlinedVerifier verifier(
+          diagnostics, "ClusterOutlined",
+          "Cluster ScopeStmt found in non-Group function (should have been outlined)");
       verifier.VisitStmt(func->body_);
     }
   }

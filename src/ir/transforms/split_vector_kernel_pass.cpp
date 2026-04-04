@@ -388,7 +388,7 @@ FunctionPtr ProcessFunction(const FunctionPtr& func) {
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {
-    new_body = transform_utils::SubstituteStmt(new_body, var_replacements);
+    new_body = transform_utils::Substitute(new_body, var_replacements);
   }
 
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,

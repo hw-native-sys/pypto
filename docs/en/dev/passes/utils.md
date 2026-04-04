@@ -72,13 +72,54 @@ expression fields in a type. `CollectTypeVars(type)` is a convenience
 wrapper returning all `Var` pointers found. These operate on types
 (not IR statements), so they remain free functions.
 
+## MemRef Collector (`memref_collectors.h`)
+
+**Header:** `#include "pypto/ir/transforms/utils/memref_collectors.h"`
+**Namespace:** `pypto::ir::memref_collectors`
+
+### Quick Reference
+
+| Utility | What it collects |
+| ------- | ---------------- |
+| `MemRefWithSpaceCollector` | Unique (MemRef, MemorySpace) pairs from TileType variables. Class-based for multi-visit use. |
+| `CollectMemRefsWithSpace()` | All (MemRef, MemorySpace) pairs from a statement. |
+| `CollectNonDDRMemRefsWithSpace()` | Non-DDR (MemRef, MemorySpace) pairs from a statement. |
+| `CollectShapedTypeMemRefs()` | MemRefPtrs from any ShapedType (Tensor or Tile) in an expression. |
+| `CollectUsedMemRefPtrs()` | Raw MemRef pointers from TileType variables in a statement. |
+
+### Usage Examples
+
+```cpp
+#include "pypto/ir/transforms/utils/memref_collectors.h"
+
+using namespace pypto::ir;
+
+// Collect all MemRefs with their memory spaces
+auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
+
+// Collect non-DDR MemRefs (e.g., for tile.alloc emission)
+auto non_ddr = memref_collectors::CollectNonDDRMemRefsWithSpace(func->body_);
+
+// Multi-visit: collect from both params and body
+memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/true);
+for (const auto& param : func->params_) collector.VisitExpr(param);
+collector.VisitStmt(func->body_);
+// Results in collector.memrefs
+
+// Collect from expressions (works with both TensorType and TileType)
+auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
+
+// Raw pointer set for fast membership checks
+auto used = memref_collectors::CollectUsedMemRefPtrs(func->body_);
+```
+
 ## Other Shared Utilities
 
 | Header | Utilities |
 | ------ | --------- |
-| `transform_utils.h` | `SubstituteExpr/Stmt`, `CollectDefVars`, `FindYieldStmt`, `FlattenToStmts` |
+| `transform_utils.h` | `Substitute`, `CollectDefVars`, `FindYieldStmt`, `FlattenToStmts`, `IsComputeTensorOp` |
 | `loop_state_repair.h` | `BuildDefMap`, loop rebuild helpers, `StripDeadIterArgs` |
-| `scope_outline_utils.h` | `VarCollector`, `StoreTargetCollector`, `ScopeOutliner` |
+| `scope_outline_utils.h` | `VarCollector`, `StoreTargetCollector`, `ScopeOutliner`, `ScopeKindAbsenceVerifier` |
 | `auto_name_utils.h` | SSA name generation, rename maps, name parsing |
 | `parent_stmt_analysis.h` | Parent-child statement mapping |
 | `dead_code_elimination.h` | Dead code removal within functions |

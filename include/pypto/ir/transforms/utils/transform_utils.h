@@ -12,7 +12,9 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_TRANSFORM_UTILS_H_
 
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -21,27 +23,20 @@
 
 namespace pypto::ir::transform_utils {
 
-/// Substitute variables in an expression using a pointer-identity map.
+/// Substitute variable references in an expression by pointer identity.
 ///
 /// Recursively traverses Call, MakeTuple, BinaryExpr, UnaryExpr, and
 /// TupleGetItemExpr to replace Var/IterArg references whose raw pointer
 /// appears in @p var_map.
-///
-/// @param expr    Expression to transform.
-/// @param var_map Pointer-based substitution map (original Var* -> replacement VarPtr).
-/// @return Transformed expression.
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map);
+ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map);
+ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& var_map);
 
 /// Substitute variable references in a statement subtree by pointer identity.
 ///
 /// Walks the IR subtree via IRMutator and replaces each Var whose raw pointer
-/// appears in @p var_map with the mapped VarPtr.  IterArg nodes are handled by
-/// the base IRMutator (preserving their type for ForStmt/WhileStmt slots).
-///
-/// @param body    Statement subtree to transform.
-/// @param var_map Pointer-based substitution map (original Var* -> replacement VarPtr).
-/// @return Transformed statement subtree.
-StmtPtr SubstituteStmt(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map);
+/// appears in @p var_map with the mapped replacement.
+StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map);
+StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map);
 
 /// Find the first YieldStmt inside a statement body (searches through SeqStmts).
 inline YieldStmtPtr FindYieldStmt(const StmtPtr& body) {
@@ -92,6 +87,23 @@ inline std::vector<VarPtr> CollectDefVars(const StmtPtr& stmt) {
   std::vector<VarPtr> result;
   CollectDefVars(stmt, result);
   return result;
+}
+
+// ============================================================================
+// Op classification
+// ============================================================================
+
+/// Returns true if op_name is a compute tensor op (not a host-side memory/transfer/metadata op).
+///
+/// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
+/// and metadata-only transforms (reshape, transpose at tensor level).
+inline bool IsComputeTensorOp(const std::string& op_name) {
+  if (op_name.compare(0, 7, "tensor.") != 0) return false;
+  static const std::unordered_set<std::string> kHostSideOps = {
+      "tensor.create",   "tensor.read", "tensor.write",   "tensor.slice",
+      "tensor.assemble", "tensor.dim",  "tensor.reshape", "tensor.transpose",
+  };
+  return kHostSideOps.count(op_name) == 0;
 }
 
 }  // namespace pypto::ir::transform_utils

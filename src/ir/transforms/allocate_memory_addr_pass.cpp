@@ -42,6 +42,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -54,37 +55,6 @@ namespace {
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 using ReserveBufferBaseMap = std::unordered_map<const Call*, int64_t>;
 using ReservedEndBySpace = std::unordered_map<MemorySpace, uint64_t>;
-
-// Visitor to collect all MemRef objects from TileType variables
-class MemRefCollectorVisitor : public IRVisitor {
- public:
-  MemRefCollectorVisitor() = default;
-
-  [[nodiscard]] const std::vector<MemRefWithSpace>& GetMemRefs() const { return memrefs_; }
-
-  void VisitVarLike_(const VarPtr& op) override {
-    if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
-      AddMemRefIfUnique(tile_type);
-    }
-  }
-
- private:
-  std::vector<MemRefWithSpace> memrefs_;
-  std::map<const MemRef*, MemorySpace> seen_ptrs_;  // Track canonical space per shared MemRef
-
-  void AddMemRefIfUnique(const std::shared_ptr<const TileType>& tile_type) {
-    auto memory_space = tile_type->GetMemorySpace();
-    CHECK(memory_space.has_value())
-        << "TileType with MemRef must have memory_space before address allocation";
-    CHECK(tile_type->memref_.has_value()) << "TileType must carry MemRef before address allocation";
-    const MemorySpace canonical_space = memory_space.value();
-
-    const auto& memref = tile_type->memref_.value();
-    if (TryRegisterUniqueMemRef(memref, canonical_space, seen_ptrs_)) {
-      memrefs_.emplace_back(memref, canonical_space);
-    }
-  }
-};
 
 MemorySpace GetReserveBufferMemorySpace(const FunctionPtr& func) {
   CHECK(func) << "AllocateMemoryAddr requires a valid function when resolving reserve_buffer space";
@@ -313,29 +283,6 @@ class MemRefUpdateMutator : public IRMutator {
 };
 
 /**
- * @brief Helper function to collect MemRefs from a statement
- */
-void CollectMemRefsFromStatement(const StmtPtr& stmt, std::vector<MemRefWithSpace>& memrefs) {
-  // Create a visitor to traverse the statement
-  MemRefCollectorVisitor visitor;
-  visitor.VisitStmt(stmt);
-
-  // Add collected MemRefs to the vector (avoiding duplicates by comparing raw pointers)
-  std::set<const ir::MemRef*> existing_ptrs;
-  for (const auto& [memref, memory_space] : memrefs) {
-    (void)memory_space;
-    existing_ptrs.insert(memref.get());
-  }
-
-  for (const auto& [memref, memory_space] : visitor.GetMemRefs()) {
-    if (existing_ptrs.find(memref.get()) == existing_ptrs.end()) {
-      memrefs.emplace_back(memref, memory_space);
-      existing_ptrs.insert(memref.get());
-    }
-  }
-}
-
-/**
  * @brief Allocate memory addresses using the given allocation policy
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
@@ -412,8 +359,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   auto reserve_resolution = ResolveReserveBufferBases(func, *policy);
 
   // Step 2: Collect all unique MemRef objects from TileType variables
-  std::vector<MemRefWithSpace> memrefs;
-  CollectMemRefsFromStatement(func->body_, memrefs);
+  auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
   // Step 3: Allocate memory addresses using the policy
   auto memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution.reserved_end_by_space, *policy);

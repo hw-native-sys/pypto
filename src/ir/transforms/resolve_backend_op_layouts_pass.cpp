@@ -55,10 +55,7 @@ TileLayout GetTileLayout(const TileTypePtr& tile_type) {
   return tile_type->tile_view_->blayout;
 }
 
-bool IsConstOne(const ExprPtr& expr) {
-  auto ci = As<ConstInt>(expr);
-  return ci && ci->value_ == 1;
-}
+bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, static_cast<int64_t>(1)); }
 
 bool IsColumnVectorColMajor(const TileTypePtr& tile_type) {
   return tile_type && tile_type->shape_.size() == 2 && IsConstOne(tile_type->shape_[1]) &&

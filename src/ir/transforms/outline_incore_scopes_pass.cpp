@@ -111,34 +111,10 @@ namespace {
 /**
  * @brief Checks no InCore ScopeStmts remain in Opaque or Orchestration functions.
  */
-class SplitIncoreOrchVerifier : public IRVisitor {
- public:
-  explicit SplitIncoreOrchVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+using SplitIncoreOrchVerifier = outline_utils::ScopeKindAbsenceVerifier<ScopeKind::InCore>;
 
-  void VisitStmt_(const ScopeStmtPtr& op) override {
-    if (!op) return;
-    if (op->scope_kind_ == ScopeKind::InCore) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Error, "SplitIncoreOrch", 0,
-                                "InCore ScopeStmt found in non-InCore function (should have been outlined)",
-                                op->span_);
-    }
-    IRVisitor::VisitStmt_(op);
-  }
-
- private:
-  std::vector<Diagnostic>& diagnostics_;
-};
-
-/// Returns true if op_name is a compute tensor op (not host-side memory/transfer/metadata).
-/// Host-side ops are memory allocation/transfer (create, read, write, slice, assemble, dim)
-/// and metadata-only transforms (reshape, transpose at tensor level — actual data ops use tile.*).
 static bool IsComputeTensorOp(const std::string& op_name) {
-  if (op_name.compare(0, 7, "tensor.") != 0) return false;
-  static const std::unordered_set<std::string> kHostSideOps = {
-      "tensor.create",   "tensor.read", "tensor.write",   "tensor.slice",
-      "tensor.assemble", "tensor.dim",  "tensor.reshape", "tensor.transpose",
-  };
-  return kHostSideOps.count(op_name) == 0;
+  return transform_utils::IsComputeTensorOp(op_name);
 }
 
 /// Checks Orchestration functions for compute tensor ops that should be in InCore.
@@ -172,7 +148,9 @@ class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
       if (!func || !func->body_) continue;
       // Check Opaque and Orchestration functions — InCore functions are expected to have InCore content
       if (func->func_type_ == FunctionType::InCore) continue;
-      SplitIncoreOrchVerifier verifier(diagnostics);
+      SplitIncoreOrchVerifier verifier(
+          diagnostics, "SplitIncoreOrch",
+          "InCore ScopeStmt found in non-InCore function (should have been outlined)");
       verifier.VisitStmt(func->body_);
       // Also check Orchestration functions for leaked compute tensor ops
       if (func->func_type_ == FunctionType::Orchestration) {

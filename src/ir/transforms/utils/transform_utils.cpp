@@ -30,7 +30,7 @@ namespace pypto::ir::transform_utils {
 namespace {
 
 // ---------------------------------------------------------------------------
-// SubstituteExpr helpers
+// Substitute helpers
 // ---------------------------------------------------------------------------
 
 /// Reconstruct a BinaryExpr with new operands, dispatching on ObjectKind.
@@ -86,17 +86,13 @@ ExprPtr ReconstructUnaryExpr(ObjectKind kind, const ExprPtr& operand, DataType d
 }
 
 // ---------------------------------------------------------------------------
-// SubstituteStmt helper (IRMutator-based)
+// Substitute helper (IRMutator-based, for statement trees)
 // ---------------------------------------------------------------------------
 
-/// Mutator that substitutes Var/IterArg references by pointer identity.
-///
-/// Overrides both VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr) to ensure
-/// all variable references are substituted, including IterArgs used as
-/// expression operands. For IterArg, initValue_ is also visited recursively.
-class SubstituteVarsMutator : public IRMutator {
+template <typename ValueT>
+class SubstituteMutator : public IRMutator {
  public:
-  explicit SubstituteVarsMutator(const std::unordered_map<const Var*, VarPtr>& var_map) : var_map_(var_map) {}
+  explicit SubstituteMutator(const std::unordered_map<const Var*, ValueT>& var_map) : var_map_(var_map) {}
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& op) override {
@@ -116,16 +112,17 @@ class SubstituteVarsMutator : public IRMutator {
   }
 
  private:
-  const std::unordered_map<const Var*, VarPtr>& var_map_;
+  const std::unordered_map<const Var*, ValueT>& var_map_;
 };
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Public API — SubstituteExpr / SubstituteStmt
+// Public API — Substitute
 // ---------------------------------------------------------------------------
 
-ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
+template <typename ValueT>
+ExprPtr SubstituteImpl(const ExprPtr& expr, const std::unordered_map<const Var*, ValueT>& var_map) {
   // Check IterArg first (inherits Var but has different ObjectKind)
   if (auto iter_arg = As<IterArg>(expr)) {
     auto it = var_map.find(iter_arg.get());
@@ -146,7 +143,7 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*,
     new_args.reserve(call->args_.size());
     bool changed = false;
     for (const auto& arg : call->args_) {
-      auto new_arg = SubstituteExpr(arg, var_map);
+      auto new_arg = SubstituteImpl(arg, var_map);
       new_args.push_back(new_arg);
       if (new_arg != arg) {
         changed = true;
@@ -162,7 +159,7 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*,
     new_elements.reserve(make_tuple->elements_.size());
     bool changed = false;
     for (const auto& elem : make_tuple->elements_) {
-      auto new_elem = SubstituteExpr(elem, var_map);
+      auto new_elem = SubstituteImpl(elem, var_map);
       new_elements.push_back(new_elem);
       if (new_elem != elem) {
         changed = true;
@@ -174,15 +171,15 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*,
     return std::make_shared<MakeTuple>(new_elements, make_tuple->span_);
   }
   if (auto tgi = As<TupleGetItemExpr>(expr)) {
-    auto new_tuple = SubstituteExpr(tgi->tuple_, var_map);
+    auto new_tuple = SubstituteImpl(tgi->tuple_, var_map);
     if (new_tuple == tgi->tuple_) {
       return expr;
     }
     return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
   }
   if (auto bin = As<BinaryExpr>(expr)) {
-    auto new_left = SubstituteExpr(bin->left_, var_map);
-    auto new_right = SubstituteExpr(bin->right_, var_map);
+    auto new_left = SubstituteImpl(bin->left_, var_map);
+    auto new_right = SubstituteImpl(bin->right_, var_map);
     if (new_left == bin->left_ && new_right == bin->right_) {
       return expr;
     }
@@ -190,7 +187,7 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*,
     return ReconstructBinaryExpr(bin->GetKind(), new_left, new_right, dtype, bin->span_);
   }
   if (auto un = As<UnaryExpr>(expr)) {
-    auto new_operand = SubstituteExpr(un->operand_, var_map);
+    auto new_operand = SubstituteImpl(un->operand_, var_map);
     if (new_operand == un->operand_) {
       return expr;
     }
@@ -201,8 +198,21 @@ ExprPtr SubstituteExpr(const ExprPtr& expr, const std::unordered_map<const Var*,
   return expr;
 }
 
-StmtPtr SubstituteStmt(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map) {
-  SubstituteVarsMutator mutator(var_map);
+// Var* → VarPtr
+ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
+  return SubstituteImpl(expr, var_map);
+}
+StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map) {
+  SubstituteMutator<VarPtr> mutator(var_map);
+  return mutator.VisitStmt(body);
+}
+
+// Var* → ExprPtr
+ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& var_map) {
+  return SubstituteImpl(expr, var_map);
+}
+StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map) {
+  SubstituteMutator<ExprPtr> mutator(var_map);
   return mutator.VisitStmt(body);
 }
 
