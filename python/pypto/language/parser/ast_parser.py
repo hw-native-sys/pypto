@@ -115,7 +115,14 @@ def _normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
 
 
 def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
-    """Return whether two IR types are equivalent in parser-visible syntax."""
+    """Return whether two IR types are structurally equal after TileView normalization.
+
+    Uses C++ ``structural_equal`` (via ``==``) instead of comparing printed
+    strings.  Note: ``structural_equal`` intentionally skips the ``memref``
+    field on TileType/TensorType — memref identity is not relevant for
+    parser-level type matching because the Var (not the Call) carries the
+    authoritative memref via ``override_type``.
+    """
     if lhs is rhs:
         return True
     if lhs is None or rhs is None:
@@ -126,7 +133,7 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     assert rhs is not None
     if type(lhs) is not type(rhs):
         return False
-    return ir.python_print_type(lhs) == ir.python_print_type(rhs)
+    return lhs == rhs
 
 
 def _normalize_inferred_type_for_annotation(
