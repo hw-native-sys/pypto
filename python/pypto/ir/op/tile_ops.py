@@ -1950,3 +1950,19 @@ def tpop_from_aiv(
         op = _ir_core.get_op("tile.tpop_from_aiv")
         return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
     return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"split": split}, actual_span)
+
+
+def runtime_print(tile: Expr, span: Span | None = None) -> Call:
+    """Print tile contents at runtime for debugging.
+
+    Generates a pto.tprint instruction in the compiled output.
+
+    Args:
+        tile: Input tile expression (TileType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression (type is pass-through TileType)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.runtime_print", [tile], {}, actual_span)

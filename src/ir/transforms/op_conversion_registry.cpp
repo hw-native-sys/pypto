@@ -152,6 +152,42 @@ OpConversionRegistry::OpConversionRegistry() {
   // Memory creation ops
   RegisterSimple("tensor.full", "tile.full");
 
+  // Utility ops — runtime_print needs a custom converter because the
+  // argument may still be a TensorType (e.g. printing a function parameter
+  // before any explicit tile.load).  In that case we insert a tile.load
+  // prologue to materialise the tile, matching the tensor.fillpad pattern.
+  RegisterCustom(
+      "tensor.runtime_print",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 1) << "tensor.runtime_print conversion expects 1 arg (input)";
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+
+        // Already a tile — pass through.
+        if (As<TileType>(input->GetType())) {
+          return ConversionResult{op_reg.Create("tile.runtime_print", {input}, span)};
+        }
+
+        auto tensor_type = As<TensorType>(input->GetType());
+        CHECK(tensor_type) << "tensor.runtime_print conversion: input must be TensorType or TileType, got "
+                           << input->GetType()->TypeName();
+
+        auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
+        auto shapes = MakeShapesTuple(tensor_type->shape_, span);
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+        auto load_call = op_reg.Create("tile.load", {input, offsets, shapes, shapes}, load_kwargs, span);
+        auto load_var = std::make_shared<Var>("runtime_print_src", load_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+
+        auto print_call = op_reg.Create("tile.runtime_print", {load_var}, span);
+        return ConversionResult{std::move(prologue), print_call};
+      });
+
   // ────────────────────────────────────────────────────────────────────────
   // Broadcast-aware elementwise binary ops
   //
