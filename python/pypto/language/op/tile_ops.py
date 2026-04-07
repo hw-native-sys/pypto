@@ -108,6 +108,10 @@ __all__ = [
     "tpush_to_aic",
     "tpop_from_aic",
     "tpop_from_aiv",
+    "sort32",
+    "gather",
+    "MaskPattern",
+    "mrgsort",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
@@ -133,6 +137,21 @@ class MemRefType:
     (``mem_vec_0: pl.MemRefType = pl.tile.alloc(...)``) is valid Python that
     pyright and the text-parser can process.
     """
+
+
+class MaskPattern:
+    """Hardware mask pattern selectors for tile.gather_mask.
+
+    Bit patterns are read right-to-left; lower bits correspond to lower indices.
+    """
+
+    P0101 = 1  # stride-2: select positions 0, 2, 4, ...
+    P1010 = 2  # stride-2: select positions 1, 3, 5, ...
+    P0001 = 3  # stride-4: select positions 0, 4, 8, ...
+    P0010 = 4  # stride-4: select positions 1, 5, 9, ...
+    P0100 = 5  # stride-4: select positions 2, 6, 10, ...
+    P1000 = 6  # stride-4: select positions 3, 7, 11, ...
+    P1111 = 7  # select all positions
 
 
 def alloc(
@@ -1546,4 +1565,168 @@ def sels(lhs: Tile, rhs: Tile, select_mode: int | float | Expr | Scalar) -> Tile
     """
     select_mode_expr = select_mode.unwrap() if isinstance(select_mode, Scalar) else select_mode
     call_expr = _ir_ops.sels(lhs.unwrap(), rhs.unwrap(), select_mode_expr)
+    return Tile(expr=call_expr)
+
+
+def sort32(src: Tile, idx: Tile) -> Tile:
+    """Sort fixed 32-element blocks with explicit index tile.
+
+    Sorts 32-element blocks in src, permuting idx alongside.
+    Returns sorted value-index pairs tile with doubled last dimension.
+
+    For FP16 src: initialize idx with [0, 1, 2, ..., 31] per block.
+    For FP32 src: initialize idx with [0, 2, 4, ..., 62] per block.
+
+    Args:
+        src: Input value tile (FP16 or FP32)
+        idx: Input index tile with sequential offsets
+
+    Returns:
+        Tile wrapping the sort32 operation (last dim doubled)
+    """
+    call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
+    return Tile(expr=call_expr)
+
+
+@overload
+def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile: ...
+
+
+@overload
+def gather(src: Tile, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tile: ...
+
+
+def gather(
+    src: Tile,
+    indices: Tile | None = None,
+    tmp: Tile | None = None,
+    *,
+    mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
+) -> Tile:
+    """Gather elements from src tile, using either indices or a fixed mask pattern.
+
+    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
+    Mask form: selects elements by a hardware mask pattern. No indices or tmp needed.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        indices: Index tile (INT32). Required for index form.
+        tmp: Temporary workspace tile (INT32). Required for index form.
+        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype for mask form only. When provided, the result
+            tile has this dtype instead of src's dtype (bit reinterpretation, no conversion).
+            Hardware requires sizeof(dst_dtype) == sizeof(src_dtype). Example: use
+            output_dtype=pl.UINT32 to extract sort32 index bits from FP32 memory.
+
+    Returns:
+        Tile with gathered elements
+
+    Examples:
+        # Index form
+        out = gather(src, indices, tmp)
+
+        # Mask form (same dtype)
+        out = gather(src, mask_pattern=1)
+
+        # Mask form with cross-type output (FP32 bits → UINT32)
+        out = gather(src, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+    """
+    if mask_pattern is not None:
+        if indices is not None or tmp is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
+                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
+            )
+        call_expr = _ir_ops.gather(src.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
+        return Tile(expr=call_expr)
+    if output_dtype is not None:
+        raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
+    if indices is None or tmp is None:
+        raise ValueError(
+            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
+        )
+    call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
+    return Tile(expr=call_expr)
+
+
+@overload
+def mrgsort(src0: Tile, *, block_len: int | Scalar) -> Tile: ...
+
+
+@overload
+def mrgsort(
+    src0: Tile,
+    src1: Tile,
+    src2: Tile,
+    src3: Tile,
+    tmp: Tile,
+    executed: Tile,
+    exhausted: bool = ...,
+) -> Tile: ...
+
+
+def mrgsort(
+    src0: Tile,
+    src1: Tile | None = None,
+    src2: Tile | None = None,
+    src3: Tile | None = None,
+    tmp: Tile | None = None,
+    executed: Tile | None = None,
+    exhausted: bool = False,
+    *,
+    block_len: int | Scalar | None = None,
+) -> Tile:
+    """Merge sort — format1 (single-list) or format2 (4-way merge).
+
+    Format1: sorts a tile containing multiple pre-sorted runs of length block_len.
+    Format2: performs a 4-way merge of 4 pre-sorted input tiles.
+
+    Format1 usage (keyword block_len):
+        out = mrgsort(src, block_len=64)
+
+    Format2 usage (6 positional args):
+        out = mrgsort(src0, src1, src2, src3, tmp, executed)
+        out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
+
+    Args:
+        src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
+              For format2: first sorted input tile.
+        src1: (format2) Second sorted input tile.
+        src2: (format2) Third sorted input tile.
+        src3: (format2) Fourth sorted input tile.
+        tmp: (format2) Temporary workspace tile.
+        executed: (format2) Exhaustion status tile (written by hardware).
+        exhausted: (format2) If True, marks inputs as exhausted (default: False).
+        block_len: (format1, keyword-only) Run length, must be multiple of 64.
+
+    Returns:
+        Tile with merged sorted elements
+    """
+    if block_len is not None:
+        # format1: single-list merge sort
+        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+            raise ValueError(
+                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "are mutually exclusive; do not pass format2 arguments with block_len"
+            )
+        block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
+        call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
+        return Tile(expr=call_expr)
+    # format2: 4-way merge
+    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+        raise ValueError(
+            "mrgsort() requires either block_len=<int> for format1, "
+            "or (src0, src1, src2, src3, tmp, executed) for format2"
+        )
+    call_expr = _ir_ops.mrgsort(
+        src0.unwrap(),
+        src1.unwrap(),
+        src2.unwrap(),
+        src3.unwrap(),
+        tmp.unwrap(),
+        executed.unwrap(),
+        exhausted,
+    )
     return Tile(expr=call_expr)

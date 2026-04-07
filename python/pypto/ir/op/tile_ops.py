@@ -1950,3 +1950,186 @@ def tpop_from_aiv(
         op = _ir_core.get_op("tile.tpop_from_aiv")
         return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
     return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"split": split}, actual_span)
+
+
+# ============================================================================
+# Sorting Operations
+# ============================================================================
+
+
+def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
+    """Sort fixed 32-element blocks with explicit index tile.
+
+    Sorts 32-element blocks in src and permutes idx accordingly.
+    Output tile stores sorted value-index pairs with doubled last dimension.
+
+    Args:
+        src: Input value tile (TileType, FP16 or FP32, Vec memory)
+        idx: Input index tile (TileType, Vec memory) with sequential offsets
+        span: Optional source span for debugging
+
+    Returns:
+        Call expression returning sorted tile with doubled last dimension
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.sort32", [src, idx], {}, actual_span)
+
+
+# ============================================================================
+# Gather Operations
+# ============================================================================
+
+
+def gather(
+    src: Expr,
+    indices: Expr | None = None,
+    tmp: Expr | None = None,
+    *,
+    mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements from src, using either indices or a fixed mask pattern.
+
+    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
+    Mask form: selects elements by a hardware mask pattern.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        indices: Index tile (INT32). Required for index form.
+        tmp: Temporary workspace tile (INT32). Required for index form.
+        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype for mask form (keyword-only). When provided,
+            the result tile has this dtype instead of src's dtype. The hardware only
+            requires sizeof(dst_dtype) == sizeof(src_dtype). Useful for extracting
+            UINT32 index bits from FP32 sort32 output (bit reinterpretation).
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile
+    """
+    actual_span = _get_span_or_capture(span)
+    if mask_pattern is not None:
+        if indices is not None or tmp is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
+                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
+            )
+        kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
+        if output_dtype is not None:
+            kwargs["output_dtype"] = output_dtype  # int | DataType, C++ handles both
+        return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
+    if indices is None or tmp is None:
+        raise ValueError(
+            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
+        )
+    return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
+
+
+def gather_mask(src: Expr, mask_pattern: int, span: Span | None = None) -> Call:
+    """Gather elements from src using a fixed mask pattern.
+
+    .. deprecated::
+        Use ``gather(src, mask_pattern=<value>)`` instead.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        mask_pattern: Mask pattern selector (1-7)
+        span: Optional source span
+
+    Returns:
+        Call expression returning gathered tile
+    """
+    return gather(src, mask_pattern=mask_pattern, span=span)
+
+
+# ============================================================================
+# Merge Sort Operations
+# ============================================================================
+
+
+def mrgsort(
+    src0: Expr,
+    src1: Expr | None = None,
+    src2: Expr | None = None,
+    src3: Expr | None = None,
+    tmp: Expr | None = None,
+    executed: Expr | None = None,
+    exhausted: bool = False,
+    *,
+    block_len: int | Expr | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Merge sort — format1 (single-list) or format2 (4-way merge).
+
+    Format1 (block_len form): sorts a tile containing multiple pre-sorted runs.
+    Format2 (4-way form): merges 4 pre-sorted input tiles into one sorted output.
+
+    Args:
+        src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
+              For format2: first sorted input tile.
+        src1: (format2) Second sorted input tile.
+        src2: (format2) Third sorted input tile.
+        src3: (format2) Fourth sorted input tile.
+        tmp: (format2) Temporary workspace tile.
+        executed: (format2) Exhaustion status tile (written by hardware).
+        exhausted: (format2) If True, marks inputs as exhausted (default: False).
+        block_len: (format1, keyword-only) Run length, must be multiple of 64.
+        span: Optional source span for debugging.
+
+    Returns:
+        Call expression returning merged sorted tile.
+    """
+    actual_span = _get_span_or_capture(span)
+    if block_len is not None:
+        # format1: single-list merge sort (pto.tmrgsort format1)
+        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+            raise ValueError(
+                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "are mutually exclusive; do not pass format2 arguments with block_len"
+            )
+        # PTO ISA requires block_len as i32. The parser may emit ConstInt with INDEX dtype,
+        # so always extract the integer value and create a fresh INT32 constant.
+        if isinstance(block_len, _ir_core.ConstInt):
+            block_len_expr = _ir_core.ConstInt(block_len.value, DataType.INT32, actual_span)
+        elif isinstance(block_len, Expr):
+            block_len_expr = block_len
+        else:
+            block_len_expr = _ir_core.ConstInt(block_len, DataType.INT32, actual_span)
+        return _ir_core.create_op_call("tile.mrgsort_format1", [src0, block_len_expr], {}, actual_span)
+    # format2: 4-way merge (pto.tmrgsort format2)
+    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+        raise ValueError(
+            "mrgsort() requires either block_len=<int> for format1, "
+            "or (src0, src1, src2, src3, tmp, executed) for format2"
+        )
+    kwargs: dict[str, Any] = {"exhausted": exhausted}
+    return _ir_core.create_op_call(
+        "tile.mrgsort_format2", [src0, src1, src2, src3, tmp, executed], kwargs, actual_span
+    )
+
+
+def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None) -> Call:
+    """Single-list merge sort (format1). Used by the parser for roundtrip fidelity.
+
+    Prefer ``mrgsort(src, block_len=...)`` in user code.
+    """
+    return mrgsort(src0, block_len=block_len, span=span)
+
+
+def mrgsort_format2(
+    src0: Expr,
+    src1: Expr,
+    src2: Expr,
+    src3: Expr,
+    tmp: Expr,
+    executed: Expr,
+    exhausted: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """4-way merge sort (format2). Used by the parser for roundtrip fidelity.
+
+    Prefer ``mrgsort(src0, src1, src2, src3, tmp, executed)`` in user code.
+    """
+    return mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=exhausted, span=span)

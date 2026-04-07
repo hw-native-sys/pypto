@@ -107,6 +107,9 @@ static void CheckSafeIdentifier(const std::string& value, const std::string& att
 static const std::vector<std::string> cmp_modes = {"eq", "ne", "lt", "le", "gt", "ge"};
 static const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                                      "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
+// Mask pattern names for pto.tgather mask form (index 0 unused, patterns 1-7)
+static const std::vector<std::string> mask_patterns = {"",      "P0101", "P1010", "P0001",
+                                                       "P0010", "P0100", "P1000", "P1111"};
 
 // Helper function for input & output generation (with type annotations)
 static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
@@ -335,25 +338,153 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
   return "";
 }
 
-// TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-// Helper function for Sort32
+// Helper function for Sort32: emits pto.tsort32
+// PTOAS expects: ins(src, idx : src_type, idx_type) outs(dst : dst_type)
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Operation:[" << pto_op_name << "] requires 1 argument, but got "
-                               << op->args_.size();
-  codegen.Emit(pto_op_name);
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
+                               << "] requires 2 arguments (src, idx), but got " << op->args_.size();
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string idx = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << pto_op_name;
+  // ins clause: src, idx
+  oss << " ins(" << src << ", " << idx;
+  if (!src_type.empty() || !idx_type.empty()) {
+    oss << " : " << src_type << ", " << idx_type;
+  }
+  // outs clause: dst only (idx is modified in-place by hardware)
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
   return "";
 }
 
-// TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-// Helper function for MrgSort
+// Helper function for GatherMask: emits pto.tgather with maskPattern attribute
+// PTOAS expects: ins(src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_type) outs(dst : dst_type)
+static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "tile.gather_mask requires 1 argument (src), but got " << op->args_.size();
+
+  int pattern = op->GetKwarg<int>("mask_pattern");
+  CHECK(pattern >= 1 && pattern < static_cast<int>(mask_patterns.size()))
+      << "mask_pattern out of range: " << pattern;
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << "pto.tgather ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
+      << ">}";
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for MrgSort format2: emits pto.tmrgsort
+// format2: ins(src0, src1, src2, src3 {exhausted = <bool>} : types...)
+//          outs(dst, tmp, executed : dst_type, tmp_type, vector<4xi16>)
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
+  CHECK(op->args_.size() == 6) << "Operation:[" << pto_op_name
+                               << "] requires 6 arguments (src0, src1, src2, src3, tmp, executed), but got "
                                << op->args_.size();
-  codegen.Emit(pto_op_name);
+
+  // ins: src0, src1, src2, src3 (args 0-3)
+  std::string src0 = codegen.GetExprAsCode(op->args_[0]);
+  std::string src1 = codegen.GetExprAsCode(op->args_[1]);
+  std::string src2 = codegen.GetExprAsCode(op->args_[2]);
+  std::string src3 = codegen.GetExprAsCode(op->args_[3]);
+  std::string s0t = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string s1t = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string s2t = codegen.GetExprTypeAnnotation(op->args_[2]);
+  std::string s3t = codegen.GetExprTypeAnnotation(op->args_[3]);
+
+  // outs: dst (result target), tmp (arg4), executed (arg5)
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  std::string tmp = codegen.GetExprAsCode(op->args_[4]);
+  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[4]);
+  std::string executed = codegen.GetExprAsCode(op->args_[5]);
+
+  bool exhausted = op->GetKwarg<bool>("exhausted", false);
+  std::string exhausted_attr = exhausted ? "{exhausted = true}" : "{exhausted = false}";
+
+  std::ostringstream oss;
+  oss << pto_op_name << " ins(" << src0 << ", " << src1 << ", " << src2 << ", " << src3 << " "
+      << exhausted_attr;
+  if (!s0t.empty() || !s1t.empty() || !s2t.empty() || !s3t.empty()) {
+    oss << " : " << s0t << ", " << s1t << ", " << s2t << ", " << s3t;
+  }
+  oss << ") outs(" << dst << ", " << tmp << ", " << executed;
+  if (!dst_type.empty() || !tmp_type.empty()) {
+    oss << " : " << dst_type << ", " << tmp_type << ", vector<4xi16>";
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for MrgSort1 format1: emits pto.tmrgsort
+// format1: ins(src, blockLen : src_type, i32) outs(dst : dst_type)
+static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                          codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
+                               << "] requires 2 arguments (src, block_len), but got " << op->args_.size();
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+  // blockLen must be i32 per PTO ISA. Constants use the optimized dedup path;
+  // runtime variables (e.g., loop-carried block_len) go through GetExprAsCode + cast.
+  std::string block_len;
+  if (auto const_int = ir::As<ir::ConstInt>(op->args_[1])) {
+    block_len = codegen.GetOrEmitI32Constant(static_cast<int32_t>(const_int->value_));
+  } else {
+    block_len = codegen.GetExprAsCode(op->args_[1]);
+    block_len = codegen.EmitCastToI32(op->args_[1], block_len);
+  }
+
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << pto_op_name << " ins(" << src << ", " << block_len;
+  if (!src_type.empty()) {
+    oss << " : " << src_type << ", i32";
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
   return "";
 }
 
@@ -1115,7 +1246,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.transpose",       "pto.ttrans",           3},
     {"tile.extract",         "pto.textract",         3},
     // Gather/scatter operations
-    {"tile.gather",          "pto.tgather",          2},
+    {"tile.gather",          "pto.tgather",          3},
     {"tile.gatherb",         "pto.tgatherb",         2},
     {"tile.scatter",         "pto.tscatter",         2},
     // Partial reduction operations
@@ -1226,14 +1357,41 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.ci", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeCiCodegenPTO("pto.tci", op, codegen);
   });
-  // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-  reg("tile.sort32", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
+  // tile.sort32 (TSORT32): all inputs and output must be row_major per ISA
+  if (exclude_ops.count("tile.sort32") == 0) {
+    backend.RegisterOp("tile.sort32")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeSort32CodegenPTO("pto.tsort32", op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+  // tile.gather_mask (TGATHER mask form): only src operand + maskPattern attribute
+  reg("tile.gather_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGatherMaskCodegenPTO(op, codegen);
   });
-  // TODO(guoliwei): Sorting operations typically have multiple outputs, which has not yet been addressed.
-  reg("tile.mrgsort", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
-  });
+  // tile.mrgsort_format2 (TMRGSORT format2): all inputs and output must be row_major per ISA
+  if (exclude_ops.count("tile.mrgsort_format2") == 0) {
+    backend.RegisterOp("tile.mrgsort_format2")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeMrgSortCodegenPTO("pto.tmrgsort", op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_input_layout(2, ir::TileLayout::row_major)
+        .set_input_layout(3, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
+  // tile.mrgsort_format1 (TMRGSORT format1): src and output must be row_major per ISA
+  if (exclude_ops.count("tile.mrgsort_format1") == 0) {
+    backend.RegisterOp("tile.mrgsort_format1")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeMrgSort1CodegenPTO("pto.tmrgsort", op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   reg("tile.print", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakePrintCodegenPTO("pto.tprint", op, codegen);
   });

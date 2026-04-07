@@ -200,6 +200,18 @@ class Scalar(metaclass=ScalarMeta):
     def __mod__(self, other: "int | float | Scalar") -> "Scalar":
         return Scalar(expr=self.unwrap() % (other.unwrap() if isinstance(other, Scalar) else other))
 
+    def __lshift__(self, other: "int | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() << (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __rlshift__(self, other: int) -> "Scalar":
+        return Scalar(expr=other << self.unwrap())
+
+    def __rshift__(self, other: "int | Scalar") -> "Scalar":
+        return Scalar(expr=self.unwrap() >> (other.unwrap() if isinstance(other, Scalar) else other))
+
+    def __rrshift__(self, other: int) -> "Scalar":
+        return Scalar(expr=other >> self.unwrap())
+
     # ------------------------------------------------------------------
     # Comparison operators — return Scalar wrapping the IR comparison node.
     # ------------------------------------------------------------------

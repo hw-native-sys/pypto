@@ -779,5 +779,76 @@ class TestTileSliceCodegen:
             )
 
 
+class TestMrgSortCodegen:
+    """Tests for mrgsort format1 code generation with constant and variable block_len."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_mrgsort_format1_const_block_len(self):
+        """mrgsort with constant block_len=64 should generate pto.tmrgsort with i32 operand."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 256], pl.FP32],
+                idx: pl.Tensor[[1, 256], pl.UINT32],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                src_tile: pl.Tile[[1, 256], pl.FP32] = pl.load(src, [0, 0], [1, 256])
+                idx_tile: pl.Tile[[1, 256], pl.UINT32] = pl.load(idx, [0, 0], [1, 256])
+                sorted_tile: pl.Tile[[1, 512], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                merged: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=64)
+                vals: pl.Tile[[1, 256], pl.FP32] = pl.tile.gather(
+                    merged, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                return pl.store(vals, [0, 0], src)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tmrgsort" in mlir, f"Expected pto.tmrgsort in codegen output:\n{mlir}"
+        # Constant block_len should appear as an i32 constant
+        tmrgsort_lines = [line for line in mlir.splitlines() if "pto.tmrgsort" in line]
+        assert tmrgsort_lines, "No pto.tmrgsort line found"
+        assert "i32" in tmrgsort_lines[0], f"block_len type annotation should be i32: {tmrgsort_lines[0]}"
+
+    def test_mrgsort_format1_variable_block_len(self):
+        """mrgsort with variable block_len (function parameter) should generate pto.tmrgsort."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 256], pl.FP32],
+                idx: pl.Tensor[[1, 256], pl.UINT32],
+                block_len: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                src_tile: pl.Tile[[1, 256], pl.FP32] = pl.load(src, [0, 0], [1, 256])
+                idx_tile: pl.Tile[[1, 256], pl.UINT32] = pl.load(idx, [0, 0], [1, 256])
+                sorted_tile: pl.Tile[[1, 512], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                merged: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=block_len)
+                vals: pl.Tile[[1, 256], pl.FP32] = pl.tile.gather(
+                    merged, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                return pl.store(vals, [0, 0], src)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tmrgsort" in mlir, f"Expected pto.tmrgsort in codegen output:\n{mlir}"
+        tmrgsort_lines = [line for line in mlir.splitlines() if "pto.tmrgsort" in line]
+        assert tmrgsort_lines, "No pto.tmrgsort line found"
+        assert "i32" in tmrgsort_lines[0], f"block_len type annotation should be i32: {tmrgsort_lines[0]}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

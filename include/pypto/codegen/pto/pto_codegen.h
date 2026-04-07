@@ -128,6 +128,19 @@ class PTOCodegen : public CodegenBase {
    */
   std::string EmitCastToIndex(const ir::VarPtr& var, const std::string& mlir_name);
 
+  /**
+   * @brief Emit arith.index_cast if expression is not already i32 type
+   *
+   * PTO ISA instructions like pto.tmrgsort require i32 operands. When the
+   * operand is a runtime variable (e.g., loop induction variable typed as
+   * index), this emits the necessary cast.
+   *
+   * @param expr IR expression whose type determines the cast
+   * @param mlir_name Current MLIR SSA name for the expression value
+   * @return SSA name of the i32-typed value (original if already i32)
+   */
+  std::string EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name);
+
   /// Check if a tile variable is consumed by a tile.fillpad operation.
   bool HasFillpadConsumer(const ir::Var* var) const;
 

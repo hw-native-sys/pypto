@@ -260,7 +260,7 @@ def _tensor_literal_expr(tensor: torch.Tensor, shape_str: str, dtype_str: str) -
         if torch.allclose(tensor.float(), torch.eye(tensor.shape[0])):
             return f"torch.eye({tensor.shape[0]}, dtype={dtype_str})"
 
-    # Small tensor: inline list literal
+    # Tensor small enough to inline as a list literal
     if tensor.numel() <= 100:
         return f"torch.tensor({tensor.tolist()!r}, dtype={dtype_str})"
 

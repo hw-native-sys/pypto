@@ -1994,6 +1994,8 @@ class ASTParser:
             ast.Div: ir.truediv,
             ast.FloorDiv: ir.floordiv,
             ast.Mod: ir.mod,
+            ast.LShift: ir.bit_shift_left,
+            ast.RShift: ir.bit_shift_right,
         }
 
         op_type = type(binop.op)
@@ -2001,7 +2003,7 @@ class ASTParser:
             raise UnsupportedFeatureError(
                 f"Unsupported binary operator: {op_type.__name__}",
                 span=self.span_tracker.get_span(binop),
-                hint="Use supported operators: +, -, *, /, //, %",
+                hint="Use supported operators: +, -, *, /, //, %, <<, >>",
             )
 
         return op_map[op_type](left, right, span)
