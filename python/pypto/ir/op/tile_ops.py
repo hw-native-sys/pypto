@@ -2011,6 +2011,11 @@ def gather(
     """
     actual_span = _get_span_or_capture(span)
     if mask_pattern is not None:
+        if indices is not None or tmp is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
+                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
+            )
         kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
         if output_dtype is not None:
             kwargs["output_dtype"] = output_dtype  # int | DataType, C++ handles both
@@ -2079,6 +2084,11 @@ def mrgsort(
     actual_span = _get_span_or_capture(span)
     if block_len is not None:
         # format1: single-list merge sort (pto.tmrgsort format1)
+        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+            raise ValueError(
+                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "are mutually exclusive; do not pass format2 arguments with block_len"
+            )
         # PTO ISA requires block_len as i32. The parser may emit ConstInt with INDEX dtype,
         # so always extract the integer value and create a fresh INT32 constant.
         if isinstance(block_len, _ir_core.ConstInt):

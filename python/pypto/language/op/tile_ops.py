@@ -1634,8 +1634,11 @@ def gather(
         out = gather(src, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
     """
     if mask_pattern is not None:
-        if output_dtype is not None and (indices is not None or tmp is not None):
-            raise ValueError("output_dtype is only valid for the mask form of gather()")
+        if indices is not None or tmp is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
+                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
+            )
         call_expr = _ir_ops.gather(src.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
         return Tile(expr=call_expr)
     if output_dtype is not None:
@@ -1703,6 +1706,11 @@ def mrgsort(
     """
     if block_len is not None:
         # format1: single-list merge sort
+        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+            raise ValueError(
+                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "are mutually exclusive; do not pass format2 arguments with block_len"
+            )
         block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
         call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
         return Tile(expr=call_expr)

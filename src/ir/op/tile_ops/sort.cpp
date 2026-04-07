@@ -36,6 +36,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -91,6 +92,7 @@ TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
 
   TileView tile_view;
   tile_view.valid_shape = output_shape;
+  InheritTileViewLayout(tile_view, src_type);
   return std::make_shared<TileType>(output_shape, src_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -147,7 +149,8 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
 
   // arg5: executed status tile
   auto exc_type = As<TileType>(args[5]->GetType());
-  CHECK(exc_type) << "The operator " << op_name << " requires argument 5 (executed) to be a TileType, but got "
+  CHECK(exc_type) << "The operator " << op_name
+                  << " requires argument 5 (executed) to be a TileType, but got "
                   << args[5]->GetType()->TypeName();
 
   // kwarg: exhausted (bool, default false)
@@ -156,6 +159,7 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
   // Output shape matches tmp tile (the merge destination buffer)
   TileView tile_view;
   tile_view.valid_shape = tmp_type->shape_;
+  InheritTileViewLayout(tile_view, src0_type);
   return std::make_shared<TileType>(tmp_type->shape_, src0_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -168,6 +172,7 @@ REGISTER_OP("tile.mrgsort_format2")
     .add_argument("src3", "Fourth sorted input tile")
     .add_argument("tmp", "Temporary workspace tile")
     .add_argument("executed", "Exhaustion status output tile")
+    .set_attr<bool>("exhausted")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
@@ -208,9 +213,17 @@ TypePtr DeduceTileMrgSort1Type(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires block_len to be an integer type, but got "
       << block_len_type->dtype_.ToString();
 
+  // Validate constant block_len: must be a positive multiple of 64
+  if (auto const_val = As<ConstInt>(args[1])) {
+    CHECK(const_val->value_ > 0 && const_val->value_ % 64 == 0)
+        << "The operator " << op_name << " requires block_len to be a positive multiple of 64, but got "
+        << const_val->value_;
+  }
+
   // Output shape matches src (merge destination has same dimensions as input)
   TileView tile_view;
   tile_view.valid_shape = src_type->shape_;
+  InheritTileViewLayout(tile_view, src_type);
   return std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
 

@@ -279,7 +279,16 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
     if (scalar_type->dtype_ != DataType::INT32) {
       std::string i32_name = NewTemp();
       std::string src_type = GetTypeString(scalar_type->dtype_);
-      Emit(i32_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to i32");
+      // Use arith.index_cast for index→i32, arith.trunci/extui for int→int
+      std::string mlir_op;
+      if (scalar_type->dtype_ == DataType::INDEX) {
+        mlir_op = "arith.index_cast";
+      } else if (scalar_type->dtype_.GetBit() > 32) {
+        mlir_op = "arith.trunci";
+      } else {
+        mlir_op = scalar_type->dtype_.IsUnsignedInt() ? "arith.extui" : "arith.extsi";
+      }
+      Emit(i32_name + " = " + mlir_op + " " + mlir_name + " : " + src_type + " to i32");
       return i32_name;
     }
   }

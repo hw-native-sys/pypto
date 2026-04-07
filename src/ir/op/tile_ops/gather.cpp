@@ -63,13 +63,16 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires indices dtype to be INT32, but got "
       << idx_type->dtype_.ToString();
 
-  // Third arg: tmp workspace tile (must be i32, same as indices)
+  // Third arg: tmp workspace tile (must be i32, same shape as indices)
   auto tmp_type = As<TileType>(args[2]->GetType());
   CHECK(tmp_type) << "The operator " << op_name << " requires third argument to be a TileType, but got "
                   << args[2]->GetType()->TypeName();
   CHECK(tmp_type->dtype_ == DataType::INT32)
       << "The operator " << op_name << " requires tmp dtype to be INT32, but got "
       << tmp_type->dtype_.ToString();
+  CHECK(tmp_type->shape_.size() == idx_type->shape_.size())
+      << "The operator " << op_name << " requires tmp shape rank to match indices rank ("
+      << idx_type->shape_.size() << "), but got " << tmp_type->shape_.size();
 
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;

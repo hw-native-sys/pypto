@@ -837,9 +837,7 @@ class TestMrgSortCodegen:
                 src_tile: pl.Tile[[1, 256], pl.FP32] = pl.load(src, [0, 0], [1, 256])
                 idx_tile: pl.Tile[[1, 256], pl.UINT32] = pl.load(idx, [0, 0], [1, 256])
                 sorted_tile: pl.Tile[[1, 512], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
-                merged: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(
-                    sorted_tile, block_len=block_len
-                )
+                merged: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=block_len)
                 vals: pl.Tile[[1, 256], pl.FP32] = pl.tile.gather(
                     merged, mask_pattern=pl.tile.MaskPattern.P0101
                 )
