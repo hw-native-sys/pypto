@@ -17,7 +17,7 @@ interleaved (value, index) pairs:
   - Sorted indices are stored inside dst at odd positions (u32 bits in f32 memory).
 
 TMRGSORT format2 merges 4 pre-sorted lists into a single sorted output:
-  - ins(src0, src1, src2, src3 {exhausted}) outs(dst, tmp, excuted)
+  - ins(src0, src1, src2, src3 {exhausted}) outs(dst, tmp, executed)
 
 To read back indices as integers on the host side, use:
     values, indices = extract_sort32_results(output_f32)

@@ -1596,7 +1596,14 @@ def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile: ...
 def gather(src: Tile, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tile: ...
 
 
-def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, mask_pattern: int | None = None, output_dtype: int | DataType | None = None) -> Tile:
+def gather(
+    src: Tile,
+    indices: Tile | None = None,
+    tmp: Tile | None = None,
+    *,
+    mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
+) -> Tile:
     """Gather elements from src tile, using either indices or a fixed mask pattern.
 
     Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
@@ -1635,8 +1642,7 @@ def gather(src: Tile, indices: Tile | None = None, tmp: Tile | None = None, *, m
         raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
     if indices is None or tmp is None:
         raise ValueError(
-            "gather() requires either (indices, tmp) for index form, "
-            "or mask_pattern=<int> for mask form"
+            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
         )
     call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
     return Tile(expr=call_expr)
@@ -1653,7 +1659,7 @@ def mrgsort(
     src2: Tile,
     src3: Tile,
     tmp: Tile,
-    excuted: Tile,
+    executed: Tile,
     exhausted: bool = ...,
 ) -> Tile: ...
 
@@ -1664,7 +1670,7 @@ def mrgsort(
     src2: Tile | None = None,
     src3: Tile | None = None,
     tmp: Tile | None = None,
-    excuted: Tile | None = None,
+    executed: Tile | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Scalar | None = None,
@@ -1678,8 +1684,8 @@ def mrgsort(
         out = mrgsort(src, block_len=64)
 
     Format2 usage (6 positional args):
-        out = mrgsort(src0, src1, src2, src3, tmp, excuted)
-        out = mrgsort(src0, src1, src2, src3, tmp, excuted, exhausted=True)
+        out = mrgsort(src0, src1, src2, src3, tmp, executed)
+        out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
 
     Args:
         src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
@@ -1688,7 +1694,7 @@ def mrgsort(
         src2: (format2) Third sorted input tile.
         src3: (format2) Fourth sorted input tile.
         tmp: (format2) Temporary workspace tile.
-        excuted: (format2) Exhaustion status tile (written by hardware).
+        executed: (format2) Exhaustion status tile (written by hardware).
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
 
@@ -1701,10 +1707,10 @@ def mrgsort(
         call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
         return Tile(expr=call_expr)
     # format2: 4-way merge
-    if src1 is None or src2 is None or src3 is None or tmp is None or excuted is None:
+    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, excuted) for format2"
+            "or (src0, src1, src2, src3, tmp, executed) for format2"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),
@@ -1712,7 +1718,7 @@ def mrgsort(
         src2.unwrap(),
         src3.unwrap(),
         tmp.unwrap(),
-        excuted.unwrap(),
+        executed.unwrap(),
         exhausted,
     )
     return Tile(expr=call_expr)

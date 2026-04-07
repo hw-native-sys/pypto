@@ -343,8 +343,8 @@ static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPt
 static std::string MakeSort32CodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments (src, idx), but got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
+                               << "] requires 2 arguments (src, idx), but got " << op->args_.size();
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string idx = codegen.GetExprAsCode(op->args_[1]);
@@ -388,7 +388,8 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tgather ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern) << ">}";
+  oss << "pto.tgather ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
+      << ">}";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -404,12 +405,12 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 
 // Helper function for MrgSort format2: emits pto.tmrgsort
 // format2: ins(src0, src1, src2, src3 {exhausted = <bool>} : types...)
-//          outs(dst, tmp, excuted : dst_type, tmp_type, vector<4xi16>)
+//          outs(dst, tmp, executed : dst_type, tmp_type, vector<4xi16>)
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 6) << "Operation:[" << pto_op_name
-                               << "] requires 6 arguments (src0, src1, src2, src3, tmp, excuted), but got "
+                               << "] requires 6 arguments (src0, src1, src2, src3, tmp, executed), but got "
                                << op->args_.size();
 
   // ins: src0, src1, src2, src3 (args 0-3)
@@ -422,22 +423,23 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
   std::string s2t = codegen.GetExprTypeAnnotation(op->args_[2]);
   std::string s3t = codegen.GetExprTypeAnnotation(op->args_[3]);
 
-  // outs: dst (result target), tmp (arg4), excuted (arg5)
+  // outs: dst (result target), tmp (arg4), executed (arg5)
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::string tmp = codegen.GetExprAsCode(op->args_[4]);
   std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[4]);
-  std::string excuted = codegen.GetExprAsCode(op->args_[5]);
+  std::string executed = codegen.GetExprAsCode(op->args_[5]);
 
   bool exhausted = op->GetKwarg<bool>("exhausted", false);
   std::string exhausted_attr = exhausted ? "{exhausted = true}" : "{exhausted = false}";
 
   std::ostringstream oss;
-  oss << pto_op_name << " ins(" << src0 << ", " << src1 << ", " << src2 << ", " << src3 << " " << exhausted_attr;
+  oss << pto_op_name << " ins(" << src0 << ", " << src1 << ", " << src2 << ", " << src3 << " "
+      << exhausted_attr;
   if (!s0t.empty() || !s1t.empty() || !s2t.empty() || !s3t.empty()) {
     oss << " : " << s0t << ", " << s1t << ", " << s2t << ", " << s3t;
   }
-  oss << ") outs(" << dst << ", " << tmp << ", " << excuted;
+  oss << ") outs(" << dst << ", " << tmp << ", " << executed;
   if (!dst_type.empty() || !tmp_type.empty()) {
     oss << " : " << dst_type << ", " << tmp_type << ", vector<4xi16>";
   }
@@ -453,8 +455,7 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
                                           codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
-                               << "] requires 2 arguments (src, block_len), but got "
-                               << op->args_.size();
+                               << "] requires 2 arguments (src, block_len), but got " << op->args_.size();
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);

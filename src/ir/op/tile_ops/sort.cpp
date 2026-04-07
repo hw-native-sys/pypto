@@ -19,16 +19,17 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <optional>
-
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
@@ -57,8 +58,8 @@ static T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, c
 TypePtr DeduceTileSort32Type(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs,
                              const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires 2 arguments (src, idx), but got " << args.size();
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, idx), but got "
+                          << args.size();
 
   // First arg: src tile (f16 or f32)
   auto src_type = As<TileType>(args[0]->GetType());
@@ -116,10 +117,10 @@ REGISTER_OP("tile.sort32")
 // ============================================================================
 
 TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
-                               const std::vector<std::pair<std::string, std::any>>& kwargs,
-                               const std::string& op_name) {
+                              const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const std::string& op_name) {
   CHECK(args.size() == 6) << "The operator " << op_name
-                          << " requires 6 arguments (src0, src1, src2, src3, tmp, excuted), but got "
+                          << " requires 6 arguments (src0, src1, src2, src3, tmp, executed), but got "
                           << args.size();
 
   // First 4 args: sorted input tiles (f16 or f32, matching dtype)
@@ -144,10 +145,10 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
   CHECK(tmp_type) << "The operator " << op_name << " requires argument 4 (tmp) to be a TileType, but got "
                   << args[4]->GetType()->TypeName();
 
-  // arg5: excuted status tile
+  // arg5: executed status tile
   auto exc_type = As<TileType>(args[5]->GetType());
   CHECK(exc_type) << "The operator " << op_name
-                  << " requires argument 5 (excuted) to be a TileType, but got "
+                  << " requires argument 5 (executed) to be a TileType, but got "
                   << args[5]->GetType()->TypeName();
 
   // kwarg: exhausted (bool, default false)
@@ -167,7 +168,7 @@ REGISTER_OP("tile.mrgsort_format2")
     .add_argument("src2", "Third sorted input tile")
     .add_argument("src3", "Fourth sorted input tile")
     .add_argument("tmp", "Temporary workspace tile")
-    .add_argument("excuted", "Exhaustion status output tile")
+    .add_argument("executed", "Exhaustion status output tile")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
@@ -186,10 +187,10 @@ REGISTER_OP("tile.mrgsort_format2")
 // ============================================================================
 
 TypePtr DeduceTileMrgSort1Type(const std::vector<ExprPtr>& args,
-                                const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires 2 arguments (src, block_len), but got " << args.size();
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, block_len), but got "
+                          << args.size();
 
   // arg0: src tile (f16 or f32)
   auto src_type = As<TileType>(args[0]->GetType());

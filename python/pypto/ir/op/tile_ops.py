@@ -2017,8 +2017,7 @@ def gather(
         return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
     if indices is None or tmp is None:
         raise ValueError(
-            "gather() requires either (indices, tmp) for index form, "
-            "or mask_pattern=<int> for mask form"
+            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
         )
     return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
 
@@ -2038,6 +2037,8 @@ def gather_mask(src: Expr, mask_pattern: int, span: Span | None = None) -> Call:
         Call expression returning gathered tile
     """
     return gather(src, mask_pattern=mask_pattern, span=span)
+
+
 # ============================================================================
 # Merge Sort Operations
 # ============================================================================
@@ -2049,7 +2050,7 @@ def mrgsort(
     src2: Expr | None = None,
     src3: Expr | None = None,
     tmp: Expr | None = None,
-    excuted: Expr | None = None,
+    executed: Expr | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Expr | None = None,
@@ -2067,7 +2068,7 @@ def mrgsort(
         src2: (format2) Third sorted input tile.
         src3: (format2) Fourth sorted input tile.
         tmp: (format2) Temporary workspace tile.
-        excuted: (format2) Exhaustion status tile (written by hardware).
+        executed: (format2) Exhaustion status tile (written by hardware).
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
         span: Optional source span for debugging.
@@ -2088,12 +2089,37 @@ def mrgsort(
             block_len_expr = _ir_core.ConstInt(block_len, DataType.INT32, actual_span)
         return _ir_core.create_op_call("tile.mrgsort_format1", [src0, block_len_expr], {}, actual_span)
     # format2: 4-way merge (pto.tmrgsort format2)
-    if src1 is None or src2 is None or src3 is None or tmp is None or excuted is None:
+    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, excuted) for format2"
+            "or (src0, src1, src2, src3, tmp, executed) for format2"
         )
     kwargs: dict[str, Any] = {"exhausted": exhausted}
     return _ir_core.create_op_call(
-        "tile.mrgsort_format2", [src0, src1, src2, src3, tmp, excuted], kwargs, actual_span
+        "tile.mrgsort_format2", [src0, src1, src2, src3, tmp, executed], kwargs, actual_span
     )
+
+
+def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None) -> Call:
+    """Single-list merge sort (format1). Used by the parser for roundtrip fidelity.
+
+    Prefer ``mrgsort(src, block_len=...)`` in user code.
+    """
+    return mrgsort(src0, block_len=block_len, span=span)
+
+
+def mrgsort_format2(
+    src0: Expr,
+    src1: Expr,
+    src2: Expr,
+    src3: Expr,
+    tmp: Expr,
+    executed: Expr,
+    exhausted: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """4-way merge sort (format2). Used by the parser for roundtrip fidelity.
+
+    Prefer ``mrgsort(src0, src1, src2, src3, tmp, executed)`` in user code.
+    """
+    return mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=exhausted, span=span)
