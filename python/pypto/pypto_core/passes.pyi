@@ -279,6 +279,9 @@ def legalize_pto_buffer_reuse() -> Pass:
 def allocate_memory_addr() -> Pass:
     """Create an allocate memory address pass."""
 
+def fuse_create_assemble_to_slice() -> Pass:
+    """Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions."""
+
 def normalize_return_order() -> Pass:
     """Create a return order normalization pass."""
 
@@ -434,6 +437,7 @@ __all__ = [
     "legalize_pto_buffer_reuse",
     "insert_sync",
     "allocate_memory_addr",
+    "fuse_create_assemble_to_slice",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

@@ -171,18 +171,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
-  void SetBufferRoots(const std::unordered_map<const Var*, const Var*>& mapping) {
-    buffer_root_map_ = mapping;
-  }
-
-  void SetAssembleViewInfos(const std::unordered_map<const Var*, AssembleViewInfo>& infos) {
-    assemble_view_infos_ = infos;
-  }
-
-  void SetNonOptimizableAssembleRoots(const std::unordered_set<const Var*>& roots) {
-    non_optimizable_assemble_roots_ = roots;
-  }
-
   void SetEscapingLoopReturns(const std::unordered_set<const Var*>& returns) {
     escaping_loop_returns_ = returns;
   }
@@ -531,18 +519,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     current_result_var_ = emit_var;
 
-    std::string gen_code;
     if (op_name == "tensor.create" && assign_var) {
-      auto assemble_view = TryGenerateAssembleViewForCreate(call, assign_var.get(), emit_var);
-      if (assemble_view.has_value()) {
-        gen_code = *assemble_view;
-      } else {
-        tensor_create_var_names_.insert(assign_var.get());
-      }
+      tensor_create_var_names_.insert(assign_var.get());
     }
-    if (gen_code.empty()) {
-      gen_code = (*codegen_func)(call, *this);
-    }
+    std::string gen_code = (*codegen_func)(call, *this);
 
     std::istringstream iss(gen_code);
     std::string line;
@@ -760,84 +740,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ -= 4;
   }
 
-  // --- Buffer root / assemble view helpers ---
-
-  const Var* ResolveBufferRoot(const Var* var) const {
-    auto it = buffer_root_map_.find(var);
-    return it != buffer_root_map_.end() ? it->second : var;
-  }
-
-  std::optional<std::string> TryGenerateAssembleViewForCreate(const CallPtr& call, const Var* assign_var,
-                                                              const std::string& emit_var) {
-    const Var* root = ResolveBufferRoot(assign_var);
-    if (root != assign_var) {
-      return std::nullopt;
-    }
-    if (non_optimizable_assemble_roots_.count(root) > 0) {
-      return std::nullopt;
-    }
-    auto it = assemble_view_infos_.find(root);
-    if (it == assemble_view_infos_.end()) {
-      return std::nullopt;
-    }
-
-    auto result_type = As<TensorType>(call->GetType());
-    INTERNAL_CHECK(result_type) << "Internal error: tensor.create must return TensorType";
-
-    size_t ndim = result_type->shape_.size();
-    size_t array_len = ndim == 0 ? 1 : ndim;
-    std::ostringstream oss;
-    oss << "uint32_t " << emit_var << "_shapes[" << array_len << "] = {";
-    if (ndim == 0) {
-      oss << "1";
-    } else {
-      for (size_t i = 0; i < ndim; ++i) {
-        if (i > 0) oss << ", ";
-        oss << GenerateExprString(result_type->shape_[i]);
-      }
-    }
-    oss << "};\n";
-
-    INTERNAL_CHECK(it->second.offset_tuple != nullptr)
-        << "Internal error: tensor.assemble offset must be MakeTuple";
-    oss << "uint32_t " << emit_var << "_offsets[" << array_len << "] = {";
-    if (ndim == 0) {
-      oss << "0";
-    } else {
-      for (size_t i = 0; i < ndim; ++i) {
-        if (i > 0) oss << ", ";
-        INTERNAL_CHECK(i < it->second.offset_tuple->elements_.size())
-            << "Internal error: tensor.assemble offset rank mismatch";
-        oss << GenerateExprString(it->second.offset_tuple->elements_[i]);
-      }
-    }
-    oss << "};\n";
-
-    std::string target_name = GenerateExprString(it->second.target_expr);
-    target_name = GetExternalTensorName(target_name);
-    oss << "Tensor " << emit_var << " = " << target_name << ".view(" << emit_var << "_shapes, " << emit_var
-        << "_offsets);";
-
-    emitted_assemble_view_roots_.insert(root);
-    return oss.str();
-  }
-
-  bool HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
+  void HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
     INTERNAL_CHECK(call->args_.size() == 3) << "Internal error: tensor.assemble expects 3 arguments";
 
     std::string target_name = GenerateExprString(call->args_[0]);
     target_name = GetExternalTensorName(target_name);
     emit_name_map_[assign->var_.get()] = target_name;
-
-    auto source_var = AsVarLike(call->args_[1]);
-    if (!source_var) {
-      return false;
-    }
-    const Var* source_root = ResolveBufferRoot(source_var.get());
-    if (non_optimizable_assemble_roots_.count(source_root) > 0) {
-      return false;
-    }
-    return emitted_assemble_view_roots_.count(source_root) > 0;
   }
 
   std::string ReserveVarEmitName(const Var* var) {
@@ -870,10 +778,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
-  std::unordered_map<const Var*, const Var*> buffer_root_map_;
-  std::unordered_map<const Var*, AssembleViewInfo> assemble_view_infos_;
-  std::unordered_set<const Var*> non_optimizable_assemble_roots_;
-  std::unordered_set<const Var*> emitted_assemble_view_roots_;
   std::unordered_set<const Var*> tensor_create_var_names_;
   std::ostringstream code_;
   int indent_ = 4;
@@ -904,13 +808,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   VarLineageCollector lineage;
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
-
-  BufferRootCollector buffer_info(program);
-  buffer_info.Initialize(func->params_);
-  buffer_info.VisitStmt(func->body_);
-
-  AssembleViewOptimizer assemble_opt(buffer_info.buffer_roots);
-  assemble_opt.VisitStmt(func->body_);
 
   LoopEscapeInfoCollector loop_escape_info;
   loop_escape_info.VisitStmt(func->body_);
@@ -954,9 +851,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
-  stmt_codegen.SetBufferRoots(buffer_info.buffer_roots);
-  stmt_codegen.SetAssembleViewInfos(assemble_opt.assemble_view_infos);
-  stmt_codegen.SetNonOptimizableAssembleRoots(assemble_opt.non_optimizable_roots);
   stmt_codegen.SetEscapingLoopReturns(loop_escape_info.escaping_loop_returns);
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);

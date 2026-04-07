@@ -52,11 +52,6 @@ struct TupleElement {
   const ir::Var* var;
 };
 
-struct AssembleViewInfo {
-  ir::ExprPtr target_expr;
-  ir::MakeTuplePtr offset_tuple;
-};
-
 // ---------------------------------------------------------------------------
 // IR analysis visitors for orchestration codegen
 // ---------------------------------------------------------------------------
@@ -107,35 +102,6 @@ class BufferRootCollector : public ir::IRVisitor {
 
   ir::ProgramPtr program_;
   std::unordered_map<const ir::Var*, std::vector<const ir::Var*>> tuple_output_roots_;
-};
-
-/**
- * @brief Detect tensor.assemble patterns eligible for view optimization
- *
- * Walks the IR in a second pass over a completed buffer_roots map.
- * Records (source_root → target, offsets) pairs for assembles that can be
- * lowered to a single .view() call, and marks roots with multiple assembles
- * as non-optimizable.
- */
-class AssembleViewOptimizer : public ir::IRVisitor {
- public:
-  explicit AssembleViewOptimizer(const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots);
-
-  std::unordered_map<const ir::Var*, AssembleViewInfo> assemble_view_infos;
-  std::unordered_set<const ir::Var*> non_optimizable_roots;
-
- protected:
-  void VisitStmt_(const ir::AssignStmtPtr& assign) override;
-
- private:
-  void RecordAssembleViewInfo(const ir::Var* source_root, const ir::ExprPtr& target_expr,
-                              const ir::MakeTuplePtr& offset_tuple);
-  [[nodiscard]] const ir::Var* ResolveVar(const ir::Var* var) const;
-  [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
-  [[nodiscard]] ir::MakeTuplePtr ResolveTupleExpr(const ir::ExprPtr& expr) const;
-
-  const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots_;
-  std::unordered_map<const ir::Var*, ir::MakeTuplePtr> tuple_values_;
 };
 
 /**

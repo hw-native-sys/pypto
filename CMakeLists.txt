@@ -129,6 +129,7 @@ set(PYPTO_SOURCES
 
     # IR - Transforms
     src/ir/transforms/allocate_memory_addr_pass.cpp
+    src/ir/transforms/fuse_create_assemble_to_slice_pass.cpp
     src/ir/transforms/memory_reuse_pass.cpp
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp

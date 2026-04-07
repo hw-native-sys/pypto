@@ -256,6 +256,12 @@ void BindPass(nb::module_& m) {
              "Allocates real memory addresses for existing alloc operations.\n"
              "Updates MemRef addresses and alloc statement arguments in place.");
 
+  passes.def("fuse_create_assemble_to_slice", &pass::FuseCreateAssembleToSlice,
+             "Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions\n\n"
+             "When a tensor.create result is assembled into a target exactly once,\n"
+             "replaces create with tensor.slice(target, shape, offsets) and removes\n"
+             "the assemble, enabling orchestration codegen to emit .view() directly.");
+
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"
              "Reorders return tuple values in InCore functions so that return[i]\n"

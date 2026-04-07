@@ -388,6 +388,19 @@ Pass NormalizeStmtStructure();
 Pass NormalizeReturnOrder();
 
 /**
+ * @brief Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions
+ *
+ * When a tensor.create result is assembled into a target tensor exactly once,
+ * replaces create with tensor.slice(target, shape, offsets) and removes the assemble.
+ * This enables the orchestration codegen to emit .view() directly.
+ *
+ * Requirements:
+ * - Must run after AllocateMemoryAddr (pipeline final position)
+ * - Only processes Orchestration functions
+ */
+Pass FuseCreateAssembleToSlice();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws
