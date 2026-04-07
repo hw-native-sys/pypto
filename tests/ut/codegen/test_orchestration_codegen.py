@@ -1691,7 +1691,7 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
     def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
-        """Cross-core split inferred from pipe ops should activate both AIV slots."""
+        """Cross-core split inferred from pipe ops should reuse one AIV kernel across both slots."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1743,13 +1743,11 @@ class TestTensorReadWriteOffsetCodegen:
         with passes.PassContext([], passes.VerificationLevel.NONE):
             transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SplitGroupProgram)
         vector_producer = transformed.get_function("vector_producer")
-        vector_producer_aiv1 = transformed.get_function("vector_producer__aiv1")
         cube_consumer = transformed.get_function("cube_consumer")
         assert vector_producer is not None
-        assert vector_producer_aiv1 is not None
+        assert transformed.get_function("vector_producer__aiv1") is None
         assert cube_consumer is not None
         assert vector_producer.split == ir.SplitMode.UP_DOWN
-        assert vector_producer_aiv1.split == ir.SplitMode.UP_DOWN
         assert cube_consumer.split == ir.SplitMode.UP_DOWN
 
         orch_result = _generate_orch_result(transformed)
@@ -1757,7 +1755,7 @@ class TestTensorReadWriteOffsetCodegen:
         expected_ids = (
             orch_result.func_name_to_id["cube_consumer"],
             orch_result.func_name_to_id["vector_producer"],
-            orch_result.func_name_to_id["vector_producer__aiv1"],
+            orch_result.func_name_to_id["vector_producer"],
         )
 
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code

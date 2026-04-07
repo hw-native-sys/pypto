@@ -26,6 +26,7 @@ import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import (
+    _emit_group_output,
     _format_error_report,
     _generate_arg_unpacking,
     _generate_kernel_wrapper,
@@ -740,6 +741,108 @@ class TestGenerateKernelWrapper:
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "a__ssa_v0_tensor->shapes[0]" in wrapper
         assert "a__ssa_v0_tensor->shapes[1]" in wrapper
+
+    def test_split_aiv_wrapper_uses_runtime_subblock_bridge_on_a2a3(self):
+        @pl.program
+        class SplitWrapperProgram:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def split_vec(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+                z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                scaled: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(z_vec, 2.0)
+                pl.tfree_to_aic(z_vec)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(scaled, [0, 0], out)
+                return updated
+
+        transformed = _run_default_passes(SplitWrapperProgram)
+        func = transformed.get_function("split_vec")
+        assert func is not None
+        assert transformed.get_function("split_vec__aiv1") is None
+
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
+        assert wrapper.count("#if !defined(__CPU_SIM)") == 2
+        assert '#if !defined(__CPU_SIM)\n#include "intrinsic.h"' in wrapper
+        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in wrapper
+        assert '#include "intrinsic.h"' in wrapper
+        assert "#define get_subblockid() pypto_runtime_subblock_id" in wrapper
+        assert (
+            "#if !defined(__CPU_SIM)\n"
+            "    // Read A2A3 mixed-task subblock id from runtime dispatch context\n"
+            "    pypto_runtime_subblock_id = get_sub_block_id(args);\n"
+            "#endif"
+        ) in wrapper
+
+    def test_split_aiv_wrapper_uses_runtime_subblock_bridge_in_group_output_on_a2a3(
+        self, tmp_path, monkeypatch
+    ):
+        @pl.program
+        class MixedGroupWrapperProgram:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def split_cube(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="split_vec")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=c2v_peer)
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def split_vec(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+                z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=1
+                )
+                scaled: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(z_vec, 2.0)
+                pl.tfree_to_aic(z_vec)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(scaled, [0, 0], out)
+                return updated
+
+        transformed = _run_default_passes(MixedGroupWrapperProgram)
+        split_cube = transformed.get_function("split_cube")
+        split_vec = transformed.get_function("split_vec")
+        assert split_cube is not None
+        assert split_vec is not None
+
+        monkeypatch.setattr(
+            "pypto.backend.pto_backend._compile_pto_module",
+            lambda _pto_code, _module_name, _output_dir: SAMPLE_PTOAS_OUTPUT,
+        )
+
+        result_files = {}
+        _emit_group_output(
+            result_files,
+            "mixed_group",
+            [split_cube, split_vec],
+            "unused grouped pto",
+            str(tmp_path),
+            skip_ptoas=False,
+        )
+
+        split_cube_wrapper = next(
+            content for path, content in result_files.items() if path.endswith("split_cube.cpp")
+        )
+        split_vec_wrapper = next(
+            content for path, content in result_files.items() if path.endswith("split_vec.cpp")
+        )
+        assert "static __aicore__ void test_func" in split_cube_wrapper
+        assert "static __aicore__ void test_func" in split_vec_wrapper
+        assert '#if !defined(__CPU_SIM)\n#include "intrinsic.h"' in split_vec_wrapper
+        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in split_vec_wrapper
+        assert "#define get_subblockid() pypto_runtime_subblock_id" in split_vec_wrapper
+        assert "pypto_runtime_subblock_id = get_sub_block_id(args);" in split_vec_wrapper
 
 
 class TestGenerateSkipPtoas:

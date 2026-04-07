@@ -43,8 +43,6 @@ namespace {
 
 int SplitDimension(SplitMode mode) { return (mode == SplitMode::UpDown) ? 0 : 1; }
 
-std::string SplitAivLane1Name(const std::string& base_name) { return base_name + "__aiv1"; }
-
 bool IsCrossCoreSplitOp(const std::string& op_name) {
   return op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic" ||
          op_name == "tile.tpop_from_aiv" || op_name == "tile.tpop_from_aic";
@@ -443,9 +441,7 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
   return result;
 }
 
-FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode,
-                            const std::optional<int>& fixed_subblock_idx = std::nullopt,
-                            const std::optional<std::string>& override_name = std::nullopt) {
+FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   if (mode == SplitMode::None) {
     return func;
   }
@@ -463,7 +459,8 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode,
     var_replacements[param.get()] = new_param;
   }
 
-  // For AIV functions, emit tile.get_subblock_idx() at the top
+  // For AIV functions, emit tile.get_subblock_idx() at the top so both vector
+  // lanes share the same kernel body and select their slice dynamically.
   ExprPtr subblock_idx_expr;
   std::vector<StmtPtr> body_stmts;
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
@@ -474,34 +471,29 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode,
 
   if (is_aiv) {
     auto idx_type = std::make_shared<ScalarType>(DataType::INT64);
-    if (fixed_subblock_idx.has_value()) {
-      subblock_idx_expr =
-          std::make_shared<ConstInt>(fixed_subblock_idx.value(), DataType::INT64, func->span_);
-    } else {
-      std::unordered_set<std::string> used_subblock_names;
-      for (const auto& p : func->params_) {
-        used_subblock_names.insert(p->name_hint_);
-      }
-      std::vector<VarPtr> def_vars;
-      transform_utils::CollectDefVars(func->body_, def_vars);
-      for (const auto& v : def_vars) {
-        used_subblock_names.insert(v->name_hint_);
-      }
-      std::string subblock_var_name = "subblock_idx";
-      if (used_subblock_names.count(subblock_var_name) != 0) {
-        subblock_var_name = auto_name::GenerateFreshNameLike("subblock_idx", used_subblock_names);
-      }
-
-      auto& op_reg = OpRegistry::GetInstance();
-      auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
-      auto subblock_call =
-          std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
-                                 std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
-      auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
-      auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
-      body_stmts.insert(body_stmts.begin(), assign_stmt);
-      subblock_idx_expr = subblock_idx_var;
+    std::unordered_set<std::string> used_subblock_names;
+    for (const auto& p : func->params_) {
+      used_subblock_names.insert(p->name_hint_);
     }
+    std::vector<VarPtr> def_vars;
+    transform_utils::CollectDefVars(func->body_, def_vars);
+    for (const auto& v : def_vars) {
+      used_subblock_names.insert(v->name_hint_);
+    }
+    std::string subblock_var_name = "subblock_idx";
+    if (used_subblock_names.count(subblock_var_name) != 0) {
+      subblock_var_name = auto_name::GenerateFreshNameLike("subblock_idx", used_subblock_names);
+    }
+
+    auto& op_reg = OpRegistry::GetInstance();
+    auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
+    auto subblock_call =
+        std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
+                               std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
+    auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
+    auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
+    body_stmts.insert(body_stmts.begin(), assign_stmt);
+    subblock_idx_expr = subblock_idx_var;
   }
 
   auto new_stmts = ProcessStmts(body_stmts, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx_expr,
@@ -514,9 +506,8 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode,
   auto [cloned_body, clone_map_unused] = DeepClone(new_body);
   (void)clone_map_unused;
 
-  const std::string& new_name = override_name.has_value() ? override_name.value() : func->name_;
   auto attrs = WithSplitAttr(func, mode);
-  return std::make_shared<Function>(new_name, new_params, func->param_directions_, func->return_types_,
+  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
                                     cloned_body, func->span_, func->func_type_, func->level_, func->role_,
                                     attrs);
 }
@@ -532,15 +523,10 @@ Pass SplitVectorKernel() {
 
     for (const auto& [gvar, func] : program->functions_) {
       auto resolved_mode = ResolveSplitMode(func);
+      bool should_split = resolved_mode.has_value() && resolved_mode.value() != SplitMode::None &&
+                          (func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC);
       // Only process AIC and AIV functions that have a non-None split mode
-      if (func->func_type_ == FunctionType::AIV && resolved_mode.has_value() &&
-          resolved_mode.value() != SplitMode::None) {
-        new_functions.push_back(ProcessFunction(func, resolved_mode.value(), 0));
-        new_functions.push_back(
-            ProcessFunction(func, resolved_mode.value(), 1, SplitAivLane1Name(func->name_)));
-        changed = true;
-      } else if (func->func_type_ == FunctionType::AIC && resolved_mode.has_value() &&
-                 resolved_mode.value() != SplitMode::None) {
+      if (should_split) {
         new_functions.push_back(ProcessFunction(func, resolved_mode.value()));
         changed = true;
       } else {

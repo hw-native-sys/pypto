@@ -130,10 +130,9 @@ std::string GenerateConfigFunction(int expected_arg_count) {
 bool IsA5Backend() { return pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend950; }
 
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
-  return aiv_func != nullptr && aiv_func->GetSplitMode().has_value();
+  return aiv_func != nullptr && aiv_func->GetSplitMode().has_value() &&
+         aiv_func->GetSplitMode().value() != SplitMode::None;
 }
-
-std::string GetDualAivCompanionName(const std::string& aiv_name) { return aiv_name + "__aiv1"; }
 
 // Returns the opening of a pto2_rt_submit_{aic,aiv}_task call.
 // Caller appends: func_id << ", " << params << ");".
@@ -662,23 +661,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
 
-    int aiv1_id = -1;
-    if (RequiresDualAivDispatch(aiv_func)) {
-      std::string aiv1_name = GetDualAivCompanionName(aiv_name);
-      INTERNAL_CHECK(program_->GetFunction(aiv1_name) != nullptr)
-          << "Internal error: split AIV function '" << aiv_name << "' is missing companion '" << aiv1_name
-          << "'";
-      (*func_name_to_core_type_)[aiv1_name] = CoreType::VECTOR;
-      aiv1_id = GetOrCreateFuncId(aiv1_name, func_name_to_id_, next_func_id_);
-    }
-
     code_ << "\n";
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV lanes)\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
-    std::string third_id = (aiv1_id >= 0) ? std::to_string(aiv1_id) : "INVALID_KERNEL_ID";
+    // Split AIV groups dispatch the same kernel on both vector lanes. The
+    // kernel body uses tile.get_subblock_idx() to select its lane-local slice.
+    std::string third_id = RequiresDualAivDispatch(aiv_func) ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
           << third_id << "};\n";
 

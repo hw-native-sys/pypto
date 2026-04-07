@@ -77,16 +77,9 @@ class TestSplitVectorKernelUpDown:
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv__aiv1(
-                self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [8, 0], out_0)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
@@ -126,16 +119,9 @@ class TestSplitVectorKernelUpDown:
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv__aiv1(
-                self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [8, 0], out_0)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
@@ -183,24 +169,60 @@ class TestSplitVectorKernelUpDown:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
                 result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_injected_subblock_idx_avoids_name_collision(self):
+        """Injected lane temp should pick a fresh name when subblock_idx already exists."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                subblock_idx: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    subblock_idx, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
 
+        @pl.program
+        class Expected:
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-            def main_aiv__aiv1(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
+            def main_aiv(
+                self,
+                subblock_idx: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx__ssa_v0: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                    subblock_idx,
+                    [0 + subblock_idx__ssa_v0 * 8, 0],
+                    [8, 128],
+                    target_memory=pl.MemorySpace.Vec,
                 )
                 pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
                 result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [8, 0], out_0)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx__ssa_v0 * 8, 0], out_0
+                )
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
@@ -286,16 +308,11 @@ class TestSplitVectorKernelLeftRight:
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv__aiv1(
-                self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 64], out_0)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    z_vec, [0, 0 + subblock_idx * 64], out_0
+                )
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
@@ -343,24 +360,15 @@ class TestSplitVectorKernelLeftRight:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
                 prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 0], [16, 64], target_memory=pl.MemorySpace.Vec
+                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
                 result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
-            def main_aiv__aiv1(
-                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    data, [0, 64], [16, 64], target_memory=pl.MemorySpace.Vec
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0, 0 + subblock_idx * 64], out_0
                 )
-                pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
-                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 64], out_0)
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
