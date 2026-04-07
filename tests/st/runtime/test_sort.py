@@ -318,28 +318,44 @@ class MrgSort1DynFP32Program:
 # --- Test Cases ---
 
 
-# Pre-compute idx tensor: [0, 1, 2, ..., 31] per row (logical indices)
-_IDX_TENSOR_FP32 = torch.arange(0, 32, dtype=torch.int32).unsqueeze(0).expand(8, -1).contiguous()
+# Factory functions for init_value tensors (golden_writer requires callables for large tensors).
 
-# Pre-compute gather index tensors for separating interleaved (val, idx) pairs.
-# sort32 output layout: [val0, idx0, val1, idx1, ...] → 64 elements per row.
-# pto.tgather uses FLAT element indices into the entire source tile, so each row
-# needs a row-specific offset: row i uses base offset i*64.
-_ROW_OFFSETS = (torch.arange(0, 8, dtype=torch.int32) * 64).unsqueeze(1)  # [8, 1]
-_VAL_GATHER_IDX = (
-    (torch.arange(0, 32, dtype=torch.int32) * 2).unsqueeze(0) + _ROW_OFFSETS
-).contiguous()  # [8, 32]
-_IDX_GATHER_IDX = (
-    (torch.arange(0, 32, dtype=torch.int32) * 2 + 1).unsqueeze(0) + _ROW_OFFSETS
-).contiguous()  # [8, 32]
 
-# Pre-compute tensors for mrgsort format1 test (sort32 → mrgsort → gather pipeline).
-# Global indices [0, 1, 2, ..., 127] — sort32 idx is just an index mapping.
-_IDX_1x128 = torch.arange(0, 128, dtype=torch.int32).unsqueeze(0).contiguous()  # [1, 128]
+def _make_idx_8x32():
+    """[0, 1, 2, ..., 31] per row — logical indices for sort32 idx input."""
+    return torch.arange(0, 32, dtype=torch.int32).unsqueeze(0).expand(8, -1).contiguous()
 
-# Pre-compute tensors for mrgsort format1 dynamic block_len test (2048 elements).
-# Global indices [0, 1, 2, ..., 2047] — sort32 idx is just an index mapping.
-_IDX_1x2048 = torch.arange(0, 2048, dtype=torch.int32).unsqueeze(0).contiguous()  # [1, 2048]
+
+def _make_val_gather_idx():
+    """Flat even-position indices into [8, 64] sort32 output — selects values."""
+    row_offsets = (torch.arange(0, 8, dtype=torch.int32) * 64).unsqueeze(1)
+    return ((torch.arange(0, 32, dtype=torch.int32) * 2).unsqueeze(0) + row_offsets).contiguous()
+
+
+def _make_idx_gather_idx():
+    """Flat odd-position indices into [8, 64] sort32 output — selects indices."""
+    row_offsets = (torch.arange(0, 8, dtype=torch.int32) * 64).unsqueeze(1)
+    return ((torch.arange(0, 32, dtype=torch.int32) * 2 + 1).unsqueeze(0) + row_offsets).contiguous()
+
+
+def _make_idx_1x128():
+    """Global indices [0..127] for mrgsort format1 test."""
+    return torch.arange(0, 128, dtype=torch.int32).unsqueeze(0).contiguous()
+
+
+def _make_src_1x128():
+    """Random [1, 128] FP32 source for mrgsort format1 test."""
+    return torch.randn(128).unsqueeze(0).contiguous()
+
+
+def _make_idx_1x2048():
+    """Global indices [0..2047] for mrgsort dynamic block_len test."""
+    return torch.arange(0, 2048, dtype=torch.int32).unsqueeze(0).contiguous()
+
+
+def _make_src_1x2048():
+    """Random [1, 2048] FP32 source for mrgsort dynamic block_len test."""
+    return torch.randn(2048).unsqueeze(0).contiguous()
 
 
 class MrgSort1FP32TestCase(PTOTestCase):
@@ -360,10 +376,9 @@ class MrgSort1FP32TestCase(PTOTestCase):
         return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
-        src = torch.randn(128).unsqueeze(0).contiguous()  # [1, 128] random FP32
         return [
-            TensorSpec("src_tensor", [1, 128], DataType.FP32, init_value=src),
-            TensorSpec("idx_tensor", [1, 128], DataType.UINT32, init_value=_IDX_1x128),
+            TensorSpec("src_tensor", [1, 128], DataType.FP32, init_value=_make_src_1x128),
+            TensorSpec("idx_tensor", [1, 128], DataType.UINT32, init_value=_make_idx_1x128),
             TensorSpec("val_output", [1, 128], DataType.FP32, is_output=True),
             TensorSpec("idx_output", [1, 128], DataType.UINT32, is_output=True),
         ]
@@ -401,10 +416,9 @@ class MrgSort1DynFP32TestCase(PTOTestCase):
         return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
-        src = torch.randn(2048).unsqueeze(0).contiguous()  # [1, 2048] random FP32
         return [
-            TensorSpec("src_tensor", [1, 2048], DataType.FP32, init_value=src),
-            TensorSpec("idx_tensor", [1, 2048], DataType.UINT32, init_value=_IDX_1x2048),
+            TensorSpec("src_tensor", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
+            TensorSpec("idx_tensor", [1, 2048], DataType.UINT32, init_value=_make_idx_1x2048),
             TensorSpec("val_output", [1, 2048], DataType.FP32, is_output=True),
             TensorSpec("idx_output", [1, 2048], DataType.UINT32, is_output=True),
         ]
@@ -444,7 +458,7 @@ class Sort32FP32TestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_IDX_TENSOR_FP32),
+            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_make_idx_8x32),
             TensorSpec("output", [8, 64], DataType.FP32, is_output=True),
         ]
 
@@ -487,9 +501,9 @@ class Sort32GatherFP32TestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_IDX_TENSOR_FP32),
-            TensorSpec("val_gather_idx", [8, 32], DataType.INT32, init_value=_VAL_GATHER_IDX),
-            TensorSpec("idx_gather_idx", [8, 32], DataType.INT32, init_value=_IDX_GATHER_IDX),
+            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_make_idx_8x32),
+            TensorSpec("val_gather_idx", [8, 32], DataType.INT32, init_value=_make_val_gather_idx),
+            TensorSpec("idx_gather_idx", [8, 32], DataType.INT32, init_value=_make_idx_gather_idx),
             TensorSpec("gather_tmp", [8, 32], DataType.INT32, init_value=0),
             TensorSpec("val_output", [8, 32], DataType.FP32, is_output=True),
             TensorSpec("idx_output", [8, 32], DataType.FP32, is_output=True),
@@ -532,7 +546,7 @@ class Sort32GatherMaskFP32TestCase(PTOTestCase):
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_IDX_TENSOR_FP32),
+            TensorSpec("idx_tensor", [8, 32], DataType.UINT32, init_value=_make_idx_8x32),
             TensorSpec("output", [8, 32], DataType.FP32, is_output=True),
         ]
 
