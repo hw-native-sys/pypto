@@ -65,16 +65,10 @@ class Sort32FP32Program:
         idx_tensor: pl.Tensor[[8, 32], pl.UINT32],
         output: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
     ) -> pl.Tensor[[8, 64], pl.FP32]:
-        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(
-            src_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
-        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(
-            idx_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
+        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_tensor, offsets=[0, 0], shapes=[8, 32])
+        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(idx_tensor, offsets=[0, 0], shapes=[8, 32])
         sorted_tile: pl.Tile[[8, 64], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
-        out: pl.Tensor[[8, 64], pl.FP32] = pl.store(
-            sorted_tile, offsets=[0, 0], output_tensor=output
-        )
+        out: pl.Tensor[[8, 64], pl.FP32] = pl.store(sorted_tile, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -103,36 +97,20 @@ class Sort32GatherFP32Program:
         val_output: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
         idx_output: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
     ) -> tuple[pl.Tensor[[8, 32], pl.FP32], pl.Tensor[[8, 32], pl.FP32]]:
-        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(
-            src_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
-        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(
-            idx_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
+        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_tensor, offsets=[0, 0], shapes=[8, 32])
+        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(idx_tensor, offsets=[0, 0], shapes=[8, 32])
         sorted_tile: pl.Tile[[8, 64], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
 
-        val_gidx: pl.Tile[[8, 32], pl.INT32] = pl.load(
-            val_gather_idx, offsets=[0, 0], shapes=[8, 32]
-        )
-        idx_gidx: pl.Tile[[8, 32], pl.INT32] = pl.load(
-            idx_gather_idx, offsets=[0, 0], shapes=[8, 32]
-        )
-        tmp_tile: pl.Tile[[8, 32], pl.INT32] = pl.load(
-            gather_tmp, offsets=[0, 0], shapes=[8, 32]
-        )
+        val_gidx: pl.Tile[[8, 32], pl.INT32] = pl.load(val_gather_idx, offsets=[0, 0], shapes=[8, 32])
+        idx_gidx: pl.Tile[[8, 32], pl.INT32] = pl.load(idx_gather_idx, offsets=[0, 0], shapes=[8, 32])
+        tmp_tile: pl.Tile[[8, 32], pl.INT32] = pl.load(gather_tmp, offsets=[0, 0], shapes=[8, 32])
 
-        val_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(
-            sorted_tile, val_gidx, tmp_tile
-        )
+        val_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(sorted_tile, val_gidx, tmp_tile)
         # Index bits are stored as raw uint32 in f32 memory by sort32.
         # Keep as FP32 — host will .view(torch.int32) to reinterpret bits.
-        idx_tile_fp32: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(
-            sorted_tile, idx_gidx, tmp_tile
-        )
+        idx_tile_fp32: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(sorted_tile, idx_gidx, tmp_tile)
 
-        val_out: pl.Tensor[[8, 32], pl.FP32] = pl.store(
-            val_tile, offsets=[0, 0], output_tensor=val_output
-        )
+        val_out: pl.Tensor[[8, 32], pl.FP32] = pl.store(val_tile, offsets=[0, 0], output_tensor=val_output)
         idx_out: pl.Tensor[[8, 32], pl.FP32] = pl.store(
             idx_tile_fp32, offsets=[0, 0], output_tensor=idx_output
         )
@@ -150,8 +128,7 @@ class Sort32GatherFP32Program:
         idx_output: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
     ) -> tuple[pl.Tensor[[8, 32], pl.FP32], pl.Tensor[[8, 32], pl.FP32]]:
         val_output, idx_output = self.sort32_gather_kernel(
-            src_tensor, idx_tensor, val_gather_idx, idx_gather_idx,
-            gather_tmp, val_output, idx_output
+            src_tensor, idx_tensor, val_gather_idx, idx_gather_idx, gather_tmp, val_output, idx_output
         )
         return val_output, idx_output
 
@@ -167,12 +144,8 @@ class Sort32GatherMaskFP32Program:
         idx_tensor: pl.Tensor[[8, 32], pl.UINT32],
         output: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
     ) -> pl.Tensor[[8, 32], pl.FP32]:
-        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(
-            src_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
-        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(
-            idx_tensor, offsets=[0, 0], shapes=[8, 32]
-        )
+        src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_tensor, offsets=[0, 0], shapes=[8, 32])
+        idx_tile: pl.Tile[[8, 32], pl.UINT32] = pl.load(idx_tensor, offsets=[0, 0], shapes=[8, 32])
         sorted_tile: pl.Tile[[8, 64], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
         # P0101 selects every other element (stride=2): columns 0,2,4,...
         # sort32 layout is [val0, idx0, val1, idx1, ...], so P0101 extracts values.
@@ -180,9 +153,7 @@ class Sort32GatherMaskFP32Program:
         gathered: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(
             sorted_tile, mask_pattern=pl.tile.MaskPattern.P0101
         )
-        out: pl.Tensor[[8, 32], pl.FP32] = pl.store(
-            gathered, offsets=[0, 0], output_tensor=output
-        )
+        out: pl.Tensor[[8, 32], pl.FP32] = pl.store(gathered, offsets=[0, 0], output_tensor=output)
         return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -194,7 +165,6 @@ class Sort32GatherMaskFP32Program:
     ) -> pl.Tensor[[8, 32], pl.FP32]:
         output = self.sort32_gather_mask_kernel(src_tensor, idx_tensor, output)
         return output
-
 
 
 @pl.program
@@ -213,31 +183,21 @@ class MrgSort1FP32Program:
         val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
         idx_output: pl.Out[pl.Tensor[[1, 128], pl.UINT32]],
     ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.UINT32]]:
-        src_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(
-            src_tensor, offsets=[0, 0], shapes=[1, 128]
-        )
-        idx_tile: pl.Tile[[1, 128], pl.UINT32] = pl.load(
-            idx_tensor, offsets=[0, 0], shapes=[1, 128]
-        )
+        src_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(src_tensor, offsets=[0, 0], shapes=[1, 128])
+        idx_tile: pl.Tile[[1, 128], pl.UINT32] = pl.load(idx_tensor, offsets=[0, 0], shapes=[1, 128])
         # Sort each 32-element block descending → [1, 256] interleaved (val+idx pairs)
         sorted_tile: pl.Tile[[1, 256], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
         # Merge the 4 sorted 64-col runs into one sorted sequence (block_len=64, repeatTimes=1)
         merged: pl.Tile[[1, 256], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=64)
         # Extract sorted values (even positions, FP32)
-        vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(
-            merged, mask_pattern=pl.tile.MaskPattern.P0101
-        )
+        vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(merged, mask_pattern=pl.tile.MaskPattern.P0101)
         # Extract indices (odd positions): bit-reinterpret FP32 → UINT32 in one step.
         # Hardware TGATHER mask form requires sizeof(dst) == sizeof(src), not same type.
         idx: pl.Tile[[1, 128], pl.UINT32] = pl.tile.gather(
             merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
         )
-        out_val: pl.Tensor[[1, 128], pl.FP32] = pl.store(
-            vals, offsets=[0, 0], output_tensor=val_output
-        )
-        out_idx: pl.Tensor[[1, 128], pl.UINT32] = pl.store(
-            idx, offsets=[0, 0], output_tensor=idx_output
-        )
+        out_val: pl.Tensor[[1, 128], pl.FP32] = pl.store(vals, offsets=[0, 0], output_tensor=val_output)
+        out_idx: pl.Tensor[[1, 128], pl.UINT32] = pl.store(idx, offsets=[0, 0], output_tensor=idx_output)
         return out_val, out_idx
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -248,9 +208,7 @@ class MrgSort1FP32Program:
         val_output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
         idx_output: pl.Out[pl.Tensor[[1, 128], pl.UINT32]],
     ) -> tuple[pl.Tensor[[1, 128], pl.FP32], pl.Tensor[[1, 128], pl.UINT32]]:
-        val_output, idx_output = self.mrgsort1_kernel(
-            src_tensor, idx_tensor, val_output, idx_output
-        )
+        val_output, idx_output = self.mrgsort1_kernel(src_tensor, idx_tensor, val_output, idx_output)
         return val_output, idx_output
 
 
@@ -271,12 +229,8 @@ class MrgSort1DynFP32Program:
         val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
         idx_output: pl.Out[pl.Tensor[[1, 2048], pl.UINT32]],
     ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
-        src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(
-            src_tensor, offsets=[0, 0], shapes=[1, 2048]
-        )
-        idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(
-            idx_tensor, offsets=[0, 0], shapes=[1, 2048]
-        )
+        src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, offsets=[0, 0], shapes=[1, 2048])
+        idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, offsets=[0, 0], shapes=[1, 2048])
         # Sort each 32-element block descending → [1, 4096] interleaved (val+idx pairs)
         sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
         # Iterative 4-way merge: block_len = 1<<(6+2*i) = 64, 256, 1024
@@ -286,19 +240,13 @@ class MrgSort1DynFP32Program:
             merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=block_len)
             result = pl.yield_(merged)
         # Extract sorted values (even positions, FP32)
-        vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather(
-            result, mask_pattern=pl.tile.MaskPattern.P0101
-        )
+        vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather(result, mask_pattern=pl.tile.MaskPattern.P0101)
         # Extract indices (odd positions): bit-reinterpret FP32 → UINT32
         idx: pl.Tile[[1, 2048], pl.UINT32] = pl.tile.gather(
             result, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
         )
-        out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(
-            vals, offsets=[0, 0], output_tensor=val_output
-        )
-        out_idx: pl.Tensor[[1, 2048], pl.UINT32] = pl.store(
-            idx, offsets=[0, 0], output_tensor=idx_output
-        )
+        out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, offsets=[0, 0], output_tensor=val_output)
+        out_idx: pl.Tensor[[1, 2048], pl.UINT32] = pl.store(idx, offsets=[0, 0], output_tensor=idx_output)
         return out_val, out_idx
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -309,9 +257,7 @@ class MrgSort1DynFP32Program:
         val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
         idx_output: pl.Out[pl.Tensor[[1, 2048], pl.UINT32]],
     ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
-        val_output, idx_output = self.mrgsort1_dyn_kernel(
-            src_tensor, idx_tensor, val_output, idx_output
-        )
+        val_output, idx_output = self.mrgsort1_dyn_kernel(src_tensor, idx_tensor, val_output, idx_output)
         return val_output, idx_output
 
 
