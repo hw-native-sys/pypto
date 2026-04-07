@@ -105,8 +105,8 @@ REGISTER_OP("tile.gather")
 static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
                                         const std::string& op_name) {
-  CHECK(args.size() == 1) << "The operator " << op_name
-                          << " requires 1 argument (src), but got " << args.size();
+  CHECK(args.size() == 1) << "The operator " << op_name << " requires 1 argument (src), but got "
+                          << args.size();
 
   auto src_type = As<TileType>(args[0]->GetType());
   CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
@@ -177,10 +177,9 @@ static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
     out_dtype = src_type->dtype_;
   } else {
     CHECK(out_dtype.GetBit() == src_type->dtype_.GetBit())
-        << "The operator " << op_name
-        << " output_dtype must have the same bit width as src dtype ("
-        << src_type->dtype_.ToString() << " = " << src_type->dtype_.GetBit()
-        << " bits), but got " << out_dtype.ToString() << " = " << out_dtype.GetBit() << " bits";
+        << "The operator " << op_name << " output_dtype must have the same bit width as src dtype ("
+        << src_type->dtype_.ToString() << " = " << src_type->dtype_.GetBit() << " bits), but got "
+        << out_dtype.ToString() << " = " << out_dtype.GetBit() << " bits";
   }
 
   return std::make_shared<TileType>(out_shape, out_dtype, std::nullopt, tile_view);

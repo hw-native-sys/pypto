@@ -274,9 +274,8 @@ std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string
 
 std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name) {
   if (auto scalar_type = As<ScalarType>(expr->GetType())) {
-    CHECK(!scalar_type->dtype_.IsFloat())
-        << "EmitCastToI32 does not support floating-point types (got " << GetTypeString(scalar_type->dtype_)
-        << ")";
+    CHECK(!scalar_type->dtype_.IsFloat()) << "EmitCastToI32 does not support floating-point types (got "
+                                          << GetTypeString(scalar_type->dtype_) << ")";
     if (scalar_type->dtype_ != DataType::INT32) {
       std::string i32_name = NewTemp();
       std::string src_type = GetTypeString(scalar_type->dtype_);

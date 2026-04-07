@@ -147,8 +147,7 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
 
   // arg5: executed status tile
   auto exc_type = As<TileType>(args[5]->GetType());
-  CHECK(exc_type) << "The operator " << op_name
-                  << " requires argument 5 (executed) to be a TileType, but got "
+  CHECK(exc_type) << "The operator " << op_name << " requires argument 5 (executed) to be a TileType, but got "
                   << args[5]->GetType()->TypeName();
 
   // kwarg: exhausted (bool, default false)
