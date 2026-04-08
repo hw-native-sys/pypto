@@ -54,9 +54,8 @@ TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
 
   auto index_type = As<TensorType>(args[1]->GetType());
   CHECK(index_type) << "tensor.scatter_: index must be TensorType, got " << args[1]->GetType()->TypeName();
-  CHECK(index_type->shape_.size() == rank)
-      << "tensor.scatter_: index rank (" << index_type->shape_.size() << ") must match input rank (" << rank
-      << ")";
+  CHECK(index_type->shape_.size() == rank) << "tensor.scatter_: index rank (" << index_type->shape_.size()
+                                           << ") must match input rank (" << rank << ")";
   CHECK(index_type->dtype_.IsInt()) << "tensor.scatter_: index dtype must be integer, got "
                                     << index_type->dtype_.ToString();
 
@@ -66,12 +65,22 @@ TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
     auto src_type = As<TensorType>(args[2]->GetType());
     CHECK(src_type) << "tensor.scatter_: src must be TensorType or scalar, got "
                     << args[2]->GetType()->TypeName();
-    CHECK(src_type->shape_.size() == rank)
-        << "tensor.scatter_: src rank (" << src_type->shape_.size() << ") must match input rank (" << rank
-        << ")";
+    CHECK(src_type->shape_.size() == rank) << "tensor.scatter_: src rank (" << src_type->shape_.size()
+                                           << ") must match input rank (" << rank << ")";
     CHECK(src_type->dtype_ == input_type->dtype_)
         << "tensor.scatter_: src dtype (" << src_type->dtype_.ToString() << ") must match input dtype ("
         << input_type->dtype_.ToString() << ")";
+  } else {
+    // Validate scalar dtype compatibility with input dtype
+    if (As<ConstFloat>(args[2])) {
+      CHECK(input_type->dtype_.IsFloat())
+          << "tensor.scatter_: float scalar src requires float input dtype, got "
+          << input_type->dtype_.ToString();
+    } else if (As<ConstInt>(args[2])) {
+      CHECK(input_type->dtype_.IsInt())
+          << "tensor.scatter_: integer scalar src requires integer input dtype, got "
+          << input_type->dtype_.ToString();
+    }
   }
 
   // Validate dim kwarg
@@ -79,9 +88,8 @@ TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
     if (key == "dim") {
       int dim_val = AnyCast<int>(val, "kwarg key: dim");
       int irank = static_cast<int>(rank);
-      CHECK(dim_val >= -irank && dim_val < irank)
-          << "tensor.scatter_: dim must be in [" << -irank << ", " << irank << ") for " << rank
-          << "D input, got " << dim_val;
+      CHECK(dim_val >= -irank && dim_val < irank) << "tensor.scatter_: dim must be in [" << -irank << ", "
+                                                  << irank << ") for " << rank << "D input, got " << dim_val;
     }
   }
 
@@ -100,6 +108,7 @@ REGISTER_OP("tensor.scatter_")
     .add_argument("index", "Index tensor (N-D, same rank as input) of integer dtype")
     .add_argument("src", "Source tensor (same shape as index) or scalar value")
     .set_attr<int>("dim")
+    .set_attr<std::string>("reduce")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorScatterType(args, kwargs);

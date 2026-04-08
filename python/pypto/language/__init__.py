@@ -85,7 +85,7 @@ from .op.system_ops import (
     tpush_to_aic,
     tpush_to_aiv,
 )
-from .op.tensor_ops import assemble, create_tensor, dim, full, scatter_update, scatter_
+from .op.tensor_ops import assemble, create_tensor, dim, full, scatter_, scatter_update
 from .op.tile_ops import (
     MemRefType,
     abs,

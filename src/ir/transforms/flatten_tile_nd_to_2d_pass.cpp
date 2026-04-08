@@ -56,6 +56,28 @@ namespace {
 bool IsNdTile(const TileTypePtr& tile_type) { return tile_type && tile_type->shape_.size() > 2; }
 
 /**
+ * @brief Flatten ND index tuple to 2D (merged_row, col).
+ *
+ * Given an ND index tuple (i0, i1, ..., i_{n-1}) and the tile shape [d0, d1, ..., d_{n-1}],
+ * compute merged_row = i0 * d1 * d2 * ... * d_{n-2} + i1 * d2 * ... + i_{n-2} and col = i_{n-1}.
+ * Each index element is substituted via var_map before use.
+ */
+ExprPtr FlattenNdIndicesToTwoD(const MakeTuplePtr& idx_tuple, const std::vector<ExprPtr>& nd_shape,
+                               const std::unordered_map<const Var*, VarPtr>& var_map, const Span& span) {
+  const size_t rank = nd_shape.size();
+  ExprPtr merged_row;
+  for (size_t k = 0; k + 1 < rank; ++k) {
+    ExprPtr term = Substitute(idx_tuple->elements_[k], var_map);
+    for (size_t j = k + 1; j + 1 < rank; ++j) {
+      term = MakeMul(term, nd_shape[j], span);
+    }
+    merged_row = merged_row ? MakeAdd(merged_row, term, span) : term;
+  }
+  ExprPtr col = Substitute(idx_tuple->elements_[rank - 1], var_map);
+  return std::make_shared<MakeTuple>(std::vector<ExprPtr>{merged_row, col}, span);
+}
+
+/**
  * @brief Extract a static int64_t from a ConstInt expression.
  *
  * Raises CHECK if the expression is not a ConstInt (dynamic shape).
@@ -417,19 +439,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
             new_args.push_back(Substitute(call->args_[0], ctx.var_map));
             auto idx_tuple = As<MakeTuple>(call->args_[1]);
             INTERNAL_CHECK(idx_tuple) << "tile.write indices must be MakeTuple";
-            const auto& nd_shape = orig_tile_type->shape_;
-            const size_t rank = nd_shape.size();
-            ExprPtr merged_row;
-            for (size_t k = 0; k + 1 < rank; ++k) {
-              ExprPtr term = Substitute(idx_tuple->elements_[k], ctx.var_map);
-              for (size_t j = k + 1; j + 1 < rank; ++j) {
-                term = MakeMul(term, nd_shape[j], span);
-              }
-              merged_row = merged_row ? MakeAdd(merged_row, term, span) : term;
-            }
-            ExprPtr col = Substitute(idx_tuple->elements_[rank - 1], ctx.var_map);
-            new_args.push_back(std::make_shared<MakeTuple>(
-                std::vector<ExprPtr>{merged_row, col}, span));
+            new_args.push_back(FlattenNdIndicesToTwoD(idx_tuple, orig_tile_type->shape_, ctx.var_map, span));
             for (size_t i = 2; i < call->args_.size(); ++i) {
               new_args.push_back(Substitute(call->args_[i], ctx.var_map));
             }
@@ -663,21 +673,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // args[1]: indices tuple — flatten from ND to 2D
         auto idx_tuple = As<MakeTuple>(call->args_[1]);
         INTERNAL_CHECK(idx_tuple) << "tile.read/tile.write indices must be MakeTuple";
-        const auto& nd_shape = orig_tile_type->shape_;
-        const size_t rank = nd_shape.size();
-        // Compute merged_row = sum of i_k * product(nd_shape[k+1..rank-2]) for k in [0..rank-2)
-        ExprPtr merged_row;
-        for (size_t k = 0; k + 1 < rank; ++k) {
-          ExprPtr term = Substitute(idx_tuple->elements_[k], ctx.var_map);
-          // Multiply by trailing dimensions (excluding last)
-          for (size_t j = k + 1; j + 1 < rank; ++j) {
-            term = MakeMul(term, nd_shape[j], span);
-          }
-          merged_row = merged_row ? MakeAdd(merged_row, term, span) : term;
-        }
-        ExprPtr col = Substitute(idx_tuple->elements_[rank - 1], ctx.var_map);
-        new_args.push_back(std::make_shared<MakeTuple>(
-            std::vector<ExprPtr>{merged_row, col}, span));
+        new_args.push_back(FlattenNdIndicesToTwoD(idx_tuple, orig_tile_type->shape_, ctx.var_map, span));
         // Remaining args (e.g., value for tile.write)
         for (size_t i = 2; i < call->args_.size(); ++i) {
           new_args.push_back(Substitute(call->args_[i], ctx.var_map));
@@ -685,14 +681,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto new_call = op_registry.Create(op_name, new_args, call->kwargs_, span);
         if (op_name == "tile.read") {
           // tile.read returns scalar — assign to var
-          auto new_var = std::make_shared<Var>(
-              assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+          auto new_var =
+              std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
           result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
           ctx.Insert(assign->var_, new_var);
         } else {
           // tile.write returns tile — assign to var and update mapping
-          auto new_var = std::make_shared<Var>(
-              assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
+          auto new_var =
+              std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
           result.push_back(std::make_shared<AssignStmt>(new_var, new_call, assign->span_));
           ctx.Insert(assign->var_, new_var);
         }

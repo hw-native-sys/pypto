@@ -956,10 +956,10 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
-static std::string MakeSystemBarrierCodegenPTO(const std::string& pipe_name,
-                                               const CallPtr& op,
+static std::string MakeSystemBarrierCodegenPTO(const std::string& pipe_name, const CallPtr& op,
                                                codegen::CodegenBase& codegen_base) {
-  (void)op;
+  CHECK(op->args_.empty()) << "system.barrier_" << pipe_name << " expects 0 arguments, got "
+                           << op->args_.size();
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   codegen.Emit("pto.barrier #pto.pipe<" + pipe_name + ">");
   return "";

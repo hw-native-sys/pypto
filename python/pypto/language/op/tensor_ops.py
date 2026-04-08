@@ -808,6 +808,10 @@ def scatter_(
     Returns:
         Tensor wrapping the scatter_ operation
     """
-    src_expr = src.unwrap() if isinstance(src, Tensor) else src
+    src_expr: float | int | Expr
+    if isinstance(src, (Tensor, Scalar)):
+        src_expr = src.unwrap()
+    else:
+        src_expr = src
     call_expr = _ir_ops.scatter_(input.unwrap(), dim, index.unwrap(), src_expr, reduce=reduce)
     return Tensor(expr=call_expr)

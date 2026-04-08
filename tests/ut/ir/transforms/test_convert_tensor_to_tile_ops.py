@@ -2448,11 +2448,12 @@ class TestTensorFullConversion:
 class TestInOutParamHandling:
     """Tests for InOut parameter handling in ConvertTensorToTileOps."""
 
-    def test_inout_param_reuses_existing_param_for_tile_store(self):
-        """InOut param from outlining: tile.store targets existing InOut param, no new Out param.
+    def test_iter_arg_loop_adds_out_param(self):
+        """IterArg loop in InCore: pass adds Out param for the returned tile.
 
-        End-to-end: outline detects IterArg InOut, then convert reuses the
-        InOut param for tile.store instead of adding a new Out param.
+        The orchestration-level ForStmt iter_arg_mapping handles reuse at
+        the call-site level (AnalyzeIterArgMappings).  Inside the InCore
+        function itself, the return tile gets a new Out param + tile.store.
         """
 
         @pl.program
@@ -2464,7 +2465,6 @@ class TestInOutParamHandling:
                         x = pl.add(x, x)
                 return x
 
-        # Run outline (which marks x as InOut), then convert
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
         with ctx:
             prog = passes.convert_to_ssa()(Input)
@@ -2475,11 +2475,10 @@ class TestInOutParamHandling:
         incore_func = After.get_function("main_incore_0")
         assert incore_func is not None
 
-        # The InOut param should remain — no additional Out param added
-        inout_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.InOut)
+        in_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.In)
         out_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.Out)
-        assert inout_count == 1, f"Expected 1 InOut param, got {inout_count}"
-        assert out_count == 0, f"Expected 0 Out params (reused InOut), got {out_count}"
+        assert in_count == 1, f"Expected 1 In param, got {in_count}"
+        assert out_count == 1, f"Expected 1 Out param (for return tile), got {out_count}"
 
 
 class TestScatterConversion:
@@ -2494,6 +2493,7 @@ class TestScatterConversion:
             def main_incore_0(
                 self,
                 index: pl.Tensor[[3, 2], pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 4], pl.FP32]],
             ) -> pl.Tensor[[3, 4], pl.FP32]:
                 buf: pl.Tensor[[3, 4], pl.FP32] = pl.create_tensor([3, 4], dtype=pl.FP32)
                 result: pl.Tensor[[3, 4], pl.FP32] = pl.scatter_(buf, dim=1, index=index, src=1.0)
@@ -2503,8 +2503,9 @@ class TestScatterConversion:
             def main(
                 self,
                 index: pl.Tensor[[3, 2], pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 4], pl.FP32]],
             ) -> pl.Tensor[[3, 4], pl.FP32]:
-                return self.main_incore_0(index)
+                return self.main_incore_0(index, out)
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_str = str(After)
@@ -2525,6 +2526,7 @@ class TestScatterConversion:
                 self,
                 index: pl.Tensor[[2, 3], pl.INT32],
                 src: pl.Tensor[[2, 3], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
             ) -> pl.Tensor[[4, 3], pl.FP32]:
                 buf: pl.Tensor[[4, 3], pl.FP32] = pl.create_tensor([4, 3], dtype=pl.FP32)
                 result: pl.Tensor[[4, 3], pl.FP32] = pl.scatter_(buf, dim=0, index=index, src=src)
@@ -2535,8 +2537,9 @@ class TestScatterConversion:
                 self,
                 index: pl.Tensor[[2, 3], pl.INT32],
                 src: pl.Tensor[[2, 3], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
             ) -> pl.Tensor[[4, 3], pl.FP32]:
-                return self.main_incore_0(index, src)
+                return self.main_incore_0(index, src, out)
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_str = str(After)

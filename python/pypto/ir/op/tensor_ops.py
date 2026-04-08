@@ -948,6 +948,7 @@ def scatter_(
     dim: int | Expr | None = None,
     index: Expr | None = None,
     src: Expr | float | int | None = None,
+    reduce: str | None = None,
     span: Span | None = None,
 ) -> Call:
     """Element-level scatter into tensor along a dimension.
@@ -997,12 +998,16 @@ def scatter_(
     if not isinstance(index, Expr):
         raise TypeError(f"index must be Expr, got {type(index)}")
 
-    # src can be Expr or scalar (int/float → ConstFloat)
-    if isinstance(src, (int, float)):
-        src = ConstFloat(float(src), DataType.FP32, actual_span)
+    # src can be Expr or scalar (int → ConstInt, float → ConstFloat)
+    if isinstance(src, int):
+        src = ConstInt(src, DataType.INT32, actual_span)
+    elif isinstance(src, float):
+        src = ConstFloat(src, DataType.FP32, actual_span)
     elif not isinstance(src, Expr):
         raise TypeError(f"src must be Expr or scalar, got {type(src)}")
 
     op_args: list[Expr] = [input, index, src]
     kwargs: dict[str, Any] = {"dim": dim_val}
+    if reduce is not None:
+        kwargs["reduce"] = reduce
     return _ir_core.create_op_call("tensor.scatter_", op_args, kwargs, actual_span)

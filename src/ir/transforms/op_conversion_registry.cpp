@@ -606,7 +606,8 @@ OpConversionRegistry::OpConversionRegistry() {
               idx_elems.push_back(loop_vars[k]);
             }
             auto read_indices = std::make_shared<MakeTuple>(idx_elems, span);
-            auto idx_val = bind("scatter_idx_val", op_reg.Create("tile.read", {index_tile, read_indices}, {}, span));
+            auto idx_val =
+                bind("scatter_idx_val", op_reg.Create("tile.read", {index_tile, read_indices}, {}, span));
 
             // 2. Read or get src value
             ExprPtr src_val;
@@ -614,7 +615,8 @@ OpConversionRegistry::OpConversionRegistry() {
               src_val = src;
             } else {
               auto src_indices = std::make_shared<MakeTuple>(idx_elems, span);
-              src_val = bind("scatter_src_val", op_reg.Create("tile.read", {src_tile, src_indices}, {}, span));
+              src_val =
+                  bind("scatter_src_val", op_reg.Create("tile.read", {src_tile, src_indices}, {}, span));
             }
 
             // Cast src_val to input dtype if needed
@@ -642,7 +644,8 @@ OpConversionRegistry::OpConversionRegistry() {
               body_stmts.push_back(std::make_shared<EvalStmt>(
                   op_reg.Create("tile.write", {input, write_indices, src_val}, {}, span), span));
             } else {
-              auto old_val = bind("scatter_old_val", op_reg.Create("tile.read", {input, write_indices}, {}, span));
+              auto old_val =
+                  bind("scatter_old_val", op_reg.Create("tile.read", {input, write_indices}, {}, span));
               ExprPtr new_val;
               if (reduce == "add") {
                 new_val = bind("scatter_new_val", MakeAdd(old_val, src_val, span));
@@ -654,15 +657,15 @@ OpConversionRegistry::OpConversionRegistry() {
             }
 
             // 5. Vector barrier after tile.write (required for tsetval hardware sync)
-            body_stmts.push_back(std::make_shared<EvalStmt>(
-                op_reg.Create("system.bar_v", {}, {}, span), span));
+            body_stmts.push_back(
+                std::make_shared<EvalStmt>(op_reg.Create("system.bar_v", {}, {}, span), span));
 
             return SeqStmts::Flatten(std::move(body_stmts), span);
           }
 
           // Create ForStmt for dimension d
-          auto loop_var = std::make_shared<Var>(
-              "scatter_d" + std::to_string(d), std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto loop_var = std::make_shared<Var>("scatter_d" + std::to_string(d),
+                                                std::make_shared<ScalarType>(DataType::INDEX), span);
           loop_vars.push_back(loop_var);
           auto body = build_loop(d + 1, loop_vars);
           loop_vars.pop_back();
@@ -671,12 +674,9 @@ OpConversionRegistry::OpConversionRegistry() {
           auto step = std::make_shared<ConstInt>(1, DataType::INDEX, span);
           auto extent = index_tile_type->shape_[d];
 
-          return std::make_shared<ForStmt>(
-              loop_var, zero, extent, step,
-              /*iter_args=*/std::vector<IterArgPtr>{},
-              body,
-              /*return_vars=*/std::vector<VarPtr>{},
-              span, ForKind::Sequential);
+          return std::make_shared<ForStmt>(loop_var, zero, extent, step,
+                                           /*iter_args=*/std::vector<IterArgPtr>{}, body,
+                                           /*return_vars=*/std::vector<VarPtr>{}, span, ForKind::Sequential);
         };
 
         std::vector<VarPtr> loop_vars;
@@ -686,11 +686,9 @@ OpConversionRegistry::OpConversionRegistry() {
         // Emit bar_all before and after the scatter loops to ensure:
         // - Pre-loop: TLOAD (index) and TEXPANDS (input fill) have completed
         // - Post-loop: All tsetval writes are committed before tstore
-        prologue.push_back(std::make_shared<EvalStmt>(
-            op_reg.Create("system.bar_all", {}, {}, span), span));
+        prologue.push_back(std::make_shared<EvalStmt>(op_reg.Create("system.bar_all", {}, {}, span), span));
         prologue.push_back(nested_for);
-        prologue.push_back(std::make_shared<EvalStmt>(
-            op_reg.Create("system.bar_all", {}, {}, span), span));
+        prologue.push_back(std::make_shared<EvalStmt>(op_reg.Create("system.bar_all", {}, {}, span), span));
 
         // The input tile is modified in-place via tile.write; return it as the result.
         return ConversionResult{std::move(prologue), input};

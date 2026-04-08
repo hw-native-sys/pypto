@@ -730,6 +730,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
       // Remove the redundant assignment we just added and return only prologue stmts
       stmts.pop_back();
       if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+    } else if (auto iter_arg = As<IterArg>(new_result)) {
+      var_remap_[op->var_.get()] = iter_arg;
+      stmts.pop_back();
+      if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
     }
 
     return SeqStmts::Flatten(std::move(stmts), op->span_);
@@ -1531,7 +1535,8 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
   for (size_t i = 0; i < func->params_.size(); ++i) {
     if (func->param_directions_[i] == ParamDirection::InOut && As<TensorType>(func->params_[i]->GetType())) {
       inout_param_by_base[auto_name::GetBaseName(func->params_[i]->name_hint_)] = func->params_[i];
-    } else if (func->param_directions_[i] == ParamDirection::Out && As<TensorType>(func->params_[i]->GetType())) {
+    } else if (func->param_directions_[i] == ParamDirection::Out &&
+               As<TensorType>(func->params_[i]->GetType())) {
       // Check if this Out param is already used by a tile.store in the body
       VarUseVisitor use_checker(func->params_[i].get());
       for (const auto& s : new_stmts) {
@@ -1761,23 +1766,25 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
         // where the DSL has pl.Out but cannot use pl.store because the result is
         // still TensorType at parse time).
         if (!is_existing_param && !unused_out_params.empty()) {
-          auto out_it = unused_out_params.begin();
-          auto out_type = As<TensorType>((*out_it)->GetType());
-          if (out_type && out_type->dtype_ == orig_tensor_type->dtype_ &&
-              out_type->shape_.size() == orig_tensor_type->shape_.size()) {
-            bool shapes_match = true;
-            for (size_t k = 0; k < out_type->shape_.size(); ++k) {
-              auto out_dim = As<ConstInt>(out_type->shape_[k]);
-              auto orig_dim = As<ConstInt>(orig_tensor_type->shape_[k]);
-              if (!out_dim || !orig_dim || out_dim->value_ != orig_dim->value_) {
-                shapes_match = false;
+          for (auto out_it = unused_out_params.begin(); out_it != unused_out_params.end(); ++out_it) {
+            auto out_type = As<TensorType>((*out_it)->GetType());
+            if (out_type && out_type->dtype_ == orig_tensor_type->dtype_ &&
+                out_type->shape_.size() == orig_tensor_type->shape_.size()) {
+              bool shapes_match = true;
+              for (size_t k = 0; k < out_type->shape_.size(); ++k) {
+                auto out_dim = As<ConstInt>(out_type->shape_[k]);
+                auto orig_dim = As<ConstInt>(orig_tensor_type->shape_[k]);
+                if (!out_dim || !orig_dim || out_dim->value_ != orig_dim->value_) {
+                  shapes_match = false;
+                  break;
+                }
+              }
+              if (shapes_match) {
+                out_param = *out_it;
+                is_existing_param = true;
+                unused_out_params.erase(out_it);
                 break;
               }
-            }
-            if (shapes_match) {
-              out_param = *out_it;
-              is_existing_param = true;
-              unused_out_params.erase(out_it);
             }
           }
         }
