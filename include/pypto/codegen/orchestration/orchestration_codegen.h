@@ -38,7 +38,7 @@ struct OrchestrationResult {
  *
  * Generates C++ code using PTO2 runtime API:
  * - aicpu_orchestration_config(TaskArg* orch_args) returns PTO2OrchestrationConfig
- * - aicpu_orchestration_entry(TaskArg* orch, int arg_count, int orch_thread_num, int orch_thread_index)
+ * - aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args)
  * - from_task_arg() for ND external tensors, make_tensor for internal tensors
  * - PTOParam + pto2_rt_submit_task for task submission
  * - No manual dependency management (runtime handles automatically)

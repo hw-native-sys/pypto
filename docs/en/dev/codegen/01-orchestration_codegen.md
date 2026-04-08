@@ -84,8 +84,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& or
 }
 
 // Phase 3: Entry function signature
-void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
-    int orch_thread_num, int orch_thread_index) {
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
 ```
 
 ### Phase 4–5: Tensor Setup
@@ -264,11 +263,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& or
     return PTO2OrchestrationConfig{ .expected_arg_count = 3 };
 }
 
-void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args,
-    int orch_thread_num, int orch_thread_index) {
-    (void)orch_thread_num;
-    (void)orch_thread_index;
-
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     // External tensors (from ChipStorageTaskArgs)
     Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
     Tensor ext_b = from_tensor_arg(orch_args.tensor(1));

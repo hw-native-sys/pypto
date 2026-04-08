@@ -110,10 +110,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args, int orch_thread_num, int orch_thread_index) {
-                (void)orch_thread_num;
-                (void)orch_thread_index;
-
+            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
                 // External tensors
                 Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
                 Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
@@ -355,10 +352,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args, int orch_thread_num, int orch_thread_index) {
-                (void)orch_thread_num;
-                (void)orch_thread_index;
-
+            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
                 // External tensors
                 Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
                 Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
@@ -735,10 +729,7 @@ class TestOrchestration:
             }
 
             __attribute__((visibility("default")))
-            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args, int orch_thread_num, int orch_thread_index) {
-                (void)orch_thread_num;
-                (void)orch_thread_index;
-
+            void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
                 // External tensors
                 Tensor ext_mij = from_tensor_arg(orch_args.tensor(0));
                 Tensor ext_lij = from_tensor_arg(orch_args.tensor(1));
