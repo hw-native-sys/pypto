@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_MEMREF_COLLECTORS_H_
 
 #include <map>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>

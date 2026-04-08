@@ -33,7 +33,6 @@
 #include <vector>
 
 #include "pypto/codegen/pto/tile_buf_signature.h"
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"

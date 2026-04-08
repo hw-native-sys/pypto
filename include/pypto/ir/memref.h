@@ -19,7 +19,6 @@
 
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/memory_space.h"
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/span.h"
 

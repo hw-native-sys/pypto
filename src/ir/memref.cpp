@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
