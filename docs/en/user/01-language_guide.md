@@ -410,8 +410,27 @@ class Model:
 Mark a code region as InCore execution without making a separate function:
 
 ```python
+# Preferred (new API):
+with pl.at(level=pl.Level.CORE_GROUP):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+
+# Deprecated (use pl.at instead):
 with pl.incore():
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+```
+
+For compiler-driven chunked loop outlining (AutoInCore), use `pl.chunked_loop_optimizer`:
+
+```python
+# Preferred (new API):
+with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, x)
+
+# Deprecated (use pl.at instead):
+with pl.auto_incore():
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, x)
 ```
 
 ## Memory and Data Movement

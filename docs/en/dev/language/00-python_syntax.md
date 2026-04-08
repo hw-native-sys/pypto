@@ -256,7 +256,21 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`, and `chunk=` loops are only valid inside `with pl.auto_incore():` outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/05-split_chunked_loops.md).
+**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `chunk` cannot be combined with `init_values`, and `chunk=` loops are only valid inside a `with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):` (or the deprecated `with pl.auto_incore():`) — outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/05-split_chunked_loops.md).
+
+### Scope Context Managers
+
+| Form | Scope Kind | Notes |
+| ---- | ---------- | ----- |
+| `pl.at(level=CORE_GROUP)` | `InCore` | Fixed-boundary outline at CORE_GROUP |
+| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | Compiler-driven chunked loop split (default `SplitMode.UP_DOWN`) |
+| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | Explicit split mode |
+| `pl.at(level=X)` for X ≠ CORE_GROUP | `Hierarchy` | Distributed hierarchy scope |
+| `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
+| `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=CORE_GROUP)` instead |
+| `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
+
+See [Language Guide](../../../../en/user/01-language_guide.md#incore-scopes) for examples.
 
 ### Yield Statement
 

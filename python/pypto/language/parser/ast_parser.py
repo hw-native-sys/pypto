@@ -10,6 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
+import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -988,9 +989,11 @@ class ASTParser:
         """Validate chunk arguments for range/parallel/unroll loops."""
         if not self._is_inside_scope(ir.ScopeKind.AutoInCore):
             raise ParserSyntaxError(
-                "chunk=... loops are only valid inside with pl.auto_incore():",
+                "chunk=... loops are only valid inside with pl.auto_incore(): or "
+                "with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):",
                 span=self.span_tracker.get_span(iter_call),
-                hint="Wrap the loop in 'with pl.auto_incore():' or remove the chunk= argument.",
+                hint="Wrap the loop in 'with pl.at(level=pl.Level.CORE_GROUP, "
+                "optimization=pl.chunked_loop_optimizer):' or remove the chunk= argument.",
             )
         if not _is_const_int(chunk_expr):
             raise ParserSyntaxError(
@@ -1561,19 +1564,23 @@ class ASTParser:
         self.in_if_stmt = False
         self.current_if_builder = None
 
-    def _parse_at_kwargs(self, call: ast.Call) -> tuple[ir.Level, ir.Role | None]:
-        """Extract level and role from pl.at(...) call.
+    def _parse_at_kwargs(self, call: ast.Call) -> tuple[ir.Level, ir.Role | None, ir.SplitMode | None]:
+        """Extract level, role, and optimization from pl.at(...) call.
 
         Supports both positional and keyword forms:
         - pl.at(pl.Level.HOST)
         - pl.at(pl.Level.HOST, pl.Role.Worker)
         - pl.at(level=pl.Level.HOST, role=pl.Role.Worker)
+        - pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
+        - pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))
 
         Args:
             call: AST Call node for pl.at(...)
 
         Returns:
-            Tuple of (level, role)
+            Tuple of (level, role, opt_split) where opt_split is None when no
+            optimization= kwarg is present, or a SplitMode when
+            chunked_loop_optimizer is used.
         """
         if len(call.args) > 2:
             raise ParserSyntaxError(
@@ -1583,6 +1590,7 @@ class ASTParser:
 
         level = None
         role = None
+        opt_split: ir.SplitMode | None = None
 
         # Parse positional arguments
         if len(call.args) >= 1:
@@ -1604,6 +1612,8 @@ class ASTParser:
                         "pl.at() got multiple values for argument 'role'",
                     )
                 role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
+            elif kw.arg == "optimization":
+                opt_split = self._parse_chunked_loop_optimizer(kw.value)
             elif kw.arg is None:
                 raise ParserSyntaxError(
                     "Unsupported **kwargs in pl.at()",
@@ -1612,28 +1622,115 @@ class ASTParser:
             else:
                 raise ParserSyntaxError(
                     f"Unknown keyword argument '{kw.arg}' in pl.at()",
-                    hint="Supported arguments: level, role",
+                    hint="Supported arguments: level, role, optimization",
                 )
         if level is None:
             raise ParserSyntaxError(
                 "pl.at() requires a level argument",
                 hint="Use pl.at(pl.Level.HOST) or pl.at(level=pl.Level.HOST)",
             )
-        return level, role
+        return level, role, opt_split
+
+    def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode":
+        """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
+
+        Returns the split mode to use for the AutoInCore scope.
+        """
+        # Bare: pl.chunked_loop_optimizer
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "chunked_loop_optimizer"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "pl"
+        ):
+            return ir.SplitMode.UP_DOWN
+
+        # Called: pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "chunked_loop_optimizer"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "pl"
+        ):
+            if value.args:
+                raise ParserSyntaxError(
+                    "pl.chunked_loop_optimizer() does not accept positional arguments",
+                    hint="Use: pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+                )
+            split = ir.SplitMode.UP_DOWN
+            for opt_kw in value.keywords:
+                if opt_kw.arg == "split":
+                    split = extract_enum_value(opt_kw.value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+                else:
+                    raise ParserSyntaxError(
+                        f"pl.chunked_loop_optimizer() got unexpected keyword '{opt_kw.arg}'",
+                        hint="Only 'split' is supported: "
+                        "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+                    )
+            return split
+
+        raise ParserSyntaxError(
+            "optimization= only accepts pl.chunked_loop_optimizer or "
+            "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+            hint="Use optimization=pl.chunked_loop_optimizer or "
+            "optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+        )
 
     def _eval_split_mode(self, value: ast.expr, stmt: ast.With) -> "ir.SplitMode":
         """Extract SplitMode enum value from AST expression."""
         return extract_enum_value(value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
 
+    def _parse_scope_body(
+        self,
+        stmt: ast.With,
+        scope_kind: "ir.ScopeKind",
+        span: "ir.Span",
+        *,
+        level: "ir.Level | None" = None,
+        role: "ir.Role | None" = None,
+        split: "ir.SplitMode | None" = None,
+    ) -> None:
+        """Build a scope statement from a with-statement body."""
+        with self.builder.scope(scope_kind, span, level=level, role=role, split=split):
+            with self._scope_kind_context(scope_kind):
+                self.scope_manager.enter_scope("scope")
+                for body_stmt in stmt.body:
+                    self.parse_statement(body_stmt)
+                self.scope_manager.exit_scope(leak_vars=True)
+
+    def _parse_at_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse pl.at(...) context manager into a ScopeStmt."""
+        level, role, opt_split = self._parse_at_kwargs(context_expr)
+        span = self.span_tracker.get_span(stmt)
+
+        if opt_split is not None and level != ir.Level.CORE_GROUP:
+            raise ParserSyntaxError(
+                "optimization=chunked_loop_optimizer is only supported with level=pl.Level.CORE_GROUP",
+                span=span,
+                hint="Use pl.at(level=pl.Level.CORE_GROUP, "
+                "optimization=pl.chunked_loop_optimizer) for AutoInCore scope",
+            )
+
+        if level == ir.Level.CORE_GROUP and opt_split is not None:
+            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split)
+        elif level == ir.Level.CORE_GROUP:
+            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span)
+        else:
+            self._parse_scope_body(stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role)
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
         Currently supports:
-        - with pl.incore(): ... (creates ScopeStmt with InCore scope)
-        - with pl.auto_incore(): ... (creates ScopeStmt with AutoInCore scope)
-        - with pl.auto_incore(split=pl.SplitMode.UP_DOWN): ... (with split mode)
+        - with pl.incore(): ... (deprecated; creates ScopeStmt with InCore scope)
+        - with pl.auto_incore(): ... (deprecated; creates ScopeStmt with AutoInCore scope)
+        - with pl.auto_incore(split=pl.SplitMode.UP_DOWN): ... (deprecated; with split mode)
         - with pl.cluster(): ... (creates ScopeStmt with Cluster scope)
-        - with pl.at(level=..., role=...): ... (creates ScopeStmt with Hierarchy scope)
+        - with pl.at(level=..., role=...): ... (creates ScopeStmt with InCore/Hierarchy scope)
+        - with pl.at(level=CORE_GROUP): ... (creates ScopeStmt with InCore scope)
+        - with pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer): ...
+          (creates ScopeStmt with AutoInCore scope)
 
         Args:
             stmt: With AST node
@@ -1681,6 +1778,22 @@ class ASTParser:
                                     span=self.span_tracker.get_span(stmt),
                                     hint="Only 'split' keyword is supported",
                                 )
+                        # Emit deprecation warnings for incore/auto_incore
+                        if func.attr == "incore":
+                            warnings.warn(
+                                "pl.incore() is deprecated; use "
+                                "'with pl.at(level=pl.Level.CORE_GROUP):' instead",
+                                DeprecationWarning,
+                                stacklevel=2,
+                            )
+                        else:
+                            warnings.warn(
+                                "pl.auto_incore() is deprecated; use "
+                                "'with pl.at(level=pl.Level.CORE_GROUP, "
+                                "optimization=pl.chunked_loop_optimizer):' instead",
+                                DeprecationWarning,
+                                stacklevel=2,
+                            )
                     elif context_expr.args or context_expr.keywords:
                         raise ParserSyntaxError(
                             f"pl.{func.attr}() does not accept arguments",
@@ -1689,26 +1802,12 @@ class ASTParser:
                         )
                     scope_kind = _SCOPE_KIND_MAP[func.attr]
                     span = self.span_tracker.get_span(stmt)
-
-                    with self.builder.scope(scope_kind, span, split=split_mode):
-                        with self._scope_kind_context(scope_kind):
-                            self.scope_manager.enter_scope("scope")
-                            for body_stmt in stmt.body:
-                                self.parse_statement(body_stmt)
-                            self.scope_manager.exit_scope(leak_vars=True)
+                    self._parse_scope_body(stmt, scope_kind, span, split=split_mode)
                     return
 
-                # NEW: pl.at(level=..., role=...)
+                # pl.at(level=..., role=..., optimization=...)
                 if func.attr == "at":
-                    level, role = self._parse_at_kwargs(context_expr)
-                    span = self.span_tracker.get_span(stmt)
-
-                    with self.builder.scope(ir.ScopeKind.Hierarchy, span, level=level, role=role):
-                        with self._scope_kind_context(ir.ScopeKind.Hierarchy):
-                            self.scope_manager.enter_scope("scope")
-                            for body_stmt in stmt.body:
-                                self.parse_statement(body_stmt)
-                            self.scope_manager.exit_scope(leak_vars=True)
+                    self._parse_at_scope(stmt, context_expr)
                     return
 
         # Unsupported context manager
@@ -1716,7 +1815,7 @@ class ASTParser:
             "Unsupported context manager in with statement",
             span=self.span_tracker.get_span(stmt),
             hint="Supported: 'with pl.incore():', 'with pl.auto_incore():',"
-            " 'with pl.cluster():', 'with pl.at(level=...):'",
+            " 'with pl.cluster():', 'with pl.at(level=..., optimization=...):'",
         )
 
     def parse_return(self, stmt: ast.Return) -> None:

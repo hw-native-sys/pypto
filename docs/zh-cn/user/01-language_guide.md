@@ -410,8 +410,27 @@ class Model:
 将代码区域标记为 InCore 执行，无需创建单独的函数：
 
 ```python
+# 推荐用法（新 API）：
+with pl.at(level=pl.Level.CORE_GROUP):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+
+# 已弃用（请改用 pl.at）：
 with pl.incore():
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+```
+
+如需编译器驱动的 chunked 循环 outline（AutoInCore），使用 `pl.chunked_loop_optimizer`：
+
+```python
+# 推荐用法（新 API）：
+with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, x)
+
+# 已弃用（请改用 pl.at）：
+with pl.auto_incore():
+    for i in pl.parallel(0, 8, 1, chunk=4):
+        x = pl.add(x, x)
 ```
 
 ## 内存与数据搬运

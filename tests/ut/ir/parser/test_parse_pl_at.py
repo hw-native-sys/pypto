@@ -9,6 +9,8 @@
 
 """Tests for parsing pl.at(level=..., role=...) (Step 04)."""
 
+import warnings
+
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
@@ -193,6 +195,113 @@ def test_printer_hierarchy_scope_roundtrip():
     assert "pl.at(" in printed
     assert "Level.HOST" in printed
     assert "Role.Worker" in printed
+
+
+# ─── New pl.at() InCore / AutoInCore forms ───────────────────────────────────
+
+
+def test_parse_pl_at_core_group_incore():
+    """pl.at(level=CORE_GROUP) creates ScopeStmt(InCore)."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert scope.level is None
+    assert scope.role is None
+
+
+def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
+    """pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer) → AutoInCore, split=UP_DOWN."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+            for i in pl.parallel(0, 8, 1, chunk=4):
+                x = pl.add(x, x)
+        return x
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
+    assert scope.split == ir.SplitMode.UP_DOWN
+
+
+def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
+    """pl.at(level=CORE_GROUP, optimization=chunked_loop_optimizer(split=LEFT_RIGHT)) → AutoInCore."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT),
+        ):
+            for i in pl.parallel(0, 8, 1, chunk=4):
+                x = pl.add(x, x)
+        return x
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
+    assert scope.split == ir.SplitMode.LEFT_RIGHT
+
+
+def test_parse_pl_at_optimization_on_non_core_group_errors():
+    """optimization= is not supported for non-CORE_GROUP levels."""
+    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(level=pl.Level.HOST, optimization=pl.chunked_loop_optimizer):
+                y = pl.add(x, x)
+            return y
+
+
+def test_parse_pl_at_unknown_optimization_errors():
+    """optimization= with unsupported value raises error."""
+    with pytest.raises(ParserSyntaxError, match="chunked_loop_optimizer"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, optimization=42):  # type: ignore[arg-type]
+                y = pl.add(x, x)
+            return y
+
+
+def test_incore_deprecation_warning():
+    """pl.incore() emits DeprecationWarning at parse time."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.incore():
+                y = pl.add(x, x)
+            return y
+
+    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
+    assert any("pl.incore()" in str(warning.message) for warning in w)
+
+
+def test_auto_incore_deprecation_warning():
+    """pl.auto_incore() emits DeprecationWarning at parse time."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.auto_incore():
+                for i in pl.parallel(0, 8, 1, chunk=4):
+                    x = pl.add(x, x)
+            return x
+
+    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
+    assert any("pl.auto_incore()" in str(warning.message) for warning in w)
 
 
 if __name__ == "__main__":

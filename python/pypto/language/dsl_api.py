@@ -19,6 +19,52 @@ if TYPE_CHECKING:
 
 from pypto.pypto_core.ir import SplitMode
 
+
+class _ChunkedLoopOptimizerCall:
+    """Result of calling chunked_loop_optimizer(split=...).
+
+    Stores the split mode to pass to the AutoInCore scope.
+    """
+
+    def __init__(self, split: SplitMode = SplitMode.UP_DOWN) -> None:
+        self.split = split
+
+    def __repr__(self) -> str:
+        return f"chunked_loop_optimizer(split={self.split!r})"
+
+
+class _ChunkedLoopOptimizer:
+    """Sentinel type for optimization=pl.chunked_loop_optimizer in pl.at().
+
+    Can be used bare or called with a split mode:
+    - ``optimization=pl.chunked_loop_optimizer``
+    - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)``
+    """
+
+    def __call__(self, split: SplitMode = SplitMode.UP_DOWN) -> _ChunkedLoopOptimizerCall:
+        """Create an optimizer specification with an explicit split mode.
+
+        Args:
+            split: Split mode for cross-core data transfer (default: SplitMode.UP_DOWN)
+
+        Returns:
+            Optimizer call with the given split mode
+        """
+        return _ChunkedLoopOptimizerCall(split=split)
+
+    def __repr__(self) -> str:
+        return "chunked_loop_optimizer"
+
+
+chunked_loop_optimizer: _ChunkedLoopOptimizer = _ChunkedLoopOptimizer()
+"""Sentinel for optimization=pl.chunked_loop_optimizer in pl.at().
+
+Use with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
+to request compiler-driven chunked loop outlining (replaces pl.auto_incore()).
+Can also be called with a split mode:
+pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN))
+"""
+
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
 
@@ -665,13 +711,22 @@ def cluster() -> ClusterContext:
 class AtContext:
     """Context manager for hierarchy-level scope.
 
-    Returned by pl.at(level=..., role=...) and used with the 'with' statement.
-    The parser recognizes this pattern and creates a ScopeStmt(Hierarchy).
+    Returned by pl.at(level=..., role=..., optimization=...) and used with the 'with' statement.
+    The parser recognizes this pattern and creates:
+    - ScopeStmt(InCore) when level=CORE_GROUP (no optimization)
+    - ScopeStmt(AutoInCore) when level=CORE_GROUP and optimization=pl.chunked_loop_optimizer
+    - ScopeStmt(Hierarchy) for all other levels
     """
 
-    def __init__(self, level: ir.Level, role: ir.Role | None = None) -> None:
+    def __init__(
+        self,
+        level: ir.Level,
+        role: ir.Role | None = None,
+        optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
+    ) -> None:
         self.level = level
         self.role = role
+        self.optimization = optimization
 
     def __enter__(self) -> None:
         pass
@@ -683,21 +738,50 @@ class AtContext:
 def at(
     level: ir.Level,
     role: ir.Role | None = None,
+    optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
 
+    When used with ``level=pl.Level.CORE_GROUP``, this creates an InCore scope
+    (equivalent to the deprecated ``pl.incore()``).
+
+    When used with ``level=pl.Level.CORE_GROUP`` and
+    ``optimization=pl.chunked_loop_optimizer``, this creates an AutoInCore scope
+    (equivalent to the deprecated ``pl.auto_incore()``).
+
+    For all other levels, this creates a Hierarchy scope.
+
     Args:
-        level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.POD)
+        level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.CORE_GROUP)
         role: Function role (Orchestrator or Worker). Default: None.
+        optimization: Optional optimization hint. Use pl.chunked_loop_optimizer
+            (or pl.chunked_loop_optimizer(split=...)) with level=CORE_GROUP
+            to enable compiler-driven chunked loop outlining.
 
     Returns:
-        Context manager for hierarchy-level scope
+        Context manager for the appropriate scope
 
     Examples:
+        >>> # InCore scope (replaces pl.incore()):
+        >>> with pl.at(level=pl.Level.CORE_GROUP):
+        ...     y = pl.ops.add(x, x)
+
+        >>> # AutoInCore scope (replaces pl.auto_incore()):
+        >>> with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+        ...     for i in pl.parallel(0, 8, 1, chunk=4):
+        ...         x = pl.add(x, x)
+
+        >>> # AutoInCore with explicit split mode:
+        >>> with pl.at(level=pl.Level.CORE_GROUP,
+        ...            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)):
+        ...     for i in pl.parallel(0, 8, 1, chunk=4):
+        ...         x = pl.add(x, x)
+
+        >>> # Hierarchy scope (unchanged behavior):
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role)
+    return AtContext(level, role, optimization)
 
 
 __all__ = [
@@ -714,6 +798,7 @@ __all__ = [
     "auto_incore",
     "at",
     "cluster",
+    "chunked_loop_optimizer",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",

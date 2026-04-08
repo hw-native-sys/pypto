@@ -255,7 +255,21 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用，且 `chunk=` 循环只能出现在 `with pl.auto_incore():` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/05-split_chunked_loops.md)。
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用，且 `chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):` 内（或已弃用的 `with pl.auto_incore():`）；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/05-split_chunked_loops.md)。
+
+### 作用域上下文管理器 (Scope Context Managers)
+
+| 形式 | Scope 类型 | 说明 |
+| ---- | ---------- | ---- |
+| `pl.at(level=CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
+| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | 编译器驱动的 chunked 循环 split（默认 `SplitMode.UP_DOWN`） |
+| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | 显式指定 split 模式 |
+| `pl.at(level=X)`（X ≠ CORE_GROUP） | `Hierarchy` | 分布式层级作用域 |
+| `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
+| `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=CORE_GROUP)` |
+| `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
+
+示例参见 [语言指南](../../../../zh-cn/user/01-language_guide.md#incore-作用域)。
 
 ### Yield 语句
 
