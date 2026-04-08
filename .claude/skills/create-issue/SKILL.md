@@ -165,7 +165,7 @@ gh api graphql -f query='{ repository(owner:"hw-native-sys",name:"pypto") {
   issue(number:ISSUE_NUMBER) { projectItems(first:5) { nodes { id project { number } } } } } }'
 ```
 
-Extract the item ID where `project.number == 3`. If not found, wait 5s and retry once (auto-add may be delayed).
+Extract the item ID where `project.number == 3`. If not found, run `sleep 5` and retry once (auto-add may be delayed).
 
 ### 7b: Fetch Field Options
 
@@ -193,7 +193,7 @@ Based on the issue type and content, suggest values using this logic:
 | **Effort** | Cross-layer / new pass / major refactor → Large; Single-layer / moderate → Medium; One-file / docs → Small |
 | **Sprint** | Critical + Ready → current sprint; Normal planned → next sprint; Backlog → no sprint |
 
-To determine current sprint: find the sprint where `startDate <= today < startDate + duration_days`.
+To determine current sprint: get today's date (e.g., via `date +%Y-%m-%d`), then find the sprint where `startDate <= today < startDate + duration`.
 
 ### 7d: Present to User
 

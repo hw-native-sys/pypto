@@ -72,7 +72,7 @@ Comments often contain clarifications, reproduction steps, or design decisions t
 
    If the project item is not found, skip the board status check (the issue may not be linked to the project yet) and continue.
 
-3. If **assigned to someone** or **Status is "In Progress"**: warn the user with `AskUserQuestion` — show who is assigned and/or the current status, and ask whether to proceed anyway or stop.
+3. If **assigned to someone** or **Status in project #3 is "In Progress"**: warn the user with `AskUserQuestion` — show who is assigned and/or the current status, and ask whether to proceed anyway or stop.
 
 ## Step 3: Create Issue Branch
 
