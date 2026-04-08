@@ -282,6 +282,9 @@ def allocate_memory_addr() -> Pass:
 def fuse_create_assemble_to_slice() -> Pass:
     """Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions."""
 
+def materialize_need_alloc() -> Pass:
+    """Materialize need_alloc=true on tensor.create into explicit noop allocation tasks."""
+
 def normalize_return_order() -> Pass:
     """Create a return order normalization pass."""
 
@@ -438,6 +441,7 @@ __all__ = [
     "insert_sync",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
+    "materialize_need_alloc",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

@@ -128,6 +128,7 @@ class PassManager:
             ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
             ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
             ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
+            ("MaterializeNeedAlloc", lambda: passes.materialize_need_alloc()),
             ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
         ]
         tile_pto_passes: list[PassSpec] = [

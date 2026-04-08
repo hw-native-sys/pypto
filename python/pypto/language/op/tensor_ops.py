@@ -80,18 +80,26 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = TensorLayout.ND) -> Tensor:
+def create(
+    shape: Sequence[IntLike],
+    dtype: DataType,
+    layout: TensorLayout = TensorLayout.ND,
+    need_alloc: bool = False,
+) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        need_alloc: When True, a pre-allocation task is inserted before any
+            loop that carries this tensor as init_value, preventing repeated
+            buffer allocation inside the loop body.
 
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout)
+    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout, need_alloc=need_alloc)
     return Tensor(expr=call_expr)
 
 

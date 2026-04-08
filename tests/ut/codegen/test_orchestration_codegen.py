@@ -1761,6 +1761,137 @@ class TestTensorReadWriteOffsetCodegen:
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
+    def test_create_tensor_need_alloc_uses_noop_preallocation(self):
+        """tensor.create(need_alloc=True) should pre-allocate via a noop task
+        so that loop-carried init_values use add_inout instead of add_output."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class NeedAllocProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                out_tensor: pl.Tensor[[16, 16], pl.FP32] = pl.store(x_tile, [0, 0], out)
+                return out_tensor
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                acc: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32, need_alloc=True)
+                for i in pl.range(4):
+                    acc = self.fill(x, acc)
+                out = self.fill(acc, out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(NeedAllocProgram)
+        code = _generate_orch_code(transformed)
+
+        # Noop pre-allocation task should appear before the loop
+        assert "TensorCreateInfo" in code
+        assert "add_output" in code
+        noop_submit_idx = code.find("pto2_rt_submit_aiv_task")
+        assert noop_submit_idx != -1, "noop task should submit via aiv"
+
+        # The noop output should be bound via get_ref
+        assert "get_ref(0)" in code
+
+        # Inside the loop, the tensor should use add_inout (not add_output)
+        loop_start = code.find("for (int64_t")
+        assert loop_start != -1
+        loop_body = code[loop_start:]
+        assert "add_inout" in loop_body
+        assert "add_output" not in loop_body
+
+        # No __loop_state hoisting should be needed
+        assert "__loop_state" not in code
+
+    def test_consecutive_need_alloc_merged_into_single_noop(self):
+        """Multiple consecutive tensor.create(need_alloc=True) should be merged
+        into a single noop task with multiple outputs, not separate tasks."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class MultiNeedAllocProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_fp32(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_bf16(
+                self,
+                x: pl.Tensor[[16, 16], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 16], pl.BF16]],
+            ) -> pl.Tensor[[16, 16], pl.BF16]:
+                t: pl.Tile[[16, 16], pl.BF16] = pl.load(x, [0, 0], [16, 16])
+                r: pl.Tensor[[16, 16], pl.BF16] = pl.store(t, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x_fp32: pl.Tensor[[16, 16], pl.FP32],
+                x_bf16: pl.Tensor[[16, 16], pl.BF16],
+                out_fp32: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out_bf16: pl.Out[pl.Tensor[[16, 16], pl.BF16]],
+            ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.BF16]]:
+                a: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32, need_alloc=True)
+                b: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32, need_alloc=True)
+                c: pl.Tensor[[16, 16], pl.BF16] = pl.create_tensor([16, 16], dtype=pl.BF16, need_alloc=True)
+                for i in pl.range(4):
+                    a = self.fill_fp32(x_fp32, a)
+                    b = self.fill_fp32(a, b)
+                    c = self.fill_bf16(x_bf16, c)
+                out_fp32 = self.fill_fp32(b, out_fp32)
+                out_bf16 = self.fill_bf16(c, out_bf16)
+                return out_fp32, out_bf16
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(MultiNeedAllocProgram)
+        code = _generate_orch_code(transformed)
+
+        # All three need_alloc tensors should be in ONE noop task
+        noop_submit_count = code.count("pto2_rt_submit_aiv_task(0,")
+        assert noop_submit_count == 1, (
+            f"Expected exactly 1 noop task submission (task 0), got {noop_submit_count}"
+        )
+
+        # The noop task should have 3 add_output calls (before the first submit)
+        first_submit = code.find("pto2_rt_submit_aiv_task")
+        pre_submit = code[:first_submit]
+        assert pre_submit.count("add_output") == 3, (
+            f"Expected 3 add_output in noop task, got {pre_submit.count('add_output')}"
+        )
+
+        # Outputs should be retrieved via get_ref(0), get_ref(1), get_ref(2)
+        assert "get_ref(0)" in code
+        assert "get_ref(1)" in code
+        assert "get_ref(2)" in code
+
+        # Inside the loop, all tensors should use add_inout
+        loop_start = code.find("for (int64_t")
+        assert loop_start != -1
+        loop_body = code[loop_start:]
+        assert loop_body.count("add_inout") >= 3
+        assert "add_output" not in loop_body
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

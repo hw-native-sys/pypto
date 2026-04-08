@@ -23,6 +23,7 @@ def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
     layout: TensorLayout = TensorLayout.ND,
+    need_alloc: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Create a new tensor with specified shape and dtype.
@@ -31,6 +32,8 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        need_alloc: When True, a pre-allocation task is inserted before any
+            loop that carries this tensor as init_value
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -42,6 +45,8 @@ def create(
 
     args = [shape_tuple]
     kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
+    if need_alloc:
+        kwargs["need_alloc"] = True
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 

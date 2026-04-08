@@ -401,6 +401,22 @@ Pass NormalizeReturnOrder();
 Pass FuseCreateAssembleToSlice();
 
 /**
+ * @brief Materialize need_alloc=true on tensor.create into explicit noop allocation tasks
+ *
+ * Finds tensor.create calls with need_alloc=true kwarg and replaces them with:
+ *   ci_var = tensor.create(...)              -- TensorCreateInfo only
+ *   original_var = __pypto_noop(ci_var)      -- noop InCore function for pre-allocation
+ *
+ * The noop function triggers add_output(TensorCreateInfo) in orchestration codegen,
+ * ensuring the tensor buffer is allocated before any loop that carries it as init_value.
+ * This prevents repeated buffer allocation inside loop iterations.
+ *
+ * Requirements:
+ * - Should run early in the pipeline, before OutlineIncoreScopes
+ */
+Pass MaterializeNeedAlloc();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

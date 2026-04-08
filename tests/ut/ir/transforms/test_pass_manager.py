@@ -22,6 +22,7 @@ TENSOR_ONLY_PASSES = [
     "OutlineHierarchyScopes",
     "OutlineIncoreScopes",
     "OutlineClusterScopes",
+    "MaterializeNeedAlloc",
     "ConvertTensorToTileOps",
 ]
 

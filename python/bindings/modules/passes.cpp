@@ -262,6 +262,11 @@ void BindPass(nb::module_& m) {
              "replaces create with tensor.slice(target, shape, offsets) and removes\n"
              "the assemble, enabling orchestration codegen to emit .view() directly.");
 
+  passes.def("materialize_need_alloc", &pass::MaterializeNeedAlloc,
+             "Materialize need_alloc=true on tensor.create into explicit noop allocation tasks\n\n"
+             "Replaces tensor.create(need_alloc=true) with tensor.create + noop function call\n"
+             "to pre-allocate the tensor buffer before any loop that carries it as init_value.");
+
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"
              "Reorders return tuple values in InCore functions so that return[i]\n"
