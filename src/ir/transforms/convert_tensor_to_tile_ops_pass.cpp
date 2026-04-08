@@ -383,6 +383,134 @@ std::unordered_map<std::string, IterArgMapping> AnalyzeIterArgMappings(
 }
 
 // ============================================================================
+// Assemble parent shape analysis
+// ============================================================================
+
+/**
+ * @brief Map from InCore function name → {return_index → parent tensor shape}.
+ *
+ * Used to propagate physical tensor stride information to kernel Out parameters
+ * when the kernel result feeds into tensor.assemble in the orchestration.
+ */
+using AssembleParentShapes =
+    std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
+
+/**
+ * @brief Scan orchestration functions to find InCore call results that feed into tensor.assemble.
+ *
+ * When an InCore call's return value (or a TupleGetItem of it) is used as the source argument
+ * (2nd arg) of tensor.assemble, the parent tensor (1st arg) represents the physical memory layout.
+ * The parent tensor's shape is needed to compute correct DMA strides for TSTORE.
+ *
+ * Example pattern:
+ *   result = self.incore_call(a, b, mb, nb)
+ *   c_out = tensor.assemble(c_iter, result, [mb, nb])
+ *
+ * Here result flows into assemble's arg[1], and c_iter (arg[0]) has shape [256,256].
+ * We record {incore_func_name, return_index=0} → [256, 256].
+ */
+AssembleParentShapes AnalyzeAssembleParentShapes(const std::vector<FunctionPtr>& functions) {
+  AssembleParentShapes result;
+
+  std::unordered_set<std::string> incore_func_names;
+  for (const auto& func : functions) {
+    if (func->func_type_ == FunctionType::InCore) {
+      incore_func_names.insert(func->name_);
+    }
+  }
+
+  for (const auto& func : functions) {
+    if (func->func_type_ == FunctionType::InCore) continue;
+
+    // Walk all statement lists using a worklist
+    std::vector<std::vector<StmtPtr>> worklist;
+    worklist.push_back(FlattenToStmts(func->body_));
+
+    while (!worklist.empty()) {
+      auto stmts = std::move(worklist.back());
+      worklist.pop_back();
+
+      for (const auto& stmt : stmts) {
+        if (auto seq = As<SeqStmts>(stmt)) {
+          worklist.push_back(seq->stmts_);
+          continue;
+        }
+        if (auto scope = As<ScopeStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(scope->body_));
+          continue;
+        }
+        if (auto if_stmt = As<IfStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(if_stmt->then_body_));
+          if (if_stmt->else_body_.has_value()) {
+            worklist.push_back(FlattenToStmts(*if_stmt->else_body_));
+          }
+          continue;
+        }
+        if (auto for_stmt = As<ForStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(for_stmt->body_));
+          continue;
+        }
+        if (auto while_stmt = As<WhileStmt>(stmt)) {
+          worklist.push_back(FlattenToStmts(while_stmt->body_));
+          continue;
+        }
+      }
+
+      // Collect InCore call assignments and tuple extracts so the assemble
+      // detection pass below can trace which variables hold InCore return values.
+      std::unordered_map<const Var*, std::pair<std::string, size_t>> var_to_incore_return;
+
+      for (const auto& stmt : stmts) {
+        auto assign = As<AssignStmt>(stmt);
+        if (!assign) continue;
+
+        if (auto call = As<Call>(assign->value_)) {
+          auto gvar = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+          if (gvar && incore_func_names.count(gvar->name_) > 0) {
+            var_to_incore_return[assign->var_.get()] = {gvar->name_, 0};
+          }
+        } else if (auto tgi = As<TupleGetItemExpr>(assign->value_)) {
+          auto src_var = As<Var>(tgi->tuple_);
+          if (src_var) {
+            auto it = var_to_incore_return.find(src_var.get());
+            if (it != var_to_incore_return.end()) {
+              var_to_incore_return[assign->var_.get()] = {it->second.first, static_cast<size_t>(tgi->index_)};
+            }
+          }
+        }
+      }
+
+      // Find tensor.assemble calls that consume InCore results
+      for (const auto& stmt : stmts) {
+        auto assign = As<AssignStmt>(stmt);
+        if (!assign) continue;
+        auto call = As<Call>(assign->value_);
+        if (!call || call->args_.size() != 3) continue;
+
+        auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+        if (!opnode || opnode->name_ != "tensor.assemble") continue;
+
+        // arg[1] is the source tile/tensor being assembled into the parent
+        auto source_var = As<Var>(call->args_[1]);
+        if (!source_var) continue;
+
+        auto it = var_to_incore_return.find(source_var.get());
+        if (it == var_to_incore_return.end()) continue;
+
+        // arg[0] is the parent tensor — extract its shape
+        auto parent_type = As<TensorType>(call->args_[0]->GetType());
+        if (!parent_type) continue;
+
+        const auto& [func_name, return_index] = it->second;
+        result[func_name][return_index] = parent_type->shape_;
+      }
+    }
+  }
+
+  return result;
+}
+
+// ============================================================================
 // IfStmt store-sinking helpers
 // ============================================================================
 
@@ -1438,8 +1566,8 @@ struct IncoreTransformResult {
   size_t num_added_outputs;
 };
 
-IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
-                                              const IterArgMapping& iter_arg_mapping) {
+IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const IterArgMapping& iter_arg_mapping,
+                                              const AssembleParentShapes& assemble_parent_shapes) {
   auto& conv_registry = OpConversionRegistry::GetInstance();
   auto& op_registry = OpRegistry::GetInstance();
   const auto& span = func->span_;
@@ -1710,7 +1838,42 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
 
         // Add output tensor parameter
         std::string out_name = MakeOutParamName(num_added_outputs);
-        auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
+
+        // If this return value feeds into tensor.assemble in the orchestration,
+        // the Out param is a view of a larger physical tensor. Attach explicit
+        // strides based on the parent tensor's shape so the codegen emits correct
+        // DMA strides for TSTORE.
+        auto out_type = orig_tensor_type;
+        auto parent_it = assemble_parent_shapes.find(func->name_);
+        if (parent_it != assemble_parent_shapes.end()) {
+          auto shape_it = parent_it->second.find(i);
+          if (shape_it != parent_it->second.end()) {
+            const auto& parent_shape = shape_it->second;
+            if (parent_shape.size() == orig_tensor_type->shape_.size() && !parent_shape.empty()) {
+              // Only compute strides when all parent dimensions are static constants.
+              // Dynamic (Var) dimensions would require runtime computation, which is not
+              // supported in TensorView stride today — skip and fall back to shape-based strides.
+              bool all_static = std::all_of(parent_shape.begin(), parent_shape.end(),
+                                            [](const ExprPtr& e) { return As<ConstInt>(e) != nullptr; });
+              if (all_static) {
+                std::vector<ExprPtr> strides(parent_shape.size());
+                strides.back() = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+                for (int dim = static_cast<int>(parent_shape.size()) - 2; dim >= 0; --dim) {
+                  auto prev_stride = As<ConstInt>(strides[dim + 1]);
+                  auto parent_dim = As<ConstInt>(parent_shape[dim + 1]);
+                  strides[dim] = std::make_shared<ConstInt>(prev_stride->value_ * parent_dim->value_,
+                                                            DataType::INDEX, span);
+                }
+                auto tv = TensorView(std::move(strides), TensorLayout::ND);
+                out_type = std::make_shared<TensorType>(orig_tensor_type->shape_, orig_tensor_type->dtype_,
+                                                        orig_tensor_type->memref_,
+                                                        std::optional<TensorView>(std::move(tv)));
+              }
+            }
+          }
+        }
+
+        auto out_param = std::make_shared<Var>(out_name, out_type, span);
         new_params.push_back(out_param);
         new_param_directions.push_back(ParamDirection::Out);
 
@@ -1883,6 +2046,7 @@ Pass ConvertTensorToTileOps() {
       all_funcs.push_back(func);
     }
     auto iter_arg_mappings = AnalyzeIterArgMappings(all_funcs);
+    auto assemble_parent_shapes = AnalyzeAssembleParentShapes(all_funcs);
 
     // Phase 1: Transform InCore functions
     std::unordered_map<std::string, size_t> incore_added_outputs;
@@ -1894,7 +2058,7 @@ Pass ConvertTensorToTileOps() {
       if (func->func_type_ == FunctionType::InCore) {
         auto mapping_it = iter_arg_mappings.find(func->name_);
         const auto& mapping = (mapping_it != iter_arg_mappings.end()) ? mapping_it->second : empty_mapping;
-        auto result = TransformIncoreFunction(func, mapping);
+        auto result = TransformIncoreFunction(func, mapping, assemble_parent_shapes);
         incore_added_outputs[func->name_] = result.num_added_outputs;
         transformed_incore_funcs[func->name_] = result.func;
         functions_phase1.push_back(result.func);

@@ -359,7 +359,17 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
           GetOrEmitIndexConstant(GetConstIntValue(j));
         }
       }
-      if (tensor_type->shape_.size() == 2) {
+      // Pre-emit stride constants: use explicit tensor_view_.stride if available,
+      // otherwise fall back to shape-based stride computation.
+      bool has_explicit_stride =
+          tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty();
+      if (has_explicit_stride) {
+        for (const auto& s : tensor_type->tensor_view_->stride) {
+          if (As<ir::ConstInt>(s)) {
+            GetOrEmitIndexConstant(GetConstIntValue(s));
+          }
+        }
+      } else if (tensor_type->shape_.size() == 2) {
         if (As<ir::ConstInt>(tensor_type->shape_[1])) {
           GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
         }
@@ -493,11 +503,17 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
 
+      // Check if tensor_view_ provides explicit strides (e.g. for view output tensors
+      // whose physical memory layout differs from the view shape).
+      bool has_explicit_stride =
+          tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty();
+
       // For N-D (N > 2): pre-compute row-major strides as SSA values using arith.muli
       // so that dynamic dimensions (ir::Var) are handled correctly. Emit any needed
       // multiply instructions BEFORE the make_tensor_view line.
+      // Skip when explicit strides are available.
       std::vector<std::string> nd_stride_names;
-      if (tensor_type->shape_.size() > 2) {
+      if (!has_explicit_stride && tensor_type->shape_.size() > 2) {
         const size_t rank = tensor_type->shape_.size();
         nd_stride_names.resize(rank);
         nd_stride_names[rank - 1] = GetOrEmitIndexConstant(1);
@@ -543,7 +559,18 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << "],";
 
       stream_ << " strides = [";
-      if (tensor_type->shape_.size() == 2) {
+      if (has_explicit_stride) {
+        // Use explicit strides from tensor_view_ (e.g. physical memory strides for view tensors)
+        const auto& strides = tensor_type->tensor_view_->stride;
+        for (size_t j = 0; j < strides.size(); j++) {
+          if (j > 0) stream_ << ", ";
+          if (auto var = As<ir::Var>(strides[j])) {
+            stream_ << GetVarName(var);
+          } else {
+            stream_ << GetOrEmitIndexConstant(GetConstIntValue(strides[j]));
+          }
+        }
+      } else if (tensor_type->shape_.size() == 2) {
         // For column vector [M, 1]: stride dim is shape[0] (= M) → strides [1, M].
         // For other 2D: stride dim is shape[1] (= C) → DN [1, C] or ND [C, 1].
         int stride_idx = is_column_vector ? 0 : 1;

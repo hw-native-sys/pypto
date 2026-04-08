@@ -2445,5 +2445,55 @@ class TestTensorFullConversion:
         assert "tensor.full" not in ir_str
 
 
+class TestAssembleParentStride:
+    """Tests for physical stride propagation when assemble is in orchestration."""
+
+    def test_out_param_gets_parent_stride_from_orchestration_assemble(self):
+        """When InCore result feeds tensor.assemble in orchestration, Out param gets physical stride.
+
+        Pattern (GEMM-like):
+          InCore returns Tensor[32, 32]
+          Orchestration: result = incore_call(...); c = tensor.assemble(c_big[128,128], result, offsets)
+
+        After ConvertTensorToTileOps, the Out param should carry tensor_view_.stride
+        based on the parent tensor's shape [128, 128], not the view shape [32, 32].
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                mb: pl.Scalar[pl.INDEX],
+                nb: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile: pl.Tensor[[32, 32], pl.FP32] = pl.slice(a, [32, 32], [mb, nb])
+                return tile
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for mb, (c_iter,) in pl.range(0, 128, 32, init_values=(c,)):
+                    for nb, (c_iter2,) in pl.range(0, 128, 32, init_values=(c_iter,)):
+                        result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(a, mb, nb)
+                        c_next: pl.Tensor[[128, 128], pl.FP32] = pl.assemble(c_iter2, result, [mb, nb])
+                        c_rv = pl.yield_(c_next)
+                    c_rv2 = pl.yield_(c_rv)
+                return c_rv2
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        # Out param should have TensorView with stride based on parent shape [128, 128]
+        assert "pl.TensorView" in after_src, "Out param should have TensorView with explicit stride"
+        assert "stride=[128, 1]" in after_src, (
+            f"Stride should be [128, 1] (from parent shape [128, 128]), got:\n{after_src}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

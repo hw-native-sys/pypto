@@ -1583,5 +1583,67 @@ def test_pto_codegen_constant_indent_consistency():
         assert leading_spaces == 2, f"arith.constant has {leading_spaces}-space indent (expected 2): {line!r}"
 
 
+def test_pto_codegen_view_output_uses_physical_stride():
+    """Output tensor with explicit tensor_view_.stride uses physical stride in make_tensor_view.
+
+    When a tensor param has tensor_view_.stride set (e.g. from assemble-view pattern
+    where the view shape is [32,32] but the physical tensor is [128,128]),
+    the codegen must emit stride based on tensor_view_.stride, not shape.
+    """
+    span = ir.Span.unknown()
+
+    # Create a tensor type with view shape [32,32] but physical stride [128, 1]
+    stride = [
+        ir.ConstInt(128, DataType.INDEX, span),
+        ir.ConstInt(1, DataType.INDEX, span),
+    ]
+    tv = ir.TensorView(stride=stride, layout=ir.TensorLayout.ND)
+    view_tensor_type = ir.TensorType([32, 32], DataType.FP32, memref=None, tensor_view=tv)
+
+    # Build a minimal InCore function: load from a, store to out (view tensor)
+    a_type = ir.TensorType([128, 128], DataType.FP32)
+    a_param = ir.Var("a", a_type, span)
+    out_param = ir.Var("out", view_tensor_type, span)
+
+    load_call = ir.op.tile.load(a_param, [0, 0], [32, 32])
+    tile_var = ir.Var("t", load_call.type, span)
+    store_call = ir.op.tile.store(tile_var, [0, 0], out_param)
+    result_var = ir.Var("result", store_call.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_var, load_call, span),
+            ir.AssignStmt(result_var, store_call, span),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+
+    func = ir.Function(
+        "kernel",
+        [a_param, out_param],
+        [view_tensor_type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "ViewStrideTest", span)
+    mlir_code = _generate_mlir(program)
+    lines = _get_mlir_lines(mlir_code)
+
+    # The out param (arg1) should use explicit stride [128, 1], not shape-based [32, 1]
+    out_view_lines = _find_lines(lines, "pto.make_tensor_view %arg1")
+    assert len(out_view_lines) == 1, f"Expected one make_tensor_view for out param, got: {out_view_lines}"
+    out_view = out_view_lines[0]
+    assert "strides = [%c128, %c1]" in out_view, (
+        f"Out param stride should be [128, 1] (physical stride), not [32, 1] (view shape). Got: {out_view}"
+    )
+
+    # The a param (arg0) should still use shape-based stride [128, 1]
+    a_view_lines = _find_lines(lines, "pto.make_tensor_view %arg0")
+    assert len(a_view_lines) == 1
+    assert "strides = [%c128, %c1]" in a_view_lines[0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
