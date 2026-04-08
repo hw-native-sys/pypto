@@ -44,7 +44,6 @@ from pypto.pypto_core.ir import (
     FunctionType,
     Level,
     MemorySpace,
-    MemRef,
     PadValue,
     PipeType,
     PtrType,
@@ -167,7 +166,7 @@ from .op.unified_ops import (
 )
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .typing import DynVar, InOut, IntLike, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace

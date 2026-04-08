@@ -139,12 +139,10 @@ class TestSoftmaxRescaleDSL:
                 mem_vec_0: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 # mem_vec_* referenced in Tile annotations via MemRef
-                t: pl.Tile[
-                    [16, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 8192), pl.Mem.Vec  # pyright: ignore[reportArgumentType]
-                ] = pl.tile.load(x, [0, 0], [16, 128])
-                t2: pl.Tile[
-                    [16, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 8192), pl.Mem.Vec  # pyright: ignore[reportArgumentType]
-                ] = pl.tile.add(t, t)
+                t: pl.Tile[[16, 128], pl.FP32, pl.MemRef(mem_vec_0, 0, 8192), pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 128]
+                )
+                t2: pl.Tile[[16, 128], pl.FP32, pl.MemRef(mem_vec_1, 0, 8192), pl.Mem.Vec] = pl.tile.add(t, t)
                 r: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(t2, [0, 0], out)
                 return r
 
