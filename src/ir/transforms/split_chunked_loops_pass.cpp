@@ -307,7 +307,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
     if (!has_iter_args) {
       return SplitSimple(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr, chunk_expr,
-                         n_full, n_rem, chunk_size, emit_full, emit_rem, prev_loop_sub, sp);
+                         n_full, n_rem, emit_full, emit_rem, prev_loop_sub, sp);
     }
 
     // Zero-trip optimization: when statically known, skip loop emission entirely
@@ -323,8 +323,7 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     return SplitWithIterArgs(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr,
-                             chunk_expr, n_full, n_rem, chunk_size, emit_full, emit_rem, prev_loop_sub,
-                             prev_ia_subs, sp);
+                             chunk_expr, n_full, n_rem, emit_full, emit_rem, prev_loop_sub, prev_ia_subs, sp);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -407,7 +406,7 @@ class ChunkedLoopSplitter : public IRMutator {
   StmtPtr SplitSimple(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
                       const std::optional<int>& loop_version, const ExprPtr& start_expr,
                       const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& n_full,
-                      const ExprPtr& n_rem, int64_t chunk_size, bool emit_full, bool emit_rem,
+                      const ExprPtr& n_rem, bool emit_full, bool emit_rem,
                       const SavedSubstitution& prev_loop_sub, const Span& sp) {
     auto zero = MakeConstIndex(0, sp);
     auto one = MakeConstIndex(1, sp);
@@ -469,7 +468,7 @@ class ChunkedLoopSplitter : public IRMutator {
   StmtPtr SplitWithIterArgs(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
                             const std::optional<int>& loop_version, const ExprPtr& start_expr,
                             const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& n_full,
-                            const ExprPtr& n_rem, int64_t chunk_size, bool emit_full, bool emit_rem,
+                            const ExprPtr& n_rem, bool emit_full, bool emit_rem,
                             const SavedSubstitution& prev_loop_sub,
                             const std::vector<SavedSubstitution>& prev_ia_subs, const Span& sp) {
     auto zero = MakeConstIndex(0, sp);
