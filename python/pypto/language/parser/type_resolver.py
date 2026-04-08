@@ -1348,7 +1348,7 @@ class TypeResolver:
             if base_name is not None:
                 byte_offset = self._resolve_memref_byte_offset(node.args[1])
                 size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
-                base_var = ir.Var(base_name, ir.PtrType(), span)
+                base_var = self._intern_base_ptr(base_name, span)
                 return ir.MemRef(base_var, byte_offset, size, span)
 
             # Legacy fallback: pl.MemRef(addr_int, size, id)
@@ -1370,6 +1370,24 @@ class TypeResolver:
             span=span,
             hint="Use pl.MemRef(base_name, byte_offset, size)",
         )
+
+    def _intern_base_ptr(self, name: str, span: "ir.Span") -> "ir.Var":
+        """Get or create a shared Var for a base Ptr name.
+
+        Ensures that two MemRef annotations referencing the same base name
+        share the same Var instance, so MemRef.SameAllocation() works after
+        parse round-trips. Checks scope_lookup first (for alloc-defined vars),
+        then falls back to a per-resolver cache.
+        """
+        if self.scope_lookup is not None:
+            existing = self.scope_lookup(name)
+            if existing is not None:
+                return existing
+        if not hasattr(self, "_base_ptr_cache"):
+            self._base_ptr_cache: dict[str, ir.Var] = {}
+        if name not in self._base_ptr_cache:
+            self._base_ptr_cache[name] = ir.Var(name, ir.PtrType(), span)
+        return self._base_ptr_cache[name]
 
     def _try_resolve_memref_base(self, node: ast.expr) -> str | None:
         """Try to resolve the first arg of pl.MemRef as a base name.

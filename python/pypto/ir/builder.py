@@ -617,8 +617,9 @@ class IRBuilder:
             )
         if not isinstance(addr_or_size, int):
             raise TypeError("IRBuilder.memref(addr, size, id) requires an integer size")
-        addr_expr = _normalize_expr(memory_space_or_addr, actual_span)
-        return ir.MemRef(addr_expr, addr_or_size, size_or_id, actual_span)
+        if not isinstance(memory_space_or_addr, int):
+            raise TypeError("IRBuilder.memref(addr, size, id) requires an integer addr")
+        return ir.MemRef(memory_space_or_addr, addr_or_size, size_or_id, actual_span)
 
     def tile_view(
         self,

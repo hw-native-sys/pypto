@@ -1542,10 +1542,14 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   oss << prefix_ << ".MemRef(";
 
   // Print base Ptr name as string literal to handle forward references
-  // (DDR bases appear in parameter annotations before their alloc statements)
-  oss << "\"" << memref.base_->name_hint_ << "\"";
+  // (DDR bases appear in parameter annotations before their alloc statements).
+  // Use GetVarName to respect SSA rename disambiguation.
+  oss << "\"" << GetVarName(memref.base_.get()) << "\"";
 
-  // Print byte offset
+  // Print byte offset using a temp printer to avoid corrupting the main stream.
+  // The temp printer has its own stream_ but shares no rename maps — that's fine
+  // because byte_offset expressions are ConstInt or arithmetic trees of loop vars
+  // which print by name_hint_ and don't need SSA renaming.
   oss << ", ";
   IRPythonPrinter temp_printer(prefix_);
   oss << temp_printer.Print(memref.byte_offset_);

@@ -290,8 +290,8 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
     INTERNAL_CHECK(shaped) << "Internal error: slice parent must be ShapedType";
 
     // tensor.slice(input, shape, offset) → offset is args[2]
-    // tile.slice(input, offset) → offset is args[1]
-    size_t offset_arg_idx = (op_name == "tensor.slice") ? 2 : 1;
+    // tile.slice(input, shape, offset[, valid_shape]) → offset is args[2]
+    size_t offset_arg_idx = 2;
     INTERNAL_CHECK(offset_arg_idx < call->args_.size())
         << "Internal error: " << op_name << " missing offset argument";
 
