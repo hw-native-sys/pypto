@@ -64,6 +64,13 @@ class TestConstIntBoundBasics:
         assert b.max_value == ConstIntBound.kPosInf
         assert b.is_everything()
 
+    def test_index_var_non_negative(self):
+        """INDEX-typed vars are implicitly non-negative."""
+        idx_var = ir.Var("n", ir.ScalarType(DataType.INDEX), S)
+        b = analyzer(idx_var)
+        assert b.min_value == 0
+        assert b.max_value == ConstIntBound.kPosInf
+
     def test_bound_var(self):
         analyzer.bind(x, 0, 8)  # [0, 8) = [0, 7]
         b = analyzer(x)

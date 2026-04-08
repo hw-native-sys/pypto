@@ -616,12 +616,12 @@ class TestDynamicChunking:
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.auto_incore():
-                    for i_out, (x_outer,) in pl.range(0, pl.max(n_0, 0) // 4, 1, init_values=(x_0,)):
+                    for i_out, (x_outer,) in pl.range(0, n_0 // 4, 1, init_values=(x_0,)):
                         for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                             x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
-                    for i_rem, (x_rem,) in pl.range(0, pl.max(n_0, 0) % 4, 1, init_values=(x_outer_rv,)):
+                    for i_rem, (x_rem,) in pl.range(0, n_0 % 4, 1, init_values=(x_outer_rv,)):
                         x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
@@ -692,12 +692,12 @@ class TestDynamicChunking:
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.auto_incore():
-                    for i_out, (x_outer,) in pl.parallel(0, pl.max(n_0, 0) // 4, 1, init_values=(x_0,)):
+                    for i_out, (x_outer,) in pl.parallel(0, n_0 // 4, 1, init_values=(x_0,)):
                         for i_in, (x_inner,) in pl.parallel(0, 4, 1, init_values=(x_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                             x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
-                    for i_rem, (x_rem,) in pl.parallel(0, pl.max(n_0, 0) % 4, 1, init_values=(x_outer_rv,)):
+                    for i_rem, (x_rem,) in pl.parallel(0, n_0 % 4, 1, init_values=(x_outer_rv,)):
                         x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv

@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.arith import RewriteSimplifier
+from pypto.arith import Analyzer, RewriteSimplifier
 
 S = ir.Span.unknown()
 INT = DataType.INT64
@@ -452,6 +452,22 @@ class TestMinMaxRules:
         assert isinstance(result, ir.Mul)
         assert isinstance(result.left, ir.Max)
         assert_is_const_int(result.right, 3)
+
+    def test_max_index_non_negative(self):
+        """max(n, 0) => n when n has INDEX dtype (non-negative by definition)."""
+        ana = Analyzer()
+        n = ir.Var("n", ir.ScalarType(IDX), S)
+        expr = ir.Max(n, ir.ConstInt(0, IDX, S), IDX, S)
+        result = ana.simplify(expr)
+        assert result is n
+
+    def test_max_zero_index_commutative(self):
+        """max(0, n) => n when n has INDEX dtype."""
+        ana = Analyzer()
+        n = ir.Var("n", ir.ScalarType(IDX), S)
+        expr = ir.Max(ir.ConstInt(0, IDX, S), n, IDX, S)
+        result = ana.simplify(expr)
+        assert result is n
 
 
 # ============================================================================

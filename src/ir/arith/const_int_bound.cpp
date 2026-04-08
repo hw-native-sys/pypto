@@ -202,14 +202,14 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   Bound VisitExpr_(const VarPtr& op) override {
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return Everything();
+    return DefaultBoundFromDtype(op);
   }
 
   Bound VisitExpr_(const IterArgPtr& op) override {
     // IterArg is a Var subclass — look up in var_map_
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return Everything();
+    return DefaultBoundFromDtype(op);
   }
 
   Bound VisitExpr_(const MemRefPtr& /*op*/) override { return Everything(); }
@@ -374,6 +374,16 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
  private:
+  /// INDEX-typed variables are implicitly non-negative; other types use full range.
+  Bound DefaultBoundFromDtype(const ExprPtr& expr) {
+    if (auto st = std::dynamic_pointer_cast<const ScalarType>(expr->GetType())) {
+      if (st->dtype_ == DataType::INDEX) {
+        return {0, Bound::kPosInf};
+      }
+    }
+    return Everything();
+  }
+
   Analyzer* parent_;
   std::unordered_map<const Expr*, Bound> var_map_;
 };
