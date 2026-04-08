@@ -584,5 +584,116 @@ class TestNestedChunking:
             )
 
 
+class TestDynamicChunking:
+    """Tests for chunked loops where start/stop are dynamic (runtime) scalars."""
+
+    def test_dynamic_stop_simple(self):
+        """Dynamic stop, no iter_args: should produce outer+inner+remainder structure."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, n, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+        printed = python_print(After)
+
+        assert "chunk=" not in printed, "chunk= should be eliminated after split"
+        assert "_out" in printed, "Should have outer loop variable"
+        assert "_in" in printed, "Should have inner loop variable"
+        assert "_rem" in printed, "Should have remainder loop variable"
+        assert "floordiv" in printed.lower() or "//" in printed, "Should have FloorDiv for n_full computation"
+
+    def test_dynamic_stop_with_iter_args(self):
+        """Dynamic stop with iter_args: outer/inner/remainder all carry iter_args."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, n, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+        printed = python_print(After)
+
+        assert "init_values=" in printed, "iter_args should be propagated through loops"
+        assert "yield_" in printed, "Should have yield statements for iter_args"
+
+    def test_dynamic_start_and_stop(self):
+        """Both start and stop are dynamic."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                lo: pl.Scalar[pl.INDEX],
+                hi: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(lo, hi, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+        printed = python_print(After)
+
+        assert "chunk=" not in printed, "chunk= should be eliminated after split"
+        assert "_out" in printed
+        assert "_rem" in printed
+
+    def test_dynamic_stop_parallel(self):
+        """Dynamic stop with pl.parallel should also work."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, n, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+        printed = python_print(After)
+
+        assert "chunk=" not in printed
+        assert "_out" in printed
+        assert "_rem" in printed
+
+    def test_static_still_works(self):
+        """Regression: static bounds should continue to work as before."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, 10, 1, chunk=5):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+        printed = python_print(After)
+
+        assert "chunk=" not in printed
+        assert "_out" in printed
+        assert "_in" in printed
+        assert "_rem" not in printed, "10/5 is exact, no remainder expected"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

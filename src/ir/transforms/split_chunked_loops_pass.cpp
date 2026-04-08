@@ -43,9 +43,10 @@ using transform_utils::CollectDefVars;
 namespace {
 
 /**
- * @brief Extract a compile-time integer value from a ConstInt or Neg(ConstInt) expression.
+ * @brief Try to extract a compile-time integer from a ConstInt or Neg(ConstInt).
+ * @return The integer value, or std::nullopt if the expression is not a compile-time constant.
  */
-static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
+static std::optional<int64_t> TryGetConstInt(const ExprPtr& expr) {
   auto ci = std::dynamic_pointer_cast<const ConstInt>(expr);
   if (ci) {
     return ci->value_;
@@ -56,6 +57,17 @@ static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
     if (inner) {
       return -inner->value_;
     }
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Extract a compile-time integer value from a ConstInt or Neg(ConstInt) expression.
+ */
+static int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
+  auto val = TryGetConstInt(expr);
+  if (val.has_value()) {
+    return *val;
   }
   throw pypto::ValueError("Chunked loop " + what + " must be a compile-time integer constant, got " +
                           expr->TypeName());
@@ -198,221 +210,24 @@ class ChunkedLoopSplitter : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    // Extract compile-time constants
-    int64_t start = GetConstIntValue(op->start_, "start");
-    int64_t stop = GetConstIntValue(op->stop_, "stop");
-    int64_t step = GetConstIntValue(op->step_, "step");
+    // chunk_size and step must always be compile-time constants.
     int64_t chunk_size = GetConstIntValue(*op->chunk_size_, "chunk_size");
+    int64_t step = GetConstIntValue(op->step_, "step");
     CHECK(step != 0) << "Chunked loop step cannot be zero";
     CHECK(chunk_size > 0) << "Chunk size must be positive, got " << chunk_size;
 
-    // Compute trip count
-    int64_t trip_count = 0;
-    if (step > 0 && start < stop) {
-      trip_count = (stop - start + step - 1) / step;
-    } else if (step < 0 && start > stop) {
-      trip_count = (start - stop + (-step) - 1) / (-step);
+    auto start_const = TryGetConstInt(op->start_);
+    auto stop_const = TryGetConstInt(op->stop_);
+
+    if (start_const && stop_const) {
+      // All-static path: original behavior, enables zero-trip elimination at compile time.
+      return SplitAllStatic(op, *start_const, *stop_const, step, chunk_size);
     }
 
-    int64_t num_full_chunks = trip_count / chunk_size;
-    int64_t remainder = trip_count % chunk_size;
-
-    const Var* loop_var_key = op->loop_var_.get();
-    auto loop_name = auto_name::Parse(op->loop_var_->name_hint_);
-    std::string base_name = loop_name.base_name;
-
-    // Save previous substitutions for loop var and iter_args
-    auto prev_loop_sub = SaveSubstitution(loop_var_key);
-
-    std::vector<SavedSubstitution> prev_ia_subs;
-    for (const auto& ia : op->iter_args_) {
-      prev_ia_subs.push_back(SaveSubstitution(ia.get()));
-    }
-
-    auto start_expr = MakeConstIndex(start, op->span_);
-    auto step_expr = MakeConstIndex(step, op->span_);
-    auto chunk_const = MakeConstIndex(chunk_size, op->span_);
-
-    bool has_iter_args = !op->iter_args_.empty();
-
-    if (!has_iter_args) {
-      // Simple path: no iter_args to propagate
-      return SplitSimple(op, start, step, chunk_size, num_full_chunks, remainder, loop_var_key, base_name,
-                         loop_name.version, start_expr, step_expr, chunk_const, prev_loop_sub);
-    }
-
-    // Zero-trip loop: return vars resolve to iter_arg init values
-    if (trip_count == 0) {
-      INTERNAL_CHECK(op->return_vars_.size() == op->iter_args_.size())
-          << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
-      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-        substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
-      }
-      RestoreSubstitution(prev_loop_sub);
-      RestoreSubstitutions(prev_ia_subs);
-      return SeqStmts::Flatten(std::vector<StmtPtr>{}, op->span_);
-    }
-
-    // SSA path: propagate iter_args through outer/inner/remainder loops
-    std::vector<StmtPtr> result_stmts;
-
-    // Track final return vars (from outer or remainder) to remap original return_vars
-    std::vector<VarPtr> final_return_vars;
-
-    // Main nested loops (if there are full chunks)
-    if (num_full_chunks > 0) {
-      auto out_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-      auto in_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-
-      // Create outer and inner iter_args/return_vars
-      std::vector<IterArgPtr> outer_iter_args;
-      std::vector<VarPtr> outer_return_vars;
-      std::vector<IterArgPtr> inner_iter_args;
-      std::vector<VarPtr> inner_return_vars;
-
-      for (const auto& ia : op->iter_args_) {
-        auto visited_init = VisitExpr(ia->initValue_);
-        auto ia_name = auto_name::Parse(ia->name_hint_);
-        auto outer_ia = std::make_shared<IterArg>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "iter",
-                                 ia_name.version),
-            ia->GetType(), visited_init, ia->span_);
-        auto outer_rv = std::make_shared<Var>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "rv", ia_name.version),
-            ia->GetType(), ia->span_);
-        outer_iter_args.push_back(outer_ia);
-        outer_return_vars.push_back(outer_rv);
-
-        ExprPtr inner_init = outer_ia;
-        auto inner_ia = std::make_shared<IterArg>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "iter",
-                                 ia_name.version),
-            ia->GetType(), inner_init, ia->span_);
-        auto inner_rv = std::make_shared<Var>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "rv", ia_name.version),
-            ia->GetType(), ia->span_);
-        inner_iter_args.push_back(inner_ia);
-        inner_return_vars.push_back(inner_rv);
-
-        // Remap original iter_arg references to inner iter_arg
-        substitution_map_[ia.get()] = inner_ia;
-      }
-
-      // Loop var substitution: i = start + (i_out * C + i_in) * step
-      ExprPtr substitution =
-          MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_const), in_var), step_expr));
-      substitution_map_[loop_var_key] = substitution;
-
-      // Visit body -> inner_body
-      auto inner_body = VisitStmt(op->body_);
-
-      // Inner loop
-      auto inner_for = std::make_shared<ForStmt>(
-          in_var, MakeConstIndex(0, op->span_), MakeConstIndex(chunk_size, op->span_),
-          MakeConstIndex(1, op->span_), inner_iter_args, inner_body, inner_return_vars, op->span_, op->kind_,
-          std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
-
-      // Outer body = [inner_for, yield(inner_return_vars)]
-      auto outer_yield = std::make_shared<YieldStmt>(
-          std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), op->span_);
-      auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, op->span_);
-
-      // Outer loop
-      auto outer_for = std::make_shared<ForStmt>(
-          out_var, MakeConstIndex(0, op->span_), MakeConstIndex(num_full_chunks, op->span_),
-          MakeConstIndex(1, op->span_), outer_iter_args, outer_body, outer_return_vars, op->span_, op->kind_,
-          std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
-
-      result_stmts.push_back(outer_for);
-      final_return_vars = outer_return_vars;
-    }
-
-    // Remainder loop
-    if (remainder > 0) {
-      auto rem_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-
-      int64_t rem_start = start + num_full_chunks * chunk_size * step;
-      auto rem_start_expr = MakeConstIndex(rem_start, op->span_);
-
-      // Remainder iter_args
-      std::vector<IterArgPtr> rem_iter_args;
-      std::vector<VarPtr> rem_return_vars;
-
-      for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-        const auto& ia = op->iter_args_[i];
-        ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : VisitExpr(ia->initValue_);
-        auto ia_name = auto_name::Parse(ia->name_hint_);
-        auto rem_ia = std::make_shared<IterArg>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "iter",
-                                 ia_name.version),
-            ia->GetType(), rem_init, ia->span_);
-        auto rem_rv = std::make_shared<Var>(
-            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "rv",
-                                 ia_name.version),
-            ia->GetType(), ia->span_);
-        rem_iter_args.push_back(rem_ia);
-        rem_return_vars.push_back(rem_rv);
-
-        substitution_map_[ia.get()] = rem_ia;
-      }
-
-      // Loop var substitution for remainder
-      ExprPtr rem_substitution = MakeAdd(rem_start_expr, MakeMul(rem_var, step_expr));
-      substitution_map_[loop_var_key] = rem_substitution;
-
-      // When both inner and remainder loops exist, the body is visited twice.
-      // DEF variables (AssignStmt targets) in the body would be shared, violating SSA.
-      // Create fresh copies of all DEF vars for the remainder body.
-      std::vector<SavedSubstitution> prev_def_subs;
-      if (num_full_chunks > 0) {
-        std::vector<VarPtr> body_def_vars;
-        CollectDefVars(op->body_, body_def_vars);
-        std::unordered_set<std::string> used_names = function_used_names_;
-        for (const auto& var : body_def_vars) {
-          used_names.insert(var->name_hint_);
-        }
-        for (const auto& var : body_def_vars) {
-          prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
-          used_names.insert(fresh_name);
-          function_used_names_.insert(fresh_name);
-          auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
-          substitution_map_[var.get()] = fresh;
-        }
-      }
-
-      auto rem_body = VisitStmt(op->body_);
-
-      // Restore DEF var substitutions
-      RestoreSubstitutions(prev_def_subs);
-
-      auto rem_for = std::make_shared<ForStmt>(
-          rem_var, MakeConstIndex(0, op->span_), MakeConstIndex(remainder, op->span_),
-          MakeConstIndex(1, op->span_), rem_iter_args, rem_body, rem_return_vars, op->span_, op->kind_,
-          std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
-
-      result_stmts.push_back(rem_for);
-      final_return_vars = rem_return_vars;
-    }
-
-    // Remap original return_vars to final return vars
-    INTERNAL_CHECK(op->return_vars_.size() == final_return_vars.size())
-        << "SplitChunkedLoops produced mismatched return vars";
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      substitution_map_[op->return_vars_[i].get()] = final_return_vars[i];
-    }
-
-    // Restore substitutions
-    RestoreSubstitution(prev_loop_sub);
-    RestoreSubstitutions(prev_ia_subs);
-
-    return MakeResultStmt(result_stmts, op->span_);
+    // Dynamic path: start and/or stop are runtime expressions.
+    // We emit IR arithmetic (FloorDiv / FloorMod) so the trip count,
+    // num_full_chunks, and remainder are computed at runtime.
+    return SplitDynamic(op, step, chunk_size);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -477,88 +292,451 @@ class ChunkedLoopSplitter : public IRMutator {
   }
 
   /**
-   * @brief Simple split path for loops without iter_args.
+   * @brief Freshen all DEF vars in the body to preserve SSA uniqueness.
+   *
+   * Used when the body is visited more than once (e.g. full-chunk + remainder).
+   * Returns saved substitutions that must be restored after visiting the body.
    */
-  StmtPtr SplitSimple(const ForStmtPtr& op, int64_t start, int64_t step, int64_t chunk_size,
-                      int64_t num_full_chunks, int64_t remainder, const Var* loop_var_key,
-                      const std::string& base_name, const std::optional<int>& loop_version,
-                      const ExprPtr& start_expr, const ExprPtr& step_expr, const ExprPtr& chunk_const,
-                      const SavedSubstitution& prev_loop_sub) {
+  std::vector<SavedSubstitution> FreshenBodyDefVars(const StmtPtr& body) {
+    std::vector<SavedSubstitution> prev_def_subs;
+    std::vector<VarPtr> body_def_vars;
+    CollectDefVars(body, body_def_vars);
+    std::unordered_set<std::string> used_names = function_used_names_;
+    for (const auto& var : body_def_vars) {
+      used_names.insert(var->name_hint_);
+    }
+    for (const auto& var : body_def_vars) {
+      prev_def_subs.push_back(SaveSubstitution(var.get()));
+      auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
+      used_names.insert(fresh_name);
+      function_used_names_.insert(fresh_name);
+      auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
+      substitution_map_[var.get()] = fresh;
+    }
+    return prev_def_subs;
+  }
+
+  /**
+   * @brief All-static split: start, stop, step, chunk are compile-time constants.
+   *
+   * This is the original code path — zero-trip elimination, exact remainder
+   * computation, and dead-code pruning all happen at compile time.
+   */
+  StmtPtr SplitAllStatic(const ForStmtPtr& op, int64_t start, int64_t stop, int64_t step,
+                         int64_t chunk_size) {
+    int64_t trip_count = 0;
+    if (step > 0 && start < stop) {
+      trip_count = (stop - start + step - 1) / step;
+    } else if (step < 0 && start > stop) {
+      trip_count = (start - stop + (-step) - 1) / (-step);
+    }
+
+    int64_t num_full_chunks = trip_count / chunk_size;
+    int64_t remainder = trip_count % chunk_size;
+
+    const Var* loop_var_key = op->loop_var_.get();
+    auto loop_name = auto_name::Parse(op->loop_var_->name_hint_);
+    std::string base_name = loop_name.base_name;
+
+    auto prev_loop_sub = SaveSubstitution(loop_var_key);
+    std::vector<SavedSubstitution> prev_ia_subs;
+    for (const auto& ia : op->iter_args_) {
+      prev_ia_subs.push_back(SaveSubstitution(ia.get()));
+    }
+
+    auto start_expr = MakeConstIndex(start, op->span_);
+    auto step_expr = MakeConstIndex(step, op->span_);
+    auto chunk_const = MakeConstIndex(chunk_size, op->span_);
+    auto zero = MakeConstIndex(0, op->span_);
+    auto one = MakeConstIndex(1, op->span_);
+    Span sp = op->span_;
+
+    bool has_iter_args = !op->iter_args_.empty();
+
+    if (!has_iter_args) {
+      // Simple path: no iter_args to propagate
+      std::vector<StmtPtr> result_stmts;
+
+      if (num_full_chunks > 0) {
+        auto out_var = std::make_shared<Var>(
+            auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
+            std::make_shared<ScalarType>(DataType::INDEX), sp);
+        auto in_var = std::make_shared<Var>(
+            auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
+            std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+        substitution_map_[loop_var_key] =
+            MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_const), in_var), step_expr));
+        auto inner_body = VisitStmt(op->body_);
+
+        auto inner_for = std::make_shared<ForStmt>(
+            in_var, zero, MakeConstIndex(chunk_size, sp), one, std::vector<IterArgPtr>{}, inner_body,
+            std::vector<VarPtr>{}, sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull,
+            LoopOrigin::ChunkInner);
+        auto outer_for = std::make_shared<ForStmt>(
+            out_var, zero, MakeConstIndex(num_full_chunks, sp), one, std::vector<IterArgPtr>{}, inner_for,
+            std::vector<VarPtr>{}, sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull,
+            LoopOrigin::ChunkOuter);
+        result_stmts.push_back(outer_for);
+      }
+
+      if (remainder > 0) {
+        auto rem_var = std::make_shared<Var>(
+            auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
+            std::make_shared<ScalarType>(DataType::INDEX), sp);
+        int64_t rem_start = start + num_full_chunks * chunk_size * step;
+        substitution_map_[loop_var_key] = MakeAdd(MakeConstIndex(rem_start, sp), MakeMul(rem_var, step_expr));
+
+        std::vector<SavedSubstitution> prev_def_subs;
+        if (num_full_chunks > 0) {
+          prev_def_subs = FreshenBodyDefVars(op->body_);
+        }
+        auto rem_body = VisitStmt(op->body_);
+        RestoreSubstitutions(prev_def_subs);
+
+        auto rem_for = std::make_shared<ForStmt>(
+            rem_var, zero, MakeConstIndex(remainder, sp), one, std::vector<IterArgPtr>{}, rem_body,
+            std::vector<VarPtr>{}, sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull,
+            LoopOrigin::ChunkRemainder);
+        result_stmts.push_back(rem_for);
+      }
+
+      RestoreSubstitution(prev_loop_sub);
+      return MakeResultStmt(result_stmts, sp);
+    }
+
+    // --- iter_args path ---
+
+    if (trip_count == 0) {
+      INTERNAL_CHECK(op->return_vars_.size() == op->iter_args_.size())
+          << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
+      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+        substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
+      }
+      RestoreSubstitution(prev_loop_sub);
+      RestoreSubstitutions(prev_ia_subs);
+      return SeqStmts::Flatten(std::vector<StmtPtr>{}, sp);
+    }
+
     std::vector<StmtPtr> result_stmts;
+    std::vector<VarPtr> final_return_vars;
 
     if (num_full_chunks > 0) {
       auto out_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
       auto in_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
+          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
 
-      ExprPtr substitution =
+      std::vector<IterArgPtr> outer_iter_args;
+      std::vector<VarPtr> outer_return_vars;
+      std::vector<IterArgPtr> inner_iter_args;
+      std::vector<VarPtr> inner_return_vars;
+
+      for (const auto& ia : op->iter_args_) {
+        auto visited_init = VisitExpr(ia->initValue_);
+        auto ia_name = auto_name::Parse(ia->name_hint_);
+        auto outer_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), visited_init, ia->span_);
+        auto outer_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "rv", ia_name.version),
+            ia->GetType(), ia->span_);
+        outer_iter_args.push_back(outer_ia);
+        outer_return_vars.push_back(outer_rv);
+
+        auto inner_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), ExprPtr(outer_ia), ia->span_);
+        auto inner_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "rv", ia_name.version),
+            ia->GetType(), ia->span_);
+        inner_iter_args.push_back(inner_ia);
+        inner_return_vars.push_back(inner_rv);
+
+        substitution_map_[ia.get()] = inner_ia;
+      }
+
+      substitution_map_[loop_var_key] =
           MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_const), in_var), step_expr));
-
-      substitution_map_[loop_var_key] = substitution;
       auto inner_body = VisitStmt(op->body_);
 
       auto inner_for = std::make_shared<ForStmt>(
-          in_var, MakeConstIndex(0, op->span_), MakeConstIndex(chunk_size, op->span_),
-          MakeConstIndex(1, op->span_), std::vector<IterArgPtr>{}, inner_body, std::vector<VarPtr>{},
-          op->span_, op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
+          in_var, zero, MakeConstIndex(chunk_size, sp), one, inner_iter_args, inner_body, inner_return_vars,
+          sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
+      auto outer_yield = std::make_shared<YieldStmt>(
+          std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
+      auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
 
       auto outer_for = std::make_shared<ForStmt>(
-          out_var, MakeConstIndex(0, op->span_), MakeConstIndex(num_full_chunks, op->span_),
-          MakeConstIndex(1, op->span_), std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{},
-          op->span_, op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+          out_var, zero, MakeConstIndex(num_full_chunks, sp), one, outer_iter_args, outer_body,
+          outer_return_vars, sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
 
       result_stmts.push_back(outer_for);
+      final_return_vars = outer_return_vars;
     }
 
     if (remainder > 0) {
       auto rem_var = std::make_shared<Var>(
-          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_version),
-          std::make_shared<ScalarType>(DataType::INDEX), op->span_);
-
+          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
       int64_t rem_start = start + num_full_chunks * chunk_size * step;
-      auto rem_start_expr = MakeConstIndex(rem_start, op->span_);
 
-      ExprPtr rem_substitution = MakeAdd(rem_start_expr, MakeMul(rem_var, step_expr));
+      std::vector<IterArgPtr> rem_iter_args;
+      std::vector<VarPtr> rem_return_vars;
+      for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+        const auto& ia = op->iter_args_[i];
+        ExprPtr rem_init = (num_full_chunks > 0) ? final_return_vars[i] : VisitExpr(ia->initValue_);
+        auto ia_name = auto_name::Parse(ia->name_hint_);
+        auto rem_ia = std::make_shared<IterArg>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "iter",
+                                 ia_name.version),
+            ia->GetType(), rem_init, ia->span_);
+        auto rem_rv = std::make_shared<Var>(
+            auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "rv",
+                                 ia_name.version),
+            ia->GetType(), ia->span_);
+        rem_iter_args.push_back(rem_ia);
+        rem_return_vars.push_back(rem_rv);
+        substitution_map_[ia.get()] = rem_ia;
+      }
 
-      substitution_map_[loop_var_key] = rem_substitution;
+      substitution_map_[loop_var_key] =
+          MakeAdd(MakeConstIndex(rem_start, sp), MakeMul(rem_var, step_expr));
 
-      // When both full chunks and remainder exist, the body is visited twice.
-      // Freshen DEF vars for the remainder to preserve SSA uniqueness.
       std::vector<SavedSubstitution> prev_def_subs;
       if (num_full_chunks > 0) {
-        std::vector<VarPtr> body_def_vars;
-        CollectDefVars(op->body_, body_def_vars);
-        std::unordered_set<std::string> used_names = function_used_names_;
-        for (const auto& var : body_def_vars) {
-          used_names.insert(var->name_hint_);
-        }
-        for (const auto& var : body_def_vars) {
-          prev_def_subs.push_back(SaveSubstitution(var.get()));
-          auto fresh_name = auto_name::GenerateFreshNameLike(var->name_hint_, used_names);
-          used_names.insert(fresh_name);
-          function_used_names_.insert(fresh_name);
-          auto fresh = std::make_shared<Var>(fresh_name, var->GetType(), var->span_);
-          substitution_map_[var.get()] = fresh;
-        }
+        prev_def_subs = FreshenBodyDefVars(op->body_);
       }
       auto rem_body = VisitStmt(op->body_);
       RestoreSubstitutions(prev_def_subs);
 
       auto rem_for = std::make_shared<ForStmt>(
-          rem_var, MakeConstIndex(0, op->span_), MakeConstIndex(remainder, op->span_),
-          MakeConstIndex(1, op->span_), std::vector<IterArgPtr>{}, rem_body, std::vector<VarPtr>{}, op->span_,
+          rem_var, zero, MakeConstIndex(remainder, sp), one, rem_iter_args, rem_body, rem_return_vars, sp,
           op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
-
       result_stmts.push_back(rem_for);
+      final_return_vars = rem_return_vars;
     }
 
-    // Restore loop var substitution
+    INTERNAL_CHECK(op->return_vars_.size() == final_return_vars.size())
+        << "SplitChunkedLoops produced mismatched return vars";
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      substitution_map_[op->return_vars_[i].get()] = final_return_vars[i];
+    }
     RestoreSubstitution(prev_loop_sub);
+    RestoreSubstitutions(prev_ia_subs);
+    return MakeResultStmt(result_stmts, sp);
+  }
 
-    return MakeResultStmt(result_stmts, op->span_);
+  /**
+   * @brief Dynamic split: start and/or stop are runtime expressions.
+   *
+   * Generates IR expressions for trip_count, num_full_chunks, and remainder
+   * using FloorDiv / FloorMod so all arithmetic is deferred to runtime.
+   * The inner loop stop is still the compile-time chunk_size constant.
+   *
+   * Transforms:
+   *   for i in range(start, stop, step, chunk=C):
+   *     body(i)
+   * Into:
+   *   trip = (stop - start + (step-1)) // step    (assumes step > 0)
+   *   n_full = trip // C
+   *   n_rem  = trip %  C
+   *   for i_out in range(0, n_full):
+   *     for i_in in range(0, C):
+   *       i = start + (i_out * C + i_in) * step
+   *       body(i)
+   *   for i_rem in range(0, n_rem):
+   *     i = start + (n_full * C + i_rem) * step
+   *     body(i)
+   */
+  StmtPtr SplitDynamic(const ForStmtPtr& op, int64_t step, int64_t chunk_size) {
+    Span sp = op->span_;
+    auto zero = MakeConstIndex(0, sp);
+    auto one = MakeConstIndex(1, sp);
+    auto step_expr = MakeConstIndex(step, sp);
+    auto chunk_expr = MakeConstIndex(chunk_size, sp);
+
+    ExprPtr start_expr = VisitExpr(op->start_);
+    ExprPtr stop_expr = VisitExpr(op->stop_);
+
+    // trip_count = ceildiv(stop - start, step)
+    ExprPtr range_size = MakeSub(stop_expr, start_expr, sp);
+    ExprPtr trip_count;
+    if (step == 1) {
+      trip_count = range_size;
+    } else {
+      trip_count = MakeFloorDiv(MakeAdd(range_size, MakeConstIndex(step - 1, sp), sp), step_expr, sp);
+    }
+
+    // Clamp trip_count to non-negative: max(trip_count, 0)
+    trip_count = MakeMax(trip_count, zero, sp);
+
+    ExprPtr n_full = MakeFloorDiv(trip_count, chunk_expr, sp);
+    ExprPtr n_rem = MakeFloorMod(trip_count, chunk_expr, sp);
+
+    const Var* loop_var_key = op->loop_var_.get();
+    auto loop_name = auto_name::Parse(op->loop_var_->name_hint_);
+    std::string base_name = loop_name.base_name;
+
+    auto prev_loop_sub = SaveSubstitution(loop_var_key);
+    std::vector<SavedSubstitution> prev_ia_subs;
+    for (const auto& ia : op->iter_args_) {
+      prev_ia_subs.push_back(SaveSubstitution(ia.get()));
+    }
+
+    bool has_iter_args = !op->iter_args_.empty();
+    std::vector<StmtPtr> result_stmts;
+
+    if (!has_iter_args) {
+      // --- Simple (no iter_args) ---
+      auto out_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
+      auto in_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+      // i = start + (i_out * C + i_in) * step
+      substitution_map_[loop_var_key] =
+          MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr), in_var), step_expr));
+      auto inner_body = VisitStmt(op->body_);
+
+      auto inner_for = std::make_shared<ForStmt>(
+          in_var, zero, MakeConstIndex(chunk_size, sp), one, std::vector<IterArgPtr>{}, inner_body,
+          std::vector<VarPtr>{}, sp, op->kind_, std::nullopt, ChunkPolicy::LeadingFull,
+          LoopOrigin::ChunkInner);
+      auto outer_for = std::make_shared<ForStmt>(
+          out_var, zero, n_full, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
+          op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+      result_stmts.push_back(outer_for);
+
+      // Remainder
+      auto rem_var = std::make_shared<Var>(
+          auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
+          std::make_shared<ScalarType>(DataType::INDEX), sp);
+      // i = start + (n_full * C + i_rem) * step
+      substitution_map_[loop_var_key] =
+          MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(n_full, chunk_expr), rem_var), step_expr));
+
+      auto prev_def_subs = FreshenBodyDefVars(op->body_);
+      auto rem_body = VisitStmt(op->body_);
+      RestoreSubstitutions(prev_def_subs);
+
+      auto rem_for = std::make_shared<ForStmt>(
+          rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body, std::vector<VarPtr>{}, sp,
+          op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
+      result_stmts.push_back(rem_for);
+
+      RestoreSubstitution(prev_loop_sub);
+      return MakeResultStmt(result_stmts, sp);
+    }
+
+    // --- iter_args path ---
+    std::vector<VarPtr> final_return_vars;
+
+    // Outer × Inner
+    auto out_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_name.version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto in_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_name.version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+    std::vector<IterArgPtr> outer_iter_args;
+    std::vector<VarPtr> outer_return_vars;
+    std::vector<IterArgPtr> inner_iter_args;
+    std::vector<VarPtr> inner_return_vars;
+
+    for (const auto& ia : op->iter_args_) {
+      auto visited_init = VisitExpr(ia->initValue_);
+      auto ia_name = auto_name::Parse(ia->name_hint_);
+      auto outer_ia = std::make_shared<IterArg>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "iter", ia_name.version),
+          ia->GetType(), visited_init, ia->span_);
+      auto outer_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "rv", ia_name.version),
+          ia->GetType(), ia->span_);
+      outer_iter_args.push_back(outer_ia);
+      outer_return_vars.push_back(outer_rv);
+
+      auto inner_ia = std::make_shared<IterArg>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "iter", ia_name.version),
+          ia->GetType(), ExprPtr(outer_ia), ia->span_);
+      auto inner_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "rv", ia_name.version),
+          ia->GetType(), ia->span_);
+      inner_iter_args.push_back(inner_ia);
+      inner_return_vars.push_back(inner_rv);
+
+      substitution_map_[ia.get()] = inner_ia;
+    }
+
+    substitution_map_[loop_var_key] =
+        MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr), in_var), step_expr));
+    auto inner_body = VisitStmt(op->body_);
+
+    auto inner_for = std::make_shared<ForStmt>(
+        in_var, zero, MakeConstIndex(chunk_size, sp), one, inner_iter_args, inner_body, inner_return_vars, sp,
+        op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
+    auto outer_yield = std::make_shared<YieldStmt>(
+        std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
+    auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
+
+    auto outer_for = std::make_shared<ForStmt>(
+        out_var, zero, n_full, one, outer_iter_args, outer_body, outer_return_vars, sp, op->kind_,
+        std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+    result_stmts.push_back(outer_for);
+    final_return_vars = outer_return_vars;
+
+    // Remainder
+    auto rem_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkRemainderQualifier(), "idx", loop_name.version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+    std::vector<IterArgPtr> rem_iter_args;
+    std::vector<VarPtr> rem_return_vars;
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      const auto& ia = op->iter_args_[i];
+      auto ia_name = auto_name::Parse(ia->name_hint_);
+      auto rem_ia = std::make_shared<IterArg>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "iter",
+                               ia_name.version),
+          ia->GetType(), ExprPtr(final_return_vars[i]), ia->span_);
+      auto rem_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkRemainderQualifier(), "rv",
+                               ia_name.version),
+          ia->GetType(), ia->span_);
+      rem_iter_args.push_back(rem_ia);
+      rem_return_vars.push_back(rem_rv);
+      substitution_map_[ia.get()] = rem_ia;
+    }
+
+    // i = start + (n_full * C + i_rem) * step
+    substitution_map_[loop_var_key] =
+        MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(n_full, chunk_expr), rem_var), step_expr));
+
+    auto prev_def_subs = FreshenBodyDefVars(op->body_);
+    auto rem_body = VisitStmt(op->body_);
+    RestoreSubstitutions(prev_def_subs);
+
+    auto rem_for = std::make_shared<ForStmt>(
+        rem_var, zero, n_rem, one, rem_iter_args, rem_body, rem_return_vars, sp, op->kind_, std::nullopt,
+        ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
+    result_stmts.push_back(rem_for);
+    final_return_vars = rem_return_vars;
+
+    INTERNAL_CHECK(op->return_vars_.size() == final_return_vars.size())
+        << "SplitChunkedLoops produced mismatched return vars";
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      substitution_map_[op->return_vars_[i].get()] = final_return_vars[i];
+    }
+    RestoreSubstitution(prev_loop_sub);
+    RestoreSubstitutions(prev_ia_subs);
+    return MakeResultStmt(result_stmts, sp);
   }
 };
 
