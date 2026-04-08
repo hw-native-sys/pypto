@@ -1,0 +1,642 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Tests for python/pypto/jit/specializer.py — AST transformation correctness."""
+
+import ast
+import textwrap
+
+import pypto.language as pl
+import pytest
+from pypto.jit.specializer import (
+    SpecializeContext,
+    TensorMeta,
+    _BodyTransformer,
+    _classify_params,
+    _collect_dynamic_dims,
+    _collect_dynvar_names,
+    specialize,
+)
+from pypto.pypto_core import DataType, ir
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_func(src: str) -> ast.FunctionDef:
+    src = textwrap.dedent(src)
+    tree = ast.parse(src)
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+
+
+def _make_ctx(
+    func_name: str = "kernel",
+    source: str = "",
+    func_type: str = "orchestration",
+    param_names: list[str] | None = None,
+    tensor_meta: dict[str, TensorMeta] | None = None,
+    scalar_values: dict | None = None,
+    scalar_dtypes: dict | None = None,
+    dynamic_dims: set | None = None,
+    dep_names: list[str] | None = None,
+) -> SpecializeContext:
+    return SpecializeContext(
+        func_name=func_name,
+        source=source,
+        func_type=func_type,
+        level=None,
+        param_names=param_names or [],
+        tensor_meta=tensor_meta or {},
+        scalar_values=scalar_values or {},
+        scalar_dtypes=scalar_dtypes or {},
+        dynamic_dims=dynamic_dims or set(),
+        dep_names=dep_names or [],
+    )
+
+
+# ---------------------------------------------------------------------------
+# _collect_dynamic_dims
+# ---------------------------------------------------------------------------
+
+
+class TestCollectDynamicDims:
+    def test_single_bind_dynamic(self):
+        src = textwrap.dedent("""
+            def f(a, b):
+                M = pl.dynamic("M")
+                a.bind_dynamic(0, M)
+        """)
+        func_def = _parse_func(src)
+        dims = _collect_dynamic_dims(func_def, {"a", "b"})
+        assert ("a", 0) in dims
+
+    def test_multiple_bind_dynamic(self):
+        src = textwrap.dedent("""
+            def f(a, c):
+                M = pl.dynamic("M")
+                a.bind_dynamic(0, M)
+                c.bind_dynamic(0, M)
+        """)
+        func_def = _parse_func(src)
+        dims = _collect_dynamic_dims(func_def, {"a", "c"})
+        assert ("a", 0) in dims
+        assert ("c", 0) in dims
+
+    def test_no_bind_dynamic(self):
+        src = textwrap.dedent("""
+            def f(a):
+                x = a.shape[0]
+        """)
+        func_def = _parse_func(src)
+        dims = _collect_dynamic_dims(func_def, {"a"})
+        assert len(dims) == 0
+
+    def test_non_param_ignored(self):
+        src = textwrap.dedent("""
+            def f(a):
+                tmp.bind_dynamic(0, M)
+        """)
+        func_def = _parse_func(src)
+        dims = _collect_dynamic_dims(func_def, {"a"})
+        assert len(dims) == 0
+
+
+# ---------------------------------------------------------------------------
+# _collect_dynvar_names
+# ---------------------------------------------------------------------------
+
+
+class TestCollectDynvarNames:
+    def test_single(self):
+        src = textwrap.dedent("""
+            def f(a):
+                M = pl.dynamic("M")
+        """)
+        func_def = _parse_func(src)
+        names = _collect_dynvar_names(func_def)
+        assert "M" in names
+
+    def test_multiple(self):
+        src = textwrap.dedent("""
+            def f(a):
+                M = pl.dynamic("M")
+                N = pl.dynamic("N")
+        """)
+        func_def = _parse_func(src)
+        names = _collect_dynvar_names(func_def)
+        assert {"M", "N"} <= names.keys()
+
+    def test_no_dynvar(self):
+        src = textwrap.dedent("""
+            def f(a):
+                x = 1
+        """)
+        func_def = _parse_func(src)
+        names = _collect_dynvar_names(func_def)
+        assert len(names) == 0
+
+    def test_literal_preserved_when_var_differs(self):
+        """rows = pl.dynamic("M") should map rows → "M", not rows → "rows"."""
+        src = textwrap.dedent("""
+            def f(a):
+                rows = pl.dynamic("M")
+        """)
+        func_def = _parse_func(src)
+        names = _collect_dynvar_names(func_def)
+        assert names["rows"] == "M"
+
+    def test_literal_fallback_when_no_string_arg(self):
+        """pl.dynamic() with no string arg should fall back to variable name."""
+        src = textwrap.dedent("""
+            def f(a):
+                M = pl.dynamic()
+        """)
+        func_def = _parse_func(src)
+        names = _collect_dynvar_names(func_def)
+        assert names["M"] == "M"
+
+
+# ---------------------------------------------------------------------------
+# _classify_params
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyParams:
+    def test_tensor_params(self):
+        src = textwrap.dedent("""
+            def f(a: pl.Tensor, b: pl.Tensor):
+                pass
+        """)
+        func_def = _parse_func(src)
+        out_params, tensor_params, scalar_strs = _classify_params(func_def)
+        assert "a" in tensor_params
+        assert "b" in tensor_params
+        assert len(out_params) == 0
+
+    def test_out_param(self):
+        src = textwrap.dedent("""
+            def f(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        out_params, tensor_params, scalar_strs = _classify_params(func_def)
+        assert "c" in out_params
+        assert "c" in tensor_params
+        assert "a" not in out_params
+
+    def test_out_param_subscripted_tensor(self):
+        """Out[pl.Tensor[[64], pl.FP32]] should still be recognised as Out+tensor."""
+        src = textwrap.dedent("""
+            def f(c: pl.Out[pl.Tensor[[64], pl.FP32]]):
+                pass
+        """)
+        func_def = _parse_func(src)
+        out_params, tensor_params, _ = _classify_params(func_def)
+        assert "c" in out_params
+        assert "c" in tensor_params
+
+    def test_scalar_bare_dtype(self):
+        src = textwrap.dedent("""
+            def f(BLOCK_M: pl.INDEX, alpha: pl.FP32):
+                pass
+        """)
+        func_def = _parse_func(src)
+        _, _, scalar_strs = _classify_params(func_def)
+        assert "BLOCK_M" in scalar_strs
+        assert "alpha" in scalar_strs
+
+
+# ---------------------------------------------------------------------------
+# _BodyTransformer
+# ---------------------------------------------------------------------------
+
+
+class TestBodyTransformer:
+    def _transform(self, src: str, tensor_meta: dict, dynamic_dims=None, dep_names=None):
+        src = textwrap.dedent(src)
+        tree = ast.parse(src)
+        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        transformer = _BodyTransformer(
+            tensor_meta=tensor_meta,
+            scalar_values={},
+            dynamic_dims=dynamic_dims or set(),
+            dynvar_python_names={},
+            dep_names=dep_names or set(),
+            dynvar_var_names=set(),
+        )
+        new_body = []
+        for stmt in func_def.body:
+            result = transformer.visit(stmt)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                new_body.extend(result)
+            else:
+                new_body.append(result)
+        new_func = ast.FunctionDef(
+            name="f",
+            args=func_def.args,
+            body=new_body or [ast.Pass()],
+            decorator_list=[],
+            returns=None,
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(new_func)
+        return ast.unparse(new_func)
+
+    def test_bind_dynamic_removed(self):
+        src = """
+            def f(a):
+                a.bind_dynamic(0, M)
+                x = 1
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((128, 128), DataType.FP32)})
+        assert "bind_dynamic" not in out
+
+    def test_pl_dynamic_assignment_removed(self):
+        src = """
+            def f(a):
+                M = pl.dynamic("M")
+                x = 1
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((128, 128), DataType.FP32)})
+        assert "pl.dynamic" not in out
+        assert "x = 1" in out
+
+    def test_shape_attribute_replaced(self):
+        src = """
+            def f(a):
+                s = a.shape
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((128, 64), DataType.FP32)})
+        assert "(128, 64)" in out
+
+    def test_shape_subscript_replaced(self):
+        src = """
+            def f(a):
+                k = a.shape[1]
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((256, 128), DataType.FP32)})
+        assert "128" in out
+        assert "a.shape" not in out
+
+    def test_shape_unpack_expanded(self):
+        src = """
+            def f(a):
+                M, N = a.shape
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((128, 64), DataType.FP32)})
+        assert "M = 128" in out
+        assert "N = 64" in out
+
+    def test_dtype_replaced(self):
+        src = """
+            def f(a):
+                d = a.dtype
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((8, 8), DataType.FP32)})
+        assert "pl.FP32" in out
+        assert "a.dtype" not in out
+
+    def test_dep_call_rewritten(self):
+        src = """
+            def f(a):
+                c = sub_kernel(a)
+        """
+        out = self._transform(
+            src,
+            tensor_meta={"a": TensorMeta((8,), DataType.FP32)},
+            dep_names={"sub_kernel"},
+        )
+        assert "self.sub_kernel" in out
+
+    def test_non_dep_call_not_rewritten(self):
+        src = """
+            def f(a):
+                c = pl.add(a, a)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((8,), DataType.FP32)})
+        assert "self.pl.add" not in out
+        assert "pl.add" in out
+
+    def _transform_with_scalars(self, src: str, tensor_meta: dict, scalar_values: dict):
+        src = textwrap.dedent(src)
+        tree = ast.parse(src)
+        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        transformer = _BodyTransformer(
+            tensor_meta=tensor_meta,
+            scalar_values=scalar_values,
+            dynamic_dims=set(),
+            dynvar_python_names={},
+            dep_names=set(),
+            dynvar_var_names=set(),
+        )
+        new_body = []
+        for stmt in func_def.body:
+            result = transformer.visit(stmt)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                new_body.extend(result)
+            else:
+                new_body.append(result)
+        new_func = ast.FunctionDef(
+            name="f",
+            args=func_def.args,
+            body=new_body or [ast.Pass()],
+            decorator_list=[],
+            returns=None,
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(new_func)
+        return ast.unparse(new_func)
+
+    def test_scalar_param_substituted_in_body(self):
+        """Scalar param references in the body should be replaced by their concrete value."""
+        src = """
+            def f(a: pl.Tensor, BLOCK_M: pl.INDEX):
+                tile = pl.load(a, [0], [BLOCK_M])
+        """
+        out = self._transform_with_scalars(
+            src,
+            tensor_meta={"a": TensorMeta((256,), DataType.FP32)},
+            scalar_values={"BLOCK_M": 64},
+        )
+        assert "64" in out
+        # Substitution happens in the body; parameter name stays in the signature
+        assert "pl.load(a, [0], [64])" in out
+
+
+# ---------------------------------------------------------------------------
+# Specializer (source generation)
+# ---------------------------------------------------------------------------
+
+
+class TestSpecializer:
+    def _specialize_simple(
+        self,
+        func_source: str,
+        param_names: list[str],
+        tensor_meta: dict[str, TensorMeta],
+        func_type: str = "orchestration",
+        dynamic_dims: set | None = None,
+        dep_names: list[str] | None = None,
+    ) -> str:
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=textwrap.dedent(func_source),
+            func_type=func_type,
+            param_names=param_names,
+            tensor_meta=tensor_meta,
+            dynamic_dims=dynamic_dims or set(),
+            dep_names=dep_names or [],
+        )
+        return specialize("_TestClass", [ctx], {})
+
+    def test_generated_has_pl_program(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+        )
+        assert "@pl.program" in out
+        assert "class _TestClass" in out
+
+    def test_generated_has_pl_function(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+        )
+        assert "@pl.function" in out
+
+    def test_tensor_annotation_filled(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((64, 32), DataType.FP16),
+                "c": TensorMeta((64, 32), DataType.FP16),
+            },
+        )
+        assert "pl.Tensor[[64, 32], pl.FP16]" in out
+
+    def test_out_annotation_filled(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((64, 32), DataType.FP16),
+                "c": TensorMeta((64, 32), DataType.FP16),
+            },
+        )
+        assert "pl.Out[pl.Tensor[[64, 32], pl.FP16]]" in out
+
+    def test_dynvar_emitted_at_module_level(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                M = pl.dynamic("M")
+                a.bind_dynamic(0, M)
+                c.bind_dynamic(0, M)
+                return c
+        """
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=textwrap.dedent(src),
+            func_type="orchestration",
+            param_names=["a", "c"],
+            tensor_meta={
+                "a": TensorMeta((256, 128), DataType.FP32),
+                "c": TensorMeta((256, 128), DataType.FP32),
+            },
+            dynamic_dims={("a", 0), ("c", 0)},
+        )
+        dynvar_bindings = {"a__0": "M", "c__0": "M"}
+        out = specialize("_Dyn", [ctx], dynvar_bindings)
+        # DynVar declaration should appear before the class
+        class_pos = out.index("class _Dyn")
+        dv_pos = out.index('pl.dynamic("M")')
+        assert dv_pos < class_pos
+
+    def test_bind_dynamic_removed_from_body(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                M = pl.dynamic("M")
+                a.bind_dynamic(0, M)
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+        )
+        assert "bind_dynamic" not in out
+
+    def test_shape_constants_inlined(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                M, N = a.shape
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((32, 16), DataType.FP32),
+                "c": TensorMeta((32, 16), DataType.FP32),
+            },
+        )
+        assert "M = 32" in out
+        assert "N = 16" in out
+
+    def test_import_line_present(self):
+        src = """
+            def kernel(a: pl.Tensor):
+                return a
+        """
+        out = self._specialize_simple(
+            src,
+            ["a"],
+            {"a": TensorMeta((8,), DataType.FP32)},
+        )
+        assert "import pypto.language as pl" in out
+
+    def test_incore_decorator_generated(self):
+        src = """
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "c"],
+            {
+                "a": TensorMeta((16, 16), DataType.FP32),
+                "c": TensorMeta((16, 16), DataType.FP32),
+            },
+            func_type="incore",
+        )
+        assert "pl.FunctionType.InCore" in out
+
+
+# ---------------------------------------------------------------------------
+# Integration: specialize → parseable by pl.parse()
+# ---------------------------------------------------------------------------
+
+
+class TestSpecializerIntegration:
+    """Verify that specializer output can be parsed by pl.parse()."""
+
+    def test_style_a_parseable(self):
+        src = textwrap.dedent("""
+            def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    M, N = a.shape
+                    tile_a = pl.load(a, [0, 0], [M, N])
+                    tile_b = pl.load(b, [0, 0], [M, N])
+                    tile_c = pl.add(tile_a, tile_b)
+                    pl.store(tile_c, [0, 0], c)
+                return c
+        """)
+
+        ctx = _make_ctx(
+            func_name="add_kernel",
+            source=src,
+            func_type="orchestration",
+            param_names=["a", "b", "c"],
+            tensor_meta={
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "b": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+        )
+        generated = specialize("_JitAddKernel", [ctx], {})
+        prog = pl.parse(generated)
+
+        assert isinstance(prog, ir.Program)
+
+    def test_style_a_structural_equal_to_equivalent_program(self):
+        """Generated JIT program should be structurally equal to a hand-written @pl.program."""
+
+        # Hand-written equivalent
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    M = 128
+                    N = 128
+                    tile_a = pl.load(a, [0, 0], [M, N])
+                    tile_b = pl.load(b, [0, 0], [M, N])
+                    tile_c = pl.add(tile_a, tile_b)
+                    pl.store(tile_c, [0, 0], c)
+                return c
+
+        src = textwrap.dedent("""
+            def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    M, N = a.shape
+                    tile_a = pl.load(a, [0, 0], [M, N])
+                    tile_b = pl.load(b, [0, 0], [M, N])
+                    tile_c = pl.add(tile_a, tile_b)
+                    pl.store(tile_c, [0, 0], c)
+                return c
+        """)
+
+        ctx = _make_ctx(
+            func_name="add_kernel",
+            source=src,
+            func_type="orchestration",
+            param_names=["a", "b", "c"],
+            tensor_meta={
+                "a": TensorMeta((128, 128), DataType.FP32),
+                "b": TensorMeta((128, 128), DataType.FP32),
+                "c": TensorMeta((128, 128), DataType.FP32),
+            },
+        )
+        generated_src = specialize("add_kernel", [ctx], {})
+        got = pl.parse(generated_src)
+
+        ir.assert_structural_equal(got, Expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
