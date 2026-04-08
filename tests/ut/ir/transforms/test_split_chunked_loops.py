@@ -585,5 +585,154 @@ class TestNestedChunking:
             )
 
 
+class TestDynamicChunking:
+    """Tests for chunked loops where start/stop are dynamic (runtime) scalars."""
+
+    @staticmethod
+    def _split_and_simplify(program):
+        """Run prerequisite passes, split chunked loops, and simplify expressions."""
+        prepared = _prepare_for_split(program)
+        split = passes.split_chunked_loops()(prepared)
+        return passes.simplify_expr()(split)
+
+    def test_dynamic_stop(self):
+        """Dynamic stop: outer+inner+remainder with FloorDiv/FloorMod bounds."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, n, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_out, (x_outer,) in pl.range(0, pl.max(n_0, 0) // 4, 1, init_values=(x_0,)):
+                        for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                    for i_rem, (x_rem,) in pl.range(0, pl.max(n_0, 0) % 4, 1, init_values=(x_outer_rv,)):
+                        x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
+                        x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
+                return x_rem_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_dynamic_start_and_stop(self):
+        """Both start and stop are dynamic."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                lo: pl.Scalar[pl.INDEX],
+                hi: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(lo, hi, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x_0: pl.Tensor[[64], pl.FP32],
+                lo_0: pl.Scalar[pl.INDEX],
+                hi_0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_out, (x_outer,) in pl.range(0, pl.max(hi_0 - lo_0, 0) // 4, 1, init_values=(x_0,)):
+                        for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                    for i_rem, (x_rem,) in pl.range(
+                        0, pl.max(hi_0 - lo_0, 0) % 4, 1, init_values=(x_outer_rv,)
+                    ):
+                        x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
+                        x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
+                return x_rem_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_dynamic_stop_parallel(self):
+        """Dynamic stop with pl.parallel should also work."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, n, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_out, (x_outer,) in pl.parallel(0, pl.max(n_0, 0) // 4, 1, init_values=(x_0,)):
+                        for i_in, (x_inner,) in pl.parallel(0, 4, 1, init_values=(x_outer,)):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                    for i_rem, (x_rem,) in pl.parallel(0, pl.max(n_0, 0) % 4, 1, init_values=(x_outer_rv,)):
+                        x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
+                        x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
+                return x_rem_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_static_still_works(self):
+        """Regression: static bounds should continue to produce same IR as before."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.range(0, 10, 1, chunk=5):
+                        x = pl.add(x, 1.0)
+                return x
+
+        Before = _prepare_for_split(Input)
+        After = passes.split_chunked_loops()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
+                            x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
+                return x_iter_1_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
