@@ -133,7 +133,7 @@ Defines the tile-level instruction set for the target hardware. Provides C++ hea
 - **PTOAS** — the C++ code PTOAS generates calls pto-isa instructions
 - **simpler** — clones pto-isa headers at first build for runtime compilation
 
-**Interface:** C++ header-only library. Downstream consumers `#include` pto-isa headers and link against hardware-specific implementations.
+**Interface:** C++ header library defining the instruction API. Downstream consumers `#include` pto-isa headers; the hardware vendor provides the target-specific implementations that back these headers.
 
 ### simpler — Task Runtime
 
@@ -159,18 +159,18 @@ Each repo boundary has a well-defined interface:
 ```text
 pypto-lib ──[ Python API: pypto.language / pypto.ir ]──► pypto
      pypto ──[ .pto files: PTO-ISA MLIR dialect     ]──► PTOAS
-     PTOAS ──[ C++ #include: tile instruction hdrs  ]──► pto-isa
-     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
+   pto-isa ──[ C++ #include: tile instruction hdrs  ]──► PTOAS
    pto-isa ──[ C++ #include: ISA headers            ]──► simpler
+     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
 ```
 
-| Border | Format | Who produces | Who consumes |
+| Border | Format | Who provides | Who consumes |
 | ------ | ------ | ------------ | ------------ |
 | pypto-lib → pypto | Python imports | pypto-lib | pypto compiler |
 | pypto → PTOAS | `.pto` MLIR files | pypto PTO codegen | PTOAS parser |
-| pypto → simpler | Orchestration C++ | pypto orchestration codegen | simpler runtime |
-| PTOAS → pto-isa | C++ `#include` | PTOAS codegen | pto-isa headers |
+| pto-isa → PTOAS | C++ `#include` | pto-isa headers | PTOAS codegen |
 | pto-isa → simpler | C++ `#include` | pto-isa headers | simpler build |
+| pypto → simpler | Orchestration C++ | pypto orchestration codegen | simpler runtime |
 
 ## Cross-Repo Development
 

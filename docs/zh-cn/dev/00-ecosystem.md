@@ -133,7 +133,7 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 - **PTOAS** — PTOAS 生成的 C++ 代码调用 pto-isa 指令
 - **simpler** — 首次构建时克隆 pto-isa 头文件用于运行时编译
 
-**接口：** C++ 头文件库。下游消费者 `#include` pto-isa 头文件并链接硬件特定实现。
+**接口：** 定义指令 API 的 C++ 头文件库。下游消费者 `#include` pto-isa 头文件；硬件厂商提供支撑这些头文件的目标特定实现。
 
 ### simpler — 任务运行时
 
@@ -159,18 +159,18 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 ```text
 pypto-lib ──[ Python API: pypto.language / pypto.ir ]──► pypto
      pypto ──[ .pto files: PTO-ISA MLIR dialect     ]──► PTOAS
-     PTOAS ──[ C++ #include: tile instruction hdrs  ]──► pto-isa
-     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
+   pto-isa ──[ C++ #include: tile instruction hdrs  ]──► PTOAS
    pto-isa ──[ C++ #include: ISA headers            ]──► simpler
+     pypto ──[ C++ API: PTO2 runtime API calls      ]──► simpler
 ```
 
-| 边界 | 格式 | 生产者 | 消费者 |
+| 边界 | 格式 | 提供者 | 消费者 |
 | ---- | ---- | ------ | ------ |
 | pypto-lib → pypto | Python imports | pypto-lib | pypto 编译器 |
 | pypto → PTOAS | `.pto` MLIR 文件 | pypto PTO codegen | PTOAS 解析器 |
-| pypto → simpler | Orchestration C++ | pypto orchestration codegen | simpler 运行时 |
-| PTOAS → pto-isa | C++ `#include` | PTOAS codegen | pto-isa 头文件 |
+| pto-isa → PTOAS | C++ `#include` | pto-isa 头文件 | PTOAS codegen |
 | pto-isa → simpler | C++ `#include` | pto-isa 头文件 | simpler 构建 |
+| pypto → simpler | Orchestration C++ | pypto orchestration codegen | simpler 运行时 |
 
 ## 跨仓库开发
 
