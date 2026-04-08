@@ -7,12 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for the SimplifyExpr pass.
+"""Tests for the Simplify pass.
 
-This pass simplifies all scalar expressions in the IR using algebraic rewrite
-rules and bound analysis. IRMutatorWithAnalyzer binds ForStmt loop variables
-to their ranges, and ConstraintContext propagates if-branch conditions,
-enabling range-aware simplification.
+This pass simplifies expressions and statements in the IR using algebraic
+rewrite rules and bound analysis. IRMutatorWithAnalyzer binds ForStmt loop
+variables to their ranges, and ConstraintContext propagates if-branch
+conditions, enabling range-aware simplification.
 
 Tests use the @pl.program DSL where possible. Constant folding tests use
 direct IR construction because Python eagerly evaluates constant expressions
@@ -54,15 +54,15 @@ def make_program(body_stmts):
 
 class TestPassMetadata:
     def test_pass_name(self):
-        p = passes.simplify_expr()
-        assert p.get_name() == "SimplifyExpr"
+        p = passes.simplify()
+        assert p.get_name() == "Simplify"
 
     def test_pass_no_required_properties(self):
-        p = passes.simplify_expr()
+        p = passes.simplify()
         assert p.get_required_properties().empty()
 
     def test_pass_no_produced_properties(self):
-        p = passes.simplify_expr()
+        p = passes.simplify()
         assert p.get_produced_properties().empty()
 
 
@@ -89,7 +89,7 @@ class TestIdentitySimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_zero_add(self):
@@ -109,7 +109,7 @@ class TestIdentitySimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_mul_one(self):
@@ -129,7 +129,7 @@ class TestIdentitySimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_sub_zero(self):
@@ -149,7 +149,7 @@ class TestIdentitySimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
 
@@ -168,7 +168,7 @@ class TestConstantFolding:
         assign_exp = ir.AssignStmt(y, ci(7), S)
         expected = make_program([assign_exp])
 
-        after = passes.simplify_expr()(before)
+        after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
 
     def test_mul_constants(self):
@@ -180,7 +180,7 @@ class TestConstantFolding:
         assign_exp = ir.AssignStmt(y, ci(12), S)
         expected = make_program([assign_exp])
 
-        after = passes.simplify_expr()(before)
+        after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
 
     def test_nested_constant_expr(self):
@@ -194,7 +194,7 @@ class TestConstantFolding:
         assign_exp = ir.AssignStmt(y, ci(20), S)
         expected = make_program([assign_exp])
 
-        after = passes.simplify_expr()(before)
+        after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
 
 
@@ -221,7 +221,7 @@ class TestRangeAwareSimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_floormod_by_range_bound(self):
@@ -241,7 +241,7 @@ class TestRangeAwareSimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_floordiv_not_simplifiable(self):
@@ -254,7 +254,7 @@ class TestRangeAwareSimplification:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i // 4
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
 
     def test_nested_loops(self):
@@ -276,7 +276,7 @@ class TestRangeAwareSimplification:
                     for j in pl.range(4):
                         _y: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
 
@@ -305,7 +305,7 @@ class TestIfBranchConstraint:
                     if i < 4:
                         _y: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_else_branch_uses_negated_condition(self):
@@ -332,7 +332,7 @@ class TestIfBranchConstraint:
                     else:
                         _y: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_nested_if_in_loop(self):
@@ -358,7 +358,7 @@ class TestIfBranchConstraint:
                     else:
                         _z: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
 
@@ -387,7 +387,7 @@ class TestControlFlow:
                     _y: pl.Scalar[pl.INDEX] = i
                     break
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_continue_stmt_passthrough(self):
@@ -409,7 +409,7 @@ class TestControlFlow:
                     _y: pl.Scalar[pl.INDEX] = i
                     continue
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_scope_stmt_traversal(self):
@@ -431,7 +431,7 @@ class TestControlFlow:
                     with pl.incore():
                         _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_while_condition_simplified(self):
@@ -453,7 +453,7 @@ class TestControlFlow:
                 while i < n:
                     i = i + 1
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_sequential_stmts(self):
@@ -475,7 +475,7 @@ class TestControlFlow:
                     _y: pl.Scalar[pl.INDEX] = i
                     _z: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_if_with_break_and_continue(self):
@@ -505,7 +505,7 @@ class TestControlFlow:
                         _y: pl.Scalar[pl.INDEX] = i
                         continue
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_for_loop_with_scope_and_if(self):
@@ -529,7 +529,7 @@ class TestControlFlow:
                         if i < 4:
                             _y: pl.Scalar[pl.INDEX] = 0
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
 
@@ -549,7 +549,7 @@ class TestNoChange:
                 for i in pl.range(8):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
 
     def test_symbolic_loop_bounds(self):
@@ -569,7 +569,7 @@ class TestNoChange:
                 for i in pl.range(n):
                     _y: pl.Scalar[pl.INDEX] = i
 
-        after = passes.simplify_expr()(Before)
+        after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
     def test_empty_function(self):
@@ -578,7 +578,7 @@ class TestNoChange:
         func = ir.Function("main", [], [], body, S)
         before = ir.Program([func], "test", S)
 
-        after = passes.simplify_expr()(before)
+        after = passes.simplify()(before)
         ir.assert_structural_equal(after, before)
 
 

@@ -45,9 +45,9 @@ namespace {
 /// IRMutator's child visiting uses qualified calls (ExprFunctor::VisitExpr)
 /// that bypass VisitExpr overrides. Analyzer::Simplify handles deep
 /// recursive simplification of the entire expression tree.
-class SimplifyExprMutator : public arith::IRMutatorWithAnalyzer {
+class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
-  explicit SimplifyExprMutator(arith::Analyzer* analyzer) : IRMutatorWithAnalyzer(analyzer) {}
+  explicit SimplifyMutator(arith::Analyzer* analyzer) : IRMutatorWithAnalyzer(analyzer) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = analyzer_->Simplify(op->value_);
@@ -164,9 +164,9 @@ class SimplifyExprMutator : public arith::IRMutatorWithAnalyzer {
   }
 };
 
-FunctionPtr TransformSimplifyExpr(const FunctionPtr& func) {
+FunctionPtr TransformSimplify(const FunctionPtr& func) {
   auto analyzer = std::make_shared<arith::Analyzer>();
-  SimplifyExprMutator mutator(analyzer.get());
+  SimplifyMutator mutator(analyzer.get());
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;
   return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
@@ -178,9 +178,7 @@ FunctionPtr TransformSimplifyExpr(const FunctionPtr& func) {
 
 namespace pass {
 
-Pass SimplifyExpr() {
-  return CreateFunctionPass(TransformSimplifyExpr, "SimplifyExpr", kSimplifyExprProperties);
-}
+Pass Simplify() { return CreateFunctionPass(TransformSimplify, "Simplify", kSimplifyProperties); }
 
 }  // namespace pass
 

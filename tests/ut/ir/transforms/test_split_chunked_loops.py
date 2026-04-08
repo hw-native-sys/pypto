@@ -593,7 +593,7 @@ class TestDynamicChunking:
         """Run prerequisite passes, split chunked loops, and simplify expressions."""
         prepared = _prepare_for_split(program)
         split = passes.split_chunked_loops()(prepared)
-        return passes.simplify_expr()(split)
+        return passes.simplify()(split)
 
     def test_dynamic_stop(self):
         """Dynamic stop: outer+inner+remainder with FloorDiv/FloorMod bounds."""

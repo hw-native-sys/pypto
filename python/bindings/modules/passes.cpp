@@ -345,8 +345,9 @@ void BindPass(nb::module_& m) {
   passes.def("split_vector_kernel", &pass::SplitVectorKernel,
              "Create a pass that splits vector kernels based on SplitMode "
              "(adjusts tpush/tpop split, halves tpop shapes, adjusts store offsets)");
-  passes.def("simplify_expr", &pass::SimplifyExpr,
-             "Create a pass that simplifies scalar expressions using algebraic rules and bound analysis");
+  passes.def(
+      "simplify", &pass::Simplify,
+      "Create a pass that simplifies expressions and statements using algebraic rules and bound analysis");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,

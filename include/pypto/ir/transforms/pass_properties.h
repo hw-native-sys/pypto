@@ -58,9 +58,9 @@ inline const PassProperties kFlattenCallExprProperties{
 inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
 
-// -- Expression simplification pass -------------------------------------------
+// -- Simplification pass ------------------------------------------------------
 
-inline const PassProperties kSimplifyExprProperties{};
+inline const PassProperties kSimplifyProperties{};
 
 // -- Outlining pass -----------------------------------------------------------
 

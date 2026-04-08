@@ -357,8 +357,8 @@ def expand_mixed_kernel() -> Pass:
 def split_vector_kernel() -> Pass:
     """Create a pass that splits vector kernels based on SplitMode."""
 
-def simplify_expr() -> Pass:
-    """Create a pass that simplifies scalar expressions using algebraic rules and bound analysis."""
+def simplify() -> Pass:
+    """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
@@ -455,7 +455,7 @@ __all__ = [
     "infer_tile_memory_space",
     "expand_mixed_kernel",
     "split_vector_kernel",
-    "simplify_expr",
+    "simplify",
     "flatten_call_expr",
     "normalize_stmt_structure",
     "NestedCallErrorType",

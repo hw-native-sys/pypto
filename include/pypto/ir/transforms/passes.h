@@ -355,13 +355,14 @@ Pass SplitVectorKernel();
 Pass RunVerifier(const IRPropertySet& properties);
 
 /**
- * @brief Simplify all scalar expressions in the program
+ * @brief Simplify scalar expressions and statements in the program
  *
- * Uses algebraic rewrite rules and bound analysis to reduce expression complexity.
+ * Uses algebraic rewrite rules and bound analysis to reduce complexity.
  * Automatically binds ForStmt loop variables to their iteration ranges for
  * range-aware simplification (e.g., i // 8 == 0 when i is in [0, 8)).
+ * Propagates if-branch constraints for tighter bounds in then/else bodies.
  */
-Pass SimplifyExpr();
+Pass Simplify();
 
 /**
  * @brief Create a pass that flattens nested call expressions
