@@ -870,10 +870,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << GenerateConfigFunction(expected_arg_count);
 
   oss << "__attribute__((visibility(\"default\")))\n";
-  oss << "void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args, "
-         "int orch_thread_num, int orch_thread_index) {\n";
-  oss << "    (void)orch_thread_num;\n";
-  oss << "    (void)orch_thread_index;\n\n";
+  oss << "void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {\n";
 
   oss << "    // External tensors\n";
   int orch_idx = 0;
