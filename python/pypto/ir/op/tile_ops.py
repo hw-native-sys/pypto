@@ -1275,6 +1275,28 @@ def matmul_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> C
     return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], {}, actual_span)
 
 
+def batch_matmul(
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Batch matrix multiplication of two tiles with broadcasting.
+
+    For inputs with shape [...batch_dims, M, K] and [...batch_dims, K, N],
+    the output has shape [...broadcast_batch_dims, M, N].
+
+    Args:
+        lhs: Left-hand side tile (TileType, at least 2D)
+        rhs: Right-hand side tile (TileType, at least 2D)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for batch matrix multiplication
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.batch_matmul", [lhs, rhs], {}, actual_span)
+
+
 def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 
@@ -1834,21 +1856,32 @@ def reshape(
     return _ir_core.create_op_call("tile.reshape", args, {}, actual_span)
 
 
-def transpose(tile: Expr, axis1: int, axis2: int, span: Span | None = None) -> Call:
+def transpose(tile: Expr, axis1: int | ConstInt, axis2: int | ConstInt, span: Span | None = None) -> Call:
     """Transpose tile by swapping two axes.
 
     Args:
         tile: Input tile expression
-        axis1: First axis to swap (supports negative indexing)
-        axis2: Second axis to swap (supports negative indexing)
+        axis1: First axis to swap as an int or ConstInt (supports negative indexing)
+        axis2: Second axis to swap as an int or ConstInt (supports negative indexing)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for tile transpose
     """
     actual_span = _get_span_or_capture(span)
-    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    if isinstance(axis1, ConstInt):
+        axis1_expr = axis1
+    elif isinstance(axis1, int):
+        axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
+    else:
+        raise TypeError(f"axis1 must be int or ConstInt, got {type(axis1)}")
+
+    if isinstance(axis2, ConstInt):
+        axis2_expr = axis2
+    elif isinstance(axis2, int):
+        axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    else:
+        raise TypeError(f"axis2 must be int or ConstInt, got {type(axis2)}")
 
     args = [tile, axis1_expr, axis2_expr]
 

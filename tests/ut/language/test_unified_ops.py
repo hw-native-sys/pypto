@@ -520,6 +520,33 @@ class TestUnifiedBlockDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_batch_matmul(self):
+        @pl.function
+        def unified(
+            t1: pl.Tensor[[2, 64, 64], pl.FP16],
+            t2: pl.Tensor[[2, 64, 64], pl.FP16],
+            out: pl.Tensor[[2, 64, 64], pl.FP16],
+        ) -> pl.Tensor[[2, 64, 64], pl.FP16]:
+            a: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            b: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            c: pl.Tile[[2, 64, 64], pl.FP32] = pl.batch_matmul(a, b)
+            result: pl.Tensor[[2, 64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t1: pl.Tensor[[2, 64, 64], pl.FP16],
+            t2: pl.Tensor[[2, 64, 64], pl.FP16],
+            out: pl.Tensor[[2, 64, 64], pl.FP16],
+        ) -> pl.Tensor[[2, 64, 64], pl.FP16]:
+            a: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            b: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            c: pl.Tile[[2, 64, 64], pl.FP32] = pl.tile.batch_matmul(a, b)
+            result: pl.Tensor[[2, 64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_row_sum(self):
         @pl.function
         def unified(

@@ -101,6 +101,19 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
 
   /**
+   * @brief Get the raw ptr SSA name for a tensor parameter
+   *
+   * Follows IterArg chains back to the original function parameter and returns
+   * its MLIR SSA name (e.g., "%arg0" of type !pto.ptr<dtype>).
+   * Use this when emitting pto.make_tensor_view which requires a ptr operand
+   * instead of the tensor_view SSA returned by GetVarName for store results.
+   *
+   * @param tensor Tensor variable (may be an IterArg from a loop)
+   * @return Raw ptr SSA name (e.g., "%arg0")
+   */
+  std::string GetTensorParamPtr(const ir::VarPtr& tensor);
+
+  /**
    * @brief Get or emit index constant
    *
    * @param val Constant value

@@ -110,6 +110,12 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+At the tile layer, `tile.batch_matmul` provides batched semantics for
+`TileType` operands. It accepts rank >= 2 tiles, broadcasts the leading batch
+dimensions, and keeps the same operand-only interface style as `tile.matmul`.
+If batch operands need transpose semantics, that is expressed explicitly with
+`tile.transpose(...)` on the inputs before later lowering to 2D `tile.matmul`.
+
 ## Python Usage
 
 ```python

@@ -1032,6 +1032,40 @@ std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
   return "";
 }
 
+std::string PTOCodegen::GetTensorParamPtr(const VarPtr& tensor_var) {
+  // Check if this var is a function parameter (tensor params are bound to %argN)
+  if (fs_.current_function) {
+    for (const auto& param : fs_.current_function->params_) {
+      if (GetVarKey(param) == GetVarKey(tensor_var)) {
+        return GetVarName(param);
+      }
+    }
+  }
+  // For IterArg, follow initValue_ chain to the original tensor parameter
+  if (auto iter_arg = As<ir::IterArg>(tensor_var)) {
+    if (auto init_var = As<ir::Var>(iter_arg->initValue_)) {
+      return GetTensorParamPtr(init_var);
+    }
+    if (auto init_iter = As<ir::IterArg>(iter_arg->initValue_)) {
+      return GetTensorParamPtr(init_iter);
+    }
+  }
+  // For store-result vars (e.g., ret0__store_0): find which function parameter
+  // shares the same tensor_view SSA, then return that parameter's ptr SSA.
+  std::string view = GetOrCreateTensorView(tensor_var);
+  if (fs_.current_function) {
+    for (const auto& param : fs_.current_function->params_) {
+      if (!As<TensorType>(param->GetType())) continue;
+      auto it = fs_.tensor_to_view.find(GetVarKey(param));
+      if (it != fs_.tensor_to_view.end() && it->second == view) {
+        return GetVarName(param);
+      }
+    }
+  }
+  INTERNAL_CHECK(false) << "Tensor param ptr not found for: " << tensor_var->name_hint_;
+  return "";
+}
+
 std::string PTOCodegen::GetIndexConstant(int64_t val) { return GetOrEmitIndexConstant(val); }
 
 std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& mlir_type) {
