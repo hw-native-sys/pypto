@@ -616,6 +616,7 @@ class TestConstraintContext:
         # After constraint: back to [0, +inf)
         bound = analyzer.const_int_bound(n)
         assert bound.min_value == 0
+        analyzer.unbind(n)
 
 
 # ============================================================================
