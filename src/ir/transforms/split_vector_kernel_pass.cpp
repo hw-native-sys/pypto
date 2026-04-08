@@ -388,6 +388,9 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         auto new_init = transform_utils::Substitute(ia->initValue_, var_replacements);
         auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
         var_replacements[ia.get()] = new_ia;
+        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim])};
+        tile_vars[ia.get()] = info;
+        tile_vars[new_ia.get()] = info;
         new_iter_args.push_back(new_ia);
       } else {
         new_iter_args.push_back(ia);

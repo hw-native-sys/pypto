@@ -282,6 +282,40 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_for_stmt_tile_iter_arg_store_inside_loop_offset_adjusted(self):
+        """ForStmt tile iter_arg: tile.store inside loop body on iter_arg has offset adjusted."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+                acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [16, 64], dtype=pl.FP32, value=0.0
+                )
+                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
+                    pl.store(acc_iter, [0, 0], out_0)
+                    new_acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, acc_iter)
+                    acc_rv = pl.yield_(new_acc)
+                out = pl.store(acc_rv, [0, 0], out_0)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
+                acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [8, 64], dtype=pl.FP32, value=0.0
+                )
+                for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
+                    pl.store(acc_iter, [0 + subblock_idx * 8, 0], out_0)
+                    new_acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, acc_iter)
+                    acc_rv = pl.yield_(new_acc)
+                out = pl.store(acc_rv, [0 + subblock_idx * 8, 0], out_0)
+                return out
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_aic_tpop_from_aiv_keeps_full_tile_shape(self):
         """AIC tpop_from_aiv must not halve tile shape (cube still consumes full operand)."""
 
