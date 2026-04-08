@@ -277,12 +277,48 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 
 /// Determine the fractal TileView for cross-core data transfer based on the
 /// boundary move destination memory space.
-/// Non-transpose 950: Left -> NZ, Right -> ZN, Mat/Vec -> preserve original.
+///
+/// Ascend950 (a5): hardware cross-core pipe carries data in fractal layout.
+///   Left -> NZ (col_major blayout, row_major slayout)
+///   Right -> ZN (row_major blayout, col_major slayout)
+///   Mat/Vec -> preserve original (already-final layout)
+///
+/// Ascend910B (a2a3): cross-core transfer goes through GM -> Mat, and Mat only
+/// supports NZ (col_major blayout, row_major slayout). All GM -> L1 transfers
+/// (Left, Right, Mat) use NZ; Vec preserves the original view.
+///   Left -> NZ (col_major blayout, row_major slayout)
+///   Right -> NZ (col_major blayout, row_major slayout)
+///   Mat -> NZ (col_major blayout, row_major slayout)
+///   Vec -> preserve original
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  INTERNAL_CHECK(backend::GetBackendType() == backend::BackendType::Ascend950)
-      << "BuildCrossCoreTransferView is only supported on Ascend950 backend";
+  auto backend_type = backend::GetBackendType();
+  INTERNAL_CHECK(backend_type == backend::BackendType::Ascend950 ||
+                 backend_type == backend::BackendType::Ascend910B)
+      << "BuildCrossCoreTransferView only supports Ascend950 and Ascend910B backends";
 
   TileView result = original_view;
+
+  // Ascend910B: all GM -> Mat transfers must be in NZ layout (hardware
+  // constraint), so Left/Right/Mat destinations all use NZ at the transfer
+  // boundary. The final Left/Right layout is resolved by a subsequent
+  // Mat -> Left/Right move (MTE1).
+  if (backend_type == backend::BackendType::Ascend910B) {
+    switch (dest_ms) {
+      case MemorySpace::Left:
+      case MemorySpace::Right:
+      case MemorySpace::Mat:
+        result.blayout = TileLayout::col_major;
+        result.slayout = TileLayout::row_major;
+        return result;
+      case MemorySpace::Vec:
+        return original_view;
+      default:
+        INTERNAL_UNREACHABLE << "cross-core move destination must be Vec, Mat, Left, or Right, got "
+                             << static_cast<int>(dest_ms);
+    }
+  }
+
+  // Ascend950: encode the fractal layout directly at the transfer boundary.
   switch (dest_ms) {
     case MemorySpace::Left:
       result.blayout = TileLayout::col_major;
@@ -339,7 +375,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         const auto& bm = bm_it->second;
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
-          // AIV V->C push: insert tile.move (tmov) to adapt fractal layout before tpush
+          // AIV V->C push: insert tile.move (tmov) to adapt the source into
+          // the required fractal layout before tpush.
+          // On Ascend950: Left -> NZ, Right -> ZN.
+          // On Ascend910B: both Left and Right -> NZ (Mat only supports NZ).
           if (side == CoreSide::AIV) {
             auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
             INTERNAL_CHECK(push_dest_type && push_dest_type->memory_space_.has_value() &&

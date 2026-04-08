@@ -26,7 +26,9 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 | Cube→Vector（如 Acc→Vec） | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
 | Vector→Cube（如 Vec→Mat/Left/Right） | `dest_var = tpop_from_aiv()` | `tile.move` 适配 fractal 布局，然后 `tpush_to_aic(adapted_tile)` |
 
-**Fractal TileView 布局（Ascend950）**：在 Ascend950 后端上，跨核传输 tile 会根据目标内存空间分配 fractal TileView：
+**Fractal TileView 布局**：跨核传输 tile 的 TileView 由 `BuildCrossCoreTransferView` 根据目标内存空间计算，不同后端的映射不同：
+
+Ascend950（a5）——硬件跨核 pipe 直接按 fractal 布局传输数据：
 
 | 方向 | Push/Pop TileView (blayout, slayout) | 名称 |
 | ---- | ------------------------------------ | ---- |
@@ -35,7 +37,16 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 | Vec->Mat | 需要显式在move中设置，否则同src | — |
 | Mat/Acc->Vec | 需要显式在move中设置，否则同src | — |
 
-此功能由 `BuildCrossCoreTransferView` 实现，它为 `tpop` 结果类型和 tpush 前的 `tile.move` 操作分配布局。在 AIV 推送侧（V→C），会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局（NZ 或 ZN）。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
+Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布局。因此 Left 和 Right 目标在传输边界统一使用 NZ，最终的 Left/Right 布局由后续 `Mat → Left/Right` `tile.move`（MTE1）处理：
+
+| 方向 | Push/Pop TileView (blayout, slayout) | 名称 |
+| ---- | ------------------------------------ | ---- |
+| Vec->Left | col_major, row_major | NZ |
+| Vec->Right | col_major, row_major | NZ |
+| Vec->Mat | 保持原始布局 | — |
+| Mat/Acc->Vec | 保持原始布局 | — |
+
+在两种后端上，AIV 推送侧（V→C）都会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。
 
 当拆分后的内核包含跨核 `tpush`/`tpop` 时，该 Pass 还会自动在函数前缀补齐前端 pipe setup：
 
@@ -68,7 +79,7 @@ CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tp
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
 - Tile 操作必须已展平为 2D（需先运行 `FlattenTileNdTo2D`）
 - Tile 内存空间必须已推断（需先运行 `InferTileMemorySpace`）
-- Fractal TileView 分配需要 Ascend950 后端（`backend::GetBackendType() == Ascend950`）
+- 跨核 Fractal TileView 分配在 Ascend950 和 Ascend910B 后端均受支持
 
 **使用时机**：在 `InferTileMemorySpace` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
 
@@ -106,8 +117,9 @@ program_expanded = expand_pass(program)
   5. 构建 AIV 函数体：对称（保留 VECTOR + SHARED，删除 CUBE）
      - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()，携带 fractal TileView
      - 对于 BOUNDARY（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
-  5a. 通过 BuildCrossCoreTransferView 为所有边界 tpop 结果类型和 tpush 前的 tile.move 操作
-      分配 fractal TileView（仅 Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始）
+  5a. 通过 BuildCrossCoreTransferView 为所有边界 tpop 结果类型和 tpush 前的 tile.move 操作分配 fractal TileView：
+      - Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始
+      - Ascend910B：Left→NZ，Right→NZ（Mat 仅支持 NZ），Mat/Vec→保持原始
   6. 修复两侧函数体中的循环携带状态
      - 删除在当前核心侧无用的 dead iter_args
      - 为保留下来的 iter_args 补回缺失的 init value 定义

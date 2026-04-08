@@ -26,7 +26,9 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 | Cube→Vector (e.g. Acc→Vec) | `tpush_to_aiv(source_tile)` | `dest_var = tpop_from_aic()` |
 | Vector→Cube (e.g. Vec→Mat/Left/Right) | `dest_var = tpop_from_aiv()` | `tile.move` to adapt fractal layout, then `tpush_to_aic(adapted_tile)` |
 
-**Fractal TileView layout (Ascend950)**: On Ascend950 backend, cross-core transfer tiles are assigned a fractal TileView based on the destination memory space:
+**Fractal TileView layout**: Cross-core transfer tile views are computed by `BuildCrossCoreTransferView` based on the destination memory space. The mapping differs between backends:
+
+Ascend950 (a5) — hardware cross-core pipe carries data in fractal layout:
 
 | Direction | Push/Pop TileView (blayout, slayout) | Name |
 | --------- | ------------------------------------ | ---- |
@@ -35,7 +37,16 @@ Cross-core data transfer at CV boundaries is handled by splitting explicit `tile
 | Vec→Mat | must be explicitly set in move | — |
 | Mat/Acc→Vec | must be explicitly set in move | — |
 
-This is implemented by `BuildCrossCoreTransferView`, which assigns the layout to both `tpop` result types and pre-tpush `tile.move` ops. On the AIV push side (V→C), a `tile.move` is inserted before `tpush_to_aic` to convert the source tile into the required fractal layout (NZ or ZN). The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
+Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only supports the NZ layout. Both Left and Right destinations use NZ at the transfer boundary; the final Left/Right layout is resolved by the subsequent `Mat → Left/Right` `tile.move` (MTE1):
+
+| Direction | Push/Pop TileView (blayout, slayout) | Name |
+| --------- | ------------------------------------ | ---- |
+| Vec→Left | col_major, row_major | NZ |
+| Vec→Right | col_major, row_major | NZ |
+| Vec→Mat | preserve original | — |
+| Mat/Acc→Vec | preserve original | — |
+
+On both backends, the AIV push side (V→C) inserts a `tile.move` before `tpush_to_aic` to convert the source tile into the required fractal layout. The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
 
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 
@@ -68,7 +79,7 @@ For consumer-side cross-core tiles, the pass also normalizes statement order to 
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
 - Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
 - Tile memory space must be inferred (run `InferTileMemorySpace` first)
-- Fractal TileView assignment requires Ascend950 backend (`backend::GetBackendType() == Ascend950`)
+- Cross-core fractal TileView assignment is supported on Ascend950 and Ascend910B backends
 
 **When to use**: Run after `InferTileMemorySpace` when InCore functions may contain both Cube and Vector tile operations.
 
@@ -107,7 +118,9 @@ Phase 2 — Expand each InCore function F:
      - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
      - For BOUNDARY (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
   5a. Assign fractal TileView to all boundary tpop result types and pre-tpush tile.move ops
-      via BuildCrossCoreTransferView (Ascend950 only: Left→NZ, Right→ZN, Mat/Vec→preserve)
+      via BuildCrossCoreTransferView:
+      - Ascend950: Left→NZ, Right→ZN, Mat/Vec→preserve
+      - Ascend910B: Left→NZ, Right→NZ (Mat only supports NZ), Mat/Vec→preserve
   6. Repair loop-carried state on both bodies
      - Strip dead iter_args whose carried values are unused on this side
      - Pull back missing init-value definitions for surviving iter_args
