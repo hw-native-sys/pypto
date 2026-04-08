@@ -432,6 +432,46 @@ def test_out_param_reassigned_detected():
     assert any("'c'" in d.message and "Out" in d.message for d in diagnostics)
 
 
+def test_out_param_reassigned_by_tensor_full_detected():
+    """Test OutParamNotShadowed verifier detects reassignment via tensor.full."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    a = ir.Var("a", tensor_type, span)
+    c = ir.Var("c", tensor_type, span)
+
+    # c = tensor.full([64], 0.0, FP32) — reassigns Out param
+    full_call = ir.create_op_call(
+        "tensor.full",
+        [
+            ir.MakeTuple([ir.ConstInt(64, DataType.INT64, span)], span),
+            ir.ConstFloat(0.0, DataType.FP32, span),
+        ],
+        {"dtype": DataType.FP32},
+        span,
+    )
+    assign_c = ir.AssignStmt(c, full_call, span)
+    return_stmt = ir.ReturnStmt([c], span)
+    body = ir.SeqStmts([assign_c, return_stmt], span)
+
+    func = ir.Function(
+        "test_full_shadow",
+        [a, (c, ir.ParamDirection.Out)],
+        [tensor_type],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert any(d.rule_name == "OutParamNotShadowed" for d in diagnostics)
+    assert any("tensor.full" in d.message for d in diagnostics)
+
+
 def test_out_param_non_creating_reassignment_ok():
     """Test OutParamNotShadowed allows non-creating reassignment of Out param."""
     span = ir.Span.unknown()

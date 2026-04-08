@@ -61,7 +61,7 @@ const std::unordered_set<std::string>& GetTensorCreatingOps() {
  * with a tensor-creating call (tensor.create, tensor.full) that disconnects
  * from the external output tensor.
  *
- * Legitimate reassignments like `out = tensor.store(tile, offsets, out)` are
+ * Legitimate reassignments like `out = tensor.assemble(out, tile, offsets)` are
  * allowed because they flow through the Out parameter.
  */
 class OutParamShadowVerifier : public IRVisitor {

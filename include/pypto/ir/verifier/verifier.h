@@ -207,7 +207,8 @@ PropertyVerifierPtr CreateStructuredCtrlFlowPropertyVerifier();
  * @brief Factory function for creating OutParamNotShadowed property verifier
  *
  * Verifies that no Out/InOut function parameter is reassigned via a
- * tensor.create call, which would shadow the external output tensor.
+ * tensor-creating call (tensor.create, tensor.full), which would shadow
+ * the external output tensor.
  * @return Shared pointer to OutParamNotShadowed PropertyVerifier
  */
 PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
