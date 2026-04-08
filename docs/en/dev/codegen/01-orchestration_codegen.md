@@ -140,7 +140,7 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 | Direction | Python Annotation | C++ Task Param | Semantics |
 | --------- | ----------------- | -------------- | --------- |
 | `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only; if the tensor is from `pl.create_tensor`, uses `add_output` for first-time allocation |
-| `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_inout(ext_x)` | Pre-allocated buffer |
+| `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_output(ext_x)` | Write-only pre-allocated buffer |
 | `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` | Runtime ring-buffer alloc |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (separate scalar slot) |
@@ -171,7 +171,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 ```cpp
 // Generated C++
 Arg params_t0;
-params_t0.add_inout(ext_output);
+params_t0.add_output(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
 const Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
@@ -286,7 +286,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
-        params_t1.add_inout(ext_d);
+        params_t1.add_output(ext_d);
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }

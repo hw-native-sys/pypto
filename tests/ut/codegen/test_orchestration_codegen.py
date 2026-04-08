@@ -132,7 +132,7 @@ class TestOrchestration:
                     Arg params_t1;
                     params_t1.add_input(c);
                     params_t1.add_input(ext_b);
-                    params_t1.add_inout(ext_d);
+                    params_t1.add_output(ext_d);
                     pto2_rt_submit_aiv_task(0, params_t1);
                 }
             }
@@ -404,7 +404,7 @@ class TestOrchestration:
                     Arg params_t4;
                     params_t4.add_input(g);
                     params_t4.add_input(c);
-                    params_t4.add_inout(ext_f);
+                    params_t4.add_output(ext_f);
                     pto2_rt_submit_aiv_task(0, params_t4);
                 }
             }
@@ -607,11 +607,11 @@ class TestOrchestration:
         # online_update: 3 In + 3 InOut + 1 Out = 7 params
         assert "params_t0.add_input(ext_mij)" in code
         assert "params_t0.add_inout(ext_mi_in)" in code
-        assert "params_t0.add_inout(ext_dst_in)" in code
+        assert "params_t0.add_output(ext_dst_in)" in code
 
         # kernel_add: 2 In + 1 Out = 3 params
         assert "params_t1.add_input(ext_oi_in)" in code
-        assert "params_t1.add_inout(ext_final)" in code
+        assert "params_t1.add_output(ext_final)" in code
 
         # PTO2_SCOPE wraps all task submissions
         assert "PTO2_SCOPE" in code
@@ -749,7 +749,7 @@ class TestOrchestration:
                     params_t0.add_inout(ext_mi);
                     params_t0.add_inout(ext_li);
                     params_t0.add_inout(ext_oi);
-                    params_t0.add_inout(ext_dst);
+                    params_t0.add_output(ext_dst);
                     pto2_rt_submit_aiv_task(0, params_t0);
                 }
             }
@@ -1233,7 +1233,7 @@ class TestOrchestration:
         code = _generate_orch_code(transformed)
 
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" in code
-        assert "params_t0.add_inout(row)" in code
+        assert "params_t0.add_output(row)" in code
         assert "Tensor row = make_tensor(" not in code
         assert "memcpy(" not in code
         assert "ext_out = out;" not in code
@@ -1576,7 +1576,7 @@ class TestTensorReadWriteOffsetCodegen:
         code = _generate_orch_code(transformed)
 
         assert "params_t0.add_input(ext_x)" in code
-        assert "params_t0.add_inout(ext_out)" in code
+        assert "params_t0.add_output(ext_out)" in code
 
     def test_infer_inout_param_from_loop_carried_read_modify_write(self):
         """Loop-carried read-modify-write should emit inout params."""

@@ -140,7 +140,7 @@ PTO2_SCOPE() {
 | 方向 | Python 注解 | C++ 任务参数 | 语义 |
 | ---- | ----------- | ------------ | ---- |
 | `In` | `pl.Tensor[...]`（默认） | `params.add_input(ext_x)` | 只读；若为 `pl.create_tensor` 变量，首次使用改用 `add_output` 分配内存 |
-| `Out`（外部） | `pl.Out[pl.Tensor[...]]`（参数） | `params.add_inout(ext_x)` | 预分配缓冲区 |
+| `Out`（外部） | `pl.Out[pl.Tensor[...]]`（参数） | `params.add_output(ext_x)` | 只写预分配缓冲区 |
 | `Out`（内部） | `pl.Out[pl.Tensor[...]]`（tensor.create） | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` | 运行时环形缓冲区分配 |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | 读写 |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | 标量常量（独立 scalar 槽位） |
@@ -171,7 +171,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 ```cpp
 // 生成的 C++
 Arg params_t0;
-params_t0.add_inout(ext_output);
+params_t0.add_output(ext_output);
 pto2_rt_submit_aiv_task(0, params_t0);
 const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
@@ -286,7 +286,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
-        params_t1.add_inout(ext_d);
+        params_t1.add_output(ext_d);
         pto2_rt_submit_aiv_task(1, params_t1);
     }
 }

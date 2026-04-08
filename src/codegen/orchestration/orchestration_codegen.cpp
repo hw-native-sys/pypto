@@ -467,7 +467,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
             if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
               push_create_output();
             } else {
-              params.push_back({ParamKind::InOut, ext_name, ""});
+              params.push_back({ParamKind::Output, ext_name, ""});
             }
             break;
           case ParamDirection::InOut:
