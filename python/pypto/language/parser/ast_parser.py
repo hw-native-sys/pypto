@@ -1613,6 +1613,11 @@ class ASTParser:
                     )
                 role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
             elif kw.arg == "optimization":
+                if opt_split is not None:
+                    raise ParserSyntaxError(
+                        "pl.at() got multiple values for argument 'optimization'",
+                        span=self.span_tracker.get_span(kw),
+                    )
                 opt_split = self._parse_chunked_loop_optimizer(kw.value)
             elif kw.arg is None:
                 raise ParserSyntaxError(
@@ -1656,15 +1661,23 @@ class ASTParser:
             if value.args:
                 raise ParserSyntaxError(
                     "pl.chunked_loop_optimizer() does not accept positional arguments",
+                    span=self.span_tracker.get_span(value),
                     hint="Use: pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
                 )
             split = ir.SplitMode.UP_DOWN
             for opt_kw in value.keywords:
                 if opt_kw.arg == "split":
                     split = extract_enum_value(opt_kw.value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+                    if split == ir.SplitMode.NONE:
+                        raise ParserSyntaxError(
+                            "pl.chunked_loop_optimizer() does not support split=pl.SplitMode.NONE",
+                            span=self.span_tracker.get_span(opt_kw.value),
+                            hint="Use pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT",
+                        )
                 else:
                     raise ParserSyntaxError(
                         f"pl.chunked_loop_optimizer() got unexpected keyword '{opt_kw.arg}'",
+                        span=self.span_tracker.get_span(opt_kw),
                         hint="Only 'split' is supported: "
                         "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
                     )
@@ -1673,6 +1686,7 @@ class ASTParser:
         raise ParserSyntaxError(
             "optimization= only accepts pl.chunked_loop_optimizer or "
             "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+            span=self.span_tracker.get_span(value),
             hint="Use optimization=pl.chunked_loop_optimizer or "
             "optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
         )
@@ -1704,7 +1718,9 @@ class ASTParser:
         level, role, opt_split = self._parse_at_kwargs(context_expr)
         span = self.span_tracker.get_span(stmt)
 
-        if opt_split is not None and level != ir.Level.CORE_GROUP:
+        is_core_group = level == ir.Level.CORE_GROUP
+
+        if opt_split is not None and not is_core_group:
             raise ParserSyntaxError(
                 "optimization=chunked_loop_optimizer is only supported with level=pl.Level.CORE_GROUP",
                 span=span,
@@ -1712,12 +1728,20 @@ class ASTParser:
                 "optimization=pl.chunked_loop_optimizer) for AutoInCore scope",
             )
 
-        if level == ir.Level.CORE_GROUP and opt_split is not None:
-            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split)
-        elif level == ir.Level.CORE_GROUP:
-            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span)
-        else:
+        if is_core_group and role is not None:
+            raise ParserSyntaxError(
+                "role= is not supported with level=pl.Level.CORE_GROUP",
+                span=span,
+                hint="Drop role= for InCore/AutoInCore scopes, "
+                "or use a non-CORE_GROUP level for Hierarchy scope",
+            )
+
+        if not is_core_group:
             self._parse_scope_body(stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role)
+        elif opt_split is not None:
+            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split)
+        else:
+            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span)
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.

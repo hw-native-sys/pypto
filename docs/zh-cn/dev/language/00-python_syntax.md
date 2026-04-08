@@ -261,15 +261,15 @@ for i in pl.unroll(12, chunk=4):
 
 | 形式 | Scope 类型 | 说明 |
 | ---- | ---------- | ---- |
-| `pl.at(level=CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
-| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | 编译器驱动的 chunked 循环 split（默认 `SplitMode.UP_DOWN`） |
-| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | 显式指定 split 模式 |
-| `pl.at(level=X)`（X ≠ CORE_GROUP） | `Hierarchy` | 分布式层级作用域 |
+| `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
+| `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | 编译器驱动的 chunked 循环 split（默认 `SplitMode.UP_DOWN`） |
+| `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | 显式指定 split 模式 |
+| `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
-| `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=CORE_GROUP)` |
-| `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
+| `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP)` |
+| `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
 
-示例参见 [语言指南](../../../../zh-cn/user/01-language_guide.md#incore-作用域)。
+示例参见 [语言指南](../../user/01-language_guide.md#incore-作用域)。
 
 ### Yield 语句
 

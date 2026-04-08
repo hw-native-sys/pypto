@@ -273,6 +273,32 @@ def test_parse_pl_at_unknown_optimization_errors():
             return y
 
 
+def test_parse_pl_at_split_mode_none_errors():
+    """chunked_loop_optimizer(split=SplitMode.NONE) raises error."""
+    with pytest.raises(ParserSyntaxError, match=r"SplitMode\.NONE"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+            ):
+                for i in pl.parallel(0, 8, 1, chunk=4):
+                    x = pl.add(x, x)
+            return x
+
+
+def test_parse_pl_at_role_with_core_group_errors():
+    """role= combined with level=CORE_GROUP raises error."""
+    with pytest.raises(ParserSyntaxError, match="role"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, role=pl.Role.Worker):
+                y = pl.add(x, x)
+            return y
+
+
 def test_incore_deprecation_warning():
     """pl.incore() emits DeprecationWarning at parse time."""
     with warnings.catch_warnings(record=True) as w:

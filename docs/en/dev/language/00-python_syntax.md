@@ -262,15 +262,15 @@ for i in pl.unroll(12, chunk=4):
 
 | Form | Scope Kind | Notes |
 | ---- | ---------- | ----- |
-| `pl.at(level=CORE_GROUP)` | `InCore` | Fixed-boundary outline at CORE_GROUP |
-| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | Compiler-driven chunked loop split (default `SplitMode.UP_DOWN`) |
-| `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | Explicit split mode |
-| `pl.at(level=X)` for X ≠ CORE_GROUP | `Hierarchy` | Distributed hierarchy scope |
+| `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | Fixed-boundary outline at CORE_GROUP |
+| `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)` | `AutoInCore` | Compiler-driven chunked loop split (default `SplitMode.UP_DOWN`) |
+| `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))` | `AutoInCore` | Explicit split mode |
+| `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
-| `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=CORE_GROUP)` instead |
-| `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
+| `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=pl.Level.CORE_GROUP)` instead |
+| `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(...))` |
 
-See [Language Guide](../../../../en/user/01-language_guide.md#incore-scopes) for examples.
+See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples.
 
 ### Yield Statement
 

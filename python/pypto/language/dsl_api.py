@@ -41,7 +41,7 @@ class _ChunkedLoopOptimizer:
     - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)``
     """
 
-    def __call__(self, split: SplitMode = SplitMode.UP_DOWN) -> _ChunkedLoopOptimizerCall:
+    def __call__(self, *, split: SplitMode = SplitMode.UP_DOWN) -> _ChunkedLoopOptimizerCall:
         """Create an optimizer specification with an explicit split mode.
 
         Args:
@@ -722,6 +722,7 @@ class AtContext:
         self,
         level: ir.Level,
         role: ir.Role | None = None,
+        *,
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
     ) -> None:
         self.level = level
@@ -738,6 +739,7 @@ class AtContext:
 def at(
     level: ir.Level,
     role: ir.Role | None = None,
+    *,
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
@@ -781,7 +783,7 @@ def at(
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role, optimization)
+    return AtContext(level, role, optimization=optimization)
 
 
 __all__ = [
