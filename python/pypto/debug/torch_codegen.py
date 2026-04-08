@@ -261,6 +261,16 @@ def _register_ops() -> None:
         # scatter_update
         m[f"{prefix}.scatter_update"] = lambda a, kw: f"{a[0]}.scatter_(-2, {a[1]}.expand_as({a[2]}), {a[2]})"
 
+        # scatter_ (element-level scatter)
+        def _scatter(a: list[str], kw: dict[str, str]) -> str:
+            dim = kw.get("dim", "0")
+            reduce = kw.get("reduce", None)
+            if reduce and reduce != "none":
+                return f"{a[0]}.scatter_({dim}, {a[1]}, {a[2]}, reduce='{reduce}')"
+            return f"{a[0]}.scatter_({dim}, {a[1]}, {a[2]})"
+
+        m[f"{prefix}.scatter_"] = _scatter
+
         # broadcast ops - torch broadcasting handles these naturally
         m[f"{prefix}.row_expand_add"] = _binop("+")
         m[f"{prefix}.row_expand_sub"] = _binop("-")

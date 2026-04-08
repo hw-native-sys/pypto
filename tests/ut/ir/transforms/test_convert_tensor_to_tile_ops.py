@@ -2445,5 +2445,108 @@ class TestTensorFullConversion:
         assert "tensor.full" not in ir_str
 
 
+class TestInOutParamHandling:
+    """Tests for InOut parameter handling in ConvertTensorToTileOps."""
+
+    def test_inout_param_reuses_existing_param_for_tile_store(self):
+        """InOut param from outlining: tile.store targets existing InOut param, no new Out param.
+
+        End-to-end: outline detects IterArg InOut, then convert reuses the
+        InOut param for tile.store instead of adding a new Out param.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.incore():
+                    for i in pl.range(10):
+                        x = pl.add(x, x)
+                return x
+
+        # Run outline (which marks x as InOut), then convert
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx:
+            prog = passes.convert_to_ssa()(Input)
+            prog = passes.outline_incore_scopes()(prog)
+            prog = passes.ctrl_flow_transform()(prog)
+            After = passes.convert_tensor_to_tile_ops()(prog)
+
+        incore_func = After.get_function("main_incore_0")
+        assert incore_func is not None
+
+        # The InOut param should remain — no additional Out param added
+        inout_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.InOut)
+        out_count = sum(1 for d in incore_func.param_directions if d == ir.ParamDirection.Out)
+        assert inout_count == 1, f"Expected 1 InOut param, got {inout_count}"
+        assert out_count == 0, f"Expected 0 Out params (reused InOut), got {out_count}"
+
+
+class TestScatterConversion:
+    """Tests for tensor.scatter_ → for-loop tile.read/tile.write conversion."""
+
+    def test_scatter_local_tile_dim1_scalar_src(self):
+        """tensor.scatter_ with scalar src lowers to for-loop + tile.read/tile.write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                index: pl.Tensor[[3, 2], pl.INT32],
+            ) -> pl.Tensor[[3, 4], pl.FP32]:
+                buf: pl.Tensor[[3, 4], pl.FP32] = pl.create_tensor([3, 4], dtype=pl.FP32)
+                result: pl.Tensor[[3, 4], pl.FP32] = pl.scatter_(buf, dim=1, index=index, src=1.0)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                index: pl.Tensor[[3, 2], pl.INT32],
+            ) -> pl.Tensor[[3, 4], pl.FP32]:
+                return self.main_incore_0(index)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_str = str(After)
+
+        # tensor.scatter_ should be decomposed into element-wise for-loop
+        assert "tensor.scatter_" not in after_str
+        # New approach uses tile.read (for index) and tile.write (for scatter)
+        assert "tile.read" in after_str
+        assert "tile.write" in after_str
+
+    def test_scatter_local_tile_dim0_tensor_src(self):
+        """tensor.scatter_ with dim=0 and tensor src lowers to for-loop + tile.read/tile.write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                index: pl.Tensor[[2, 3], pl.INT32],
+                src: pl.Tensor[[2, 3], pl.FP32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                buf: pl.Tensor[[4, 3], pl.FP32] = pl.create_tensor([4, 3], dtype=pl.FP32)
+                result: pl.Tensor[[4, 3], pl.FP32] = pl.scatter_(buf, dim=0, index=index, src=src)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                index: pl.Tensor[[2, 3], pl.INT32],
+                src: pl.Tensor[[2, 3], pl.FP32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                return self.main_incore_0(index, src)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_str = str(After)
+
+        # tensor.scatter_ should be decomposed into element-wise for-loop
+        assert "tensor.scatter_" not in after_str
+        # New approach uses tile.read (for index + src) and tile.write
+        assert "tile.read" in after_str
+        assert "tile.write" in after_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

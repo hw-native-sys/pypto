@@ -59,6 +59,7 @@ __all__ = [
     "reshape",
     "transpose",
     "scatter_update",
+    "scatter_",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -778,4 +779,35 @@ def scatter_update(
         Tensor wrapping the scatter_update operation
     """
     call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def scatter_(
+    input: Tensor,
+    dim: int,
+    index: Tensor,
+    src: float | int | Tensor,
+    *,
+    reduce: str | None = None,
+) -> Tensor:
+    """Element-level scatter: write src values into input at positions given by index along dim.
+
+    For each element position (i0,...,in) in index, sets:
+        input[i0]...[i_{d-1}][index[i0...in]][i_{d+1}]...[in] = src[i0...in]
+
+    Supports arbitrary rank and any valid dim in [-rank, rank).
+    src can be a tensor (same shape as index) or a scalar value.
+
+    Args:
+        input: Destination tensor (N-D)
+        dim: Dimension along which to scatter
+        index: Index tensor (N-D, same rank as input) of integer dtype
+        src: Source tensor (same shape as index) or scalar value
+        reduce: Optional reduce mode ("add" or "multiply")
+
+    Returns:
+        Tensor wrapping the scatter_ operation
+    """
+    src_expr = src.unwrap() if isinstance(src, Tensor) else src
+    call_expr = _ir_ops.scatter_(input.unwrap(), dim, index.unwrap(), src_expr, reduce=reduce)
     return Tensor(expr=call_expr)

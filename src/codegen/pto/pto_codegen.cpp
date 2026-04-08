@@ -907,6 +907,10 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
     return GetVarName(var);
   }
   if (auto const_int = As<ir::ConstInt>(expr)) {
+    DataType dtype = const_int->dtype();
+    if (dtype == DataType::INT32) {
+      return GetOrEmitI32Constant(static_cast<int32_t>(const_int->value_));
+    }
     return GetIndexConstant(const_int->value_);
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
@@ -1148,7 +1152,7 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     return "f32";
   }
   if (auto const_int = As<ir::ConstInt>(expr)) {
-    return "index";
+    return GetTypeString(const_int->dtype());
   }
   return "";
 }
