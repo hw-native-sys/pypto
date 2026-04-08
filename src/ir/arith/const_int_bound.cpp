@@ -202,14 +202,14 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   Bound VisitExpr_(const VarPtr& op) override {
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return DefaultBoundFromDtype(op);
+    return DefaultBoundFromDtype(op.get());
   }
 
   Bound VisitExpr_(const IterArgPtr& op) override {
     // IterArg is a Var subclass — look up in var_map_
     auto it = var_map_.find(op.get());
     if (it != var_map_.end()) return it->second;
-    return DefaultBoundFromDtype(op);
+    return DefaultBoundFromDtype(op.get());
   }
 
   Bound VisitExpr_(const MemRefPtr& /*op*/) override { return Everything(); }
@@ -375,7 +375,7 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
 
  private:
   /// INDEX-typed variables are implicitly non-negative; other types use full range.
-  Bound DefaultBoundFromDtype(const ExprPtr& expr) {
+  static Bound DefaultBoundFromDtype(const Expr* expr) {
     if (auto st = std::dynamic_pointer_cast<const ScalarType>(expr->GetType())) {
       if (st->dtype_ == DataType::INDEX) {
         return {0, Bound::kPosInf};
@@ -398,7 +398,7 @@ std::function<void()> ConstIntBoundAnalyzer::Impl::EnterConstraint(const ExprPtr
   // Helper: try to tighten bound for a variable.
   auto TryTighten = [&](const Expr* var_ptr, const Bound& new_bound) {
     auto it = var_map_.find(var_ptr);
-    Bound old = (it != var_map_.end()) ? it->second : Everything();
+    Bound old = (it != var_map_.end()) ? it->second : DefaultBoundFromDtype(var_ptr);
     recovery.emplace_back(var_ptr, old);
     var_map_[var_ptr] = {std::max(old.min_value, new_bound.min_value),
                          std::min(old.max_value, new_bound.max_value)};

@@ -599,6 +599,24 @@ class TestConstraintContext:
         analyzer.unbind(x)
         analyzer.unbind(y)
 
+    def test_index_non_negativity_preserved_under_constraint(self):
+        """INDEX var retains [0, +inf) lower bound when tightened by an upper-bound constraint."""
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), S)
+        # Without constraint: INDEX var is [0, +inf)
+        bound = analyzer.const_int_bound(n)
+        assert bound.min_value == 0
+
+        # Under n <= 10 constraint: should become [0, 10], not [-inf, 10]
+        constraint = ir.Le(n, ci(10), BOOL, S)
+        with analyzer.constraint_context(constraint):
+            bound = analyzer.const_int_bound(n)
+            assert bound.min_value == 0
+            assert bound.max_value == 10
+
+        # After constraint: back to [0, +inf)
+        bound = analyzer.const_int_bound(n)
+        assert bound.min_value == 0
+
 
 # ============================================================================
 # Cross-analyzer integration (TryCompare)
