@@ -84,7 +84,7 @@ for (const Var* def : collector.var_defs_ordered) {
 | `CollectMemRefsWithSpace()` | 语句中所有 (MemRef, MemorySpace) 对。 |
 | `CollectNonDDRMemRefsWithSpace()` | 语句中非 DDR 的 (MemRef, MemorySpace) 对。 |
 | `CollectShapedTypeMemRefs()` | 表达式中任意 ShapedType（Tensor 或 Tile）的 MemRefPtr。 |
-| `CollectUsedMemRefPtrs()` | 语句中 TileType 变量的原始 MemRef 指针。 |
+| `CollectUsedBasePtrs()` | 语句中 TileType/TensorType 变量的 MemRef base Ptr 原始指针。 |
 
 ### 使用示例
 
@@ -108,8 +108,8 @@ collector.VisitStmt(func->body_);
 // 从表达式收集（同时支持 TensorType 和 TileType）
 auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
 
-// 原始指针集合用于快速成员检查
-auto used = memref_collectors::CollectUsedMemRefPtrs(func->body_);
+// base Ptr 原始指针集合用于快速成员检查（检测未使用的 alloc）
+auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 ```
 
 ## 其他共享工具

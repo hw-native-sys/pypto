@@ -11,14 +11,15 @@
 
 #include "pypto/ir/memref.h"
 
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
@@ -57,29 +58,35 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 
-// Helper function to convert string to lowercase
-static std::string ToLowerCase(const std::string& str) {
-  std::string result = str;
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  return result;
-}
-
-static std::string BuildMemRefName(uint64_t id) { return "mem_" + std::to_string(id); }
-
-static std::string BuildMemRefName(MemorySpace naming_space, uint64_t id) {
-  return "mem_" + ToLowerCase(MemorySpaceToString(naming_space)) + "_" + std::to_string(id);
-}
-
 // MemRef implementation
-MemRef::MemRef(ExprPtr addr, uint64_t size, uint64_t id, Span span)
-    : MemRef(BuildMemRefName(id), std::move(addr), size, id, std::move(span)) {}
+MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span)
+    : Var(base->name_hint_, GetMemRefType(), std::move(span)),
+      base_(std::move(base)),
+      byte_offset_(std::move(byte_offset)),
+      size_(size) {}
 
-MemRef::MemRef(MemorySpace naming_space, ExprPtr addr, uint64_t size, uint64_t id, Span span)
-    : MemRef(BuildMemRefName(naming_space, id), std::move(addr), size, id, std::move(span)) {}
+MemRef::MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span)
+    : MemRef(std::move(base), std::make_shared<ConstInt>(byte_offset, DataType::INDEX, Span::unknown()), size,
+             std::move(span)) {}
 
-MemRef::MemRef(std::string name, ExprPtr addr, uint64_t size, uint64_t id, Span span)
-    : Var(std::move(name), GetMemRefType(), std::move(span)), addr_(std::move(addr)), size_(size), id_(id) {}
+MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span)
+    : Var(std::move(name), GetMemRefType(), std::move(span)),
+      base_(std::move(base)),
+      byte_offset_(std::move(byte_offset)),
+      size_(size) {}
+
+bool MemRef::MayAlias(const MemRefPtr& a, const MemRefPtr& b) {
+  if (a->base_.get() != b->base_.get()) return false;
+
+  auto off_a = As<ConstInt>(a->byte_offset_);
+  auto off_b = As<ConstInt>(b->byte_offset_);
+  if (off_a && off_b) {
+    int64_t end_a = off_a->value_ + static_cast<int64_t>(a->size_);
+    int64_t end_b = off_b->value_ + static_cast<int64_t>(b->size_);
+    return off_a->value_ < end_b && off_b->value_ < end_a;
+  }
+  return true;  // same base, symbolic offsets → conservatively alias
+}
 
 }  // namespace ir
 }  // namespace pypto

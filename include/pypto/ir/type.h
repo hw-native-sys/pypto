@@ -566,6 +566,35 @@ inline MemRefTypePtr GetMemRefType() {
   return memref_type;
 }
 
+/**
+ * @brief Pointer type for base allocation identity tokens
+ *
+ * Represents the type of variables returned by tile.alloc / tensor.alloc.
+ * A Ptr variable is the allocation identity token that MemRefs reference
+ * via their base_ field.
+ */
+class PtrType : public Type {
+ public:
+  PtrType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::PtrType; }
+  [[nodiscard]] std::string TypeName() const override { return "Ptr"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using PtrTypePtr = std::shared_ptr<const PtrType>;
+
+/**
+ * @brief Get a shared pointer to the singleton PtrType instance
+ *
+ * @return Shared pointer to PtrType
+ */
+inline PtrTypePtr GetPtrType() {
+  static const auto ptr_type = std::make_shared<PtrType>();
+  return ptr_type;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

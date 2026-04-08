@@ -55,7 +55,7 @@ class TestMemRef:
         addr = ir.ConstInt(0, DataType.INT64, span)
         memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024, 0)
         assert memref is not None
-        assert memref.id_ == 0
+        assert memref.base_.name_hint == "mem_ddr_0"
 
     def test_memref_set_attributes(self):
         """Test setting MemRef attributes."""
@@ -66,7 +66,7 @@ class TestMemRef:
 
         assert not hasattr(memref, "memory_space_")
         assert memref.name_hint == "mem_ddr_0"
-        assert memref.addr_.same_as(addr)
+        assert memref.byte_offset_.same_as(addr)
         assert memref.size_ == 1024
 
     def test_memref_different_memory_spaces(self):
@@ -96,7 +96,7 @@ class TestMemRef:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, addr_expr, 4096, 2)
 
-        assert isinstance(memref.addr_, ir.Add)
+        assert isinstance(memref.byte_offset_, ir.Add)
         assert memref.size_ == 4096
 
     def test_memref_large_size(self):
@@ -115,8 +115,8 @@ class TestMemRef:
 
         memref = ir.MemRef(ir.MemorySpace.Mat, addr, 512, 4)
 
-        assert isinstance(memref.addr_, ir.ConstInt)
-        assert memref.addr_.value == 0
+        assert isinstance(memref.byte_offset_, ir.ConstInt)
+        assert memref.byte_offset_.value == 0
 
 
 class TestTileView:
@@ -647,10 +647,10 @@ class TestMemRefStandaloneSerialization:
         assert isinstance(restored, ir.MemRef)
         assert not hasattr(restored, "memory_space_")
         assert restored.name_hint == "mem_vec_42"
-        assert isinstance(restored.addr_, ir.ConstInt)
-        assert restored.addr_.value == 0x1000
+        assert isinstance(restored.byte_offset_, ir.ConstInt)
+        assert restored.byte_offset_.value == 0x1000
         assert restored.size_ == 2048
-        assert restored.id_ == 42
+        assert restored.base_.name_hint == "mem_vec_42"
 
     def test_serialize_memref_all_memory_spaces(self):
         """Verify all MemorySpace values round-trip correctly."""
@@ -931,7 +931,7 @@ class TestMemRefConstructor:
 
         assert memref.name_hint == "mem_ddr_5"
         assert not hasattr(memref, "memory_space_")
-        assert memref.addr_.same_as(addr)
+        assert memref.byte_offset_.same_as(addr)
         assert memref.size_ == 1024
 
     def test_memref_constructor_different_spaces(self):
@@ -1193,7 +1193,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.FP32" in printed
         # MemRef prints as positional arg (no keyword) with full constructor syntax
         assert "memref=" not in printed
-        assert "pl.MemRef(4096, 1024, 7)" in printed
+        assert 'pl.MemRef("mem_ddr_7", 4096, 1024)' in printed
 
     def test_tile_type_with_memref_and_tileview_print(self):
         """Test printing TileType with inline MemRef constructor syntax and TileView."""
@@ -1223,7 +1223,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.Tile" in printed
         assert "pl.FP16" in printed
         assert "memref=" not in printed
-        assert "pl.MemRef(8192, 512, 8)" in printed
+        assert 'pl.MemRef("mem_left_8", 8192, 512)' in printed
         assert "pl.Mem.Left" in printed
         # TileView is now a positional arg in subscript (fixes #323), not keyword
         assert "pl.TileView" in printed
@@ -1343,13 +1343,13 @@ class TestPythonSyntaxPrinting:
         shape = [ir.ConstInt(32, DataType.INT64, span)]
         tensor_type_vec = ir.TensorType(shape, DataType.INT32, memref_vec)
         printed_vec = ir.python_print_type(tensor_type_vec)
-        assert "pl.MemRef(base_addr + 128, 2048, 9)" in printed_vec
+        assert 'pl.MemRef("mem_vec_9", base_addr + 128, 2048)' in printed_vec
 
         # DDR MemRef also prints in constructor form with symbolic address.
         memref_ddr = ir.MemRef(ir.MemorySpace.DDR, addr, 2048, 10)
         tensor_type_ddr = ir.TensorType(shape, DataType.INT32, memref_ddr)
         printed_ddr = ir.python_print_type(tensor_type_ddr)
-        assert "pl.MemRef(base_addr + 128, 2048, 10)" in printed_ddr
+        assert 'pl.MemRef("mem_ddr_10", base_addr + 128, 2048)' in printed_ddr
 
     def test_tensor_type_with_tensorview_print(self):
         """Test printing TensorType with TensorView."""
@@ -1390,7 +1390,7 @@ class TestPythonSyntaxPrinting:
         assert "pl.FP16" in printed
         # TensorType always prints MemRef inline because tensor memory space is DDR.
         assert "memref=" not in printed
-        assert "pl.MemRef(20480, 4096, 42)" in printed
+        assert 'pl.MemRef("mem_left_42", 20480, 4096)' in printed
         # tensor_view is now positional, not keyword in subscript
         assert "pl.TensorView" in printed
         assert "pl.TensorLayout.NZ" in printed
@@ -1503,7 +1503,7 @@ class TestIRBuilderHelpers:
         assert "pl.Tile[[32, 32], pl.FP32," in printed
         assert "pl.FP32" in printed
         assert "memref=" not in printed
-        assert "pl.MemRef(512, 1024, 36)" in printed
+        assert 'pl.MemRef("mem_right_36", 512, 1024)' in printed
         assert "pl.Mem.Right" in printed
         assert "pl.TileView" in printed  # positional arg (fixes #323)
 
@@ -1754,7 +1754,7 @@ class TestMemRefRoundTrip:
         # Verify valid Python syntax
         compile(printed, "<test_memref_valid_python>", "exec")
 
-        assert "pl.MemRef(0, 16384, 0)" in printed
+        assert 'pl.MemRef("mem_vec_0", 0, 16384)' in printed
         assert "pl.Mem.Vec" in printed
 
     def test_parse_tensor_with_memref(self):
@@ -1764,7 +1764,7 @@ class TestMemRefRoundTrip:
             class TestProg:
                 @pl.function
                 def test_fn(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    y: pl.Tensor[[64], pl.FP32, pl.MemRef(0, 256, 1)] = pl.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32, pl.MemRef(mem_ddr_1, 0, 256)] = pl.add(x, 1.0)
                     return y
         """)
         program = pl.parse(code)
@@ -1772,7 +1772,7 @@ class TestMemRefRoundTrip:
 
         # Verify the parsed IR contains memref by re-printing
         printed = program.as_python()
-        assert "pl.MemRef(0, 256, 1)" in printed
+        assert 'pl.MemRef("mem_ddr_1", 0, 256)' in printed
 
     def test_parse_tile_with_memref(self):
         """Parse tile memref annotations and reparse the printed IR."""
@@ -1783,14 +1783,14 @@ class TestMemRefRoundTrip:
                 def test_fn(self, x: pl.Tensor[[64, 64], pl.FP32]):
                     tile_a: pl.Tile[
                         [64, 64], pl.FP32,
-                        pl.MemRef(0, 16384, 0), pl.Mem.Vec
+                        pl.MemRef(mem_vec_0, 0, 16384), pl.Mem.Vec
                     ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         program = pl.parse(code)
         assert isinstance(program, ir.Program)
 
         printed = program.as_python()
-        assert "pl.MemRef(0, 16384, 0)" in printed
+        assert 'pl.MemRef("mem_vec_0", 0, 16384)' in printed
         assert "pl.Mem.Vec" in printed
         reparsed = pl.parse(printed)
         ir.assert_structural_equal(program, reparsed, enable_auto_mapping=True)
@@ -1804,7 +1804,7 @@ class TestMemRefRoundTrip:
                 def test_fn(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                     y: pl.Tensor[
                         [64], pl.FP32, pl.NZ,
-                        pl.MemRef(0, 256, 2)
+                        pl.MemRef(mem_ddr_2, 0, 256)
                     ] = pl.add(x, 1.0)
                     return y
         """)
@@ -1813,7 +1813,7 @@ class TestMemRefRoundTrip:
 
         # Verify both layout and memref are preserved
         printed = program.as_python()
-        assert "pl.MemRef(0, 256, 2)" in printed
+        assert 'pl.MemRef("mem_ddr_2", 0, 256)' in printed
         # Layout appears as positional TensorView arg (fixes #323)
         assert "pl.TensorView" in printed
 
@@ -1826,7 +1826,7 @@ class TestMemRefRoundTrip:
                 def test_fn(self, x: pl.Tensor[[64, 64], pl.FP32]):
                     tile_a: pl.Tile[
                         [64, 64], pl.FP32,
-                        pl.MemRef(0, 16384, 0), pl.Mem.DDR
+                        pl.MemRef(mem_ddr_0, 0, 16384), pl.Mem.DDR
                     ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
         """)
         parsed1 = pl.parse(code)
@@ -1841,7 +1841,7 @@ class TestMemRefRoundTrip:
             class TestProg:
                 @pl.function
                 def test_fn(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    y: pl.Tensor[[64], pl.FP32, pl.MemRef(0, 256, 1)] = pl.add(x, 1.0)
+                    y: pl.Tensor[[64], pl.FP32, pl.MemRef(mem_ddr_1, 0, 256)] = pl.add(x, 1.0)
                     return y
         """)
         parsed1 = pl.parse(code)
@@ -1853,6 +1853,7 @@ class TestMemRefRoundTrip:
         """Test all supported tile memory spaces round-trip through as_python()."""
         spaces = ["DDR", "Vec", "Mat", "Left", "Right", "Acc"]
         for space_name in spaces:
+            base_name = f"mem_{space_name.lower()}_0"
             code = textwrap.dedent(f"""\
                 @pl.program
                 class TestProg:
@@ -1860,12 +1861,12 @@ class TestMemRefRoundTrip:
                     def test_fn(self, x: pl.Tensor[[64, 64], pl.FP32]):
                         tile_a: pl.Tile[
                             [64, 64], pl.FP32,
-                            pl.MemRef(0, 16384, 0), pl.Mem.{space_name}
+                            pl.MemRef({base_name}, 0, 16384), pl.Mem.{space_name}
                         ] = pl.tile.load(x, offsets=[0, 0], shapes=[64, 64])
             """)
             parsed1 = pl.parse(code)
             printed = parsed1.as_python()
-            assert "pl.MemRef(0, 16384, 0)" in printed, (
+            assert f'pl.MemRef("{base_name}", 0, 16384)' in printed, (
                 f"Expected explicit MemRef constructor in printed output, got: {printed}"
             )
             assert f"pl.Mem.{space_name}" in printed, (

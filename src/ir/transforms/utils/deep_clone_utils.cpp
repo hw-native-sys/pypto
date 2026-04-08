@@ -104,9 +104,10 @@ class DeepCloneMutator : public IRMutator {
     if (it != expr_map_.end()) {
       return it->second;
     }
-    // Create fresh MemRef with cloned addr_
-    auto new_addr = op->addr_ ? IRMutator::VisitExpr(op->addr_) : op->addr_;
-    auto fresh = std::make_shared<MemRef>(op->name_hint_, std::move(new_addr), op->size_, op->id_, op->span_);
+    // Create fresh MemRef with cloned byte_offset_ and same base_
+    auto new_offset = op->byte_offset_ ? IRMutator::VisitExpr(op->byte_offset_) : op->byte_offset_;
+    auto fresh =
+        std::make_shared<MemRef>(op->name_hint_, op->base_, std::move(new_offset), op->size_, op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }

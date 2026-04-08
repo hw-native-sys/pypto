@@ -184,7 +184,7 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Get tile_buf type string for a MemRef (e.g., "!pto.tile_buf<loc=vec, dtype=f32, ...>")
    */
-  std::string GetTileBufTypeString(const ir::MemRef* memref) const;
+  std::string GetTileBufTypeString(const ir::Var* base_ptr) const;
 
   /**
    * @brief Get type annotation for an expression (for ins/outs clauses)
@@ -355,7 +355,7 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] const ir::Var* GetVarKey(const ir::VarPtr& var) const;
   void BindVarToMlir(const ir::VarPtr& var, const std::string& mlir_name);
   void BindTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
-  void BindVarToMemRef(const ir::VarPtr& var, const ir::MemRef* memref);
+  void BindVarToMemRef(const ir::VarPtr& var, const ir::Var* base_ptr);
 
   /**
    * @brief Emit make_tensor_view for all tensor parameters
@@ -400,9 +400,10 @@ class PTOCodegen : public CodegenBase {
 
     std::map<const ir::Var*, std::string> var_to_mlir;
     std::map<const ir::Var*, std::string> tensor_to_view;
-    std::map<const ir::MemRef*, std::string> memref_to_mlir;
-    std::map<const ir::Var*, const ir::MemRef*> var_to_memref;
-    std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type;
+    std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
+    std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
+    std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
+        memref_to_tile_type;  ///< keyed by base_ Ptr
 
     std::map<int64_t, std::string> emitted_constants;
     std::map<int64_t, std::string> emitted_i64_constants;
@@ -423,7 +424,7 @@ class PTOCodegen : public CodegenBase {
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
 
-    std::map<const ir::MemRef*, std::string> memref_to_var_name;
+    std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
     std::map<const ir::Var*, TpopResultInfo> tpop_result_vars;

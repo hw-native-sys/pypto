@@ -61,7 +61,7 @@ using codegen::TileBufSignature;
 /// MemRef's root alloc type).
 static bool IsLegalViewOp(const std::string& op_name) {
   return op_name == "tile.reshape" || op_name == "tile.extract" || op_name == "tile.slice" ||
-         op_name == "tile.fillpad";
+         op_name == "tile.fillpad" || op_name == "tensor.slice";
 }
 
 // -------------------------------------------------------------------------
@@ -69,7 +69,8 @@ static bool IsLegalViewOp(const std::string& op_name) {
 // -------------------------------------------------------------------------
 
 struct MemRefUsageInfo {
-  const MemRef* ptr = nullptr;
+  const Var* base_ptr = nullptr;  ///< base_ Ptr identity key
+  uint64_t alloc_size = 0;        ///< Size of the root allocation in bytes
   std::vector<std::pair<const Var*, TileBufSignature>> writers;
   std::vector<std::pair<const Var*, TileBufSignature>> view_users;
   std::vector<std::pair<const Var*, const Var*>> view_edges;
@@ -84,7 +85,8 @@ class MemRefUsageCollector : public IRVisitor {
       return;
     }
 
-    const MemRef* memref_ptr = GetDefinedMemRef(tile_type).get();
+    auto memref = GetDefinedMemRef(tile_type);
+    const Var* base_ptr = memref->base_.get();
     auto sig = TileBufSignature::FromTileType(*tile_type);
 
     CallPtr call;
@@ -96,13 +98,13 @@ class MemRefUsageCollector : public IRVisitor {
       }
     }
 
-    auto& info = GetOrCreate(memref_ptr);
+    auto& info = GetOrCreate(base_ptr, memref->size_);
     if (is_view) {
       info.view_users.emplace_back(op->var_.get(), sig);
       for (const auto& arg : call->args_) {
         if (auto source_var = As<Var>(arg)) {
           if (auto source_tile_type = GetTileTypeWithMemRef(source_var->GetType())) {
-            if (GetDefinedMemRef(source_tile_type).get() == memref_ptr) {
+            if (GetDefinedMemRef(source_tile_type)->base_.get() == base_ptr) {
               info.view_edges.emplace_back(source_var.get(), op->var_.get());
               break;
             }
@@ -116,17 +118,21 @@ class MemRefUsageCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  [[nodiscard]] const std::map<const MemRef*, MemRefUsageInfo>& GetUsages() const { return usages_; }
+  [[nodiscard]] const std::map<const Var*, MemRefUsageInfo>& GetUsages() const { return usages_; }
 
  private:
-  std::map<const MemRef*, MemRefUsageInfo> usages_;
+  std::map<const Var*, MemRefUsageInfo> usages_;
 
-  MemRefUsageInfo& GetOrCreate(const MemRef* ptr) {
-    auto it = usages_.find(ptr);
+  MemRefUsageInfo& GetOrCreate(const Var* base_ptr, uint64_t size) {
+    auto it = usages_.find(base_ptr);
     if (it == usages_.end()) {
       MemRefUsageInfo info;
-      info.ptr = ptr;
-      it = usages_.emplace(ptr, std::move(info)).first;
+      info.base_ptr = base_ptr;
+      info.alloc_size = size;
+      it = usages_.emplace(base_ptr, std::move(info)).first;
+    } else {
+      // Keep the max size across all uses
+      if (size > it->second.alloc_size) it->second.alloc_size = size;
     }
     return it->second;
   }
@@ -163,11 +169,11 @@ void PropagateSplitToViewUsers(const MemRefUsageInfo& info, const std::vector<co
   }
 }
 
-std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const MemRef*, MemRefUsageInfo>& usages,
+std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const Var*, MemRefUsageInfo>& usages,
                                                  uint64_t& next_id) {
   std::map<const Var*, MemRefPtr> splits;
 
-  for (const auto& [memref_ptr, info] : usages) {
+  for (const auto& [base_ptr, info] : usages) {
     if (info.writers.size() <= 1) continue;
 
     const auto& ref_sig = info.writers[0].second;
@@ -205,8 +211,9 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const MemRef*, M
       if (gid == 0) continue;
 
       auto memory_space = info.writers[indices[0]].second.memory_space;
-      auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
-      auto new_memref = std::make_shared<MemRef>(memory_space, addr, memref_ptr->size_, next_id++);
+      auto new_base =
+          std::make_shared<Var>(BuildBasePtrName(memory_space, next_id++), GetPtrType(), Span::unknown());
+      auto new_memref = std::make_shared<MemRef>(new_base, static_cast<int64_t>(0), info.alloc_size);
       std::vector<const Var*> split_roots;
 
       for (size_t idx : indices) {
@@ -277,14 +284,14 @@ class MemRefSplitMutator : public IRMutator {
 // -------------------------------------------------------------------------
 
 StmtPtr InsertNewAllocStatements(const StmtPtr& body, const std::map<const Var*, MemRefPtr>& splits) {
-  // Collect unique new MemRefs
-  std::map<const MemRef*, std::pair<MemRefPtr, MemorySpace>> new_memrefs;
+  // Collect unique new MemRefs (keyed by base_ Ptr identity)
+  std::map<const Var*, std::pair<MemRefPtr, MemorySpace>> new_memrefs;
   for (const auto& [var, memref] : splits) {
-    if (new_memrefs.count(memref.get()) > 0) continue;
+    if (new_memrefs.count(memref->base_.get()) > 0) continue;
     auto tile_type = As<TileType>(var->GetType());
     MemorySpace space =
         tile_type && tile_type->memory_space_.has_value() ? *tile_type->memory_space_ : MemorySpace::Vec;
-    new_memrefs[memref.get()] = {memref, space};
+    new_memrefs[memref->base_.get()] = {memref, space};
   }
   if (new_memrefs.empty()) return body;
 
@@ -292,18 +299,7 @@ StmtPtr InsertNewAllocStatements(const StmtPtr& body, const std::map<const Var*,
   std::vector<StmtPtr> alloc_stmts;
   for (const auto& [_, pair] : new_memrefs) {
     const auto& [memref, space] = pair;
-    auto alloc_op = std::make_shared<Op>("tile.alloc");
-    auto memspace_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(space), DataType::INDEX, Span::unknown());
-    auto addr_expr = memref->addr_;
-    auto size_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
-    auto id_expr =
-        std::make_shared<ConstInt>(static_cast<int64_t>(memref->id_), DataType::INDEX, Span::unknown());
-
-    std::vector<ExprPtr> alloc_args = {memspace_expr, addr_expr, size_expr, id_expr};
-    auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetMemRefType(), Span::unknown());
-    alloc_stmts.push_back(std::make_shared<AssignStmt>(memref, alloc_call, Span::unknown()));
+    alloc_stmts.push_back(CreateAllocStatement(memref, space));
   }
 
   auto seq = As<SeqStmts>(body);
@@ -320,13 +316,14 @@ StmtPtr InsertNewAllocStatements(const StmtPtr& body, const std::map<const Var*,
 // Top-level transform
 // -------------------------------------------------------------------------
 
-/// Find the highest MemRef id in the function (for generating fresh ids)
+/// Find the highest MemRef base name counter in the function (for generating fresh ids).
 class MaxMemRefIdCollector : public IRVisitor {
  public:
   void VisitVarLike_(const VarPtr& op) override {
     if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
       auto memref = GetDefinedMemRef(tile_type);
-      if (memref->id_ >= max_id_) max_id_ = memref->id_ + 1;
+      auto counter = ExtractNameCounter(memref->base_->name_hint_);
+      if (counter.has_value() && *counter >= max_id_) max_id_ = *counter + 1;
     }
   }
   [[nodiscard]] uint64_t GetNextId() const { return max_id_; }

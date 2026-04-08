@@ -129,13 +129,11 @@ from .system_ops import (  # noqa: F401
 
 
 class MemRefType:
-    """Opaque sentinel type for tile.alloc results in printed IR.
+    """Opaque sentinel type for alloc results in printed IR.
 
-    tile.alloc is an internal IR operation created by the InitMemRef and
-    AllocateMemoryAddr passes.  It has no user-facing DSL constructor — this
-    class exists solely so that the Python code emitted by the C++ printer
-    (``mem_vec_0: pl.MemRefType = pl.tile.alloc(...)``) is valid Python that
-    pyright and the text-parser can process.
+    tile.alloc / tensor.alloc are internal IR operations created by the
+    InitMemRef and AllocateMemoryAddr passes.  This class exists solely so
+    that the Python code emitted by the C++ printer is valid Python.
     """
 
 
@@ -156,9 +154,7 @@ class MaskPattern:
 
 def alloc(
     memory_space: MemorySpace,
-    addr: int,
     size: int,
-    alloc_id: int,  # pyright: ignore[reportUnusedParameter]
 ) -> MemRefType:
     """Stub for the internal ``tile.alloc`` IR operation.
 
@@ -169,9 +165,7 @@ def alloc(
 
     Args:
         memory_space: Target memory space (e.g. ``pl.Mem.Vec``)
-        addr: Starting byte address
         size: Allocation size in bytes
-        alloc_id: MemRef identifier
 
     Returns:
         Opaque MemRefType sentinel (unused at runtime)

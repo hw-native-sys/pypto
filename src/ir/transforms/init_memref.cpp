@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -125,9 +126,9 @@ class InitMemRefMutator : public IRMutator {
     INTERNAL_CHECK(memory_space.has_value())
         << "Internal error: memory_space must be resolved before CreateMemRef";
 
-    auto addr = std::make_shared<ConstInt>(-1, DataType::INDEX, Span::unknown());
-    uint64_t id = next_id_++;
-    return std::make_shared<MemRef>(*memory_space, addr, size_bytes, id);
+    auto base =
+        std::make_shared<Var>(BuildBasePtrName(*memory_space, next_id_++), GetPtrType(), Span::unknown());
+    return std::make_shared<MemRef>(base, static_cast<int64_t>(0), size_bytes);
   }
 
   std::optional<MemorySpace> ExtractMemorySpaceFromType(const TypePtr& type) {
@@ -203,18 +204,63 @@ class InitMemRefMutator : public IRMutator {
   }
 
   /**
-   * @brief Share a MemRef from a source expression to the LHS variable of an assignment.
+   * @brief Create a view MemRef from a source expression for the LHS variable of an assignment.
    *
-   * Returns a new AssignStmt with the LHS type updated to share the source's MemRef,
-   * or nullptr if the source has no MemRef.
+   * Creates a NEW MemRef with the same base_ Ptr as the source's MemRef,
+   * accumulated byte offset, and computed size from the output shape.
+   * Returns nullptr if the source has no MemRef.
    */
   StmtPtr ShareMemRefFrom(const ExprPtr& source, const AssignStmtPtr& op, const ExprPtr& new_value) {
-    auto shared_memref = GetTypeMemRef(source->GetType());
-    if (!shared_memref.has_value()) return nullptr;
+    auto parent_memref_opt = GetTypeMemRef(source->GetType());
+    if (!parent_memref_opt.has_value()) return nullptr;
+    const auto& parent_memref = *parent_memref_opt;
+
+    // Compute additional byte offset from the view op (if applicable)
+    ExprPtr additional_offset = MakeZeroByteOffset();
+    if (auto call = As<Call>(new_value)) {
+      additional_offset = ComputeViewByteOffset(call, source->GetType());
+    }
+
+    // Accumulate: total_offset = parent.byte_offset + additional_offset
+    ExprPtr total_offset = AddByteOffsets(parent_memref->byte_offset_, additional_offset);
+
+    // Compute view size from the output type
+    uint64_t view_size = parent_memref->size_;  // default: same size as parent
+    if (auto out_shaped = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType())) {
+      uint64_t num_elements = 1;
+      bool is_static = true;
+      for (const auto& dim : out_shaped->shape_) {
+        if (auto const_dim = As<ConstInt>(dim)) {
+          num_elements *= static_cast<uint64_t>(const_dim->value_);
+        } else {
+          is_static = false;
+          break;
+        }
+      }
+      if (is_static) {
+        view_size = num_elements * ((out_shaped->dtype_.GetBit() + 7) / 8);
+      }
+    }
+
+    // For pure aliases (no offset change, same size), share the SAME MemRef shared_ptr
+    // to preserve base_ Ptr identity. MemoryReuse builds sharing groups by base_ Ptr —
+    // variables sharing the same base_ are merged into one lifetime group.
+    bool is_pure_alias = (view_size == parent_memref->size_);
+    if (is_pure_alias) {
+      if (auto const_offset = As<ConstInt>(additional_offset)) {
+        is_pure_alias = (const_offset->value_ == 0);
+      } else {
+        is_pure_alias = false;
+      }
+    }
+    MemRefPtr view_memref = is_pure_alias
+                                ? parent_memref
+                                : std::make_shared<MemRef>(parent_memref->base_, total_offset, view_size);
 
     auto source_ms = ExtractMemorySpaceFromType(source->GetType());
+    std::optional<MemRefPtr> view_opt = view_memref;
     TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
-        op->var_->GetType(), shared_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, source_ms);
+        op->var_->GetType(), view_opt, [this](const ExprPtr& e) { return VisitExpr(e); }, source_ms);
     VarPtr new_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
     var_map_[op->var_] = new_var;
     return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
@@ -409,24 +455,6 @@ class InitMemRefMutator : public IRMutator {
   uint64_t next_id_ = 0;
 };
 
-// Create tile.alloc AssignStmt for a MemRef with addr=-1 (unallocated)
-StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) {
-  auto alloc_op = std::make_shared<Op>("tile.alloc");
-
-  auto memspace_expr =
-      std::make_shared<ConstInt>(static_cast<int64_t>(memory_space), DataType::INDEX, Span::unknown());
-  ExprPtr addr_expr = memref->addr_;
-  auto size_expr =
-      std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
-  auto id_expr =
-      std::make_shared<ConstInt>(static_cast<int64_t>(memref->id_), DataType::INDEX, Span::unknown());
-
-  std::vector<ExprPtr> alloc_args = {memspace_expr, addr_expr, size_expr, id_expr};
-  auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetMemRefType(), Span::unknown());
-
-  return std::make_shared<AssignStmt>(memref, alloc_call, Span::unknown());
-}
-
 // Insert alloc statements at the beginning of a function body.
 StmtPtr InsertAllocsIntoBody(const StmtPtr& body, const std::vector<StmtPtr>& alloc_stmts) {
   if (alloc_stmts.empty()) return body;
@@ -479,8 +507,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
       new_body, normalized_func->span_, normalized_func->func_type_, normalized_func->level_,
       normalized_func->role_, normalized_func->attrs_);
 
-  // Step 3: Collect non-DDR MemRefs and create alloc statements
-  memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/true);
+  // Step 3: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
+  memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);
   for (const auto& param : new_params) {
     collector.VisitExpr(param);
   }
@@ -489,10 +517,14 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   const auto& memrefs = collector.memrefs;
   if (memrefs.empty()) return result_func;
 
+  // Deduplicate by base_ Ptr — one alloc per unique base
+  std::set<const Var*> seen_bases;
   std::vector<StmtPtr> alloc_stmts;
   alloc_stmts.reserve(memrefs.size());
   for (const auto& [memref, memory_space] : memrefs) {
-    alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
+    if (seen_bases.insert(memref->base_.get()).second) {
+      alloc_stmts.push_back(CreateAllocStatement(memref, memory_space));
+    }
   }
 
   // Step 4: Insert alloc statements at the beginning of the function body

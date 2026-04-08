@@ -12,15 +12,22 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_MEMREF_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_MEMREF_UTILS_H_
 
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -154,11 +161,6 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   return *tile_type->memref_;
 }
 
-inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, std::set<const MemRef*>& seen_ptrs) {
-  CHECK(memref != nullptr) << "MemRef must not be null";
-  return seen_ptrs.insert(memref.get()).second;
-}
-
 inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, MemorySpace memory_space,
                                     std::map<const MemRef*, MemorySpace>& seen_ptrs) {
   CHECK(memref != nullptr) << "MemRef must not be null";
@@ -166,6 +168,148 @@ inline bool TryRegisterUniqueMemRef(const MemRefPtr& memref, MemorySpace memory_
   CHECK(inserted || it->second == memory_space)
       << "Conflicting TileType.memory_space values found for the same MemRef";
   return inserted;
+}
+
+// ============================================================================
+// Base Ptr name construction and parsing
+// ============================================================================
+
+/// Build a base Ptr variable name from memory space and counter: "mem_vec_7"
+inline std::string BuildBasePtrName(MemorySpace space, uint64_t id) {
+  std::string space_str = MemorySpaceToString(space);
+  std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return "mem_" + space_str + "_" + std::to_string(id);
+}
+
+/// Build a base Ptr variable name from counter only: "mem_7"
+inline std::string BuildBasePtrName(uint64_t id) { return "mem_" + std::to_string(id); }
+
+/// Extract the trailing numeric counter from a base Ptr name (e.g., "mem_vec_7" → 7).
+/// Returns std::nullopt if the name has no trailing numeric suffix.
+inline std::optional<uint64_t> ExtractNameCounter(const std::string& name) {
+  auto pos = name.find_last_of('_');
+  if (pos == std::string::npos || pos + 1 >= name.size()) return std::nullopt;
+  const std::string suffix = name.substr(pos + 1);
+  if (suffix.empty() ||
+      !std::all_of(suffix.begin(), suffix.end(), [](unsigned char c) { return std::isdigit(c); })) {
+    return std::nullopt;
+  }
+  return std::stoull(suffix);
+}
+
+// ============================================================================
+// Alloc statement creation
+// ============================================================================
+
+/// Create an alloc AssignStmt for a MemRef's base Ptr variable.
+/// DDR → tensor.alloc, on-chip → tile.alloc.
+/// Emits: base_ptr: Ptr = {tile,tensor}.alloc(memory_space, size)
+inline StmtPtr CreateAllocStatement(const MemRefPtr& memref, MemorySpace memory_space) {
+  std::string op_name = (memory_space == MemorySpace::DDR) ? "tensor.alloc" : "tile.alloc";
+  auto alloc_op = std::make_shared<Op>(op_name);
+
+  auto memspace_expr =
+      std::make_shared<ConstInt>(static_cast<int64_t>(memory_space), DataType::INDEX, Span::unknown());
+  auto size_expr =
+      std::make_shared<ConstInt>(static_cast<int64_t>(memref->size_), DataType::INDEX, Span::unknown());
+
+  std::vector<ExprPtr> alloc_args = {memspace_expr, size_expr};
+  auto alloc_call = std::make_shared<Call>(alloc_op, alloc_args, GetPtrType(), Span::unknown());
+
+  return std::make_shared<AssignStmt>(memref->base_, alloc_call, Span::unknown());
+}
+
+// ============================================================================
+// Byte offset computation helpers
+// ============================================================================
+
+/// Create a ConstInt(0) expression for byte offset initialization.
+inline ExprPtr MakeZeroByteOffset() {
+  return std::make_shared<ConstInt>(0, DataType::INDEX, Span::unknown());
+}
+
+/// Create an addition expression: lhs + rhs.
+/// Folds ConstInt + ConstInt into a single ConstInt.
+inline ExprPtr AddByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto const_lhs = As<ConstInt>(lhs);
+  auto const_rhs = As<ConstInt>(rhs);
+  if (const_lhs && const_rhs) {
+    return std::make_shared<ConstInt>(const_lhs->value_ + const_rhs->value_, DataType::INDEX,
+                                      Span::unknown());
+  }
+  if (const_rhs && const_rhs->value_ == 0) return lhs;
+  if (const_lhs && const_lhs->value_ == 0) return rhs;
+  return std::make_shared<Add>(lhs, rhs, DataType::INDEX, Span::unknown());
+}
+
+/// Create a multiply expression: lhs * rhs.
+/// Folds ConstInt * ConstInt into a single ConstInt.
+inline ExprPtr MulByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto const_lhs = As<ConstInt>(lhs);
+  auto const_rhs = As<ConstInt>(rhs);
+  if (const_lhs && const_rhs) {
+    return std::make_shared<ConstInt>(const_lhs->value_ * const_rhs->value_, DataType::INDEX,
+                                      Span::unknown());
+  }
+  if (const_rhs && const_rhs->value_ == 1) return lhs;
+  if (const_lhs && const_lhs->value_ == 1) return rhs;
+  return std::make_shared<Mul>(lhs, rhs, DataType::INDEX, Span::unknown());
+}
+
+/// Compute byte offset for a slice operation.
+/// byte_offset = (o0 * s1 * ... * sN + o1 * s2 * ... * sN + ... + oN) * elem_bytes
+inline ExprPtr ComputeSliceByteOffset(const std::vector<ExprPtr>& offsets,
+                                      const std::vector<ExprPtr>& parent_shape, uint64_t elem_bytes) {
+  INTERNAL_CHECK(offsets.size() == parent_shape.size())
+      << "Internal error: slice offset rank (" << offsets.size() << ") must match parent shape rank ("
+      << parent_shape.size() << ")";
+
+  ExprPtr result = MakeZeroByteOffset();
+
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    ExprPtr stride = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
+    for (size_t j = i + 1; j < parent_shape.size(); ++j) {
+      stride = MulByteOffsets(stride, parent_shape[j]);
+    }
+    result = AddByteOffsets(result, MulByteOffsets(offsets[i], stride));
+  }
+
+  auto elem_size_expr =
+      std::make_shared<ConstInt>(static_cast<int64_t>(elem_bytes), DataType::INDEX, Span::unknown());
+  return MulByteOffsets(result, elem_size_expr);
+}
+
+/// Compute additional byte offset for a view operation.
+/// Dispatches: slice ops → stride-based offset, others → zero offset.
+inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
+  const std::string& op_name = call->op_->name_;
+
+  if (op_name == "tensor.slice" || op_name == "tile.slice") {
+    auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);
+    INTERNAL_CHECK(shaped) << "Internal error: slice parent must be ShapedType";
+
+    // tensor.slice(input, shape, offset) → offset is args[2]
+    // tile.slice(input, offset) → offset is args[1]
+    size_t offset_arg_idx = (op_name == "tensor.slice") ? 2 : 1;
+    INTERNAL_CHECK(offset_arg_idx < call->args_.size())
+        << "Internal error: " << op_name << " missing offset argument";
+
+    // Extract individual offset elements from the MakeTuple expression
+    std::vector<ExprPtr> offsets;
+    if (auto make_tuple = As<MakeTuple>(call->args_[offset_arg_idx])) {
+      offsets = make_tuple->elements_;
+    } else {
+      offsets.push_back(call->args_[offset_arg_idx]);
+    }
+
+    uint64_t elem_bytes = (shaped->dtype_.GetBit() + 7) / 8;
+    return ComputeSliceByteOffset(offsets, shaped->shape_, elem_bytes);
+  }
+
+  // Non-slice view ops (reshape, transpose, extract):
+  // No additional byte offset — same memory region, different interpretation
+  return MakeZeroByteOffset();
 }
 
 }  // namespace pypto::ir

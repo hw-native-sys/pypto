@@ -246,9 +246,9 @@ class IRSerializer::Impl {
 
     const auto& memref = *memref_opt.value();
     std::map<std::string, msgpack::object> memref_map;
-    memref_map["addr"] = SerializeNode(memref.addr_, zone);
+    memref_map["base"] = msgpack::object(memref.base_->name_hint_, zone);
+    memref_map["byte_offset"] = SerializeNode(memref.byte_offset_, zone);
     memref_map["size"] = msgpack::object(memref.size_, zone);
-    memref_map["id"] = msgpack::object(memref.id_, zone);
     return msgpack::object(memref_map, zone);
   }
 
@@ -404,8 +404,8 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type)) {
-      // MemRefType and UnknownType have no additional fields
+    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type)) {
+      // MemRefType, PtrType, and UnknownType have no additional fields
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();
     }

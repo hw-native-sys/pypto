@@ -66,8 +66,8 @@ def get_memref_addresses_from_tiles(func):
             var_type = stmt.var.type
             if isinstance(var_type, ir.TileType) and var_type.memref is not None:
                 memref = var_type.memref
-                if isinstance(memref.addr_, ir.ConstInt):
-                    memref_addrs[stmt.var.name_hint] = memref.addr_.value
+                if isinstance(memref.byte_offset_, ir.ConstInt):
+                    memref_addrs[stmt.var.name_hint] = memref.byte_offset_.value
     return memref_addrs
 
 
@@ -430,8 +430,8 @@ def test_memrefs_before_allocate_have_unallocated_addr():
     memref_addrs = get_memref_addresses_from_tiles(func)
     assert len(memref_addrs) > 0, "Should have MemRef addresses after init_mem_ref"
     for var_name, addr in memref_addrs.items():
-        assert addr == -1, (
-            f"MemRef address for '{var_name}' should be -1 before AllocateMemoryAddr, got {addr}"
+        assert addr == 0, (
+            f"MemRef byte_offset for '{var_name}' should be 0 before AllocateMemoryAddr, got {addr}"
         )
 
 

@@ -85,7 +85,7 @@ wrapper returning all `Var` pointers found. These operate on types
 | `CollectMemRefsWithSpace()` | All (MemRef, MemorySpace) pairs from a statement. |
 | `CollectNonDDRMemRefsWithSpace()` | Non-DDR (MemRef, MemorySpace) pairs from a statement. |
 | `CollectShapedTypeMemRefs()` | MemRefPtrs from any ShapedType (Tensor or Tile) in an expression. |
-| `CollectUsedMemRefPtrs()` | Raw MemRef pointers from TileType variables in a statement. |
+| `CollectUsedBasePtrs()` | Raw base Ptr pointers from MemRefs in TileType/TensorType variables. |
 
 ### Usage Examples
 
@@ -109,8 +109,8 @@ collector.VisitStmt(func->body_);
 // Collect from expressions (works with both TensorType and TileType)
 auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
 
-// Raw pointer set for fast membership checks
-auto used = memref_collectors::CollectUsedMemRefPtrs(func->body_);
+// Raw base Ptr set for fast membership checks (unused alloc detection)
+auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 ```
 
 ## Other Shared Utilities

@@ -458,22 +458,22 @@ class ASTParser:
                 span=self.span_tracker.get_span(stmt),
                 hint="Provide a value for the assignment",
             )
-        is_memref_type_annotation = (
+        is_ptr_type_annotation = (
             isinstance(stmt.annotation, ast.Attribute)
             and isinstance(stmt.annotation.value, ast.Name)
             and stmt.annotation.value.id == "pl"
-            and stmt.annotation.attr == "MemRefType"
-        ) or (isinstance(stmt.annotation, ast.Name) and stmt.annotation.id == "MemRefType")
+            and stmt.annotation.attr in ("Ptr", "MemRefType")
+        ) or (isinstance(stmt.annotation, ast.Name) and stmt.annotation.id in ("Ptr", "MemRefType"))
 
         if (
-            is_memref_type_annotation
+            is_ptr_type_annotation
             and isinstance(stmt.value, ast.Call)
-            and self._is_printed_tile_alloc_call(stmt.value)
+            and self._is_printed_alloc_call(stmt.value)
         ):
-            value_expr = self._parse_printed_tile_alloc_call(stmt.value)
-            memref_var = self._build_memref_from_alloc_call(var_name, value_expr, span)
-            self.builder.emit(ir.AssignStmt(memref_var, value_expr, span))
-            self.scope_manager.define_var(var_name, memref_var, span=span)
+            value_expr = self._parse_printed_alloc_call(stmt.value)
+            ptr_var = ir.Var(var_name, ir.PtrType(), span)
+            self.builder.emit(ir.AssignStmt(ptr_var, value_expr, span))
+            self.scope_manager.define_var(var_name, ptr_var, span=span)
             return
 
         value_expr = self.parse_expression(stmt.value)
@@ -489,7 +489,7 @@ class ASTParser:
                 isinstance(ann, ast.Attribute)
                 and isinstance(ann.value, ast.Name)
                 and ann.value.id == "pl"
-                and ann.attr in ("UnknownType", "MemRefType")
+                and ann.attr in ("UnknownType", "MemRefType", "Ptr")
             )
             if is_unresolvable:
                 resolved = None
@@ -579,35 +579,6 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
-
-    def _build_memref_from_alloc_call(self, var_name: str, alloc_call: ir.Call, span: ir.Span) -> ir.MemRef:
-        """Build a MemRef variable from a printer-emitted ``tile.alloc`` call."""
-        if len(alloc_call.args) != 4:
-            raise ParserTypeError(
-                f"tile.alloc for '{var_name}' must have 4 positional arguments",
-                span=span,
-                hint="Use tile.alloc(memory_space, addr, size, id)",
-            )
-
-        memory_space_expr, addr_expr, size_expr, id_expr = alloc_call.args
-        if not isinstance(size_expr, ir.ConstInt) or not isinstance(id_expr, ir.ConstInt):
-            raise ParserTypeError(
-                f"tile.alloc for '{var_name}' requires constant size/id in printed IR",
-                span=span,
-                hint="Use constant integer size/id for tile.alloc",
-            )
-
-        if isinstance(memory_space_expr, ir.ConstInt):
-            try:
-                memory_space = ir.MemorySpace(memory_space_expr.value)
-            except Exception as exc:  # pragma: no cover - defensive enum fallback
-                raise ParserTypeError(
-                    f"Invalid memory space value in tile.alloc for '{var_name}': {memory_space_expr.value}",
-                    span=span,
-                ) from exc
-            return ir.MemRef(memory_space, addr_expr, size_expr.value, id_expr.value, span)
-
-        return ir.MemRef(addr_expr, size_expr.value, id_expr.value, span)
 
     def _assign_or_let(
         self,
@@ -2628,41 +2599,49 @@ class ASTParser:
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation."""
+        if op_name == "alloc":
+            return self._parse_printed_alloc_call(call)
         return self._dispatch_op(ir_op.tensor, "tensor", op_name, call)
 
     def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tile operation."""
         if op_name == "alloc":
-            return self._parse_printed_tile_alloc_call(call)
+            return self._parse_printed_alloc_call(call)
         return self._dispatch_op(ir_op.tile, "tile", op_name, call)
 
     @staticmethod
-    def _is_printed_tile_alloc_call(call: ast.Call) -> bool:
-        """Return whether the AST call matches printer-emitted ``pl.tile.alloc(...)``."""
+    def _is_printed_alloc_call(call: ast.Call) -> bool:
+        """Return whether the AST call matches printer-emitted ``pl.tile.alloc(...)``
+        or ``pl.tensor.alloc(...)``."""
         func = call.func
         return (
             isinstance(func, ast.Attribute)
             and func.attr == "alloc"
             and isinstance(func.value, ast.Attribute)
-            and func.value.attr == "tile"
+            and func.value.attr in ("tile", "tensor")
             and isinstance(func.value.value, ast.Name)
             and func.value.value.id == "pl"
         )
 
-    def _parse_printed_tile_alloc_call(self, call: ast.Call) -> ir.Call:
-        """Parse printer-emitted ``pl.tile.alloc(...)`` into a raw IR call."""
+    def _parse_printed_alloc_call(self, call: ast.Call) -> ir.Call:
+        """Parse printer-emitted ``pl.{tile,tensor}.alloc(...)`` into a raw IR call."""
+        func = call.func
+        assert isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute)
+        namespace = func.value.attr  # "tile" or "tensor"
+        op_name = f"{namespace}.alloc"
+
         if call.keywords:
             raise InvalidOperationError(
-                "tile.alloc in printed IR must use positional arguments only",
+                f"{op_name} in printed IR must use positional arguments only",
                 span=self.span_tracker.get_span(call),
             )
         args = [self.parse_expression(arg) for arg in call.args]
-        if len(args) != 4:
+        if len(args) != 2:
             raise InvalidOperationError(
-                f"tile.alloc in printed IR expects 4 positional arguments, got {len(args)}",
+                f"{op_name} in printed IR expects 2 positional args (memory_space, size), got {len(args)}",
                 span=self.span_tracker.get_span(call),
             )
-        return ir.create_op_call("tile.alloc", args, {}, self.span_tracker.get_span(call))
+        return ir.create_op_call(op_name, args, {}, self.span_tracker.get_span(call))
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""

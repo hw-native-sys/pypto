@@ -261,11 +261,6 @@ class IRPythonPrinter : public IRVisitor {
   // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
   std::unordered_map<const Var*, std::string> var_rename_map_;
 
-  // Per-function MemRef name map: MemRef pointer → printed alloc name.
-  // Built from tile.alloc definition sites so tile/tensor annotations can refer
-  // to the same named buffers instead of re-printing inline pl.MemRef(...).
-  std::unordered_map<const MemRef*, std::string> memref_rename_map_;
-
   // Program-level dyn var rename map: Var pointer → disambiguated printed name.
   // Built once by VisitProgram for dynamic dimension variables used in type annotations.
   // When two distinct Var* share the same name_hint_, they get unique suffixed names.
@@ -279,17 +274,9 @@ class IRPythonPrinter : public IRVisitor {
   // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
   std::string GetVarName(const Var* var) const;
 
-  // Return the printed name for a MemRef when it is defined in the current
-  // function (for example by tile.alloc). Falls back to the original hint.
-  std::string GetMemRefName(const MemRef* memref) const;
-
   // Build var_rename_map_ for a function by scanning all Var def-sites in DFS pre-order.
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
   void BuildVarRenameMap(const FunctionPtr& func);
-
-  // Build memref_rename_map_ for a function from MemRef definition sites
-  // (currently tile.alloc assignments).
-  void BuildMemRefRenameMap(const FunctionPtr& func);
 
   // Print a statement block at current indent level.
   // SeqStmts is a transparent container - recursed into without extra indent.
@@ -443,6 +430,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + ".MemRefType";
   }
 
+  if (auto ptr_type = As<PtrType>(type)) {
+    return prefix_ + ".Ptr";
+  }
+
   return prefix_ + ".UnknownType";
 }
 
@@ -463,7 +454,7 @@ void IRPythonPrinter::VisitExpr_(const VarPtr& op) { stream_ << GetVarName(op.ge
 
 void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << op->name_hint_; }
 
-void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << GetMemRefName(op.get()); }
+void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
@@ -569,8 +560,8 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";
 
-    // Special handling for tile.alloc's first argument (memory_space)
-    if (op->op_->name_ == "tile.alloc" && i == 0) {
+    // Special handling for tile.alloc/tensor.alloc first argument (memory_space)
+    if ((op->op_->name_ == "tile.alloc" || op->op_->name_ == "tensor.alloc") && i == 0) {
       // Try to extract the integer value and convert it to MemorySpace enum
       if (auto const_int = std::dynamic_pointer_cast<const ConstInt>(op->args_[i])) {
         int space_value = static_cast<int>(const_int->value_);
@@ -1134,37 +1125,12 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
   }
 }
 
-// Collect MemRef definition sites in DFS pre-order for alloc name reuse.
-static void CollectMemRefDefsInOrder(const StmtPtr& stmt, std::vector<const MemRef*>& out) {
-  if (!stmt) return;
-  if (auto assign = As<AssignStmt>(stmt)) {
-    if (auto memref = As<MemRef>(assign->var_)) out.push_back(memref.get());
-  } else if (auto for_stmt = As<ForStmt>(stmt)) {
-    CollectMemRefDefsInOrder(for_stmt->body_, out);
-  } else if (auto if_stmt = As<IfStmt>(stmt)) {
-    CollectMemRefDefsInOrder(if_stmt->then_body_, out);
-    if (if_stmt->else_body_.has_value()) CollectMemRefDefsInOrder(*if_stmt->else_body_, out);
-  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-    CollectMemRefDefsInOrder(while_stmt->body_, out);
-  } else if (auto seq = As<SeqStmts>(stmt)) {
-    for (auto& s : seq->stmts_) CollectMemRefDefsInOrder(s, out);
-  } else if (auto scope = As<ScopeStmt>(stmt)) {
-    CollectMemRefDefsInOrder(scope->body_, out);
-  }
-}
-
 std::string IRPythonPrinter::GetVarName(const Var* var) const {
   auto it = var_rename_map_.find(var);
   if (it != var_rename_map_.end()) return it->second;
   auto dyn_it = dyn_var_rename_map_.find(var);
   if (dyn_it != dyn_var_rename_map_.end()) return dyn_it->second;
   return var->name_hint_;
-}
-
-std::string IRPythonPrinter::GetMemRefName(const MemRef* memref) const {
-  auto it = memref_rename_map_.find(memref);
-  if (it != memref_rename_map_.end()) return it->second;
-  return memref->name_hint_;
 }
 
 void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
@@ -1179,14 +1145,7 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   auto_name::BuildRenameMapForDefs(defs, var_rename_map_);
 }
 
-void IRPythonPrinter::BuildMemRefRenameMap(const FunctionPtr& func) {
-  std::vector<const MemRef*> defs;
-  if (func->body_) CollectMemRefDefsInOrder(func->body_, defs);
-  auto_name::BuildRenameMapForDefs(defs, memref_rename_map_, true);
-}
-
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
-  BuildMemRefRenameMap(func);
   // Build rename map for this function to handle SSA name shadowing.
   BuildVarRenameMap(func);
 
@@ -1495,7 +1454,7 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
                      dyn_var_ptrs.end());
 
   // Phase 2: Assign unique printed names, disambiguating collisions.
-  // Reuses the same rename logic as BuildVarRenameMap / BuildMemRefRenameMap.
+  // Reuses the same rename logic as BuildVarRenameMap.
   // include_unique_names=true so VisitProgram can iterate the full map for
   // pl.dynamic() declarations.
   std::unordered_map<const Var*, std::string> result;
@@ -1579,18 +1538,20 @@ void IRPythonPrinter::PrintShapeDims(std::ostringstream& oss, const std::vector<
 
 // Helper methods for MemRef and TileView printing
 std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
-  auto it = memref_rename_map_.find(&memref);
-  if (it != memref_rename_map_.end()) return it->second;
-
   std::ostringstream oss;
   oss << prefix_ << ".MemRef(";
 
-  // Print address expression
-  IRPythonPrinter temp_printer(prefix_);
-  oss << temp_printer.Print(memref.addr_);
+  // Print base Ptr name as string literal to handle forward references
+  // (DDR bases appear in parameter annotations before their alloc statements)
+  oss << "\"" << memref.base_->name_hint_ << "\"";
 
-  // Print size and id
-  oss << ", " << memref.size_ << ", " << memref.id_ << ")";
+  // Print byte offset
+  oss << ", ";
+  IRPythonPrinter temp_printer(prefix_);
+  oss << temp_printer.Print(memref.byte_offset_);
+
+  // Print size
+  oss << ", " << memref.size_ << ")";
   return oss.str();
 }
 

@@ -1072,8 +1072,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
-  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs)) {
-    return true;  // Singleton type, both being MemRefType or UnknownType is sufficient
+  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs)) {
+    return true;  // Singleton type, both being same type kind is sufficient
   }
 
   INTERNAL_UNREACHABLE << "EqualType encountered unhandled Type: " << lhs->TypeName();
@@ -1159,10 +1159,18 @@ bool StructuralEqualImpl<AssertMode>::EqualMemRef(const MemRefPtr& lhs, const Me
     return false;
   }
 
-  // 2. Then, compare MemRef-specific fields (except id_ which is a naming counter)
-  if (!Equal(lhs->addr_, rhs->addr_)) {
+  // 2. Then, compare MemRef-specific fields: base_, byte_offset_, size_
+  if (!EqualVar(lhs->base_, rhs->base_)) {
     if constexpr (AssertMode) {
-      ThrowMismatch("MemRef addr mismatch", std::static_pointer_cast<const IRNode>(lhs),
+      ThrowMismatch("MemRef base mismatch", std::static_pointer_cast<const IRNode>(lhs),
+                    std::static_pointer_cast<const IRNode>(rhs));
+    }
+    return false;
+  }
+
+  if (!Equal(lhs->byte_offset_, rhs->byte_offset_)) {
+    if constexpr (AssertMode) {
+      ThrowMismatch("MemRef byte_offset mismatch", std::static_pointer_cast<const IRNode>(lhs),
                     std::static_pointer_cast<const IRNode>(rhs));
     }
     return false;

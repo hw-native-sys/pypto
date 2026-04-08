@@ -39,6 +39,10 @@ class _AutoDynVar(dict):
     """
 
     def __missing__(self, key: str) -> object:
+        # Skip dunder names — these are Python/framework internals (e.g. pytest's
+        # __tracebackhide__) and must not be auto-created as DynVars.
+        if key.startswith("__") and key.endswith("__"):
+            raise KeyError(key)
         pl_mod = self.get("pl")
         if pl_mod is not None and isinstance(key, str):
             dvar = pl_mod.dynamic(key)

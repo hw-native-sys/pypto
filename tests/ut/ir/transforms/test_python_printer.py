@@ -219,9 +219,8 @@ class TestPythonPrinterProgram:
         after = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
         code = after.as_python()
 
-        assert "pl.MemRefType = pl.tile.alloc(" in code
-        assert "pl.Tile[[64, 64], pl.FP32, mem_vec_" in code
-        assert "pl.Tile[[64, 64], pl.FP32, pl.MemRef(" not in code
+        assert "pl.Ptr = pl.tile.alloc(" in code
+        assert 'pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_' in code
 
 
 class TestPythonPrinterConstDtypeRoundtrip:

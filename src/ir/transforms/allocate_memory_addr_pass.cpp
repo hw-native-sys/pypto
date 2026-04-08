@@ -201,24 +201,8 @@ class MemRefUpdateMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    // Handle tile.alloc statements: update LHS MemRef and Call addr argument
-    auto memref_var = std::dynamic_pointer_cast<const MemRef>(op->var_);
-    if (memref_var) {
-      auto call = std::dynamic_pointer_cast<const Call>(op->value_);
-      if (call && call->op_->name_ == "tile.alloc") {
-        auto it = memref_map_.find(memref_var.get());
-        if (it != memref_map_.end()) {
-          const auto& new_memref = it->second;
-          // Rebuild Call with updated addr argument (index 1)
-          std::vector<ExprPtr> new_args = call->args_;
-          new_args[1] = new_memref->addr_;
-          auto new_call =
-              std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-          return std::make_shared<AssignStmt>(new_memref, new_call, op->span_);
-        }
-        return op;
-      }
-    }
+    // tile.alloc statements now have Ptr LHS (not MemRef), so no special handling needed.
+    // Just fall through to the default mutator which updates types via UpdateTypeMemRef.
     return IRMutator::VisitStmt_(op);
   }
 
@@ -314,11 +298,11 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       CHECK(old_memref->size_ > 0)
           << "AllocateMemoryAddr encountered zero-sized MemRef '" << old_memref->name_hint_
           << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
-      // Create new MemRef with allocated address
-      auto addr_expr =
+      // Create new MemRef with allocated byte_offset, reusing the same base_ Ptr
+      auto offset_expr =
           std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
-      auto new_memref =
-          std::make_shared<MemRef>(space, addr_expr, old_memref->size_, old_memref->id_, old_memref->span_);
+      auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, offset_expr,
+                                                 old_memref->size_, old_memref->span_);
       memref_pairs.emplace_back(old_memref.get(), new_memref);
 
       // Next address = align(current + size)
@@ -326,17 +310,16 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     }
   }
 
-  // Sort by address (ascending order) so alloc statements are in address order
+  // Sort by byte_offset (ascending order) so alloc statements are in address order
   std::sort(memref_pairs.begin(), memref_pairs.end(),
             [](const std::pair<const MemRef*, MemRefPtr>& a, const std::pair<const MemRef*, MemRefPtr>& b) {
-              // Extract address values for comparison
-              auto addr_a = std::dynamic_pointer_cast<const ConstInt>(a.second->addr_);
-              auto addr_b = std::dynamic_pointer_cast<const ConstInt>(b.second->addr_);
-              if (addr_a && addr_b) {
-                return addr_a->value_ < addr_b->value_;
+              auto off_a = std::dynamic_pointer_cast<const ConstInt>(a.second->byte_offset_);
+              auto off_b = std::dynamic_pointer_cast<const ConstInt>(b.second->byte_offset_);
+              if (off_a && off_b) {
+                return off_a->value_ < off_b->value_;
               }
-              // Fallback: sort by ID if addresses are not ConstInt
-              return a.second->id_ < b.second->id_;
+              // Fallback: sort by name
+              return a.second->name_hint_ < b.second->name_hint_;
             });
 
   return memref_pairs;
@@ -437,17 +420,16 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     if (memory_space == MemorySpace::DDR) return;
     if (!seen_.insert(memref.get()).second) return;
 
-    auto const_addr = std::dynamic_pointer_cast<const ConstInt>(memref->addr_);
-    if (!const_addr || const_addr->value_ < 0) {
+    auto const_offset = std::dynamic_pointer_cast<const ConstInt>(memref->byte_offset_);
+    if (!const_offset || const_offset->value_ < 0) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "AllocatedMemoryAddr", 0,
                                 "MemRef for variable '" + var_name + "' in " +
-                                    MemorySpaceToString(memory_space) +
-                                    " has no valid address allocated (addr=-1)",
+                                    MemorySpaceToString(memory_space) + " has no valid address allocated",
                                 span);
       return;
     }
 
-    uint64_t end = static_cast<uint64_t>(const_addr->value_) + memref->size_;
+    uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;
     auto& hw = high_water_[memory_space];
     if (end > hw) hw = end;
   }

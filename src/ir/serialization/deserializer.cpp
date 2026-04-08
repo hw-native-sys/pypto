@@ -149,33 +149,36 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
 
     CHECK(obj.type == msgpack::type::MAP) << "Expected map for MemRef";
 
-    ExprPtr addr = nullptr;
+    std::string base_name;
+    ExprPtr byte_offset = nullptr;
     uint64_t size = 0;
-    uint64_t id = 0;
-    bool has_addr = false;
+    bool has_base = false;
+    bool has_byte_offset = false;
     bool has_size = false;
-    bool has_id = false;
 
     msgpack::object_kv* p = obj.via.map.ptr;
     msgpack::object_kv* const pend = obj.via.map.ptr + obj.via.map.size;
     for (; p < pend; ++p) {
       std::string key;
       p->key.convert(key);
-      if (key == "addr") {
-        addr = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
-        has_addr = true;
+      if (key == "base") {
+        p->val.convert(base_name);
+        has_base = true;
+      } else if (key == "byte_offset") {
+        byte_offset = std::static_pointer_cast<const Expr>(DeserializeNode(p->val, zone));
+        has_byte_offset = true;
       } else if (key == "size") {
         p->val.convert(size);
         has_size = true;
-      } else if (key == "id") {
-        p->val.convert(id);
-        has_id = true;
       }
     }
 
-    CHECK(has_addr && has_size && has_id) << "MemRef missing required fields (addr, size, or id)";
+    CHECK(has_base && has_byte_offset && has_size)
+        << "MemRef missing required fields (base, byte_offset, or size)";
 
-    return std::make_shared<MemRef>(addr, size, id);
+    // Create a base Ptr variable from the name
+    auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+    return std::make_shared<MemRef>(base, byte_offset, size);
   }
 
   std::optional<TileView> DeserializeTileView(const msgpack::object& obj, msgpack::zone& zone) {
@@ -380,6 +383,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "MemRefType") {
       return GetMemRefType();
+    } else if (type_kind == "Ptr") {
+      return GetPtrType();
     } else if (type_kind == "UnknownType") {
       return GetUnknownType();
     } else {

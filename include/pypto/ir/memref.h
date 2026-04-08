@@ -29,76 +29,55 @@ namespace ir {
 /**
  * @brief Memory reference variable for shaped types (tensor and tile)
  *
- * Represents a memory allocation with metadata (address, size, id).
- * Inherits from Var, making it a first-class IR expression that can be
- * declared and referenced like other variables.
+ * Represents a memory reference combining an allocation identity (base Ptr),
+ * a byte offset within that allocation, and a size.
  *
- * Memory references have auto-generated names based on their ID (e.g.,
- * "mem_123") and MemRefType as their type. Generated alloc buffers may use a
- * memory-space hint in the name (for example, "mem_vec_7"), but the memory
- * space itself is not stored on MemRef.
+ * - base_: VarPtr to the Ptr variable from tile.alloc/tensor.alloc (allocation identity)
+ * - byte_offset_: byte offset from base (0 for root alloc, computed for views)
+ * - size_: size in bytes of this memory region
+ *
+ * Aliasing is determined by comparing base_ pointers (SameAllocation) and
+ * checking for overlapping byte ranges (MayAlias).
  */
 class MemRef : public Var {
  public:
-  ExprPtr addr_;   ///< Starting address expression
-  uint64_t size_;  ///< Size in bytes (64-bit unsigned)
-  uint64_t id_;    ///< Unique identifier (used for name generation)
+  VarPtr base_;          ///< Ptr variable from alloc — allocation identity token
+  ExprPtr byte_offset_;  ///< Byte offset from base (0 for full alloc, view offset for views)
+  uint64_t size_;        ///< Size in bytes of this MemRef
 
   /**
-   * @brief Constructor with auto-generated generic name
-   *
-   * Generates a variable name from the ID (e.g., "mem_123") and creates
-   * a MemRefType for the type. Calls Var constructor with these values.
-   *
-   * @param addr Starting address expression
-   * @param size Size in bytes
-   * @param id Unique identifier (used to generate variable name)
-   * @param span Source location (defaults to Span::unknown())
+   * @brief Construct MemRef from base pointer, expression offset, and size.
+   * Name is derived from the base Ptr's name.
    */
-  MemRef(ExprPtr addr, uint64_t size, uint64_t id, Span span = Span::unknown());
+  MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown());
 
   /**
-   * @brief Constructor with space-specific generated name
-   *
-   * This is intended for generated alloc buffers whose name should retain the
-   * memory-space hint (e.g., "mem_vec_7"). The memory space is used only for
-   * naming; it is not stored on MemRef.
-   *
-   * @param naming_space Memory space used to build the generated variable name
-   * @param addr Starting address expression
-   * @param size Size in bytes
-   * @param id Unique identifier (used to generate variable name)
-   * @param span Source location (defaults to Span::unknown())
+   * @brief Convenience: construct with integer byte_offset (auto-wrapped in ConstInt).
    */
-  MemRef(MemorySpace naming_space, ExprPtr addr, uint64_t size, uint64_t id, Span span = Span::unknown());
+  MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span = Span::unknown());
 
   /**
-   * @brief Constructor with explicit variable name
-   *
-   * Used by deserialization and transforms that need to preserve an existing
-   * MemRef variable name exactly.
-   *
-   * @param name Explicit variable name
-   * @param addr Starting address expression
-   * @param size Size in bytes
-   * @param id Unique identifier associated with the MemRef
-   * @param span Source location (defaults to Span::unknown())
+   * @brief Construct with explicit variable name. Used by deserialization and
+   * address allocation where the name must be preserved exactly.
    */
-  MemRef(std::string name, ExprPtr addr, uint64_t size, uint64_t id, Span span = Span::unknown());
+  MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span = Span::unknown());
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::MemRef; }
   [[nodiscard]] std::string TypeName() const override { return "MemRef"; }
 
-  /**
-   * @brief Get field descriptors for reflection-based visitation
-   *
-   * @return Tuple of field descriptors
-   */
+  /// Are two MemRefs from the same allocation? (compare base_ Ptr identity)
+  static bool SameAllocation(const MemRefPtr& a, const MemRefPtr& b) {
+    return a->base_.get() == b->base_.get();
+  }
+
+  /// Do two MemRefs potentially alias? (same base + overlapping byte ranges)
+  static bool MayAlias(const MemRefPtr& a, const MemRefPtr& b);
+
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Var::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&MemRef::addr_, "addr"),
-                                          reflection::UsualField(&MemRef::size_, "size"),
-                                          reflection::UsualField(&MemRef::id_, "id")));
+                          std::make_tuple(reflection::UsualField(&MemRef::base_, "base"),
+                                          reflection::UsualField(&MemRef::byte_offset_, "byte_offset"),
+                                          reflection::UsualField(&MemRef::size_, "size")));
   }
 };
 

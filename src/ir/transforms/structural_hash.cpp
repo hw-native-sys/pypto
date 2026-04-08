@@ -454,8 +454,8 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
-  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type)) {
-    // MemRefType and UnknownType have no fields, only hash type name (already done above)
+  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type)) {
+    // MemRefType, PtrType, and UnknownType have no fields, only hash type name (already done above)
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();
   }

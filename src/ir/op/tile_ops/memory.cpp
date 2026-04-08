@@ -262,13 +262,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileAllocType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs,
                             const std::string& op_name) {
-  // alloc signature: (memory_space, addr, size, id)
-  // Takes MemRef fields as arguments and returns MemRefType
-  CHECK(args.size() == 4) << "The operator " << op_name << " requires exactly 4 arguments, but got "
+  // alloc signature: (memory_space, size) — returns PtrType (allocation identity)
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
-  // Return MemRefType
-  return GetMemRefType();
+  return GetPtrType();
 }
 
 TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
@@ -552,11 +550,9 @@ REGISTER_OP("tile.move")
 
 REGISTER_OP("tile.alloc")
     .set_op_category("TileOp")
-    .set_description("Allocate memory for a MemRef object")
+    .set_description("Declare on-chip memory allocation, returning a Ptr")
     .add_argument("memory_space", "Memory space (int enum value)")
-    .add_argument("addr", "Starting address expression")
     .add_argument("size", "Size in bytes (scalar)")
-    .add_argument("id", "MemRef ID (scalar)")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

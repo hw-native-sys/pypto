@@ -61,27 +61,27 @@ def _first_function(program):
     return next(iter(program.functions.values()))
 
 
-def _is_tile_alloc_assign(stmt):
-    """Return True if stmt is an AssignStmt wrapping a tile.alloc call."""
+def _is_alloc_assign(stmt):
+    """Return True if stmt is an AssignStmt wrapping a tile.alloc or tensor.alloc call."""
     return (
         isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "tile.alloc"
+        and stmt.value.op.name in ("tile.alloc", "tensor.alloc")
     )
 
 
 def _assert_leading_allocs(func, count):
-    """Assert that the first count statements in the body are tile.alloc assigns."""
+    """Assert that the first count statements in the body are alloc assigns."""
     assert isinstance(func.body, ir.SeqStmts)
     assert len(func.body.stmts) >= count
-    assert all(_is_tile_alloc_assign(stmt) for stmt in func.body.stmts[:count])
+    assert all(_is_alloc_assign(stmt) for stmt in func.body.stmts[:count])
 
 
 def _get_alloc_stmts(func):
-    """Get tile.alloc AssignStmts from function body."""
+    """Get alloc AssignStmts (tile.alloc or tensor.alloc) from function body."""
     allocs = []
     for stmt in _iter_assign_stmts(func):
-        if _is_tile_alloc_assign(stmt):
+        if _is_alloc_assign(stmt):
             allocs.append(stmt)
     return allocs
 
@@ -129,7 +129,7 @@ class TestBasic:
         for name in ("input_a", "input_b", "output"):
             assert name in param_types, f"param {name} should have MemRef"
             assert param_types[name].memory_space == MemorySpace.DDR
-            assert param_types[name].memref.addr_.value == -1
+            assert param_types[name].memref.byte_offset_.value == 0
             assert param_types[name].memref.size_ == 16384  # 64*64*4
 
         # Tiles: Vec, addr=-1, size=16384
@@ -137,14 +137,12 @@ class TestBasic:
         for name in ("tile_a", "tile_b", "tile_sum"):
             assert name in tile_types, f"tile {name} should have MemRef"
             assert tile_types[name].memory_space == MemorySpace.Vec
-            assert tile_types[name].memref.addr_.value == -1
+            assert tile_types[name].memref.byte_offset_.value == 0
             assert tile_types[name].memref.size_ == 16384
 
-        # Alloc count matches non-DDR tiles
+        # Alloc count matches non-DDR tiles (new format: tile.alloc(space, size))
         allocs = _get_alloc_stmts(func)
         assert len(allocs) == 3
-        for alloc in allocs:
-            assert alloc.value.args[1].value == -1
 
     def test_matmul_pipeline(self):
         """load→move→matmul→store: Vec/Mat/Left/Right/Acc memory spaces."""
@@ -198,7 +196,7 @@ class TestBasic:
             assert tile_types[name].memory_space == expected, (
                 f"{name}: expected {expected}, got {tile_types[name].memory_space}"
             )
-            assert tile_types[name].memref.addr_.value == -1
+            assert tile_types[name].memref.byte_offset_.value == 0
             if name == "tile_result":
                 assert tile_types[name].memref.size_ == 4096  # 32*32*4
             else:

@@ -168,8 +168,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string addr_ssa;
         std::string valid_row_ssa;
         std::string valid_col_ssa;
-        if (auto const_addr = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
-          addr_ssa = GetOrEmitI64Constant(const_addr->value_);
+        if (auto const_offset = As<ir::ConstInt>(tile_type->memref_.value()->byte_offset_)) {
+          addr_ssa = GetOrEmitI64Constant(const_offset->value_);
         }
         auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
         if (valid_row_var) valid_row_ssa = GetVarName(valid_row_var);
@@ -304,8 +304,8 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       BindTensorView(return_var, init_mlir_name);
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref.get());
-      BindVarToMemRef(return_var, memref.get());
+      BindVarToMemRef(iter_arg, memref->base_.get());
+      BindVarToMemRef(return_var, memref->base_.get());
     }
   }
 
@@ -443,8 +443,8 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       BindTensorView(return_var, init_mlir_name);
     } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
       const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref.get());
-      BindVarToMemRef(return_var, memref.get());
+      BindVarToMemRef(iter_arg, memref->base_.get());
+      BindVarToMemRef(return_var, memref->base_.get());
     }
   }
 

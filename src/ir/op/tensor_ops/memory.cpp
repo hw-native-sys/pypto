@@ -351,10 +351,11 @@ REGISTER_OP("tensor.create")
 
 REGISTER_OP("tensor.slice")
     .set_op_category("TensorOp")
-    .set_description("Create a slice of a tensor with new shape and offset")
+    .set_description("Create a slice (view) of a tensor with new shape and offset")
     .add_argument("input", "Input tensor (TensorType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSliceType(args, kwargs);
@@ -478,6 +479,18 @@ REGISTER_OP("tensor.write")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorWriteType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.alloc")
+    .set_op_category("TensorOp")
+    .set_description("Declare DDR memory allocation, returning a Ptr")
+    .add_argument("memory_space", "Memory space (DDR)")
+    .add_argument("size", "Size in bytes (scalar)")
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 2) << "tensor.alloc expects 2 args (memory_space, size), got " << args.size();
+      return GetPtrType();
     });
 
 }  // namespace ir

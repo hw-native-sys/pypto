@@ -843,33 +843,55 @@ class MemorySpace(enum.Enum):
 Mem = MemorySpace
 """Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""
 
+class PtrType(Type):
+    """Pointer type for allocation identity tokens (returned by tile.alloc/tensor.alloc)."""
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> PtrType:
+        """Get the singleton PtrType instance."""
+        ...
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 
-    addr_: Expr
-    """Starting address expression."""
+    base_: Var
+    """Base Ptr variable (allocation identity token)."""
+
+    byte_offset_: Expr
+    """Byte offset from base (0 for root alloc, computed for views)."""
 
     size_: int
     """Size in bytes (64-bit unsigned)."""
 
-    id_: int
-    """Unique identifier for this MemRef instance."""
-
     @overload
-    def __init__(self, addr: Expr | int, size: int, id: int, span: Span = ...) -> None: ...
+    def __init__(self, base: Var, byte_offset: int, size: int, span: Span = ...) -> None: ...
+    @overload
+    def __init__(self, base: Var, byte_offset: Expr, size: int, span: Span = ...) -> None: ...
+    @overload
+    def __init__(self, base: str, byte_offset: int, size: int, span: Span = ...) -> None: ...
+    @overload
+    def __init__(self, addr: int, size: int, id: int, span: Span = ...) -> None: ...
     @overload
     def __init__(
         self, memory_space: MemorySpace, addr: Expr | int, size: int, id: int, span: Span = ...
     ) -> None: ...
     def __init__(self, *args, **kwargs) -> None:
-        """Create a memory reference with addr, size, id, and span.
+        """Create a memory reference.
 
-        Args:
-            addr: Starting address expression or integer address literal
-            size: Size in bytes
-            id: Unique identifier for this MemRef instance
-            span: Source location (defaults to Span.unknown())
+        New API: MemRef(base, byte_offset, size)
+        Legacy API: MemRef(memory_space, addr, size, id) or MemRef(addr, size, id)
         """
+
+    @staticmethod
+    def same_allocation(a: MemRef, b: MemRef) -> bool:
+        """Check if two MemRefs share the same allocation (same base_ Ptr)."""
+        ...
+
+    @staticmethod
+    def may_alias(a: MemRef, b: MemRef) -> bool:
+        """Check if two MemRefs may alias (same base + overlapping byte ranges)."""
+        ...
 
 DYNAMIC_DIM: Final[int]
 """Constant representing a dynamic dimension (value: -1).

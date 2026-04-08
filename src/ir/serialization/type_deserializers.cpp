@@ -230,10 +230,13 @@ static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::z
                                    DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
   std::string name_hint = GET_FIELD(std::string, "name_hint");
-  auto addr = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("addr"), zone));
+  auto byte_offset =
+      std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("byte_offset"), zone));
   uint64_t size = GET_FIELD(uint64_t, "size");
-  uint64_t id = GET_FIELD(uint64_t, "id");
-  return std::make_shared<MemRef>(name_hint, addr, size, id, span);
+  // base_ is a VarPtr, serialized as a full IRNode
+  auto base = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("base"), zone));
+  INTERNAL_CHECK(base) << "MemRef base deserialized to null";
+  return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span);
 }
 
 // Deserialize ConstInt

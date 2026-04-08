@@ -77,7 +77,7 @@ using MemoryAllocatorPolicyPtr = std::unique_ptr<MemoryAllocatorPolicy>;
  *
  * - Skips DDR (addresses managed externally)
  * - Uses 32-byte alignment for all on-chip memory spaces
- * - Sorts MemRefs by id_ for deterministic allocation order
+ * - Sorts MemRefs by name for deterministic allocation order
  */
 class DefaultMemoryAllocatorPolicy : public MemoryAllocatorPolicy {
  public:
@@ -89,7 +89,7 @@ class DefaultMemoryAllocatorPolicy : public MemoryAllocatorPolicy {
 
   void OrderMemRefs(std::vector<MemRefPtr>& refs) const override {
     std::sort(refs.begin(), refs.end(),
-              [](const MemRefPtr& a, const MemRefPtr& b) { return a->id_ < b->id_; });
+              [](const MemRefPtr& a, const MemRefPtr& b) { return a->name_hint_ < b->name_hint_; });
   }
 };
 

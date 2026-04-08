@@ -295,18 +295,18 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     return {lifetimes, {}};
   }
 
-  // Step 2: Build MemRef sharing groups
-  std::map<const MemRef*, std::vector<VarPtr>> memref_groups;
+  // Step 2: Build MemRef sharing groups (keyed by base_ Ptr identity)
+  std::map<const Var*, std::vector<VarPtr>> memref_groups;
   for (const auto& var : result.ordered_defs) {
     auto tile_type = As<TileType>(var->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
-      const MemRef* memref_ptr = tile_type->memref_.value().get();
-      memref_groups[memref_ptr].push_back(var);
+      const Var* base_ptr = tile_type->memref_.value()->base_.get();
+      memref_groups[base_ptr].push_back(var);
     }
   }
 
   std::map<VarPtr, std::vector<VarPtr>> var_sharing_groups;
-  for (const auto& [memref_ptr, vars] : memref_groups) {
+  for (const auto& [base_ptr, vars] : memref_groups) {
     if (vars.size() > 1) {
       for (const auto& var : vars) {
         var_sharing_groups[var] = vars;
@@ -716,7 +716,7 @@ class YieldFixupMutator : public IRMutator {
       if (!init_tile) continue;
       auto init_memref = GetDefinedMemRef(init_tile);
 
-      if (yield_memref.get() == init_memref.get()) continue;
+      if (MemRef::SameAllocation(yield_memref, init_memref)) continue;
 
       // MemRef mismatch — create tile.move to copy yield value into initValue's buffer
       auto target_memory = init_tile->GetMemorySpace();
@@ -789,7 +789,7 @@ class YieldFixupMutator : public IRMutator {
       // Check else branch: if MemRef differs from target, insert tile.move
       if (then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
-        if (else_memref.get() != target_memref.get()) {
+        if (!MemRef::SameAllocation(else_memref, target_memref)) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
           else_move_stmts.emplace_back(std::move(move_stmt));
           else_moves.emplace_back(i, moved_var);
@@ -801,7 +801,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (rv_tile && rv_tile->memref_.has_value()) {
         auto rv_memref = GetDefinedMemRef(rv_tile);
-        if (rv_memref.get() != target_memref.get()) {
+        if (!MemRef::SameAllocation(rv_memref, target_memref)) {
           auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
               rv_tile, target_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, target_memory);
           new_return_vars[i] =
@@ -866,7 +866,7 @@ class YieldFixupMutator : public IRMutator {
       auto ia_tile = As<TileType>(for_stmt->iter_args_[i]->GetType());
       if (ia_tile && ia_tile->memref_.has_value()) {
         auto ia_memref = GetDefinedMemRef(ia_tile);
-        if (ia_memref.get() != init_memref.get()) {
+        if (!MemRef::SameAllocation(ia_memref, init_memref)) {
           auto new_ia_type = CloneTypeWithMemRefAndRemapExprs(
               ia_tile, init_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
               init_tile->GetMemorySpace());
@@ -888,7 +888,7 @@ class YieldFixupMutator : public IRMutator {
       auto rv_tile = As<TileType>(new_return_vars[i]->GetType());
       if (!rv_tile || !rv_tile->memref_.has_value()) continue;
       auto rv_memref = GetDefinedMemRef(rv_tile);
-      if (rv_memref.get() != yield_memref.get()) {
+      if (!MemRef::SameAllocation(rv_memref, yield_memref)) {
         auto new_rv_type = CloneTypeWithMemRefAndRemapExprs(
             rv_tile, yield_memref, [this](const ExprPtr& expr) { return VisitExpr(expr); },
             yield_tile->GetMemorySpace());
@@ -944,18 +944,18 @@ class YieldFixupMutator : public IRMutator {
 };
 
 // Check if a statement is a tile.alloc AssignStmt for an unused MemRef
-bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const MemRef*>& used_ptrs) {
+bool IsUnusedAllocStmt(const StmtPtr& stmt, const std::set<const Var*>& used_bases) {
   auto assign = As<AssignStmt>(stmt);
   if (!assign) return false;
-  auto memref = std::dynamic_pointer_cast<const MemRef>(assign->var_);
-  if (!memref) return false;
   auto call = As<Call>(assign->value_);
-  if (!call || call->op_->name_ != "tile.alloc") return false;
-  return used_ptrs.find(memref.get()) == used_ptrs.end();
+  if (!call) return false;
+  if (call->op_->name_ != "tile.alloc" && call->op_->name_ != "tensor.alloc") return false;
+  // Alloc LHS is a Ptr Var — check if any MemRef's base_ still references it
+  return used_bases.find(assign->var_.get()) == used_bases.end();
 }
 
 // Remove unused alloc statements from a SeqStmts body
-StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const MemRef*>& used_ptrs) {
+StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Var*>& used_bases) {
   auto seq = As<SeqStmts>(body);
   if (!seq) return body;
 
@@ -963,7 +963,7 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Me
   bool changed = false;
 
   for (const auto& child : seq->stmts_) {
-    if (IsUnusedAllocStmt(child, used_ptrs)) {
+    if (IsUnusedAllocStmt(child, used_bases)) {
       changed = true;
       continue;
     }
@@ -1007,8 +1007,8 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   new_body = yield_fixup.VisitStmt(new_body);
 
   // Step 5: Remove alloc statements for MemRefs no longer in use
-  auto used_ptrs = memref_collectors::CollectUsedMemRefPtrs(new_body);
-  new_body = RemoveUnusedAllocStatements(new_body, used_ptrs);
+  auto used_bases = memref_collectors::CollectUsedBasePtrs(new_body);
+  new_body = RemoveUnusedAllocStatements(new_body, used_bases);
 
   auto result = std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
                                                  func->return_types_, new_body, func->span_, func->func_type_,

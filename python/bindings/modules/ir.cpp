@@ -17,7 +17,9 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <any>
+#include <cctype>
 #include <memory>
 #include <optional>
 #include <string>
@@ -309,6 +311,13 @@ void BindIR(nb::module_& m) {
                        "Create a tuple type from a list of types");
   BindFields<TupleType>(tuple_type_class);
 
+  // PtrType - allocation identity token type
+  auto ptr_type_class =
+      nb::class_<PtrType, Type>(ir, "PtrType", "Pointer type for allocation identity tokens");
+  ptr_type_class.def(nb::init<>(), "Create a Ptr type");
+  ptr_type_class.def_static("get", &GetPtrType, "Get the singleton PtrType instance");
+  BindFields<PtrType>(ptr_type_class);
+
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
       .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")
@@ -475,31 +484,60 @@ void BindIR(nb::module_& m) {
   memref_class
       .def(
           "__init__",
-          [](MemRef* self, int64_t addr, uint64_t size, uint64_t id, const Span& span) {
-            auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INT64, span);
-            new (self) MemRef(addr_expr, size, id, span);
+          [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span) {
+            new (self) MemRef(base, byte_offset, size, span);
           },
-          nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
-          "Create a memory reference with integer addr, size, id, and span")
+          nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
+          "Create a memory reference with base Ptr, integer byte_offset, and size")
+      .def(nb::init<VarPtr, ExprPtr, uint64_t, Span>(), nb::arg("base"), nb::arg("byte_offset"),
+           nb::arg("size"), nb::arg("span") = Span::unknown(),
+           "Create a memory reference with base Ptr, byte_offset expression, and size")
+      // String base constructor: MemRef("base_name", byte_offset, size) — for forward references
+      // in printed IR where the base Ptr variable appears in annotations before its alloc statement
       .def(
           "__init__",
-          [](MemRef* self, MemorySpace memory_space, int64_t addr, uint64_t size, uint64_t id,
+          [](MemRef* self, const std::string& base_name, int64_t byte_offset, uint64_t size,
              const Span& span) {
-            auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INT64, span);
-            new (self) MemRef(memory_space, addr_expr, size, id, span);
+            auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+            new (self) MemRef(base, byte_offset, size, span);
+          },
+          nb::arg("base"), nb::arg("byte_offset"), nb::arg("size"), nb::arg("span") = Span::unknown(),
+          "Create a memory reference from base name string, integer byte_offset, and size")
+      // Legacy constructor: MemRef(MemorySpace, addr_expr, size, id) → auto-creates base Ptr
+      .def(
+          "__init__",
+          [](MemRef* self, MemorySpace memory_space, const ExprPtr& addr_expr, uint64_t size, uint64_t id,
+             const Span& span) {
+            // Build a name like "mem_vec_0" from memory_space and id
+            std::string space_str = MemorySpaceToString(memory_space);
+            std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            std::string base_name = "mem_" + space_str + "_" + std::to_string(id);
+            auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+            // Use addr_expr as byte_offset for backward compatibility
+            new (self) MemRef(base, addr_expr, size, span);
           },
           nb::arg("memory_space"), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
           nb::arg("span") = Span::unknown(),
-          "Create a memory reference with legacy memory_space, integer addr, size, id, and span.")
-      .def(nb::init<MemorySpace, ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("memory_space"),
-           nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
-           "Create a memory reference with legacy memory_space, addr, size, id, and span."
-           " The memory space is kept only in the generated name for compatibility.")
-      .def(nb::init<ExprPtr, uint64_t, uint64_t, Span>(), nb::arg("addr"), nb::arg("size"), nb::arg("id"),
-           nb::arg("span") = Span::unknown(), "Create a memory reference with addr, size, id, and span")
-      .def_rw("addr_", &MemRef::addr_, "Starting address expression")
+          "Legacy constructor: create MemRef from memory_space, addr, size, id")
+      // Legacy constructor: MemRef(addr_int, size, id) → auto-creates base Ptr
+      .def(
+          "__init__",
+          [](MemRef* self, int64_t addr, uint64_t size, uint64_t id, const Span& span) {
+            std::string base_name = "mem_" + std::to_string(id);
+            auto base = std::make_shared<Var>(base_name, GetPtrType(), Span::unknown());
+            auto addr_expr = std::make_shared<ConstInt>(addr, DataType::INDEX, Span::unknown());
+            new (self) MemRef(base, addr_expr, size, span);
+          },
+          nb::arg("addr"), nb::arg("size"), nb::arg("id"), nb::arg("span") = Span::unknown(),
+          "Legacy constructor: create MemRef from integer addr, size, id")
+      .def_rw("base_", &MemRef::base_, "Base Ptr variable (allocation identity)")
+      .def_rw("byte_offset_", &MemRef::byte_offset_, "Byte offset from base")
       .def_rw("size_", &MemRef::size_, "Size in bytes (64-bit unsigned)")
-      .def_rw("id_", &MemRef::id_, "Unique identifier for this MemRef instance");
+      .def_static("same_allocation", &MemRef::SameAllocation, nb::arg("a"), nb::arg("b"),
+                  "Check if two MemRefs share the same allocation (same base_ Ptr)")
+      .def_static("may_alias", &MemRef::MayAlias, nb::arg("a"), nb::arg("b"),
+                  "Check if two MemRefs may alias (same base + overlapping byte ranges)");
 
   // ConstInt - const shared_ptr
   auto constint_class = nb::class_<ConstInt, Expr>(ir, "ConstInt", "Constant integer expression");

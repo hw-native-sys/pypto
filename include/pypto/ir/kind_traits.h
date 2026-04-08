@@ -102,6 +102,7 @@ DEFINE_KIND_TRAIT(TensorType, ObjectKind::TensorType)
 DEFINE_KIND_TRAIT(TileType, ObjectKind::TileType)
 DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
+DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)

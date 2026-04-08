@@ -73,23 +73,21 @@ def _assert_all_have_memrefs(func):
 
 
 def _count_alloc_stmts(func):
-    """Count tile.alloc AssignStmt in the function body."""
+    """Count alloc AssignStmts (tile.alloc or tensor.alloc) in the function body."""
     count = 0
     for stmt in _iter_all_assign_stmts(func.body):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name in ("tile.alloc", "tensor.alloc"):
             count += 1
     return count
 
 
-def _get_alloc_memref_ids(func):
-    """Get the set of MemRef id_ values from tile.alloc statements."""
-    ids = set()
+def _get_alloc_base_names(func):
+    """Get the set of base Ptr names from alloc statements."""
+    names = set()
     for stmt in _iter_all_assign_stmts(func.body):
-        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
-            memref = stmt.var
-            assert isinstance(memref, ir.MemRef), "tile.alloc LHS must be MemRef"
-            ids.add(memref.id_)
-    return ids
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name in ("tile.alloc", "tensor.alloc"):
+            names.add(stmt.var.name_hint)
+    return names
 
 
 def _find_first_for_stmt(stmt):
@@ -262,10 +260,10 @@ class TestAllocCleanup:
             f"Expected 1 alloc stmt after chain reuse, got {_count_alloc_stmts(func)}"
         )
 
-        alloc_ids = _get_alloc_memref_ids(func)
+        alloc_names = _get_alloc_base_names(func)
         tile_a_type = _get_var_type(func, "tile_a")
         assert tile_a_type is not None and tile_a_type.memref is not None
-        assert tile_a_type.memref.id_ in alloc_ids
+        assert tile_a_type.memref.base_.name_hint in alloc_names
 
     def test_partial_reuse_with_overlapping_lifetimes(self):
         """When some lifetimes truly overlap, partial reuse happens."""

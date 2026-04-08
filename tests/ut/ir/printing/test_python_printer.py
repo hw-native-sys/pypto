@@ -507,7 +507,7 @@ def test_python_print_tile_type_prints_explicit_tile_memory_space():
 
     result = ir.python_print_type(tile_type)
 
-    assert "pl.MemRef(0, 512, 0)" in result
+    assert 'pl.MemRef("mem_vec_0", 0, 512)' in result
     assert ", pl.Mem.Vec" in result
 
 

@@ -86,8 +86,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   MemRefCollectorVisitor() = default;
 
   [[nodiscard]] const std::vector<MemRefPtr>& GetMemRefs() const { return memrefs_; }
-  [[nodiscard]] const std::map<const ir::MemRef*, std::shared_ptr<const TileType>>& GetMemRefTileTypes()
-      const {
+  [[nodiscard]] const std::map<const ir::Var*, std::shared_ptr<const TileType>>& GetMemRefTileTypes() const {
     return memref_tile_types_;
   }
 
@@ -105,21 +104,21 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
  private:
   std::vector<MemRefPtr> memrefs_;
-  std::set<const ir::MemRef*> seen_ptrs_;
-  std::map<const ir::MemRef*, std::shared_ptr<const TileType>> memref_tile_types_;
+  std::set<const ir::Var*> seen_bases_;
+  std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
-    const ir::MemRef* raw_ptr = memref.get();
-    if (ir::TryRegisterUniqueMemRef(memref, seen_ptrs_)) {
+    const ir::Var* base_ptr = memref->base_.get();
+    if (seen_bases_.insert(base_ptr).second) {
       memrefs_.push_back(memref);
-      memref_tile_types_[raw_ptr] = tile_type;
+      memref_tile_types_[base_ptr] = tile_type;
     } else {
-      // Merge TileView properties when multiple tiles share the same MemRef:
+      // Merge TileView properties when multiple tiles share the same allocation:
       // - Keep valid_shape from the original tile (e.g., from load)
       // - Take pad from the new tile if it has a non-null pad (e.g., from fillpad)
       // This ensures fillpad's pad_value is used while preserving the original valid_shape
-      auto existing = memref_tile_types_[raw_ptr];
+      auto existing = memref_tile_types_[base_ptr];
       if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::PadValue::null) {
         // Merge: keep valid_shape from existing, take pad from new tile
         ir::TileView merged_view;
@@ -129,7 +128,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
         merged_view.pad = tile_type->tile_view_->pad;
         auto merged_tile_type = std::make_shared<TileType>(
             existing->shape_, existing->dtype_, existing->memref_, merged_view, existing->memory_space_);
-        memref_tile_types_[raw_ptr] = merged_tile_type;
+        memref_tile_types_[base_ptr] = merged_tile_type;
       }
     }
   }
@@ -236,9 +235,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     auto memref = ir::GetDefinedMemRef(tile_type);
 
-    // Also maintain fs_.memref_to_mlir for compatibility (first var per MemRef)
-    if (fs_.memref_to_mlir.find(memref.get()) == fs_.memref_to_mlir.end()) {
-      fs_.memref_to_mlir[memref.get()] = ssa_name;
+    // Also maintain fs_.memref_to_mlir for compatibility (first var per allocation)
+    const ir::Var* base_ptr = memref->base_.get();
+    if (fs_.memref_to_mlir.find(base_ptr) == fs_.memref_to_mlir.end()) {
+      fs_.memref_to_mlir[base_ptr] = ssa_name;
     }
   }
 
@@ -337,8 +337,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     if (fs_.tpop_result_vars.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
-    if (memref && As<ir::ConstInt>(memref->addr_)) {
-      GetOrEmitI64Constant(As<ir::ConstInt>(memref->addr_)->value_);
+    if (memref && As<ir::ConstInt>(memref->byte_offset_)) {
+      GetOrEmitI64Constant(As<ir::ConstInt>(memref->byte_offset_)->value_);
     }
   }
 
@@ -412,14 +412,14 @@ std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::Stm
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   class VarMemRefMapper : public ir::IRVisitor {
    public:
-    std::map<const ir::Var*, const ir::MemRef*>& var_to_memref;
-    std::map<const ir::MemRef*, std::string>& memref_to_var_name;
+    std::map<const ir::Var*, const ir::Var*>& var_to_memref;    ///< tile var → base_ Ptr
+    std::map<const ir::Var*, std::string>& memref_to_var_name;  ///< base_ Ptr → var name
     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& tile_var_allocs;
     std::map<const ir::Var*, TpopResultInfo>& tpop_result_vars;
     std::set<const ir::Var*>& fillpad_input_vars;
 
-    VarMemRefMapper(std::map<const ir::Var*, const ir::MemRef*>& mapping,
-                    std::map<const ir::MemRef*, std::string>& reverse_mapping,
+    VarMemRefMapper(std::map<const ir::Var*, const ir::Var*>& mapping,
+                    std::map<const ir::Var*, std::string>& reverse_mapping,
                     std::vector<std::pair<VarPtr, std::shared_ptr<const TileType>>>& allocs,
                     std::map<const ir::Var*, TpopResultInfo>& tpop_vars,
                     std::set<const ir::Var*>& fillpad_vars)
@@ -432,10 +432,10 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
     void VisitStmt_(const AssignStmtPtr& op) override {
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
         const auto memref = ir::GetDefinedMemRef(tile_type);
-        const ir::MemRef* ptr = memref.get();
-        var_to_memref[op->var_.get()] = ptr;
-        if (memref_to_var_name.find(ptr) == memref_to_var_name.end()) {
-          memref_to_var_name[ptr] = op->var_->name_hint_;
+        const ir::Var* base_ptr = memref->base_.get();
+        var_to_memref[op->var_.get()] = base_ptr;
+        if (memref_to_var_name.find(base_ptr) == memref_to_var_name.end()) {
+          memref_to_var_name[base_ptr] = op->var_->name_hint_;
         }
         tile_var_allocs.emplace_back(op->var_, tile_type);
 
@@ -648,8 +648,8 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   auto memref = ir::GetDefinedMemRef(tile_type);
   std::string addr_ssa;
   if (memref) {
-    if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
-      addr_ssa = GetOrEmitI64Constant(const_addr->value_);
+    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
+      addr_ssa = GetOrEmitI64Constant(const_offset->value_);
     }
   }
 
@@ -741,8 +741,9 @@ std::string PTOCodegen::GetOrEmitI32Constant(int32_t value) {
 }
 
 std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) const {
-  auto it = fs_.memref_to_mlir.find(memref.get());
-  INTERNAL_CHECK(it != fs_.memref_to_mlir.end()) << "MemRef not found in mapping";
+  auto it = fs_.memref_to_mlir.find(memref->base_.get());
+  INTERNAL_CHECK(it != fs_.memref_to_mlir.end())
+      << "Internal error: no MLIR mapping for MemRef base '" << memref->base_->name_hint_ << "'";
   return it->second;
 }
 
@@ -941,8 +942,8 @@ void PTOCodegen::BindTensorView(const VarPtr& var, const std::string& tensor_vie
   fs_.tensor_to_view[GetVarKey(var)] = tensor_view_name;
 }
 
-void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::MemRef* memref) {
-  fs_.var_to_memref[GetVarKey(var)] = memref;
+void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::Var* base_ptr) {
+  fs_.var_to_memref[GetVarKey(var)] = base_ptr;
 }
 
 std::string PTOCodegen::GetVarName(const VarPtr& var) const {
@@ -1071,10 +1072,10 @@ std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_typ
   return oss.str();
 }
 
-std::string PTOCodegen::GetTileBufTypeString(const ir::MemRef* memref) const {
-  auto tile_it = fs_.memref_to_tile_type.find(memref);
+std::string PTOCodegen::GetTileBufTypeString(const ir::Var* base_ptr) const {
+  auto tile_it = fs_.memref_to_tile_type.find(base_ptr);
   INTERNAL_CHECK(tile_it != fs_.memref_to_tile_type.end())
-      << "Internal error: missing tile type for MemRef '" << memref->name_hint_ << "'";
+      << "Internal error: missing tile type for base Ptr '" << base_ptr->name_hint_ << "'";
   auto memory_space = tile_it->second->GetMemorySpace();
   INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile type must have memory_space";
 

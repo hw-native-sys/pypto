@@ -452,7 +452,7 @@ class TypeResolver:
         if memref_node is not None and memory_space_node is None:
             raise ParserTypeError(
                 "Tile annotation with a memref argument must also specify explicit memory space",
-                hint="Use pl.Tile[[shape], dtype, pl.MemRef(addr, size, id), pl.Mem.Vec] or "
+                hint="Use pl.Tile[[shape], dtype, pl.MemRef(base, offset, size), pl.Mem.Vec] or "
                 "pl.Tile[[shape], dtype, memref_var, pl.Mem.Vec]",
             )
 
@@ -1316,7 +1316,11 @@ class TypeResolver:
         return True
 
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
-        """Resolve a pl.MemRef(addr, size, id) AST call to ir.MemRef.
+        """Resolve a pl.MemRef(base, byte_offset, size) AST call to ir.MemRef.
+
+        Supports:
+        - New format: pl.MemRef(base_name, byte_offset, size) — bare name or string ref
+        - Legacy format: pl.MemRef(addr, size, id) — integer addr
 
         Args:
             node: AST Call node for pl.MemRef(...)
@@ -1330,38 +1334,88 @@ class TypeResolver:
         if not isinstance(node, ast.Call):
             raise ParserTypeError(
                 f"Expected pl.MemRef(...) call, got: {ast.unparse(node)}",
-                hint="Use pl.MemRef(addr, size, id)",
+                hint="Use pl.MemRef(base_name, byte_offset, size)",
             )
 
         span = self._get_span(node)
 
         if len(node.args) == 3:
-            addr_expr = self._resolve_memref_addr(node.args[0])
+            first_arg = node.args[0]
+
+            # New format: pl.MemRef(base_name, byte_offset, size)
+            # base_name is a bare Name or a string literal
+            base_name = self._try_resolve_memref_base(first_arg)
+            if base_name is not None:
+                byte_offset = self._resolve_memref_byte_offset(node.args[1])
+                size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
+                base_var = ir.Var(base_name, ir.PtrType(), span)
+                return ir.MemRef(base_var, byte_offset, size, span)
+
+            # Legacy fallback: pl.MemRef(addr_int, size, id)
+            addr_val = self._resolve_int_literal(node.args[0], "addr")
             size = self._resolve_int_literal(node.args[1], "size", non_negative=True)
             memref_id = self._resolve_int_literal(node.args[2], "id", non_negative=True)
-            return ir.MemRef(addr_expr, size, memref_id, span)
+            return ir.MemRef(addr_val, size, memref_id, span)
 
-        if len(node.args) != 4:
-            raise ParserTypeError(
-                f"pl.MemRef requires 3 arguments (addr, size, id), got {len(node.args)}",
-                span=span,
-                hint="Use pl.MemRef(0, 1024, 0)",
-            )
+        if len(node.args) == 4:
+            # Legacy: pl.MemRef(memory_space, addr, size, id)
+            memory_space = self._resolve_memory_space(node.args[0])
+            addr_expr = self._resolve_memref_addr(node.args[1])
+            size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
+            memref_id = self._resolve_int_literal(node.args[3], "id", non_negative=True)
+            return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
 
-        # Backward-compatibility path: allow legacy DDR-only form
-        memory_space = self._resolve_memory_space(node.args[0])
-        if memory_space != ir.MemorySpace.DDR:
-            raise ParserTypeError(
-                "pl.MemRef(memory_space, ...) no longer stores memory space",
-                span=span,
-                hint="Use pl.MemRef(addr, size, id) and put non-DDR space on Tile annotations",
-            )
+        raise ParserTypeError(
+            f"pl.MemRef requires 3 arguments (base, byte_offset, size), got {len(node.args)}",
+            span=span,
+            hint="Use pl.MemRef(base_name, byte_offset, size)",
+        )
 
-        addr_expr = self._resolve_memref_addr(node.args[1])
-        size = self._resolve_int_literal(node.args[2], "size", non_negative=True)
-        memref_id = self._resolve_int_literal(node.args[3], "id", non_negative=True)
+    def _try_resolve_memref_base(self, node: ast.expr) -> str | None:
+        """Try to resolve the first arg of pl.MemRef as a base name.
 
-        return ir.MemRef(memory_space, addr_expr, size, memref_id, span)
+        Returns the name string if the node is a bare Name or string literal,
+        None if it's an integer (legacy addr format).
+        """
+        # String literal: pl.MemRef("mem_ddr_0", ...)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        # Bare name: pl.MemRef(mem_vec_0, ...)
+        if isinstance(node, ast.Name):
+            return node.id
+        # Integer → legacy format, not a base name
+        return None
+
+    def _resolve_memref_byte_offset(self, node: ast.expr) -> "ir.Expr":
+        """Resolve a MemRef byte_offset to an IR expression (int, variable, or arithmetic)."""
+        value = self._try_resolve_int(node)
+        if value is not None:
+            return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
+
+        # Try resolving as a variable reference (for symbolic offsets)
+        if isinstance(node, ast.Name) and self.scope_lookup is not None:
+            var = self.scope_lookup(node.id)
+            if var is not None:
+                return var
+
+        # Handle arithmetic expressions (e.g., var * 4, var + 128)
+        if isinstance(node, ast.BinOp):
+            lhs = self._resolve_memref_byte_offset(node.left)
+            rhs = self._resolve_memref_byte_offset(node.right)
+            op_map: dict[type, str] = {
+                ast.Add: "__add__",
+                ast.Sub: "__sub__",
+                ast.Mult: "__mul__",
+            }
+            method = op_map.get(type(node.op))
+            if method is not None:
+                return getattr(lhs, method)(rhs)
+
+        raise ParserTypeError(
+            f"MemRef byte_offset must be an integer or variable, got: {ast.unparse(node)}",
+            span=self._get_span(node),
+            hint="Use an integer value for the byte offset, e.g., 0 or 1024",
+        )
 
     def _resolve_memory_space(self, node: ast.expr) -> "ir.MemorySpace":
         """Resolve a memory space AST node (e.g., pl.Mem.DDR or pl.MemorySpace.DDR)."""

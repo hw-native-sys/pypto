@@ -71,9 +71,9 @@ class MemoryUsageCollector : public IRVisitor {
     auto& s = stats_[*memory_space];
     s.count++;
 
-    auto const_addr = std::dynamic_pointer_cast<const ConstInt>(memref->addr_);
-    if (const_addr && const_addr->value_ >= 0) {
-      uint64_t end = static_cast<uint64_t>(const_addr->value_) + memref->size_;
+    auto const_offset = std::dynamic_pointer_cast<const ConstInt>(memref->byte_offset_);
+    if (const_offset && const_offset->value_ >= 0) {
+      uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;
       if (end > s.high_water) s.high_water = end;
     } else {
       // Address not yet allocated — use size as a lower bound

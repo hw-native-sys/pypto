@@ -109,24 +109,26 @@ inline std::set<MemRefPtr> CollectShapedTypeMemRefs(const ExprPtr& expr) {
   return std::move(collector.memrefs);
 }
 
-/// Collect raw MemRef pointers currently referenced by TileType variables
-/// in a statement subtree.
-///
-/// Returns raw pointers (not shared_ptrs) for fast membership checks,
-/// e.g. to identify unused tile.alloc statements.
-inline std::set<const MemRef*> CollectUsedMemRefPtrs(const StmtPtr& stmt) {
+/// Collect raw pointers of base_ Var objects referenced by MemRefs in
+/// TileType and TensorType variables.
+/// Used to identify unused tile.alloc/tensor.alloc Ptr variables.
+inline std::set<const Var*> CollectUsedBasePtrs(const StmtPtr& stmt) {
   class Collector : public IRVisitor {
    public:
-    std::set<const MemRef*> used_ptrs;
+    std::set<const Var*> used_bases;
     void VisitVarLike_(const VarPtr& op) override {
       if (auto tile_type = GetTileTypeWithMemRef(op->GetType())) {
-        used_ptrs.insert(GetDefinedMemRef(tile_type).get());
+        used_bases.insert(GetDefinedMemRef(tile_type)->base_.get());
+      } else if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(op->GetType())) {
+        if (tensor_type->memref_.has_value()) {
+          used_bases.insert(tensor_type->memref_.value()->base_.get());
+        }
       }
     }
   };
   Collector collector;
   collector.VisitStmt(stmt);
-  return std::move(collector.used_ptrs);
+  return std::move(collector.used_bases);
 }
 
 }  // namespace memref_collectors
