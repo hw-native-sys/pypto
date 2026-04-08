@@ -38,6 +38,8 @@ gh auth status
 
 If not authenticated, tell the user to run `gh auth login` and **stop**.
 
+Verify the token has `project` scope (needed for Step 7). If missing, tell the user to run `gh auth refresh -s project` and **stop**.
+
 ## Step 2: Check for Existing Issues
 
 **Launch a `general-purpose` agent** (via `Task` tool, **model: haiku**) to perform the dedup check. This keeps the main context clean and fast.
@@ -150,7 +152,7 @@ EOF
 )"
 ```
 
-**After creation**, display the issue URL to the user.
+**After creation**, capture the issue number from the output URL (e.g., `https://github.com/.../issues/123` → `ISSUE_NUMBER=123`) for use in Step 7. Display the issue URL to the user.
 
 ## Step 7: Set Project Board Fields
 
@@ -160,7 +162,7 @@ After creation, the "Auto-add to project" workflow adds the issue to **hw-native
 
 ```bash
 gh api graphql -f query='{ repository(owner:"hw-native-sys",name:"pypto") {
-  issue(number:ISSUE_NUM) { projectItems(first:5) { nodes { id project { number } } } } } }'
+  issue(number:ISSUE_NUMBER) { projectItems(first:5) { nodes { id project { number } } } } } }'
 ```
 
 Extract the item ID where `project.number == 3`. If not found, wait 5s and retry once (auto-add may be delayed).
@@ -224,7 +226,7 @@ For Sprint (iteration field), use `value:{ iterationId:"ITER_ID" }` instead. If 
 ## Checklist
 
 - [ ] Input source determined (KNOWN_ISSUES.md or direct)
-- [ ] gh CLI authenticated (with `project` scope for board fields)
+- [ ] gh CLI authenticated with `project` scope
 - [ ] Searched for existing issues (no duplicate)
 - [ ] Issue classified to correct template, all required fields filled
 - [ ] Issue created with correct prefix, labels, and markdown body
