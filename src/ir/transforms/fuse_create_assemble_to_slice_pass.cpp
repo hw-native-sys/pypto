@@ -28,6 +28,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -270,6 +271,16 @@ class FuseCreateAssembleMutator : public IRMutator {
     return IRMutator::VisitStmt_(op);
   }
 
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    return StripPassThroughIterArgs(result);
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    auto result = IRMutator::VisitStmt_(op);
+    return StripPassThroughWhileIterArgs(result);
+  }
+
  private:
   StmtPtr RewriteCreateToSlice(const AssignStmtPtr& assign, const CallPtr& create_call,
                                const FuseInfo& info) {
@@ -298,7 +309,127 @@ class FuseCreateAssembleMutator : public IRMutator {
 
   StmtPtr RewriteAssembleToAlias(const AssignStmtPtr& assign, const CallPtr& call) {
     ExprPtr target = VisitExpr(call->args_[0]);
-    return std::make_shared<AssignStmt>(assign->var_, target, assign->span_);
+    var_remap_[assign->var_.get()] = target;
+    return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, assign->span_);
+  }
+
+  // After mutation, a for loop's yield may pass an iter_arg through unchanged
+  // (yield(iter_arg) instead of yield(new_value)). This happens when the
+  // assemble that produced the new value was eliminated. Strip such iter_args
+  // from the loop since they carry no state.
+  StmtPtr StripPassThroughIterArgs(const StmtPtr& stmt) {
+    auto for_stmt = As<ForStmt>(stmt);
+    if (!for_stmt || for_stmt->iter_args_.empty()) return stmt;
+
+    auto yield = GetTrailingYield(for_stmt->body_);
+    if (!yield || yield->value_.size() != for_stmt->iter_args_.size()) return stmt;
+
+    std::vector<bool> is_pass_through(for_stmt->iter_args_.size(), false);
+    bool any = false;
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      auto yielded = AsVarLike(yield->value_[i]);
+      if (yielded && yielded.get() == for_stmt->iter_args_[i].get()) {
+        is_pass_through[i] = true;
+        any = true;
+      }
+    }
+    if (!any) return stmt;
+
+    std::vector<IterArgPtr> new_iter_args;
+    std::vector<VarPtr> new_return_vars;
+    std::vector<ExprPtr> new_yield_values;
+    std::unordered_map<const Var*, ExprPtr> body_subst;
+    for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+      if (is_pass_through[i]) {
+        var_remap_[for_stmt->return_vars_[i].get()] = for_stmt->iter_args_[i]->initValue_;
+        body_subst[for_stmt->iter_args_[i].get()] = for_stmt->iter_args_[i]->initValue_;
+        continue;
+      }
+      new_iter_args.push_back(for_stmt->iter_args_[i]);
+      new_return_vars.push_back(for_stmt->return_vars_[i]);
+      new_yield_values.push_back(yield->value_[i]);
+    }
+
+    auto new_body = ReplaceTrailingYield(for_stmt->body_, new_yield_values, yield->span_);
+    if (!body_subst.empty()) {
+      new_body = transform_utils::Substitute(new_body, body_subst);
+    }
+
+    return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+                                     new_iter_args, new_body, new_return_vars, for_stmt->span_,
+                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
+                                     for_stmt->loop_origin_);
+  }
+
+  StmtPtr StripPassThroughWhileIterArgs(const StmtPtr& stmt) {
+    auto while_stmt = As<WhileStmt>(stmt);
+    if (!while_stmt || while_stmt->iter_args_.empty()) return stmt;
+
+    auto yield = GetTrailingYield(while_stmt->body_);
+    if (!yield || yield->value_.size() != while_stmt->iter_args_.size()) return stmt;
+
+    std::vector<bool> is_pass_through(while_stmt->iter_args_.size(), false);
+    bool any = false;
+    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+      auto yielded = AsVarLike(yield->value_[i]);
+      if (yielded && yielded.get() == while_stmt->iter_args_[i].get()) {
+        is_pass_through[i] = true;
+        any = true;
+      }
+    }
+    if (!any) return stmt;
+
+    std::vector<IterArgPtr> new_iter_args;
+    std::vector<VarPtr> new_return_vars;
+    std::vector<ExprPtr> new_yield_values;
+    std::unordered_map<const Var*, ExprPtr> body_subst;
+    for (size_t i = 0; i < while_stmt->iter_args_.size(); ++i) {
+      if (is_pass_through[i]) {
+        var_remap_[while_stmt->return_vars_[i].get()] = while_stmt->iter_args_[i]->initValue_;
+        body_subst[while_stmt->iter_args_[i].get()] = while_stmt->iter_args_[i]->initValue_;
+        continue;
+      }
+      new_iter_args.push_back(while_stmt->iter_args_[i]);
+      new_return_vars.push_back(while_stmt->return_vars_[i]);
+      new_yield_values.push_back(yield->value_[i]);
+    }
+
+    auto new_body = ReplaceTrailingYield(while_stmt->body_, new_yield_values, yield->span_);
+    if (!body_subst.empty()) {
+      new_body = transform_utils::Substitute(new_body, body_subst);
+    }
+
+    return std::make_shared<WhileStmt>(while_stmt->condition_, new_iter_args, new_body, new_return_vars,
+                                       while_stmt->span_);
+  }
+
+  static YieldStmtPtr GetTrailingYield(const StmtPtr& body) {
+    if (auto seq = As<SeqStmts>(body)) {
+      if (seq->stmts_.empty()) return nullptr;
+      return As<YieldStmt>(seq->stmts_.back());
+    }
+    return As<YieldStmt>(body);
+  }
+
+  static StmtPtr ReplaceTrailingYield(const StmtPtr& body, const std::vector<ExprPtr>& new_values,
+                                      const Span& span) {
+    if (As<YieldStmt>(body)) {
+      if (new_values.empty()) {
+        return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, span);
+      }
+      return std::make_shared<YieldStmt>(new_values, span);
+    }
+    if (auto seq = As<SeqStmts>(body)) {
+      std::vector<StmtPtr> stmts = seq->stmts_;
+      if (!stmts.empty() && As<YieldStmt>(stmts.back())) {
+        stmts.pop_back();
+        if (!new_values.empty()) {
+          stmts.push_back(std::make_shared<YieldStmt>(new_values, span));
+        }
+      }
+      return SeqStmts::Flatten(std::move(stmts), seq->span_);
+    }
+    return body;
   }
 
   [[nodiscard]] const Var* ResolveVar(const Var* var) const {

@@ -122,10 +122,7 @@ class TestFuseCreateAssembleToSlice:
 
         after = _run_prereqs_and_fuse(Before)
         expected = _run_prereqs_only(Expected)
-
-        after_ops = _collect_tensor_ops_in_orch(after)
-        expected_ops = _collect_tensor_ops_in_orch(expected)
-        assert after_ops == expected_ops
+        ir.assert_structural_equal(after, expected)
 
     def test_duplicate_assemble_not_fused(self):
         """tensor.create assembled more than once → no fusion, IR unchanged."""
@@ -212,6 +209,93 @@ class TestFuseCreateAssembleToSlice:
                 chunk: pl.Tensor[[1, 8], pl.FP32] = pl.slice(x, [1, 8], [0, 0])
                 out = pl.assemble(out, chunk, [0, 0])
                 return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
+
+    def test_multi_iter_arg_partial_fuse(self):
+        """Only the assembled iter_arg is stripped; other iter_args survive.
+
+        Reproduces the decode-attention pattern where the outer for loop
+        carries multiple iter_args (e.g. attn_out, cache) but only attn_out
+        has a create+assemble pattern.  Before the fix, the pass produced
+        ``auto attn_out = attn_out;`` in codegen (self-assignment) because
+        it replaced assemble with an alias without cleaning up the iter_arg.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def update_state(
+                self,
+                state: pl.Out[pl.Tensor[[4], pl.FP32]],
+                r: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                t: pl.Tile[[4], pl.FP32] = pl.load(state, [0], [4])
+                state_1: pl.Tensor[[4], pl.FP32] = pl.store(t, [0], state)
+                return state_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                state: pl.Out[pl.Tensor[[4], pl.FP32]],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4, 8], pl.FP32]]:
+                for r in pl.range(4):
+                    state = self.update_state(state, r)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.fill_row(x, r, row)
+                    out = pl.assemble(out, row, [r, 0])
+                return state, out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def update_state(
+                self,
+                state: pl.Out[pl.Tensor[[4], pl.FP32]],
+                r: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                t: pl.Tile[[4], pl.FP32] = pl.load(state, [0], [4])
+                state_1: pl.Tensor[[4], pl.FP32] = pl.store(t, [0], state)
+                return state_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                state: pl.Out[pl.Tensor[[4], pl.FP32]],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4, 8], pl.FP32]]:
+                for r in pl.range(4):
+                    state = self.update_state(state, r)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.slice(out, [1, 8], [r, 0])
+                    row = self.fill_row(x, r, row)
+                return state, out
 
         after = _run_prereqs_and_fuse(Before)
         expected = _run_prereqs_only(Expected)
