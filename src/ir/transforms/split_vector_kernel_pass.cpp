@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -21,6 +22,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -33,6 +35,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -372,6 +375,26 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
   }
 
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+    // Phase 1: Update iter_args — halve tile types and eagerly substitute initValues.
+    // Eager initValue substitution ensures new_ia is the final form. If we deferred to the
+    // final Substitute, it would create new_ia2 (with updated initValue) while body references
+    // would get new_ia — causing a pointer mismatch in structural equality.
+    std::vector<IterArgPtr> new_iter_args;
+    new_iter_args.reserve(for_stmt->iter_args_.size());
+    for (const auto& ia : for_stmt->iter_args_) {
+      auto tt = std::dynamic_pointer_cast<const TileType>(ia->GetType());
+      if (is_aiv && tt && split_dim < static_cast<int>(tt->shape_.size())) {
+        auto new_type = HalveTileShape(ia->GetType(), split_dim);
+        auto new_init = transform_utils::Substitute(ia->initValue_, var_replacements);
+        auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
+        var_replacements[ia.get()] = new_ia;
+        new_iter_args.push_back(new_ia);
+      } else {
+        new_iter_args.push_back(ia);
+      }
+    }
+
+    // Phase 2: Process loop body with updated var_replacements.
     auto flat = std::vector<StmtPtr>();
     if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(for_stmt->body_)) {
       flat = seq->stmts_;
@@ -383,10 +406,34 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     StmtPtr new_body = (new_body_stmts.size() == 1)
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
-    return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                     for_stmt->iter_args_, new_body, for_stmt->return_vars_, for_stmt->span_,
-                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
-                                     for_stmt->loop_origin_);
+
+    // Phase 3: Update return_vars — halve type if corresponding iter_arg was halved,
+    // and register in tile_vars so downstream tile.store picks up the subblock offset.
+    // Invariant: |iter_args| == |return_vars|, so indexing is safe.
+    INTERNAL_CHECK(for_stmt->iter_args_.size() == for_stmt->return_vars_.size())
+        << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
+        << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
+    std::vector<VarPtr> new_return_vars;
+    new_return_vars.reserve(for_stmt->return_vars_.size());
+    for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+      const auto& rv = for_stmt->return_vars_[i];
+      const bool ia_halved = (new_iter_args[i].get() != for_stmt->iter_args_[i].get());
+      if (ia_halved) {
+        auto new_rv_type = HalveTileShape(rv->GetType(), split_dim);
+        auto new_rv = std::make_shared<Var>(rv->name_hint_, new_rv_type, rv->span_);
+        var_replacements[rv.get()] = new_rv;
+        // Register in tile_vars so tile.store after this loop adjusts its offset.
+        auto old_tt = std::dynamic_pointer_cast<const TileType>(for_stmt->iter_args_[i]->GetType());
+        TileInfo info{ComputeHalfDimSize(old_tt->shape_[split_dim])};
+        tile_vars[rv.get()] = info;
+        tile_vars[new_rv.get()] = info;
+        new_return_vars.push_back(new_rv);
+      } else {
+        new_return_vars.push_back(rv);
+      }
+    }
+
+    return loop_repair::RebuildForStmt(for_stmt, new_iter_args, new_body, new_return_vars);
   }
 
   if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
