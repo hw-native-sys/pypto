@@ -133,6 +133,25 @@ std::string ErrorTypeToString(ErrorType type);
 
 }  // namespace use_after_def
 
+/**
+ * @brief Out parameter shadowing verification error types and utilities
+ */
+namespace out_param {
+
+/**
+ * @brief Error types for out parameter shadowing verification
+ */
+enum class ErrorType : int {
+  OUT_PARAM_REASSIGNED = 501,  ///< Out/InOut param reassigned
+};
+
+/**
+ * @brief Convert out_param error type to string
+ */
+std::string ErrorTypeToString(ErrorType type);
+
+}  // namespace out_param
+
 }  // namespace ir
 }  // namespace pypto
 

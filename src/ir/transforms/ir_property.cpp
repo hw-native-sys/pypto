@@ -59,6 +59,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "StructuredCtrlFlow";
     case IRProperty::VectorKernelSplit:
       return "VectorKernelSplit";
+    case IRProperty::OutParamNotShadowed:
+      return "OutParamNotShadowed";
     default:
       return "Unknown";
   }
@@ -124,14 +126,19 @@ VerificationLevel GetDefaultVerificationLevel() {
 
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked, IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
+                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed};
   return props;
 }
 
 const IRPropertySet& GetDefaultVerifyProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm,           IRProperty::TypeChecked,
-                                   IRProperty::NoNestedCalls,     IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef};
+  static const IRPropertySet props{IRProperty::SSAForm,
+                                   IRProperty::TypeChecked,
+                                   IRProperty::NoNestedCalls,
+                                   IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks,
+                                   IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed};
   return props;
 }
 

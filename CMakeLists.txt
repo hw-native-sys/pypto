@@ -189,6 +189,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_use_after_def.cpp
     src/ir/verifier/type_check_pass.cpp
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
+    src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/warning_verifier_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
 

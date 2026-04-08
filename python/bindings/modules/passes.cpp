@@ -67,7 +67,8 @@ void BindPass(nb::module_& m) {
       .value("StructuredCtrlFlow", IRProperty::StructuredCtrlFlow,
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
-             "AIV functions with split mode have tpop shapes and store offsets adjusted");
+             "AIV functions with split mode have tpop shapes and store offsets adjusted")
+      .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")

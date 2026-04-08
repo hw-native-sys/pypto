@@ -48,6 +48,7 @@ enum class IRProperty : uint64_t {
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
+  OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor.create
   kCount                    ///< Sentinel (must be last)
 };
 
@@ -188,7 +189,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef}.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed}.
  */
 const IRPropertySet& GetStructuralProperties();
 
@@ -196,7 +197,8 @@ const IRPropertySet& GetStructuralProperties();
  * @brief Default property set for explicit verification
  *
  * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef} — the properties checked by run_verifier() when no explicit set is given.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed} — the properties checked by run_verifier() when no
+ * explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();
 

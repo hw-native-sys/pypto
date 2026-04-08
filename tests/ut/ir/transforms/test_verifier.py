@@ -177,6 +177,7 @@ def test_get_default_verify_properties():
     assert props.contains(passes.IRProperty.NoNestedCalls)
     assert props.contains(passes.IRProperty.BreakContinueValid)
     assert props.contains(passes.IRProperty.NoRedundantBlocks)
+    assert props.contains(passes.IRProperty.OutParamNotShadowed)
 
 
 def test_get_structural_properties():
@@ -185,6 +186,7 @@ def test_get_structural_properties():
     assert props.contains(passes.IRProperty.TypeChecked)
     assert props.contains(passes.IRProperty.BreakContinueValid)
     assert props.contains(passes.IRProperty.NoRedundantBlocks)
+    assert props.contains(passes.IRProperty.OutParamNotShadowed)
     assert not props.contains(passes.IRProperty.SSAForm)
 
 
@@ -384,6 +386,84 @@ def test_verification_instrument_checks_structural_after_pass():
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         result = passes.convert_to_ssa()(program)
     assert result is not None
+
+
+def _make_out_param_reassigned_program() -> ir.Program:
+    """Create a program where an Out parameter is reassigned."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    # Parameters: a (In), c (Out)
+    a = ir.Var("a", tensor_type, span)
+    c = ir.Var("c", tensor_type, span)
+
+    # c = tensor.create([64], FP32) — reassigns Out param
+    create_call = ir.create_op_call(
+        "tensor.create",
+        [ir.MakeTuple([ir.ConstInt(64, DataType.INT64, span)], span)],
+        {"dtype": DataType.FP32},
+        span,
+    )
+    assign_c = ir.AssignStmt(c, create_call, span)
+    return_stmt = ir.ReturnStmt([c], span)
+    body = ir.SeqStmts([assign_c, return_stmt], span)
+
+    func = ir.Function(
+        "test_out_shadow",
+        [a, (c, ir.ParamDirection.Out)],
+        [tensor_type],
+        body,
+        span,
+    )
+    return ir.Program([func], "test_program", span)
+
+
+def test_out_param_reassigned_detected():
+    """Test OutParamNotShadowed verifier detects reassignment of Out param."""
+    program = _make_out_param_reassigned_program()
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
+    assert any(d.rule_name == "OutParamNotShadowed" for d in diagnostics)
+    assert any("'c'" in d.message and "Out" in d.message for d in diagnostics)
+
+
+def test_out_param_non_creating_reassignment_ok():
+    """Test OutParamNotShadowed allows non-creating reassignment of Out param."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    a = ir.Var("a", tensor_type, span)
+    out = ir.Var("out", tensor_type, span)
+
+    # out = tensor.assemble(out, ...) — legitimate reassignment (not tensor.create)
+    assemble_call = ir.create_op_call(
+        "tensor.assemble",
+        [out, a, ir.MakeTuple([ir.ConstInt(0, DataType.INT64, span)], span)],
+        span,
+    )
+    assign_out = ir.AssignStmt(out, assemble_call, span)
+    return_stmt = ir.ReturnStmt([out], span)
+    body = ir.SeqStmts([assign_out, return_stmt], span)
+
+    func = ir.Function(
+        "test_assemble_ok",
+        [a, (out, ir.ParamDirection.Out)],
+        [tensor_type],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) == 0
 
 
 if __name__ == "__main__":
