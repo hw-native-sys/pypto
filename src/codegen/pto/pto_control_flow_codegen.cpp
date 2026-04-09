@@ -99,6 +99,14 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 
   std::vector<std::string> yielded_values;
   for (const auto& expr : op->value_) {
+    // Tensor/IterArg parameters lower to a raw ptr SSA; scf.if yields must use the
+    // matching pto.make_tensor_view result or ptoas sees ptr vs tensor_view mismatch.
+    if (auto holder = As<ir::Var>(expr)) {
+      if (As<TensorType>(holder->GetType())) {
+        yielded_values.push_back(GetOrCreateTensorView(holder));
+        continue;
+      }
+    }
     VisitExpr(expr);
     yielded_values.push_back(fs_.current_expr_value);
     fs_.current_expr_value = "";

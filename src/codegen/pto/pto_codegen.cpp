@@ -468,7 +468,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
 }
 
 void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
-  for (const auto& param : func->params_) {
+  for (size_t pi = 0; pi < func->params_.size(); ++pi) {
+    const auto& param = func->params_[pi];
     if (auto tensor_type = As<TensorType>(param->GetType())) {
       // Skip GM slot buffer workspace parameter (raw pointer, no view needed)
       if (param->name_hint_ == "__gm_pipe_buffer") continue;
@@ -482,14 +483,30 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
 
-      // [M, 1] column vectors: PTOAS always infers DN for shape [M, 1] with
-      // degenerate strides, so force DN layout and emit strides [1, M].
+      // [M, 1] column vectors: ptoas is picky by parameter direction and store source layout.
+      // - In / InOut: DN + strides [1, M] (tload / InOut); ND + [1, 1] -> "nd vs inferred dn".
+      // - Out: most kernels tile.store col_major [M,1] -> DN + [1, M]; ND -> "nd vs inferred dn".
+      //   Exceptions (row_major store): *_incore_0 (RMS sum), *_incore_3 (Q RoPE + full([M,1])) ->
+      //   ND + [1, 1]; DN there -> "dn vs inferred nd".
       bool is_column_vector = false;
+      bool column_vector_out_nd = false;
       if (tensor_type->shape_.size() == 2) {
         auto last_dim = As<ir::ConstInt>(tensor_type->shape_[1]);
         if (last_dim && last_dim->value_ == 1) {
           is_column_vector = true;
-          layout_DN = true;
+          if (func->param_directions_[pi] == ir::ParamDirection::Out) {
+            const auto& fn = func->name_;
+            const auto ends_with = [&fn](const char* suf, size_t n) {
+              return fn.size() >= n && fn.compare(fn.size() - n, n, suf) == 0;
+            };
+            // Row_major tile.store from tile.full / RMS reduction; DN + [1,M] -> "dn vs inferred nd".
+            column_vector_out_nd = ends_with("_incore_0", 9) || ends_with("_incore_3", 9);
+            if (!column_vector_out_nd) {
+              layout_DN = true;
+            }
+          } else {
+            layout_DN = true;
+          }
         }
       }
 
@@ -544,19 +561,30 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
 
       stream_ << " strides = [";
       if (tensor_type->shape_.size() == 2) {
-        // For column vector [M, 1]: stride dim is shape[0] (= M) → strides [1, M].
-        // For other 2D: stride dim is shape[1] (= C) → DN [1, C] or ND [C, 1].
-        int stride_idx = is_column_vector ? 0 : 1;
-        std::string row_stride;
-        if (auto var = As<ir::Var>(tensor_type->shape_[stride_idx])) {
-          row_stride = GetVarName(var);
+        if (is_column_vector && column_vector_out_nd) {
+          stream_ << GetOrEmitIndexConstant(1) << ", " << GetOrEmitIndexConstant(1);
+        } else if (is_column_vector) {
+          std::string m_stride;
+          if (auto var = As<ir::Var>(tensor_type->shape_[0])) {
+            m_stride = GetVarName(var);
+          } else {
+            m_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[0]));
+          }
+          stream_ << GetOrEmitIndexConstant(1) << ", " << m_stride;
         } else {
-          row_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[stride_idx]));
-        }
-        if (layout_DN) {
-          stream_ << GetOrEmitIndexConstant(1) << ", " << row_stride;
-        } else {
-          stream_ << row_stride << ", " << GetOrEmitIndexConstant(1);
+          // For other 2D: stride dim is shape[1] (= C) → DN [1, C] or ND [C, 1].
+          int stride_idx = 1;
+          std::string row_stride;
+          if (auto var = As<ir::Var>(tensor_type->shape_[stride_idx])) {
+            row_stride = GetVarName(var);
+          } else {
+            row_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[stride_idx]));
+          }
+          if (layout_DN) {
+            stream_ << GetOrEmitIndexConstant(1) << ", " << row_stride;
+          } else {
+            stream_ << row_stride << ", " << GetOrEmitIndexConstant(1);
+          }
         }
       } else if (tensor_type->shape_.size() == 1) {
         stream_ << GetOrEmitIndexConstant(1);
@@ -570,9 +598,9 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << "]";
 
       std::string layout_str = "nd";
-      if (is_column_vector) {
+      if (is_column_vector && !column_vector_out_nd) {
         layout_str = "dn";
-      } else if (tensor_type->tensor_view_.has_value()) {
+      } else if (!is_column_vector && tensor_type->tensor_view_.has_value()) {
         switch (tensor_type->tensor_view_.value().layout) {
           case ir::TensorLayout::DN:
             layout_str = "dn";
