@@ -1774,7 +1774,7 @@ class TestUnregisteredOpError:
 
         program = ir.Program([orch_func], "test_prog", ir.Span.unknown())
 
-        with pytest.raises(RuntimeError, match="Unregistered tensor op.*tensor.full"):
+        with pytest.raises(RuntimeError, match="Misplaced tensor op.*tensor.full"):
             codegen.generate_orchestration(program, orch_func)
 
 
