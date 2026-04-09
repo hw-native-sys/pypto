@@ -31,7 +31,7 @@ Tile dimensions (matching multi-config Case2, q_tile=16):
   Online Update:   operates on (16, 128) data tiles, (16, 1) scalar tiles
 
 Module-level InCore kernels (reusable, importable):
-  kernel_aiv_hub, kernel_softmax_prepare, kernel_online_update
+  kernel_softmax_prepare, kernel_online_update
 
 Factory functions for batch-dynamic kernels:
   make_kernel_qk_matmul(key_cache_rows)
@@ -56,25 +56,6 @@ N_UNROLL_Q = N_UNROLL * Q_TILE  # 1024 — static sij/pij buffer height
 
 
 # ── Kernel factory functions ──────────────────────────────────────────────────
-
-
-def make_kernel_aiv_hub(q_tile: int, head_dim: int):
-    """Create aiv_hub InCore kernel with parameterised tile dimensions."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_aiv_hub(
-        oi: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
-        li: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
-        mi: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
-    ) -> tuple[
-        pl.Tensor[[q_tile, head_dim], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-    ]:
-        """Initialize inplace accumulators to zero (VECTOR)."""
-        return oi, li, mi
-
-    return kernel_aiv_hub
 
 
 def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
@@ -272,7 +253,6 @@ def make_kernel_online_update(q_tile: int, head_dim: int):
 
 
 # ── Module-level kernel instances (backward-compatible imports) ───────────────
-kernel_aiv_hub = make_kernel_aiv_hub(Q_TILE, HEAD_DIM)
 kernel_softmax_prepare = make_kernel_softmax_prepare(Q_TILE, BLOCK_SIZE, N_UNROLL_Q)
 kernel_online_update = make_kernel_online_update(Q_TILE, HEAD_DIM)
 
@@ -466,7 +446,6 @@ def build_paged_attention_multi_config_program(
     out_rows = batch * num_heads
     block_table_flat_size = batch * max_num_blocks_per_req
 
-    _hub = make_kernel_aiv_hub(q_tile, head_dim)
     _sf = make_kernel_softmax_prepare(q_tile, block_size, n_unroll_q)
     _up = make_kernel_online_update(q_tile, head_dim)
     _qk = make_kernel_qk_matmul(key_cache_rows, q_tile, head_dim, block_size, n_unroll, n_unroll_q)
@@ -509,7 +488,6 @@ def build_paged_attention_multi_config_program(
                     oi = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
                     li_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                     mi_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
-                    oi, li_update, mi_update = _hub(oi, li_update, mi_update)
 
                     qi = pl.slice(query, [q_tile, head_dim], [cur_offset, 0])
 

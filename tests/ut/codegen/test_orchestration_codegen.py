@@ -119,14 +119,15 @@ class TestOrchestration:
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
+                    TaskOutputTensors alloc_0 = alloc_tensors(c_ci);
+                    const Tensor& c = alloc_0.get_ref(0);
 
                     // Task 0: kernel_add
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_output(c_ci);
-                    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-                    const Tensor& c = outs_t0.get_ref(0);
+                    params_t0.add_output(c);
+                    pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
                     Arg params_t1;
@@ -361,44 +362,45 @@ class TestOrchestration:
                 PTO2_SCOPE() {
                     uint32_t c_ci_shapes[2] = {16, 16};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
+                    uint32_t d_ci_shapes[2] = {16, 16};
+                    TensorCreateInfo d_ci(d_ci_shapes, 2, DataType::FLOAT32);
+                    uint32_t e_ci_shapes[2] = {16, 16};
+                    TensorCreateInfo e_ci(e_ci_shapes, 2, DataType::FLOAT32);
+                    uint32_t g_ci_shapes[2] = {16, 16};
+                    TensorCreateInfo g_ci(g_ci_shapes, 2, DataType::FLOAT32);
+                    TaskOutputTensors alloc_0 = alloc_tensors(c_ci, d_ci, e_ci, g_ci);
+                    const Tensor& c = alloc_0.get_ref(0);
+                    const Tensor& d = alloc_0.get_ref(1);
+                    const Tensor& e = alloc_0.get_ref(2);
+                    const Tensor& g = alloc_0.get_ref(3);
 
                     // Task 0: kernel_add
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_output(c_ci);
-                    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-                    const Tensor& c = outs_t0.get_ref(0);
-                    uint32_t d_ci_shapes[2] = {16, 16};
-                    TensorCreateInfo d_ci(d_ci_shapes, 2, DataType::FLOAT32);
+                    params_t0.add_output(c);
+                    pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
                     Arg params_t1;
                     params_t1.add_input(c);
-                    params_t1.add_output(d_ci);
+                    params_t1.add_output(d);
                     params_t1.add_scalar(to_u64(1.000000f));
-                    TaskOutputTensors outs_t1 = pto2_rt_submit_aiv_task(1, params_t1);
-                    const Tensor& d = outs_t1.get_ref(0);
-                    uint32_t e_ci_shapes[2] = {16, 16};
-                    TensorCreateInfo e_ci(e_ci_shapes, 2, DataType::FLOAT32);
+                    pto2_rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
                     Arg params_t2;
                     params_t2.add_input(c);
-                    params_t2.add_output(e_ci);
+                    params_t2.add_output(e);
                     params_t2.add_scalar(to_u64(2.000000f));
-                    TaskOutputTensors outs_t2 = pto2_rt_submit_aiv_task(1, params_t2);
-                    const Tensor& e = outs_t2.get_ref(0);
-                    uint32_t g_ci_shapes[2] = {16, 16};
-                    TensorCreateInfo g_ci(g_ci_shapes, 2, DataType::FLOAT32);
+                    pto2_rt_submit_aiv_task(1, params_t2);
 
                     // Task 3: kernel_mul
                     Arg params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
-                    params_t3.add_output(g_ci);
-                    TaskOutputTensors outs_t3 = pto2_rt_submit_aiv_task(2, params_t3);
-                    const Tensor& g = outs_t3.get_ref(0);
+                    params_t3.add_output(g);
+                    pto2_rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
                     Arg params_t4;
@@ -1141,14 +1143,11 @@ class TestOrchestration:
         transformed = pm.run_passes(LoopCarriedStateProgram)
         code = _generate_orch_code(transformed)
 
-        assert (
-            "Tensor acc__loop_state = make_tensor_external(nullptr, acc_ci_shapes, 2, DataType::FLOAT32);"
-            in code
-        )
-        assert "const Tensor& acc = outs_t0.get_ref(0);" in code
-        assert "acc__loop_state = acc;" in code
-        assert "params_t1.add_input(acc__loop_state);" in code
-        assert "params_t1.add_input(acc);" not in code
+        assert "alloc_tensors(acc_ci)" in code
+        assert "const Tensor& acc = alloc_0.get_ref(0);" in code
+        assert "make_tensor_external(nullptr" not in code
+        assert "acc__loop_state" not in code
+        assert "params_t1.add_input(acc);" in code
 
     def test_for_loop_with_inplace_return_after_passes(self):
         """Test inplace detection when return var has compound auto-name suffixes from pass pipeline.
@@ -1399,11 +1398,229 @@ class TestOrchestration:
 
         assert code.count("TensorCreateInfo ret0__out_ci(") == 1
         assert code.count("TensorCreateInfo ret0__out_1_ci(") == 1
-        assert "params_t0.add_output(ret0__out_ci)" in code
-        assert "params_t1.add_output(ret0__out_1_ci)" in code
+        assert "alloc_tensors(ret0__out_ci, ret0__out_1_ci)" in code
+        assert "params_t0.add_output(ret0__out)" in code
+        assert "params_t1.add_output(ret0__out_1)" in code
         assert "const Tensor& first = ret0__out;" in code
         assert "const Tensor& second = ret0__out_1;" in code
-        assert "add_output(ret0)" not in code
+
+    def test_multi_scope_alloc_tensors_batching(self):
+        """Each scope (function body, for body) batches its own alloc_tensors independently."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class MultiScopeAllocProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_op(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                y: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # Outer scope: 2 create_tensor -> batched into alloc_0
+                t1: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                t2: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                t1 = self.kernel_op(x, y, t1)
+                t2 = self.kernel_op(t1, x, t2)
+                for i in pl.range(4):
+                    # Inner scope (for body): 1 create_tensor -> batched into alloc_1
+                    tmp: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                    tmp = self.kernel_op(t2, y, tmp)
+                    t2 = self.kernel_op(tmp, t1, t2)
+                out = self.kernel_op(t2, t1, out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(MultiScopeAllocProgram)
+        code = _generate_orch_code(transformed)
+
+        # Outer scope batches t1 and t2 together
+        assert "alloc_tensors(t1_ci, t2_ci)" in code
+        # Inner scope (for body) has its own alloc_tensors for tmp
+        assert "alloc_tensors(tmp_ci)" in code
+        # Two separate alloc_tensors calls (alloc_0 and alloc_1)
+        assert "alloc_0 = alloc_tensors(" in code
+        assert "alloc_1 = alloc_tensors(" in code
+        # Verify bindings from each alloc
+        assert "const Tensor& t1 = alloc_0.get_ref(0);" in code
+        assert "const Tensor& t2 = alloc_0.get_ref(1);" in code
+        assert "const Tensor& tmp = alloc_1.get_ref(0);" in code
+
+    def test_alloc_tensors_splits_at_16(self):
+        """More than 16 create_tensor in one scope are split into multiple alloc_tensors calls."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ManyCreateProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_copy(
+                self,
+                x: pl.Tensor[[8], pl.FP32],
+                out: pl.Out[pl.Tensor[[8], pl.FP32]],
+            ) -> pl.Tensor[[8], pl.FP32]:
+                t: pl.Tile[[8], pl.FP32] = pl.load(x, [0], [8])
+                r: pl.Tensor[[8], pl.FP32] = pl.store(t, [0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                src: pl.Tensor[[8], pl.FP32],
+                dst: pl.Out[pl.Tensor[[8], pl.FP32]],
+            ) -> pl.Tensor[[8], pl.FP32]:
+                t0: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t1: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t2: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t3: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t4: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t5: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t6: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t7: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t8: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t9: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t10: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t11: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t12: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t13: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t14: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t15: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t16: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t17: pl.Tensor[[8], pl.FP32] = pl.create_tensor([8], dtype=pl.FP32)
+                t0 = self.kernel_copy(src, t0)
+                t1 = self.kernel_copy(t0, t1)
+                t2 = self.kernel_copy(t1, t2)
+                t3 = self.kernel_copy(t2, t3)
+                t4 = self.kernel_copy(t3, t4)
+                t5 = self.kernel_copy(t4, t5)
+                t6 = self.kernel_copy(t5, t6)
+                t7 = self.kernel_copy(t6, t7)
+                t8 = self.kernel_copy(t7, t8)
+                t9 = self.kernel_copy(t8, t9)
+                t10 = self.kernel_copy(t9, t10)
+                t11 = self.kernel_copy(t10, t11)
+                t12 = self.kernel_copy(t11, t12)
+                t13 = self.kernel_copy(t12, t13)
+                t14 = self.kernel_copy(t13, t14)
+                t15 = self.kernel_copy(t14, t15)
+                t16 = self.kernel_copy(t15, t16)
+                t17 = self.kernel_copy(t16, t17)
+                dst = self.kernel_copy(t17, dst)
+                return dst
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(ManyCreateProgram)
+        code = _generate_orch_code(transformed)
+
+        # First batch: 16 tensors
+        assert "alloc_0 = alloc_tensors(" in code
+        first_alloc_line = [line for line in code.splitlines() if "alloc_0 = alloc_tensors(" in line][0]
+        assert first_alloc_line.count("_ci") == 16
+
+        # Second batch: remaining 2 tensors
+        assert "alloc_1 = alloc_tensors(" in code
+        second_alloc_line = [line for line in code.splitlines() if "alloc_1 = alloc_tensors(" in line][0]
+        assert second_alloc_line.count("_ci") == 2
+
+        # Second batch get_ref indices reset to 0
+        assert "alloc_1.get_ref(0)" in code
+        assert "alloc_1.get_ref(1)" in code
+
+    def test_create_tensor_with_local_shape_dep_not_hoisted(self):
+        """create_tensor whose shape depends on a locally-defined variable is not hoisted.
+
+        Constructs IR directly where a tensor.create has a shape referencing a
+        Var defined by an earlier statement. Verifies the create is emitted
+        in-place (its own alloc_tensors) rather than batched at scope entry.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        from pypto.pypto_core import DataType
+
+        span = ir.Span.unknown()
+        INDEX = DataType.INDEX
+        FP32 = DataType.FP32
+        dyn_n = ir.Var("n", ir.ScalarType(INDEX), span)
+        dim_expr = ir.Mul(dyn_n, ir.ConstInt(16, INDEX, span), INDEX, span)
+
+        tensor_create_op = ir.Op("tensor.create")
+        static_create_call = ir.Call(
+            tensor_create_op,
+            [],
+            ir.TensorType([16, 8], FP32),
+            span,
+        )
+        dyn_create_call = ir.Call(
+            tensor_create_op,
+            [],
+            ir.TensorType([dim_expr, ir.ConstInt(8, INDEX, span)], FP32),
+            span,
+        )
+
+        t1_var = ir.Var("t1", ir.TensorType([16, 8], FP32), span)
+        t2_var = ir.Var(
+            "t2",
+            ir.TensorType([dim_expr, ir.ConstInt(8, INDEX, span)], FP32),
+            span,
+        )
+
+        stmts = [
+            ir.AssignStmt(t1_var, static_create_call, span),
+            ir.AssignStmt(dyn_n, ir.ConstInt(4, INDEX, span), span),
+            ir.AssignStmt(t2_var, dyn_create_call, span),
+            ir.ReturnStmt(span),
+        ]
+        body = ir.SeqStmts(stmts, span)
+
+        func = ir.Function(
+            "orch",
+            [],
+            [],
+            body,
+            span,
+            type=ir.FunctionType.Orchestration,
+        )
+        program = ir.Program([func], "test_prog", span)
+
+        code = codegen.generate_orchestration(program, func).code
+        lines = code.splitlines()
+
+        def line_index_containing(text):
+            for i, line in enumerate(lines):
+                if text in line:
+                    return i
+            return -1
+
+        # t1 (constant shape) is batched at scope entry
+        assert line_index_containing("alloc_tensors(t1_ci)") >= 0
+
+        # n must be defined BEFORE t2_ci
+        n_line = line_index_containing("int64_t n =")
+        t2_ci_line = line_index_containing("TensorCreateInfo t2_ci(")
+        assert n_line >= 0 and t2_ci_line >= 0
+        assert n_line < t2_ci_line, f"n definition (line {n_line}) must precede t2_ci (line {t2_ci_line})"
+
+        # t2 gets its own alloc_tensors, separate from t1
+        t2_alloc_line = line_index_containing("alloc_tensors(t2_ci)")
+        assert t2_alloc_line >= 0, "t2 should get its own alloc_tensors(t2_ci)"
+        assert t2_alloc_line > n_line, "t2 alloc must come after n definition"
 
     def test_scalar_taskarg(self):
         """Scalar params get ChipStorageTaskArgs scalar slots (0-indexed) via from_u64<T>()."""
@@ -1666,8 +1883,8 @@ class TestTensorReadWriteOffsetCodegen:
         # dst comes from ForStmt yield tracing back to a dst Out param.
         # Before the fix, dst would incorrectly alias to the acc Out param.
 
-        # Ensure the two tuple aliases reference DIFFERENT get_ref indices.
-        get_ref_matches = re.findall(r"outs_t0\.get_ref\((\d+)\)", code)
+        # Ensure the two alloc_tensors aliases reference DIFFERENT get_ref indices.
+        get_ref_matches = re.findall(r"alloc_\d+\.get_ref\((\d+)\)", code)
         assert len(set(get_ref_matches)) >= 2, (
             f"Expected at least 2 distinct get_ref indices, got {get_ref_matches}"
         )

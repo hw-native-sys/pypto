@@ -178,10 +178,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
-  void SetEscapingLoopReturns(const std::unordered_set<const Var*>& returns) {
-    escaping_loop_returns_ = returns;
-  }
-
   void SetInitialIndent(int indent) { indent_ = indent; }
 
   std::string GetGeneratedCode() const { return code_.str(); }
@@ -198,10 +194,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return ci->value_;
   }
   std::string GetVarName(const VarPtr& var) const override {
-    auto escaped_it = escaped_loop_return_exprs_.find(var.get());
-    if (escaped_it != escaped_loop_return_exprs_.end()) {
-      return escaped_it->second;
-    }
     auto it = emit_name_map_.find(var.get());
     if (it != emit_name_map_.end()) {
       return it->second;
@@ -250,25 +242,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
       emit_name_map_[iter_arg.get()] = init_var_name;
       emit_name_map_[return_var.get()] = init_var_name;
-      auto tensor_type = As<TensorType>(return_var->GetType());
-      auto init_var = AsVarLike(iter_arg->initValue_);
-      // Transfer create-pending status from init_var to iter_arg.
-      // init_var is only referenced at the loop boundary; iter_arg is what
-      // BuildTaskParams will see when the var is passed inside the loop body.
-      bool is_create_pending = init_var && tensor_create_var_names_.count(init_var.get()) > 0;
-      if (is_create_pending) {
-        tensor_create_var_names_.erase(init_var.get());
-        tensor_create_var_names_.insert(iter_arg.get());
-      }
-      if (escaping_loop_returns_.count(return_var.get()) > 0 && is_create_pending) {
-        std::string state_name = ReserveSyntheticEmitName(init_var_name + "__loop_state");
-        INTERNAL_CHECK(tensor_type) << "Internal error: escaping loop-carried output must be a tensor";
-        code_ << Indent() << "Tensor " << state_name << " = make_tensor_external(nullptr, " << init_var_name
-              << "_ci_shapes, " << tensor_type->shape_.size() << ", "
-              << GetRuntimeDataTypeString(tensor_type->dtype_) << ");\n";
-        active_loop_output_states_[init_var_name] = state_name;
-        escaped_loop_return_exprs_[return_var.get()] = state_name;
-      }
     }
 
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
@@ -278,11 +251,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ += 4;
 
     auto saved = current_return_vars_;
-    auto saved_active_loop_output_states = active_loop_output_states_;
     current_return_vars_.clear();
     VisitStmt(for_stmt->body_);
     current_return_vars_ = saved;
-    active_loop_output_states_ = saved_active_loop_output_states;
 
     indent_ -= 4;
     code_ << Indent() << "}\n";
@@ -352,7 +323,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const SeqStmtsPtr& seq) override {
+    EmitBatchedAllocTensors(seq->stmts_);
     for (const auto& stmt : seq->stmts_) {
+      if (batched_create_stmts_.count(stmt.get())) continue;
       VisitStmt(stmt);
     }
   }
@@ -431,14 +404,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   struct ParamEntry {
     ParamKind kind;
-    std::string value;    // expression passed to the method
-    std::string out_var;  // non-empty for internal Out tensors: the Tensor variable to bind via get_ref
-    const Var* out_var_ptr = nullptr;  // raw pointer into tensor_create_var_names_
-  };
-
-  struct InternalOutVar {
-    std::string name;
-    const Var* var_ptr = nullptr;
+    std::string value;
   };
 
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
@@ -451,40 +417,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!var_name.empty()) {
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type), ""});
+          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type)});
           continue;
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
-        auto arg_var = AsVarLike(arg);
 
         INTERNAL_CHECK(arg_idx < callee_func->param_directions_.size())
             << "arg count (" << call->args_.size() << ") exceeds param count ("
             << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
 
-        // Push an "add_output" entry for a tensor.create-allocated argument.
-        auto push_create_output = [&]() {
-          params.push_back({ParamKind::Output, var_name + "_ci", var_name, arg_var.get()});
-        };
-
         ParamDirection dir = callee_func->param_directions_[arg_idx];
         switch (dir) {
           case ParamDirection::Out:
-            if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
-              push_create_output();
-            } else {
-              params.push_back({ParamKind::Output, ext_name, ""});
-            }
+            params.push_back({ParamKind::Output, ext_name});
             break;
           case ParamDirection::InOut:
-            params.push_back({ParamKind::InOut, ext_name, ""});
+            params.push_back({ParamKind::InOut, ext_name});
             break;
           case ParamDirection::In:
-            if (arg_var && tensor_create_var_names_.count(arg_var.get())) {
-              push_create_output();
-            } else {
-              params.push_back({ParamKind::Input, ext_name, ""});
-            }
+            params.push_back({ParamKind::Input, ext_name});
             break;
           default:
             INTERNAL_CHECK(false) << "Internal error: unexpected ParamDirection value "
@@ -493,13 +445,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ParamKind::Scalar, "(uint64_t)" + value, ""});
+        params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
       } else if (auto const_float = As<ConstFloat>(arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type), ""});
+        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
       } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
+        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
       }
     }
 
@@ -531,9 +483,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     current_result_var_ = emit_var;
 
-    if (op_name == "tensor.create" && assign_var) {
-      tensor_create_var_names_.insert(assign_var.get());
-    }
     std::string gen_code = (*codegen_func)(call, *this);
 
     std::istringstream iss(gen_code);
@@ -542,6 +491,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!line.empty()) {
         code_ << Indent() << line << "\n";
       }
+    }
+
+    if (op_name == "tensor.create") {
+      EmitAllocBatch({emit_var});
     }
   }
 
@@ -576,32 +529,124 @@ class OrchestrationStmtCodegen : public CodegenBase {
     aiv_name = std::move(finder.aiv_name);
   }
 
-  void EmitTaskSubmitAndBind(const std::string& submit_expr, const std::vector<ParamEntry>& params) {
-    std::vector<InternalOutVar> internal_out_vars;
-    for (const auto& p : params) {
-      if (p.kind == ParamKind::Output && !p.out_var.empty()) {
-        internal_out_vars.push_back({p.out_var, p.out_var_ptr});
-      }
-    }
-
-    std::string ind = Indent();
-    if (internal_out_vars.empty()) {
-      code_ << ind << submit_expr << ";\n";
-    } else {
-      std::string outs_var = "outs_t" + std::to_string(task_counter_);
-      code_ << ind << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
-      for (size_t i = 0; i < internal_out_vars.size(); ++i) {
-        const auto& ov = internal_out_vars[i];
-        code_ << ind << "const Tensor& " << ov.name << " = " << outs_var << ".get_ref(" << i << ");\n";
-        auto state_it = active_loop_output_states_.find(ov.name);
-        if (state_it != active_loop_output_states_.end()) {
-          code_ << ind << state_it->second << " = " << ov.name << ";\n";
-        }
-        if (ov.var_ptr) tensor_create_var_names_.erase(ov.var_ptr);
-      }
-    }
-
+  void EmitTaskSubmitAndBind(const std::string& submit_expr) {
+    code_ << Indent() << submit_expr << ";\n";
     task_counter_++;
+  }
+
+  static constexpr size_t kMaxAllocTensorsArgs = 16;
+
+  static bool ExprRefsAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
+    if (!expr) {
+      return false;
+    }
+    if (auto var = As<Var>(expr)) {
+      return vars.count(var.get()) > 0;
+    }
+    if (auto bin = As<BinaryExpr>(expr)) {
+      return ExprRefsAnyOf(bin->left_, vars) || ExprRefsAnyOf(bin->right_, vars);
+    }
+    if (auto un = As<UnaryExpr>(expr)) {
+      return ExprRefsAnyOf(un->operand_, vars);
+    }
+    if (auto cast_expr = As<Cast>(expr)) {
+      return ExprRefsAnyOf(cast_expr->operand_, vars);
+    }
+    return false;
+  }
+
+  bool ShapeDependsOnLocalVars(const CallPtr& call,
+                               const std::unordered_set<const Var*>& locally_defined) const {
+    auto result_type = As<TensorType>(call->GetType());
+    if (!result_type) {
+      return false;
+    }
+    for (const auto& dim : result_type->shape_) {
+      if (ExprRefsAnyOf(dim, locally_defined)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void EmitAllocBatch(const std::vector<std::string>& emit_names) {
+    std::string alloc_var = "alloc_" + std::to_string(alloc_counter_++);
+    code_ << Indent() << "TaskOutputTensors " << alloc_var << " = alloc_tensors(";
+    for (size_t i = 0; i < emit_names.size(); i++) {
+      if (i > 0) {
+        code_ << ", ";
+      }
+      code_ << emit_names[i] << "_ci";
+    }
+    code_ << ");\n";
+
+    for (size_t i = 0; i < emit_names.size(); i++) {
+      code_ << Indent() << "const Tensor& " << emit_names[i] << " = " << alloc_var << ".get_ref(" << i
+            << ");\n";
+    }
+  }
+
+  void EmitBatchedAllocTensors(const std::vector<StmtPtr>& stmts) {
+    struct PendingCreate {
+      std::string emit_name;
+      CallPtr call;
+    };
+    std::vector<PendingCreate> creates;
+
+    std::unordered_set<const Var*> locally_defined;
+
+    for (const auto& stmt : stmts) {
+      auto assign = As<AssignStmt>(stmt);
+      if (!assign) {
+        continue;
+      }
+      auto call = As<Call>(assign->value_);
+      if (!call || call->op_->name_ != "tensor.create") {
+        locally_defined.insert(assign->var_.get());
+        continue;
+      }
+      if (declared_var_ptrs_.count(assign->var_.get()) || param_name_set_.count(GetVarName(assign->var_))) {
+        continue;
+      }
+      if (ShapeDependsOnLocalVars(call, locally_defined)) {
+        locally_defined.insert(assign->var_.get());
+        continue;
+      }
+
+      declared_var_ptrs_.insert(assign->var_.get());
+      std::string emit_var = ReserveVarEmitName(assign->var_.get());
+      creates.push_back({emit_var, call});
+      batched_create_stmts_.insert(stmt.get());
+    }
+    if (creates.empty()) {
+      return;
+    }
+
+    auto& registry = OrchestrationOpRegistry::GetInstance();
+    auto handler = registry.Get("tensor.create");
+    INTERNAL_CHECK(handler.has_value()) << "Internal error: tensor.create handler not registered";
+
+    for (size_t batch_start = 0; batch_start < creates.size(); batch_start += kMaxAllocTensorsArgs) {
+      size_t batch_end = std::min(batch_start + kMaxAllocTensorsArgs, creates.size());
+
+      for (size_t i = batch_start; i < batch_end; i++) {
+        current_result_var_ = creates[i].emit_name;
+        std::string gen_code = (*handler)(creates[i].call, *this);
+        std::istringstream iss(gen_code);
+        std::string line;
+        while (std::getline(iss, line)) {
+          if (!line.empty()) {
+            code_ << Indent() << line << "\n";
+          }
+        }
+      }
+
+      std::vector<std::string> batch_names;
+      for (size_t i = batch_start; i < batch_end; i++) {
+        batch_names.push_back(creates[i].emit_name);
+      }
+      EmitAllocBatch(batch_names);
+    }
   }
 
   void GenerateFunctionCallCode(const CallPtr& call, const std::string& result_var) {
@@ -634,7 +679,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, params);
+    EmitTaskSubmitAndBind(submit_expr);
   }
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func) {
@@ -680,7 +725,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string submit_expr =
         "pto2_rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, params);
+    EmitTaskSubmitAndBind(submit_expr);
   }
 
   // --- Alias generation helpers ---
@@ -791,18 +836,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
-  std::unordered_set<const Var*> tensor_create_var_names_;
   std::ostringstream code_;
   int indent_ = 4;
   std::string current_result_var_;
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
+  int alloc_counter_ = 0;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;
-  std::unordered_set<const Var*> escaping_loop_returns_;
-  std::unordered_map<const Var*, std::string> escaped_loop_return_exprs_;
-  std::unordered_map<std::string, std::string> active_loop_output_states_;
   std::unordered_set<const Var*> declared_var_ptrs_;
+  std::unordered_set<const Stmt*> batched_create_stmts_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -821,9 +864,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   VarLineageCollector lineage;
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
-
-  LoopEscapeInfoCollector loop_escape_info;
-  loop_escape_info.VisitStmt(func->body_);
 
   std::unordered_map<const Var*, std::string> emit_name_map;
   std::set<std::string> param_name_set;
@@ -864,7 +904,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
-  stmt_codegen.SetEscapingLoopReturns(loop_escape_info.escaping_loop_returns);
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);
 

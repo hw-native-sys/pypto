@@ -15,7 +15,6 @@ Orchestration pre-extracts block_indices via pl.slice() from block_table.
 Kernels receive block_indices tensor view instead of block_table + bt_offset.
 
 Module-level InCore kernels:
-  kernel_aiv_hub:         Zero-initialise oi, li, mi accumulators
   kernel_softmax_prepare: Two-pass softmax across n_blocks (global row_max, then exp+sum)
   kernel_online_update:   Online softmax update with inplace mi/li/oi
 
@@ -37,7 +36,6 @@ from examples.models.paged_attention_multi_config import (
     N_UNROLL_Q,
     Q_TILE,
     build_paged_attention_multi_config_program,
-    kernel_aiv_hub,
     kernel_online_update,
     kernel_softmax_prepare,
     make_kernel_pv_matmul,
@@ -46,47 +44,6 @@ from examples.models.paged_attention_multi_config import (
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-
-
-class AivHubTestCase(PTOTestCase):
-    """Test case for kernel_aiv_hub: zero-initialise oi, li, mi accumulators.
-
-    Verifies that all three output tensors are set to zero.
-    """
-
-    def get_name(self) -> str:
-        return "aiv_hub_zero_init"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("oi", [Q_TILE, HEAD_DIM], DataType.FP32, is_output=True),
-            TensorSpec("li", [Q_TILE, 1], DataType.FP32, is_output=True),
-            TensorSpec("mi", [Q_TILE, 1], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        @pl.program
-        class AivHubProgram:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self,
-                oi: pl.Out[pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32]],
-                li: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32]],
-                mi: pl.Out[pl.Tensor[[Q_TILE, 1], pl.FP32]],
-            ) -> tuple[
-                pl.Tensor[[Q_TILE, HEAD_DIM], pl.FP32],
-                pl.Tensor[[Q_TILE, 1], pl.FP32],
-                pl.Tensor[[Q_TILE, 1], pl.FP32],
-            ]:
-                oi, li, mi = kernel_aiv_hub(oi, li, mi)
-                return oi, li, mi
-
-        return AivHubProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["oi"][:] = torch.zeros(16, 128, dtype=torch.float32)
-        tensors["li"][:] = torch.zeros(16, 1, dtype=torch.float32)
-        tensors["mi"][:] = torch.zeros(16, 1, dtype=torch.float32)
 
 
 class SoftmaxPrepareTestCase(PTOTestCase):
@@ -648,13 +605,6 @@ class PTOASTestCaseMixin:
         return BackendType.Ascend910B
 
 
-class AivHubPTOASTestCase(PTOASTestCaseMixin, AivHubTestCase):
-    """Test aiv_hub with PTO backend and Default optimization strategy."""
-
-    def get_name(self) -> str:
-        return "aiv_hub_ptoas_zero_init"
-
-
 class SoftmaxPreparePTOASTestCase(PTOASTestCaseMixin, SoftmaxPrepareTestCase):
     """Test softmax prepare with PTO backend and Default optimization strategy."""
 
@@ -702,12 +652,6 @@ class TestPagedAttentionMultiConfigKernels:
     Each test instantiates the corresponding PTOTestCase and runs it through
     the test_runner fixture.
     """
-
-    def test_aiv_hub_ptoas(self, test_runner):
-        """Test aiv_hub with PTO backend and Default optimization."""
-        test_case = AivHubPTOASTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Aiv hub PTOAS test failed: {result.error}"
 
     @pytest.mark.parametrize("n_blocks", [1, 2, 4])
     def test_softmax_prepare_ptoas(self, test_runner, n_blocks):

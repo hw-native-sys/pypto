@@ -35,8 +35,6 @@ Pipeline per KV block iteration (all batches processed in a single kernel call):
   4. Online Update (AIV):    mi, li, oi, out = KernelOnlineUpdate(mij, lij, oi_new, mi, li, oi, out, ...)
 
 Kernel mapping to C++ implementations:
-  KernelAicHub         -> kernels/aic/aic_hub.cpp          (func_id=4)
-  KernelAivHub         -> kernels/aiv/aiv_hub.cpp          (func_id=5)
   KernelQkMatmul       -> kernels/aic/aic_qk_matmul.cpp   (func_id=0)
   KernelSoftmaxPrepare -> kernels/aiv/aiv_softmax_prepare.cpp (func_id=1)
   KernelPvMatmul       -> kernels/aic/aic_pv_matmul.cpp   (func_id=2)
@@ -82,26 +80,6 @@ def BuildBatchPagedAttentionProgram(
     @pl.program
     class BatchPagedAttentionProgram:
         """Batch paged attention with AIC (CUBE) and AIV (VECTOR) kernels."""
-
-        # ── AIC hub kernel (placeholder for AIC-side synchronisation) ────
-        @pl.function(type=pl.FunctionType.InCore)
-        def KernelAicHub(self) -> None:
-            """AIC hub: empty placeholder (func_id=4)."""
-
-        # ── AIV hub kernel: zero-initialise batch-sized accumulators ─────
-        @pl.function(type=pl.FunctionType.InCore)
-        def KernelAivHub(
-            self,
-            oi_batch: pl.Out[pl.Tensor[[batch_q_tile, head_dim], pl.FP32]],
-            li_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
-            mi_batch: pl.Out[pl.Tensor[[batch_q_tile, 1], pl.FP32]],
-        ) -> tuple[
-            pl.Tensor[[batch_q_tile, head_dim], pl.FP32],
-            pl.Tensor[[batch_q_tile, 1], pl.FP32],
-            pl.Tensor[[batch_q_tile, 1], pl.FP32],
-        ]:
-            """AIV hub: zero-initialise inplace accumulators (func_id=5)."""
-            return oi_batch, li_batch, mi_batch
 
         # ── CUBE kernel: QK matmul ──────────────────────────────────────
         # C++ params: query(in), key_cache(in), sij_batch(out),
@@ -434,9 +412,6 @@ def BuildBatchPagedAttentionProgram(
                 oi_batch = pl.create_tensor([batch_cfg * q_tile, head_dim_cfg], dtype=pl.FP32)
                 li_batch = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
                 mi_batch = pl.create_tensor([batch_cfg * q_tile, 1], dtype=pl.FP32)
-
-                # Zero-init accumulators via AIV hub (FUNC_AIV_HUB)
-                oi_batch, li_batch, mi_batch = self.KernelAivHub(oi_batch, li_batch, mi_batch)
 
                 for bn in pl.range(max_bn):
                     # Batch-sized intermediate tensors (mirrors C++ sij_b/pij_b/etc.)

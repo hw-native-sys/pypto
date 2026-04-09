@@ -59,9 +59,9 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
-  // tensor.create emits TensorCreateInfo for runtime memory allocation via add_output().
-  // The Tensor binding is emitted at the task submission site:
-  //   const Tensor& var = outs_tN.get_ref(i);
+  // tensor.create emits TensorCreateInfo for runtime memory allocation via alloc_tensors().
+  // The batched alloc_tensors call and const Tensor& binding are emitted by
+  // EmitBatchedAllocTensors at scope entry (SeqStmts).
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
 

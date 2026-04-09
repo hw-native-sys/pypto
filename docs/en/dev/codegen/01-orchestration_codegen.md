@@ -96,10 +96,11 @@ Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
 Tensor ext_dn = from_tensor_arg(orch_args.tensor(2));
 
 // Phase 5: Internal tensors (from pl.create_tensor — intermediates only)
-// TensorCreateInfo is emitted here. The Tensor variable is bound at the submit site:
-//   const Tensor& tmp = outs_t0.get_ref(0);
+// All tensor.create in the same scope are batched into a single alloc_tensors call.
 uint32_t tmp_ci_shapes[2] = {16, 16};
 TensorCreateInfo tmp_ci(tmp_ci_shapes, 2, DataType::FLOAT32);
+TaskOutputTensors alloc_0 = alloc_tensors(tmp_ci);
+const Tensor& tmp = alloc_0.get_ref(0);
 ```
 
 ### Phase 6–8: Task Submission and Control Flow
@@ -111,9 +112,8 @@ PTO2_SCOPE() {
     Arg params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
-    params_t0.add_output(tmp_ci);            // add_output takes TensorCreateInfo for internal tensors
-    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-    const Tensor& tmp = outs_t0.get_ref(0); // non-DN: bind const ref at submit site
+    params_t0.add_output(tmp);               // pre-allocated tensor uses add_output(const Tensor&)
+    pto2_rt_submit_aiv_task(0, params_t0);
 
     // ForStmt example — plain for loop, no nested PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -129,9 +129,9 @@ PTO2_SCOPE() {
 | Type | Source | C++ Construction | Naming |
 | ---- | ------ | ---------------- | ------ |
 | External (ND/DN) | Function parameters | `from_tensor_arg(orch_args.tensor(N))` | `ext_<name>` |
-| Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `const Tensor& var` bound at submit | `<name>` (no prefix) |
+| Internal | `pl.create_tensor(...)` in function body | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` at scope entry | `<name>` (no prefix) |
 
-External tensors wrap device memory pointers passed from the host via `ChipStorageTaskArgs`. Internal tensors are allocated by the runtime from a ring buffer when passed to `add_output(var_ci)`.
+External tensors wrap device memory pointers passed from the host via `ChipStorageTaskArgs`. Internal tensors are pre-allocated at scope entry via `alloc_tensors()` — all `tensor.create` calls within the same scope (function body, for body, if body) are batched into a single `alloc_tensors` invocation. Pre-allocated tensors are then passed to kernels via `add_output(const Tensor&)` (OUTPUT_EXISTING overload).
 
 ### Parameter Direction
 
@@ -139,13 +139,13 @@ The `ParamDirection` of each function parameter determines how it appears in tas
 
 | Direction | Python Annotation | C++ Task Param | Semantics |
 | --------- | ----------------- | -------------- | --------- |
-| `In` | `pl.Tensor[...]` (default) | `params.add_input(ext_x)` | Read-only; if the tensor is from `pl.create_tensor`, uses `add_output` for first-time allocation |
+| `In` | `pl.Tensor[...]` (default) | `params.add_input(var)` | Read-only |
 | `Out` (external) | `pl.Out[pl.Tensor[...]]` (param) | `params.add_output(ext_x)` | Write-only pre-allocated buffer |
-| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x_ci)` + `const Tensor& x = outs.get_ref(i)` | Runtime ring-buffer alloc |
+| `Out` (internal) | `pl.Out[pl.Tensor[...]]` (tensor.create) | `params.add_output(x)` | Pre-allocated via `alloc_tensors`, uses OUTPUT_EXISTING overload |
 | `InOut` | `pl.InOut[pl.Tensor[...]]` | `params.add_inout(ext_x)` | Read-write |
 | Scalar | `pl.Scalar[...]` | `params.add_scalar(value)` | Scalar constant (separate scalar slot) |
 
-When `add_output` is used, the submit call returns `TaskOutputTensors` and a `const Tensor& var = outs.get_ref(i)` binding is declared at the submit site.
+Internal tensors from `tensor.create` are pre-allocated at scope entry via `alloc_tensors()`. When passed to kernels, they use `add_output(const Tensor&)` which triggers the OUTPUT_EXISTING overload — the runtime reuses the pre-allocated buffer instead of allocating a new one.
 
 ### Scalar Parameter Encoding
 
@@ -223,7 +223,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 
 | IR Operation | C++ Codegen | Description |
 | ------------ | ----------- | ----------- |
-| `tensor.create` | `TensorCreateInfo var_ci(...)` | Ring-buffer alloc info; `const Tensor& var` bound at submit |
+| `tensor.create` | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` | Scope-level batched alloc; `const Tensor& var = alloc_N.get_ref(i)` |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
@@ -269,18 +269,19 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
     Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
-    // Internal tensor (intermediate) — only TensorCreateInfo declared here
-    uint32_t c_ci_shapes[2] = {16, 16};
-    TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-
     PTO2_SCOPE() {
+        // Internal tensor — pre-allocated via alloc_tensors at scope entry
+        uint32_t c_ci_shapes[2] = {16, 16};
+        TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
+        TaskOutputTensors alloc_0 = alloc_tensors(c_ci);
+        const Tensor& c = alloc_0.get_ref(0);
+
         // Task 0: kernel_add (a + b → c)
         Arg params_t0;
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
-        params_t0.add_output(c_ci);
-        TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);
-        const Tensor& c = outs_t0.get_ref(0);  // non-DN: bind const ref at submit site
+        params_t0.add_output(c);
+        pto2_rt_submit_aiv_task(0, params_t0);
 
         // Task 1: kernel_add (c + b → d)
         Arg params_t1;
@@ -316,7 +317,7 @@ names in the output), but never for identity decisions.
 | Internal tensor | `<name>` (no prefix) | `c` |
 | Internal TensorCreateInfo | `<name>_ci` | `c_ci` |
 | Task params | `params_t<N>` | `params_t0` |
-| TaskOutputTensors | `outs_t<N>` | `outs_t0` |
+| Alloc result | `alloc_<N>` | `alloc_0` |
 | Tensor arg index | `orch_args.tensor(N)` | `orch_args.tensor(0)` |
 | Scalar arg index | `orch_args.scalar(N)` | `orch_args.scalar(0)` |
 

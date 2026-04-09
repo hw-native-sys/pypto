@@ -31,25 +31,6 @@ N_UNROLL_Q = N_UNROLL * Q_TILE
 # ── Kernel factory functions ─────────────────────────────────────────────────
 
 
-def make_kernel_aiv_hub(q_tile: int, head_dim: int):
-    """Create aiv_hub InCore kernel with parameterised tile dimensions."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_aiv_hub(
-        oi: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
-        li: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
-        mi: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
-    ) -> tuple[
-        pl.Tensor[[q_tile, head_dim], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-    ]:
-        """Initialize inplace accumulators to zero (VECTOR)."""
-        return oi, li, mi
-
-    return kernel_aiv_hub
-
-
 def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
     """Create softmax_prepare InCore kernel with parameterised tile dimensions."""
 
@@ -321,7 +302,6 @@ def build_paged_attention_multi_config_program(
     q_loop_static = (num_heads + q_tile - 1) // q_tile
     max_bn = (context_len + block_size - 1) // block_size
 
-    _hub = make_kernel_aiv_hub(q_tile, head_dim)
     _sf = make_kernel_softmax_prepare(q_tile, block_size, n_unroll_q)
     _up = make_kernel_online_update(q_tile, head_dim)
     _qk = make_kernel_qk_matmul(key_cache_rows, q_tile, head_dim, block_size, n_unroll, n_unroll_q)
@@ -361,8 +341,6 @@ def build_paged_attention_multi_config_program(
                         [q_tile, 1],
                         dtype=pl.FP32,
                     )
-                    oi, li_update, mi_update = _hub(oi, li_update, mi_update)
-
                     qi: pl.Tensor[[q_tile, head_dim], pl.BF16] = pl.slice(
                         query,
                         [q_tile, head_dim],
@@ -477,7 +455,6 @@ def test_paged_attention_multi_config_codegen():
         func.name: func for func in optimized_program.functions.values() if ir.is_incore_type(func.func_type)
     }
     expected_incore = {
-        "kernel_aiv_hub",
         "kernel_softmax_prepare",
         "kernel_online_update",
         "kernel_qk_matmul",
