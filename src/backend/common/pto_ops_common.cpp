@@ -1229,6 +1229,8 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_sub",  "pto.trowexpandsub",    2},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
+    // Inplace variant: set_output_reuses_input(0) makes src/dst share UB addr.
+    {"tile.fillpad_inplace", "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},

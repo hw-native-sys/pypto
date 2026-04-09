@@ -60,7 +60,7 @@ using codegen::TileBufSignature;
 /// MemRef's root alloc type).
 static bool IsLegalViewOp(const std::string& op_name) {
   return op_name == "tile.reshape" || op_name == "tile.extract" || op_name == "tile.slice" ||
-         op_name == "tile.fillpad" || op_name == "tensor.slice";
+         op_name == "tile.fillpad" || op_name == "tile.fillpad_inplace" || op_name == "tensor.slice";
 }
 
 // -------------------------------------------------------------------------

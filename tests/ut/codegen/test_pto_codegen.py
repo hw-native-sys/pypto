@@ -339,6 +339,86 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     assert "v_col=128" in alloc_lines[1], f"Expected static v_col in padded tile: {alloc_lines[1]}"
 
 
+def test_pto_codegen_fillpad_inplace():
+    """Test that tile.fillpad_inplace emits pto.tfillpad and shares MemRef with input."""
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    size = ir.ConstInt(128, DataType.INDEX, span)
+
+    input_tensor = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
+    output_tensor = ir.Var("output", ir.TensorType([128, 128], DataType.FP32), span)
+    m_var = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+    n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
+
+    load_view = ir.TileView()
+    load_view.valid_shape = [m_var, n_var]
+    load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
+    load_tile = ir.Var("tile_a", load_tile_type, span)
+
+    padded_view = ir.TileView()
+    padded_view.valid_shape = [size, size]
+    padded_view.pad = ir.PadValue.zero
+    padded_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, padded_view, ir.MemorySpace.Vec)
+    padded_tile = ir.Var("padded", padded_tile_type, span)
+
+    result_var = ir.Var("result", ir.TensorType([128, 128], DataType.FP32), span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    shapes = ir.MakeTuple([size, size], span)
+
+    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, load_tile_type, span)
+    fillpad_inplace_call = ir.Call(
+        ir.Op("tile.fillpad_inplace"),
+        [load_tile],
+        {"pad_value": ir.PadValue.zero},
+        padded_tile_type,
+        span,
+    )
+    store_call = ir.Call(ir.Op("tile.store"), [padded_tile, offsets, output_tensor], result_var.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(load_tile, load_call, span),
+                    ir.AssignStmt(padded_tile, fillpad_inplace_call, span),
+                    ir.AssignStmt(result_var, store_call, span),
+                ],
+                span,
+            ),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "fillpad_inplace_test",
+        [
+            (input_tensor, ir.ParamDirection.In),
+            (output_tensor, ir.ParamDirection.Out),
+            (m_var, ir.ParamDirection.In),
+            (n_var, ir.ParamDirection.In),
+        ],
+        [ir.TensorType([128, 128], DataType.FP32)],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "fillpad_inplace_test_program", span)
+
+    mlir_code = _generate_mlir(program)
+    alloc_lines = _get_alloc_tile_lines(mlir_code)
+
+    # Both allocs share the same addr (same MemRef)
+    assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
+    assert "addr = %c0i" in alloc_lines[0]
+    assert "addr = %c0i" in alloc_lines[1]
+    # Dynamic valid_shape tile: type has v_row=?, v_col=? (both dynamic per PTOAS requirement)
+    assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
+    assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
+    # fillpad_inplace emits pto.tfillpad; inplace semantics come from shared UB addr above.
+    assert "pto.tfillpad " in mlir_code, "Expected pto.tfillpad in MLIR output"
+
+
 def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
     """Dynamic valid_shape scalars defined in-body should still reach alloc_tile."""
 

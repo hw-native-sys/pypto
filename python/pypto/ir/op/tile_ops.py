@@ -456,6 +456,25 @@ def fillpad(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None =
     return _ir_core.create_op_call("tile.fillpad", [tile], {"pad_value": pad_value}, actual_span)
 
 
+def fillpad_inplace(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None = None) -> Call:
+    """Fill padding elements of input tile in place with specified pad value.
+
+    Unlike fillpad which returns a new tile, this operation mutates the input
+    tile in place. The valid data region is unchanged; only out-of-bounds
+    (padding) elements are written.
+
+    Args:
+        tile: Input tile (TileType)
+        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression (result typically discarded since op is in-place)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.fillpad_inplace", [tile], {"pad_value": pad_value}, actual_span)
+
+
 # ============================================================================
 # Element-wise Operations
 # ============================================================================

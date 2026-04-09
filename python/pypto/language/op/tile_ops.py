@@ -33,6 +33,7 @@ __all__ = [
     "move",
     "full",
     "fillpad",
+    "fillpad_inplace",
     "get_block_idx",
     "get_subblock_idx",
     "add",
@@ -416,6 +417,24 @@ def fillpad(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
         Tile wrapping the fillpad operation
     """
     call_expr = _ir_ops.fillpad(tile.unwrap(), pad_value=pad_value)
+    return Tile(expr=call_expr)
+
+
+def fillpad_inplace(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
+    """Fill padding elements of input tile in place.
+
+    Unlike fillpad which allocates a new output tile, this operation reuses
+    the input tile's UB buffer. The result shares the same memory address,
+    making it equivalent to TFILLPAD_INPLACE on the hardware.
+
+    Args:
+        tile: Input tile
+        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+
+    Returns:
+        Tile with padding filled (shares memory with the input tile).
+    """
+    call_expr = _ir_ops.fillpad_inplace(tile.unwrap(), pad_value=pad_value)
     return Tile(expr=call_expr)
 
 

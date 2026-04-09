@@ -442,9 +442,11 @@ def test_fillpad_kwarg_schema():
     """Test that fillpad ops declare pad_value in their kwarg schemas."""
     tensor_fillpad_op = ir.get_op("tensor.fillpad")
     tile_fillpad_op = ir.get_op("tile.fillpad")
+    tile_fillpad_inplace_op = ir.get_op("tile.fillpad_inplace")
 
     assert tensor_fillpad_op.has_attr("pad_value")
     assert tile_fillpad_op.has_attr("pad_value")
+    assert tile_fillpad_inplace_op.has_attr("pad_value")
 
 
 class TestOpMemorySpecRegistry:
@@ -693,6 +695,7 @@ class TestRegistryInfrastructure:
             "tile.cmp",
             "tile.sel",
             "tile.fillpad",
+            "tile.fillpad_inplace",
             "tile.cast",
             "tile.abs",
             "tile.relu",

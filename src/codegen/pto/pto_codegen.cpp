@@ -459,7 +459,8 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
           }
           // Track fillpad input variables so we know which tiles need
           // physical dims on alloc_tile + set_validshape after tload.
-          if (call->op_->name_ == "tile.fillpad" && !call->args_.empty()) {
+          if ((call->op_->name_ == "tile.fillpad" || call->op_->name_ == "tile.fillpad_inplace") &&
+              !call->args_.empty()) {
             if (auto input_var = As<ir::Var>(call->args_[0])) {
               fillpad_input_vars.insert(input_var.get());
             }

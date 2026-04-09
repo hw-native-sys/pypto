@@ -945,5 +945,39 @@ REGISTER_OP("tile.fillpad")
                                         tile_type->memory_space_);
     });
 
+REGISTER_OP("tile.fillpad_inplace")
+    .set_op_category("TileOp")
+    .set_description("Fill padding elements of input tile in place with specified pad value")
+    .add_argument("tile", "Input tile (TileType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .set_output_reuses_input(0)
+    .set_attr<PadValue>("pad_value")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 1) << "The operator tile.fillpad_inplace requires exactly 1 argument, but got "
+                              << args.size();
+
+      auto tile_type = As<TileType>(args[0]->GetType());
+      CHECK(tile_type)
+          << "The operator tile.fillpad_inplace requires first argument to be a TileType, but got "
+          << args[0]->GetType()->TypeName();
+
+      PadValue pad_value = PadValue::zero;
+      for (const auto& kv : kwargs) {
+        if (kv.first == "pad_value") {
+          pad_value = std::any_cast<PadValue>(kv.second);
+          CHECK(pad_value != PadValue::null)
+              << "tile.fillpad_inplace requires pad_value to be zero/max/min, not null";
+        }
+      }
+
+      TileView tile_view;
+      tile_view.valid_shape = tile_type->shape_;
+      tile_view.pad = pad_value;
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view,
+                                        tile_type->memory_space_);
+    });
+
 }  // namespace ir
 }  // namespace pypto
