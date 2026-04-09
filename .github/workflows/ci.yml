@@ -112,10 +112,10 @@ jobs:
 
       - name: Install ptoas
         run: |
-          PTOAS_VERSION=v0.18
-          PTOAS_SHA256=e61022d990e3142084529621d21ae10ca1aeea86c25fe6ba46222c61060f40af
+          PTOAS_VERSION=v0.24
+          PTOAS_SHA256=31a1f14767f23f0e530faeea0b0dea481ec22c09f9bee5045287b444df00b5bd
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
              -o /tmp/ptoas-bin-aarch64.tar.gz
           echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin
@@ -159,10 +159,10 @@ jobs:
 
       - name: Install ptoas
         run: |
-          PTOAS_VERSION=v0.16
-          PTOAS_SHA256=37bae58a015fe64be1cc105898317fb38f422992e87963ac90fcef5d595d00ec
+          PTOAS_VERSION=v0.24
+          PTOAS_SHA256=3270856c98f4a36a8a5e083f5db7a12b521da3e6e5e181cad886235ee1e8ab60
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-x86_64.tar.gz \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-x86_64.tar.gz \
              -o /tmp/ptoas-bin-x86_64.tar.gz
           echo "${PTOAS_SHA256}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin

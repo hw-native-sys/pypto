@@ -32,7 +32,7 @@ from pypto.pypto_core import ir as _ir_core
 
 logger = logging.getLogger(__name__)
 
-_PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
+_PTOAS_RELEASE_URL = "https://github.com/hw-native-sys/PTOAS/releases"
 
 
 class PartialCodegenError(RuntimeError):
