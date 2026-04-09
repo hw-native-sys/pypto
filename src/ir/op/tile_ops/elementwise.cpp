@@ -940,6 +940,7 @@ REGISTER_OP("tile.fillpad")
       // After fillpad, the entire tile is valid (padding region is now filled with pad_value)
       TileView tile_view;
       tile_view.valid_shape = tile_type->shape_;  // Expand valid_shape to full shape
+      InheritTileViewLayout(tile_view, tile_type);
       tile_view.pad = pad_value;
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view,
                                         tile_type->memory_space_);
@@ -974,6 +975,7 @@ REGISTER_OP("tile.fillpad_inplace")
 
       TileView tile_view;
       tile_view.valid_shape = tile_type->shape_;
+      InheritTileViewLayout(tile_view, tile_type);
       tile_view.pad = pad_value;
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_, tile_view,
                                         tile_type->memory_space_);
