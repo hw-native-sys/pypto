@@ -325,6 +325,31 @@ def scatter_update(
     return _ir_core.create_op_call("tile.scatter_update", op_args, kwargs, actual_span)
 
 
+def mscatter(
+    src: Expr,
+    idx: Expr,
+    output_tensor: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Scatter-store elements from src tile to output_tensor at per-element indices.
+
+    Semantics: ``output_tensor[idx[i, j]] = src[i, j]``
+
+    Maps to the PTOAS ``pto.mscatter`` instruction.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        idx: Index tile (INT32, same rank as src)
+        output_tensor: Output tensor (TensorType, same dtype as src)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns the output tensor
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.mscatter", [src, idx, output_tensor], {}, actual_span)
+
+
 def concat(
     src0: Expr,
     src1: Expr,
