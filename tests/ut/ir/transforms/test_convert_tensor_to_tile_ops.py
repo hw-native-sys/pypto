@@ -1191,6 +1191,166 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_expand_clone_dim0_conversion(self):
+        """tensor.expand_clone (dim0 broadcast) -> looped tile.store into target."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[1, 4, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = pl.expand_clone(src, target)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[1, 4, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[1, 4, 8], pl.FP16],
+                target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                expand_clone_input: pl.Tile[[1, 4, 8], pl.FP16] = pl.load(src, [0, 0, 0], [1, 4, 8])
+                for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
+                    expand_clone_d0_store: pl.Tensor[[2, 4, 8], pl.FP16] = pl.store(
+                        expand_clone_input, [i, 0, 0], expand_clone_acc
+                    )
+                    expand_clone_d0_result = pl.yield_(expand_clone_d0_store)
+                y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = expand_clone_d0_result
+                return y_tile
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[1, 4, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_expand_clone_dim1_conversion(self):
+        """tensor.expand_clone (dim1 broadcast) -> per-row load + col_expand + store."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[2, 1, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = pl.expand_clone(src, target)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[2, 1, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[2, 1, 8], pl.FP16],
+                target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                for i, (expand_clone_acc,) in pl.range(2, init_values=(target,)):
+                    expand_clone_d1_input: pl.Tile[[1, 1, 8], pl.FP16] = pl.load(src, [i, 0, 0], [1, 1, 8])
+                    expand_clone_d1_target: pl.Tile[[1, 4, 8], pl.FP16] = pl.tile.create(
+                        [1, 4, 8], dtype=pl.FP16
+                    )
+                    expand_clone_d1_col: pl.Tile[[1, 4, 8], pl.FP16] = pl.tile.col_expand(
+                        expand_clone_d1_target, expand_clone_d1_input
+                    )
+                    expand_clone_d1_store: pl.Tensor[[2, 4, 8], pl.FP16] = pl.store(
+                        expand_clone_d1_col, [i, 0, 0], expand_clone_acc
+                    )
+                    expand_clone_d1_result = pl.yield_(expand_clone_d1_store)
+                y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = expand_clone_d1_result
+                return y_tile
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[2, 1, 8], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_expand_clone_dim2_conversion(self):
+        """tensor.expand_clone (dim2 broadcast) -> row_expand + store."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[2, 4, 1], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = pl.expand_clone(src, target)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[2, 4, 1], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[2, 4, 1], pl.FP16],
+                target: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                expand_clone_input: pl.Tile[[2, 4, 8], pl.FP16] = pl.load(
+                    src, [0, 0, 0], [2, 4, 8], valid_shapes=[2, 4, 1]
+                )
+                expand_clone_d2_row: pl.Tile[[2, 4, 8], pl.FP16] = pl.tile.row_expand(expand_clone_input)
+                y_tile: pl.Tensor[[2, 4, 8], pl.FP16] = pl.store(expand_clone_d2_row, [0, 0, 0], target)
+                return y_tile
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[2, 4, 1], pl.FP16],
+                target: pl.Tensor[[2, 4, 8], pl.FP16],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
+                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(src, target)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestNestedControlFlow:
     """Test ConvertTensorToTileOps with nested control flow."""

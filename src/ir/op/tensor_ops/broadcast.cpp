@@ -19,12 +19,15 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
@@ -173,6 +176,53 @@ TypePtr DeduceTensorExpandScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
 }
 
+TypePtr DeduceTensorExpandCloneType(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                    const std::string& op_name) {
+  CHECK(args.size() == 2) << op_name << " requires 2 arguments (input, target), but got " << args.size();
+
+  // First argument must be TensorType
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << op_name << "requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Second argument must be TensorType (target tensor)
+  auto target_type = As<TensorType>(args[1]->GetType());
+  CHECK(target_type) << op_name << "requires second argument to be a TensorType, but got "
+                     << args[1]->GetType()->TypeName();
+
+  // Extract new shape dimensions from target tensor
+  std::vector<ExprPtr> new_shape = target_type->shape_;
+
+  // Validate broadcast rules between input shape and new shape
+  const auto& input_shape = tensor_type->shape_;
+  CHECK(input_shape.size() == 3) << op_name << " requires input rank to be 3, but got " << input_shape.size();
+  CHECK(input_shape.size() == new_shape.size()) << op_name << " requires input rank (" << input_shape.size()
+                                                << ") to match target rank (" << new_shape.size() << ")";
+
+  size_t broadcast_dims = 0;
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    if (DimensionsEqual(input_shape[i], new_shape[i])) {
+      continue;
+    }
+
+    auto input_const = GetConstantDimension(input_shape[i]);
+    CHECK(input_const && *input_const == 1)
+        << op_name << " only allows broadcasting from dimension 1, but input shape "
+        << FormatShape(input_shape) << " cannot be expanded to " << FormatShape(new_shape) << " at dim " << i
+        << " (got " << input_shape[i] << " -> " << new_shape[i] << ")";
+
+    ++broadcast_dims;
+  }
+
+  CHECK(broadcast_dims <= 1) << op_name << " allows broadcasting in at most one dimension, but got "
+                             << broadcast_dims << " (input shape " << FormatShape(input_shape)
+                             << ", target shape " << FormatShape(new_shape) << ")";
+
+  // Return new TensorType with reshaped dimensions and same dtype
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
+}
+
 // ============================================================================
 // Registration Function for Tensor Broadcast Operations
 // ============================================================================
@@ -274,6 +324,17 @@ REGISTER_OP("tensor.expands")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorExpandScalarType(args, kwargs, "tensor.expands");
+    });
+
+REGISTER_OP("tensor.expand_clone")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Expand tensor by cloning data (not broadcasting). All dimensions must be 1 or match target shape.")
+    .add_argument("input", "Input tensor to expand (TensorType)")
+    .add_argument("target", "Target tensor defining output shape (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorExpandCloneType(args, kwargs, "tensor.expand_clone");
     });
 
 }  // namespace ir
