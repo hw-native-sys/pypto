@@ -133,12 +133,12 @@ jobs:
           pip install -v .
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=882c4db
+        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=38fcfb17
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device=$DEVICE_ID --platform=a2a3 --enable-profiling --forked --pto-isa-commit=882c4db
+            -v --device=$DEVICE_ID --platform=a2a3 --enable-profiling --forked --pto-isa-commit=38fcfb17
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
@@ -177,7 +177,7 @@ jobs:
           pip install -v .
 
       - name: Test A5 system tests (simulator)
-        run: pytest tests/st -v --platform a5sim --forked --pto-isa-commit=882c4db -m a5
+        run: pytest tests/st -v --platform a5sim --forked --pto-isa-commit=38fcfb17 -m a5
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest

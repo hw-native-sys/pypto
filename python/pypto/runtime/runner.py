@@ -577,7 +577,14 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
         aicpu_file = cache_dir / f"{name}_{self.platform}_aicpu.bin"
         aicore_file = cache_dir / f"{name}_{self.platform}_aicore.bin"
         if host_file.exists() and aicpu_file.exists() and aicore_file.exists():
-            return RuntimeBinaries(host_path=host_file, aicpu_path=aicpu_file, aicore_path=aicore_file)
+            # sim_context_path is a shared per-platform SO (not per-runtime-name),
+            # so resolve it from the builder rather than caching as bytes.
+            resolver = getattr(self, "_resolve_sim_context_path", None)
+            sim_context_path = resolver() if resolver is not None else None
+            return RuntimeBinaries(
+                host_path=host_file, aicpu_path=aicpu_file, aicore_path=aicore_file,
+                sim_context_path=sim_context_path,
+            )
         result = orig_get_binaries(self, name, build=build)
         _save_binary(result.host_path.read_bytes(), host_file)
         _save_binary(result.aicpu_path.read_bytes(), aicpu_file)
