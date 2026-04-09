@@ -140,7 +140,8 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed};
+                                   IRProperty::OutParamNotShadowed,
+                                   IRProperty::NoNestedInCore};
   return props;
 }
 

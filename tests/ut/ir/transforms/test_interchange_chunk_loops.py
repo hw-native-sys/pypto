@@ -267,7 +267,7 @@ class TestNestedChunksWithInterveningStatements:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.parallel(0, 16, 1, chunk=4):
                         x = pl.add(x, y)
                         for h in pl.parallel(0, 8, 1, chunk=2):
@@ -282,11 +282,8 @@ class TestNestedChunksWithInterveningStatements:
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        # AutoInCore consumed
-        assert "auto_incore" not in after_str
-
         # Exactly 1 InCore scope (no nesting)
-        assert after_str.count("pl.incore()") == 1
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") == 1
 
     def test_outline_no_crash_with_intervening_stmt(self):
         """Nested chunks with intervening stmt: outline must not crash."""
@@ -553,7 +550,7 @@ class TestNoNestedIncoreVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -578,7 +575,7 @@ class TestNoNestedIncoreVerifier:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.parallel(0, 16, 1, chunk=4):
                         x = pl.add(x, y)
                         for h in pl.parallel(0, 8, 1, chunk=2):

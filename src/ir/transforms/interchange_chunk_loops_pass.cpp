@@ -470,7 +470,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
     // Warn if this interchange is nested inside a parent chain's InCore context
     if (inside_incore_context_) {
-      LOG_WARN << "Nested chunked parallel loop found with intervening statements between it and its parent "
+      LOG_WARN << op->span_.filename_ << ":" << op->span_.begin_line_ << " — "
+               << "Nested chunked parallel loop found with intervening statements between it and its parent "
                << "chunked parallel — the inner chunk will share the parent's InCore scope instead of "
                << "getting its own. Consider removing the intervening statements or restructuring the loop "
                << "nest so the chunked parallels are directly nested.";
@@ -819,6 +820,8 @@ Pass InterchangeChunkLoops() {
 
 namespace {
 
+constexpr int kNestedIncoreCode = 501;
+
 /// Detects nested ScopeStmt(InCore) scopes in an IR tree.
 class NestedInCoreScopeDetector : public IRVisitor {
  public:
@@ -828,7 +831,7 @@ class NestedInCoreScopeDetector : public IRVisitor {
     if (!op) return;
     if (op->scope_kind_ == ScopeKind::InCore) {
       if (inside_incore_) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoNestedInCore", 0,
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoNestedInCore", kNestedIncoreCode,
                                   "Nested InCore scope detected — InCore scopes must not contain other "
                                   "InCore scopes",
                                   op->span_);
