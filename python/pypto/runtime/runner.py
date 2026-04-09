@@ -54,6 +54,7 @@ import torch
 from pypto import ir
 from pypto.backend import BackendType, set_backend_type
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.pipeline_profiling import PipelineProfiler, get_active_profiler
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
 from .golden_writer import write_golden
@@ -243,8 +244,12 @@ class RunConfig:
             on device.  Useful for validating compilation output.
         pto_isa_commit: If set, pin the pto-isa clone to this specific git
             commit (hash or tag).  ``None`` means use the latest remote HEAD.
-        enable_profiling: If ``True``, enable runtime profiling and generate
-            ``swimlane.json`` after execution.
+        on_device_profiling: If ``True``, enable on-device runtime profiling and
+            generate ``swimlane.json`` after execution.
+        pipeline_profiling: If ``True``, enable compilation pipeline profiling
+            that records per-stage wall-clock timings (parse, passes, codegen).
+            Results are written to ``report/pipeline_profile.{txt,json}`` in
+            the output directory.
         warning_level: Override warning level for compilation. ``None`` uses the
             default (``PrePipeline``, or ``PYPTO_WARNING_LEVEL`` env var).
         disabled_warnings: Set of warning checks to disable during compilation.
@@ -264,7 +269,8 @@ class RunConfig:
     save_kernels_dir: str | None = None
     codegen_only: bool = False
     pto_isa_commit: str | None = None
-    enable_profiling: bool = False
+    on_device_profiling: bool = False
+    pipeline_profiling: bool = False
     warning_level: WarningLevel | None = None
     disabled_warnings: WarningCheckSet | None = None
 
@@ -279,9 +285,9 @@ class RunConfig:
         if not self.platform.startswith(expected_arch):
             sim_suffix = "sim" if self.platform.endswith("sim") else ""
             self.platform = f"{expected_arch}{sim_suffix}"
-        # Profiling requires kernel artefacts to be retained so swimlane files
-        # can reference kernel_config.py.  Enable save_kernels automatically.
-        if self.enable_profiling and not self.save_kernels:
+        # On-device profiling requires kernel artefacts to be retained so
+        # swimlane files can reference kernel_config.py.
+        if self.on_device_profiling and not self.save_kernels:
             self.save_kernels = True
 
 
@@ -305,6 +311,7 @@ class RunResult:
     test_name: str | None = None
     error: str | None = None
     execution_time: float | None = None
+    profile: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         time_str = f" ({self.execution_time:.2f}s)" if self.execution_time else ""
@@ -331,6 +338,7 @@ def compile_program(
     dump_passes: bool = False,
     warning_level: WarningLevel | None = None,
     disabled_warnings: WarningCheckSet | None = None,
+    profiling: bool = False,
 ) -> None:
     """Compile *program* to *work_dir* and patch orchestration headers.
 
@@ -345,6 +353,7 @@ def compile_program(
         dump_passes: If ``True``, dump intermediate IR after each pass.
         warning_level: Override warning level for compilation.
         disabled_warnings: Set of warning checks to disable.
+        profiling: If ``True``, enable pipeline profiling.
     """
     ir.compile(
         program,
@@ -354,6 +363,7 @@ def compile_program(
         backend_type=backend_type,
         warning_level=warning_level,
         disabled_warnings=disabled_warnings,
+        profiling=profiling,
     )
     _patch_orchestration_headers(work_dir)
 
@@ -401,44 +411,89 @@ def run(
         work_dir = Path("build_output") / f"{program.name}_{timestamp}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Pipeline profiling --------------------------------------------------
+    prof = get_active_profiler()
+    owns_profiler = False
+    if prof is None and config.pipeline_profiling:
+        prof = PipelineProfiler()
+        prof.__enter__()
+        owns_profiler = True
+
     try:
         # 1. Set backend for code generation
         set_backend_type(config.backend_type)
 
         # 2. Compile: generates kernels/, orchestration/, kernel_config.py
         #    and patches orchestration headers
-        compile_program(
-            program,
-            work_dir,
-            strategy=config.strategy,
-            backend_type=config.backend_type,
-            dump_passes=config.dump_passes,
-            warning_level=config.warning_level,
-            disabled_warnings=config.disabled_warnings,
-        )
+        if prof is not None:
+            with prof.stage("compile"):
+                compile_program(
+                    program,
+                    work_dir,
+                    strategy=config.strategy,
+                    backend_type=config.backend_type,
+                    dump_passes=config.dump_passes,
+                    warning_level=config.warning_level,
+                    disabled_warnings=config.disabled_warnings,
+                    profiling=config.pipeline_profiling,
+                )
+        else:
+            compile_program(
+                program,
+                work_dir,
+                strategy=config.strategy,
+                backend_type=config.backend_type,
+                dump_passes=config.dump_passes,
+                warning_level=config.warning_level,
+                disabled_warnings=config.disabled_warnings,
+            )
 
         # 3. Write golden.py
-        golden_path = work_dir / "golden.py"
-        write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
+        if prof is not None:
+            with prof.stage("golden_write"):
+                golden_path = work_dir / "golden.py"
+                write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
+        else:
+            golden_path = work_dir / "golden.py"
+            write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
 
         # 4. Execute via Simpler's CodeRunner
-        _execute_on_device(
-            work_dir,
-            golden_path,
-            config.platform,
-            config.device_id,
-            config.pto_isa_commit,
-            config.enable_profiling,
-        )
+        if prof is not None:
+            with prof.stage("device_execution"):
+                _execute_on_device(
+                    work_dir,
+                    golden_path,
+                    config.platform,
+                    config.device_id,
+                    config.pto_isa_commit,
+                    config.on_device_profiling,
+                )
+        else:
+            _execute_on_device(
+                work_dir,
+                golden_path,
+                config.platform,
+                config.device_id,
+                config.pto_isa_commit,
+                config.on_device_profiling,
+            )
 
-        return RunResult(passed=True, execution_time=time.time() - start_time)
+        profile_data = prof.to_dict() if prof is not None else None
+        return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
 
     except Exception:
+        profile_data = prof.to_dict() if prof is not None else None
         return RunResult(
             passed=False,
             error=traceback.format_exc(),
             execution_time=time.time() - start_time,
+            profile=profile_data,
         )
+    finally:
+        if owns_profiler and prof is not None:
+            prof.__exit__(None, None, None)
+            report_dir = work_dir / "report"
+            prof.write_report(str(report_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +658,7 @@ def _execute_on_device(
     platform: str,
     device_id: int,
     pto_isa_commit: str | None = None,
-    enable_profiling: bool = False,
+    on_device_profiling: bool = False,
 ) -> None:
     """Invoke Simpler's CodeRunner to compile, load, execute, and validate.
 
@@ -619,8 +674,8 @@ def _execute_on_device(
         device_id: Hardware device index.
         pto_isa_commit: If set, pin the pto-isa clone to this specific git
             commit (hash or tag).
-        enable_profiling: If ``True``, enable runtime profiling and generate
-            ``swimlane.json`` after execution.
+        on_device_profiling: If ``True``, enable on-device runtime profiling
+            and generate ``swimlane.json`` after execution.
     """
     simpler_root = os.environ.get("SIMPLER_ROOT")
     if simpler_root:
@@ -641,7 +696,7 @@ def _execute_on_device(
     # Device logs are only available on real hardware, not on simulators.
     pre_run_logs: set[Path] = set()
     device_log_dir: Path | None = None
-    if enable_profiling and not platform.endswith("sim"):
+    if on_device_profiling and not platform.endswith("sim"):
         device_log_dir = _get_device_log_dir(device_id)
         if device_log_dir.exists():
             pre_run_logs = set(device_log_dir.glob("*.log"))
@@ -649,7 +704,7 @@ def _execute_on_device(
     # Snapshot existing perf_swimlane files so we can identify the new one
     # produced by CodeRunner (written to _OUTPUTS_DIR).
     pre_run_perf_files: set[Path] = set()
-    if enable_profiling:
+    if on_device_profiling:
         _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         pre_run_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json"))
 
@@ -660,10 +715,10 @@ def _execute_on_device(
         device_id=device_id,
         clone_protocol="https",
         pto_isa_commit=pto_isa_commit,
-        enable_profiling=enable_profiling,
+        enable_profiling=on_device_profiling,
     ).run()
 
-    if enable_profiling:
+    if on_device_profiling:
         swimlane_dir = work_dir / "swimlane_data"
         swimlane_dir.mkdir(parents=True, exist_ok=True)
 

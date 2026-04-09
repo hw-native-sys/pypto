@@ -191,10 +191,10 @@ def golden(tensors: dict, params: dict | None = None) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Vector DAG example")
     parser.add_argument(
-        "--enable-profiling",
+        "--on-device-profiling",
         action="store_true",
         default=False,
-        help="Enable runtime profiling and generate swimlane JSON",
+        help="Enable on-device runtime profiling and generate swimlane JSON",
     )
     args = parser.parse_args()
 
@@ -214,7 +214,7 @@ def main():
             backend_type=BackendType.Ascend910B,
             rtol=1e-5,
             atol=1e-5,
-            enable_profiling=args.enable_profiling,
+            on_device_profiling=args.on_device_profiling,
         ),
     )
     print(f"Result: {result}")

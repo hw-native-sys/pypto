@@ -16,7 +16,7 @@ This package provides Python bindings for the PyPTO C++ library.
 from typing import cast
 
 # Import IR module (includes operations and core IR types)
-from . import ir, language, runtime
+from . import ir, language, pipeline_profiling, runtime
 from .pypto_core import (
     DataType,
     InternalError,
@@ -63,6 +63,7 @@ __all__ = [
     "ir",
     "language",
     "passes",
+    "pipeline_profiling",
     "runtime",
     "testing",
     # Logging framework

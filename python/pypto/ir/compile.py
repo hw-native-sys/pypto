@@ -14,6 +14,7 @@ from datetime import datetime
 
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate
+from pypto.pipeline_profiling import PipelineProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
@@ -42,6 +43,7 @@ def compile(
     verification_level: _passes.VerificationLevel | None = None,
     warning_level: _passes.WarningLevel | None = None,
     disabled_warnings: _passes.WarningCheckSet | None = None,
+    profiling: bool = False,
 ) -> str:
     """Compile a Program through passes and codegen.
 
@@ -65,6 +67,8 @@ def compile(
             None uses the default (PrePipeline, or PYPTO_WARNING_LEVEL env var).
         disabled_warnings: Set of warning checks to disable. None uses the default
             (UnusedControlFlowResult disabled).
+        profiling: If True, enable pipeline profiling that records per-stage
+            wall-clock timings.  Results are written to ``output_dir/report/``.
 
     Returns:
         Path to the output directory containing all artifacts
@@ -88,6 +92,14 @@ def compile(
         output_dir = os.path.join("build_output", f"{program.name}_{timestamp}")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # --- Pipeline profiling --------------------------------------------------
+    prof = get_active_profiler()
+    owns_profiler = False
+    if prof is None and profiling:
+        prof = PipelineProfiler()
+        prof.__enter__()
+        owns_profiler = True
 
     outer = _passes.PassContext.current()
     if verification_level is not None and outer is not None:
@@ -123,19 +135,34 @@ def compile(
         disabled = disabled_warnings if disabled_warnings is not None else default_disabled
     ctx = _passes.PassContext(instruments, vlevel, wlevel, disabled)
 
-    with ctx:
-        pm = PassManager.get_strategy(strategy)
-        passes_dump_dir = os.path.join(output_dir, "passes_dump")
-        transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
+    try:
+        with ctx:
+            pm = PassManager.get_strategy(strategy)
+            passes_dump_dir = os.path.join(output_dir, "passes_dump")
+            if prof is not None:
+                with prof.stage("passes"):
+                    transformed_program = pm.run_passes(
+                        program, dump_ir=dump_passes, output_dir=passes_dump_dir
+                    )
+            else:
+                transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
-    if backend_type in (BackendType.Ascend910B, BackendType.Ascend950):
-        try:
-            files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
-        except PartialCodegenError as exc:
-            _write_files(exc.files, output_dir)
-            raise
-        _write_files(files, output_dir)
-    else:
-        raise ValueError(f"Unsupported backend type: {backend_type}")
+        if backend_type in (BackendType.Ascend910B, BackendType.Ascend950):
+            try:
+                if prof is not None:
+                    with prof.stage("codegen"):
+                        files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
+                else:
+                    files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
+            except PartialCodegenError as exc:
+                _write_files(exc.files, output_dir)
+                raise
+            _write_files(files, output_dir)
+        else:
+            raise ValueError(f"Unsupported backend type: {backend_type}")
+    finally:
+        if owns_profiler and prof is not None:
+            prof.__exit__(None, None, None)
+            prof.write_report(report_dir)
 
     return output_dir

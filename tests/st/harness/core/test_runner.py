@@ -633,7 +633,7 @@ class TestRunner:
                 platform,
                 self.config.device_id,
                 self.config.pto_isa_commit,
-                self.config.enable_profiling,
+                self.config.on_device_profiling,
             )
 
             return RunResult(
