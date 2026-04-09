@@ -169,7 +169,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string valid_row_ssa;
         std::string valid_col_ssa;
         if (auto const_offset = As<ir::ConstInt>(tile_type->memref_.value()->byte_offset_)) {
-          addr_ssa = GetOrEmitI64Constant(const_offset->value_);
+          addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
         }
         auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
         if (valid_row_var) valid_row_ssa = GetVarName(valid_row_var);

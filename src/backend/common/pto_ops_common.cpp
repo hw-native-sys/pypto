@@ -464,7 +464,8 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
   // runtime variables (e.g., loop-carried block_len) go through GetExprAsCode + cast.
   std::string block_len;
   if (auto const_int = ir::As<ir::ConstInt>(op->args_[1])) {
-    block_len = codegen.GetOrEmitI32Constant(static_cast<int32_t>(const_int->value_));
+    block_len = codegen.GetOrEmitConstant(static_cast<int64_t>(static_cast<int32_t>(const_int->value_)),
+                                          DataType::INT32);
   } else {
     block_len = codegen.GetExprAsCode(op->args_[1]);
     block_len = codegen.EmitCastToI32(op->args_[1], block_len);
@@ -562,7 +563,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   partition_line << ", sizes = [";
   for (size_t i = 0; i < shape_elems.size(); ++i) {
     if (i > 0) partition_line << ", ";
-    partition_line << codegen.GetIndexConstant(codegen.GetConstIntValue(shape_elems[i]));
+    partition_line << codegen.GetOrEmitConstant(codegen.GetConstIntValue(shape_elems[i]), DataType::INDEX);
   }
   partition_line << "]";
   partition_line << " : " << tensor_view_type << " -> " << partition_type;
@@ -591,7 +592,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
           vr = codegen.EmitCastToIndex(var, mlir_name);
           has_dynamic = true;
         } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
-          vr = codegen.GetIndexConstant(c->value_);
+          vr = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
         }
       }
 
@@ -602,7 +603,7 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
           vc = codegen.EmitCastToIndex(var, mlir_name);
           has_dynamic = true;
         } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
-          vc = codegen.GetIndexConstant(c->value_);
+          vc = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
         }
       }
 
@@ -672,7 +673,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
       if (i > 0) partition_line << ", ";
       if (auto c = As<ir::ConstInt>(shapes_tuple->elements_[i])) {
-        partition_line << codegen.GetIndexConstant(c->value_);
+        partition_line << codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
         if (i > 0) partition_type += "x";
         partition_type += std::to_string(c->value_);
       } else {
@@ -763,7 +764,7 @@ static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
   }
 
   if (all_constant) {
-    return codegen.GetIndexConstant(flat_offset);
+    return codegen.GetOrEmitConstant(flat_offset, DataType::INDEX);
   }
 
   return ComputeFlatOffsetPTO(indices_tuple, shape, codegen);
@@ -920,7 +921,7 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   if (auto dyn_shape = ir::As<ir::Var>(shape)) {
     shape_name = codegen.GetVarName(dyn_shape);
   } else if (auto static_shape = ir::As<ir::ConstInt>(shape)) {
-    shape_name = codegen.GetIndexConstant(static_shape->value_);
+    shape_name = codegen.GetOrEmitConstant(static_shape->value_, DataType::INDEX);
   } else {
     INTERNAL_CHECK(false) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
   }
@@ -1081,7 +1082,7 @@ static bool ExprIsI32Scalar(const ir::ExprPtr& expr) {
 // Pipe buffer operands are i32 SSA. GetExprAsCode(ConstInt) uses index constants; use i32 here.
 static std::string GetPipeBufOperandI32SSA(codegen::PTOCodegen& codegen, const ir::ExprPtr& expr) {
   if (auto c = As<ir::ConstInt>(expr)) {
-    return codegen.GetOrEmitI32Constant(static_cast<int32_t>(c->value_));
+    return codegen.GetOrEmitConstant(static_cast<int64_t>(static_cast<int32_t>(c->value_)), DataType::INT32);
   }
   INTERNAL_CHECK(ExprIsI32Scalar(expr))
       << "Initialize-pipe buffer operand must be INT32 scalar SSA or integral ConstInt placeholder";

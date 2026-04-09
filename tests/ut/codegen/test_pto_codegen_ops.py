@@ -850,5 +850,61 @@ class TestMrgSortCodegen:
         assert "i32" in tmrgsort_lines[0], f"block_len type annotation should be i32: {tmrgsort_lines[0]}"
 
 
+class TestConstDtypeCodegen:
+    """Regression tests for const dtype emission (Issue #934).
+
+    Previously, codegen hardcoded 'f32' for all float consts and 'index' for
+    all int consts. These tests verify the actual dtype is emitted.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_full_bf16_const_emits_bf16(self):
+        """tile.full with a bf16 fill value must emit bf16, not f32 (Issue #934)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.BF16],
+            ) -> pl.Tensor[[16, 16], pl.BF16]:
+                t = pl.tile.full([16, 16], dtype=pl.BF16, value=1.0)
+                return pl.store(t, [0, 0], a)
+
+        mlir = self._generate_mlir(Prog)
+        assert "bf16" in mlir, f"Expected bf16 in MLIR output:\n{mlir}"
+        assert "1.000000e+00 : bf16" in mlir, f"Expected bf16 float constant in MLIR:\n{mlir}"
+        # Ensure no f32 constant was emitted for the fill value
+        assert "1.000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
+
+    def test_full_f16_const_emits_f16(self):
+        """tile.full with an f16 fill value must emit f16, not f32 (Issue #934)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP16],
+            ) -> pl.Tensor[[16, 16], pl.FP16]:
+                t = pl.tile.full([16, 16], dtype=pl.FP16, value=0.0)
+                return pl.store(t, [0, 0], a)
+
+        mlir = self._generate_mlir(Prog)
+        assert "f16" in mlir, f"Expected f16 in MLIR output:\n{mlir}"
+        assert "0.000000e+00 : f16" in mlir, f"Expected f16 float constant in MLIR:\n{mlir}"
+        assert "0.000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

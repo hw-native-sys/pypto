@@ -52,15 +52,15 @@ std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::str
 
   if (wanted_mlir_type == "index") {
     if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitIndexConstant(ci->value_);
+      return GetOrEmitConstant(ci->value_, DataType::INDEX);
     }
   } else if (wanted_mlir_type == "i64") {
     if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitI64Constant(ci->value_);
+      return GetOrEmitConstant(ci->value_, DataType::INT64);
     }
   } else if (wanted_mlir_type == "i32") {
     if (auto ci = As<ir::ConstInt>(expr)) {
-      return GetOrEmitI32Constant(static_cast<int32_t>(ci->value_));
+      return GetOrEmitConstant(static_cast<int64_t>(static_cast<int32_t>(ci->value_)), DataType::INT32);
     }
   }
 
@@ -171,15 +171,11 @@ void PTOCodegen::VisitExpr_(const ir::IterArgPtr& op) {
 }
 
 void PTOCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
-  fs_.current_expr_value = GetOrEmitIndexConstant(op->value_);
+  fs_.current_expr_value = GetOrEmitConstant(op->value_, op->dtype());
 }
 
 void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
-  std::string mlir_type = "f32";
-  if (auto scalar_type = As<ScalarType>(op->GetType())) {
-    mlir_type = GetTypeString(scalar_type->dtype_);
-  }
-  fs_.current_expr_value = GetOrEmitFloatConstant(op->value_, mlir_type);
+  fs_.current_expr_value = GetOrEmitConstant(op->value_, op->dtype());
 }
 
 void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {

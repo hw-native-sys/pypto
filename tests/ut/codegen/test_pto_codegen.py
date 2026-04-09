@@ -231,7 +231,7 @@ def test_pto_codegen_tensor_parameters():
 
     # Verify make_tensor_view generation
     assert "pto.make_tensor_view" in mlir_code
-    assert "shape = [%c64, %c64]" in mlir_code or "shape = [%c32, %c32]" in mlir_code
+    assert "shape = [%c64_index, %c64_index]" in mlir_code or "shape = [%c32_index, %c32_index]" in mlir_code
     assert "strides = " in mlir_code
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
 
@@ -328,8 +328,8 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
 
     assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
     # Both share the same addr (same MemRef)
-    assert "addr = %c0i" in alloc_lines[0]
-    assert "addr = %c0i" in alloc_lines[1]
+    assert "addr = %c0_i64" in alloc_lines[0]
+    assert "addr = %c0_i64" in alloc_lines[1]
     # Dynamic valid_shape tile: type has v_row=?, v_col=? (both dynamic per PTOAS requirement)
     assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
     assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
@@ -428,8 +428,8 @@ def test_pto_codegen_tile_load_lowering():
 
     # Verify partition_view generation
     assert "pto.partition_view" in mlir_code
-    assert "offsets = [%c0, %c0]" in mlir_code
-    assert "sizes = [%c32, %c32]" in mlir_code
+    assert "offsets = [%c0_index, %c0_index]" in mlir_code
+    assert "sizes = [%c32_index, %c32_index]" in mlir_code
     assert "!pto.partition_tensor_view<32x32xf32>" in mlir_code
 
     # Verify tload generation
@@ -518,7 +518,7 @@ def test_pto_codegen_constants():
     # Verify index constants
     assert "arith.constant" in mlir_code
     assert ": index" in mlir_code
-    assert "%c0" in mlir_code or "%c32" in mlir_code
+    assert "%c0_index" in mlir_code or "%c32_index" in mlir_code
 
 
 def test_pto_codegen_ssa_naming():
@@ -1480,8 +1480,8 @@ class TestColumnVectorCodegen:
         mlir_code = _generate_default_mlir(ColVecProgram)
         lines = _get_mlir_lines(mlir_code)
         col_vec_view = _single_line(lines, "pto.make_tensor_view %arg0")
-        assert "shape = [%c16, %c1]" in col_vec_view
-        assert "strides = [%c1, %c16]" in col_vec_view
+        assert "shape = [%c16_index, %c1_index]" in col_vec_view
+        assert "strides = [%c1_index, %c16_index]" in col_vec_view
         assert "layout = #pto.layout<dn>" in col_vec_view
 
     def test_column_vector_with_explicit_dn(self):
@@ -1501,8 +1501,8 @@ class TestColumnVectorCodegen:
         mlir_code = _generate_default_mlir(ColVecDNProgram)
         lines = _get_mlir_lines(mlir_code)
         col_vec_view = _single_line(lines, "pto.make_tensor_view %arg0")
-        assert "shape = [%c16, %c1]" in col_vec_view
-        assert "strides = [%c1, %c16]" in col_vec_view
+        assert "shape = [%c16_index, %c1_index]" in col_vec_view
+        assert "strides = [%c1_index, %c16_index]" in col_vec_view
         assert "layout = #pto.layout<dn>" in col_vec_view
 
     def test_regular_2d_nd_unchanged(self):
@@ -1522,8 +1522,8 @@ class TestColumnVectorCodegen:
         mlir_code = _generate_default_mlir(RegularProgram)
         lines = _get_mlir_lines(mlir_code)
         a_view = _single_line(lines, "pto.make_tensor_view %arg0")
-        assert "shape = [%c16, %c128]" in a_view
-        assert "strides = [%c128, %c1]" in a_view
+        assert "shape = [%c16_index, %c128_index]" in a_view
+        assert "strides = [%c128_index, %c1_index]" in a_view
         assert "layout = #pto.layout<nd>" in a_view
 
     def test_row_vector_stays_nd(self):
@@ -1543,8 +1543,8 @@ class TestColumnVectorCodegen:
         mlir_code = _generate_default_mlir(RowVecProgram)
         lines = _get_mlir_lines(mlir_code)
         row_view = _single_line(lines, "pto.make_tensor_view %arg0")
-        assert "shape = [%c1, %c128]" in row_view
-        assert "strides = [%c128, %c1]" in row_view
+        assert "shape = [%c1_index, %c128_index]" in row_view
+        assert "strides = [%c128_index, %c1_index]" in row_view
         assert "layout = #pto.layout<nd>" in row_view
 
 
@@ -1635,14 +1635,14 @@ def test_pto_codegen_view_output_uses_physical_stride():
     out_view_lines = _find_lines(lines, "pto.make_tensor_view %arg1")
     assert len(out_view_lines) == 1, f"Expected one make_tensor_view for out param, got: {out_view_lines}"
     out_view = out_view_lines[0]
-    assert "strides = [%c128, %c1]" in out_view, (
+    assert "strides = [%c128_index, %c1_index]" in out_view, (
         f"Out param stride should be [128, 1] (physical stride), not [32, 1] (view shape). Got: {out_view}"
     )
 
     # The a param (arg0) should still use shape-based stride [128, 1]
     a_view_lines = _find_lines(lines, "pto.make_tensor_view %arg0")
     assert len(a_view_lines) == 1
-    assert "strides = [%c128, %c1]" in a_view_lines[0]
+    assert "strides = [%c128_index, %c1_index]" in a_view_lines[0]
 
 
 if __name__ == "__main__":

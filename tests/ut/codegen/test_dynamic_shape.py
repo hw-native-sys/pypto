@@ -103,11 +103,11 @@ def test_add_kernel_dynamic_shape_pto_codegen():
     assert "%arg4: index" in mlir_code
     # Dynamic dim variables used in make_tensor_view shape and strides
     assert "shape = [%arg3, %arg4]" in mlir_code
-    assert "strides = [%arg4, %c1]" in mlir_code
+    assert "strides = [%arg4, %c1_index]" in mlir_code
     # Dynamic type annotation uses wildcard
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
     # Dynamic dims must not appear as zero constants in make_tensor_view shape
-    assert "shape = [%c0" not in mlir_code
+    assert "shape = [%c0_index" not in mlir_code
 
 
 def test_add_kernel_valid_shape_pto_codegen():
@@ -127,8 +127,8 @@ def test_add_kernel_valid_shape_pto_codegen():
     assert "%arg3: index" in mlir_code
     assert "%arg4: index" in mlir_code
     # Static tensor views use constant dims from the 128x128 tensor type
-    assert "shape = [%c128, %c128]" in mlir_code
-    assert "strides = [%c128, %c1]" in mlir_code
+    assert "shape = [%c128_index, %c128_index]" in mlir_code
+    assert "strides = [%c128_index, %c1_index]" in mlir_code
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
     # Tile allocation uses shapes (128x128), not dynamic valid_shapes
     assert "partition_tensor_view<128x128xf32>" in mlir_code

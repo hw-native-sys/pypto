@@ -101,20 +101,26 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
 
   /**
-   * @brief Get or emit index constant
+   * @brief Get or emit a numeric constant of any dtype (int, index, or float).
    *
-   * @param val Constant value
-   * @return Index constant string
+   * Both overloads write the constant to the constants section on first use and
+   * return the SSA name. Subsequent calls for the same (value, dtype) pair
+   * return the cached name without emitting again.
+   *
+   * @param value Integer or index value
+   * @param dt    Data type (e.g., DataType::INDEX, DataType::INT32, DataType::INT64)
+   * @return SSA variable name for the constant
    */
-  std::string GetIndexConstant(int64_t val);
+  std::string GetOrEmitConstant(int64_t value, DataType dt);
 
   /**
-   * @brief Get or emit i32 constant (for cross-core consumer buffer addresses)
+   * @brief Get or emit a floating-point constant of any float dtype.
    *
-   * @param value Constant value
-   * @return SSA variable name for the constant (e.g., "%c0_i32")
+   * @param value Floating-point value
+   * @param dt    Data type (e.g., DataType::FP32, DataType::BF16, DataType::FP16)
+   * @return SSA variable name for the constant
    */
-  std::string GetOrEmitI32Constant(int32_t value);
+  std::string GetOrEmitConstant(double value, DataType dt);
 
   /**
    * @brief Emit arith.index_cast if var is not already index type
@@ -166,15 +172,6 @@ class PTOCodegen : public CodegenBase {
    * @brief Get the IR variable currently being assigned
    */
   [[nodiscard]] ir::VarPtr GetCurrentResultVar() const;
-
-  /**
-   * @brief Get or emit float constant (emits to constants section, returns SSA name)
-   *
-   * @param value Constant value
-   * @param mlir_type MLIR type string (e.g., "f32", "i32")
-   * @return SSA variable name for the constant
-   */
-  std::string GetOrEmitFloatConstant(double value, const std::string& mlir_type = "f32");
 
   /**
    * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
@@ -378,16 +375,6 @@ class PTOCodegen : public CodegenBase {
   std::string GetIndent() const;
 
   /**
-   * @brief Get or emit index constant (internal; writes to constants section)
-   */
-  std::string GetOrEmitIndexConstant(int64_t value);
-
-  /**
-   * @brief Get or emit i64 constant (for tile buffer addresses)
-   */
-  std::string GetOrEmitI64Constant(int64_t value);
-
-  /**
    * @brief Get tile_buf name for a MemRef
    */
   std::string GetTileBufForMemRef(const ir::MemRefPtr& memref) const;
@@ -405,11 +392,7 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 
-    std::map<int64_t, std::string> emitted_constants;
-    std::map<int64_t, std::string> emitted_i64_constants;
-    std::map<int32_t, std::string> emitted_i32_constants;
-    std::set<double> emitted_float_constants;
-    std::map<double, std::string> float_const_names;
+    std::map<std::pair<int64_t, uint8_t>, std::string> emitted_numeric_constants;
 
     struct ExtraAllocTile {
       std::string name;
@@ -453,11 +436,7 @@ class PTOCodegen : public CodegenBase {
       var_to_memref.clear();
       memref_to_tile_type.clear();
 
-      emitted_constants.clear();
-      emitted_i64_constants.clear();
-      emitted_i32_constants.clear();
-      emitted_float_constants.clear();
-      float_const_names.clear();
+      emitted_numeric_constants.clear();
 
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();

@@ -535,7 +535,17 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       }
     }
     stream_ << ", value=";
-    VisitExpr(op->args_[1]);  // value (as keyword)
+    // Print value as a bare numeric literal (dtype is already captured in dtype=...).
+    // Using VisitExpr would emit pl.const(v, pl.BF16) which the Python API cannot accept
+    // as the `value: int | float` parameter.
+    const auto& val_expr = op->args_[1];
+    if (auto cf = As<ConstFloat>(val_expr)) {
+      stream_ << FormatFloatLiteral(cf->value_);
+    } else if (auto ci = As<ConstInt>(val_expr)) {
+      stream_ << ci->value_;
+    } else {
+      VisitExpr(val_expr);
+    }
     stream_ << ")";
     return;
   }

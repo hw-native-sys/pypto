@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <ios>
 #include <map>
@@ -338,7 +339,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     if (fs_.tpop_result_vars.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
     if (memref && As<ir::ConstInt>(memref->byte_offset_)) {
-      GetOrEmitI64Constant(As<ir::ConstInt>(memref->byte_offset_)->value_);
+      GetOrEmitConstant(As<ir::ConstInt>(memref->byte_offset_)->value_, DataType::INT64);
     }
   }
 
@@ -356,7 +357,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
       for (const auto& j : tensor_type->shape_) {
         if (As<ir::ConstInt>(j)) {
-          GetOrEmitIndexConstant(GetConstIntValue(j));
+          GetOrEmitConstant(GetConstIntValue(j), DataType::INDEX);
         }
       }
       // Pre-emit stride constants: use explicit tensor_view_.stride if available,
@@ -366,19 +367,19 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       if (has_explicit_stride) {
         for (const auto& s : tensor_type->tensor_view_->stride) {
           if (As<ir::ConstInt>(s)) {
-            GetOrEmitIndexConstant(GetConstIntValue(s));
+            GetOrEmitConstant(GetConstIntValue(s), DataType::INDEX);
           }
         }
       } else if (tensor_type->shape_.size() == 2) {
         if (As<ir::ConstInt>(tensor_type->shape_[1])) {
-          GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[1]));
+          GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[1]), DataType::INDEX);
         }
-        GetOrEmitIndexConstant(1);
+        GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
       } else {
         // 1-D and N-D (N>2): pre-emit constant 1 (innermost stride). For N>2,
         // other strides are computed dynamically via arith.muli in
         // EmitMakeTensorViews to support dynamic dims.
-        GetOrEmitIndexConstant(1);
+        GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
       }
     }
   }
@@ -516,13 +517,13 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       if (!has_explicit_stride && tensor_type->shape_.size() > 2) {
         const size_t rank = tensor_type->shape_.size();
         nd_stride_names.resize(rank);
-        nd_stride_names[rank - 1] = GetOrEmitIndexConstant(1);
+        nd_stride_names[rank - 1] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
         for (int j = static_cast<int>(rank) - 2; j >= 0; j--) {
           std::string dim_mlir;
           if (auto var = As<ir::Var>(tensor_type->shape_[j + 1])) {
             dim_mlir = GetVarName(var);
           } else {
-            dim_mlir = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j + 1]));
+            dim_mlir = GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j + 1]), DataType::INDEX);
           }
           std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(j));
           stream_ << GetIndent() << mul_name << " = arith.muli " << nd_stride_names[j + 1] << ", " << dim_mlir
@@ -543,7 +544,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
           if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
             stream_ << GetVarName(var);
           } else {
-            stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+            stream_ << GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j]), DataType::INDEX);
           }
         }
       } else {
@@ -552,7 +553,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
           if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
             stream_ << GetVarName(var);
           } else {
-            stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
+            stream_ << GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j]), DataType::INDEX);
           }
         }
       }
@@ -567,7 +568,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
           if (auto var = As<ir::Var>(strides[j])) {
             stream_ << GetVarName(var);
           } else {
-            stream_ << GetOrEmitIndexConstant(GetConstIntValue(strides[j]));
+            stream_ << GetOrEmitConstant(GetConstIntValue(strides[j]), DataType::INDEX);
           }
         }
       } else if (tensor_type->shape_.size() == 2) {
@@ -578,15 +579,15 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         if (auto var = As<ir::Var>(tensor_type->shape_[stride_idx])) {
           row_stride = GetVarName(var);
         } else {
-          row_stride = GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[stride_idx]));
+          row_stride = GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[stride_idx]), DataType::INDEX);
         }
         if (layout_DN) {
-          stream_ << GetOrEmitIndexConstant(1) << ", " << row_stride;
+          stream_ << GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX) << ", " << row_stride;
         } else {
-          stream_ << row_stride << ", " << GetOrEmitIndexConstant(1);
+          stream_ << row_stride << ", " << GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
         }
       } else if (tensor_type->shape_.size() == 1) {
-        stream_ << GetOrEmitIndexConstant(1);
+        stream_ << GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
       } else {
         // Use pre-computed SSA stride names (built above via arith.muli)
         for (size_t j = 0; j < nd_stride_names.size(); j++) {
@@ -654,12 +655,12 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
       if (has_fillpad) {
         if (tile_type->shape_.size() >= 1) {
           if (auto c = As<ir::ConstInt>(tile_type->shape_[0])) {
-            valid_row_mlir = GetOrEmitIndexConstant(c->value_);
+            valid_row_mlir = GetOrEmitConstant(c->value_, DataType::INDEX);
           }
         }
         if (tile_type->shape_.size() >= 2) {
           if (auto c = As<ir::ConstInt>(tile_type->shape_[1])) {
-            valid_col_mlir = GetOrEmitIndexConstant(c->value_);
+            valid_col_mlir = GetOrEmitConstant(c->value_, DataType::INDEX);
           }
         }
       } else {
@@ -676,7 +677,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   std::string addr_ssa;
   if (memref) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      addr_ssa = GetOrEmitI64Constant(const_offset->value_);
+      addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
     }
   }
 
@@ -697,73 +698,61 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
 std::string PTOCodegen::GetIndent() const { return std::string(static_cast<size_t>(indent_level_) * 2, ' '); }
 
-std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
-  auto it = fs_.emitted_constants.find(value);
-  if (it != fs_.emitted_constants.end()) {
-    return it->second;
+std::string PTOCodegen::GetOrEmitConstant(int64_t value, DataType dt) {
+  auto key = std::make_pair(value, dt.Code());
+  auto it = fs_.emitted_numeric_constants.find(key);
+  if (it != fs_.emitted_numeric_constants.end()) return it->second;
+
+  std::string mlir_type = GetTypeString(dt);
+  std::string ssa_suffix = "_" + mlir_type;
+
+  std::string ssa_id;
+  if (value == 0) {
+    ssa_id = "c0" + ssa_suffix;
+  } else if (value < 0) {
+    uint64_t mag = static_cast<uint64_t>(-(value + 1)) + 1;
+    ssa_id = "cn" + std::to_string(mag) + ssa_suffix;
+  } else {
+    ssa_id = "c" + std::to_string(value) + ssa_suffix;
   }
-  std::string ssa_id = "c" + std::to_string(value);
+
   std::string name;
-  if (fs_.used_ssa_names.find(ssa_id) == fs_.used_ssa_names.end()) {
+  if (!fs_.used_ssa_names.count(ssa_id)) {
     fs_.used_ssa_names.insert(ssa_id);
     name = "%" + ssa_id;
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : index\n";
-  fs_.emitted_constants[value] = name;
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : " << mlir_type
+                        << "\n";
+  fs_.emitted_numeric_constants[key] = name;
   return name;
 }
 
-std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
-  auto it = fs_.emitted_i64_constants.find(value);
-  if (it != fs_.emitted_i64_constants.end()) {
-    return it->second;
-  }
-  std::string ssa_id;
-  if (value == 0) {
-    ssa_id = "c0i";
-  } else if (value < 0) {
-    uint64_t magnitude = static_cast<uint64_t>(-(value + 1)) + 1;
-    ssa_id = "cn" + std::to_string(magnitude);
-  } else {
-    ssa_id = "c" + std::to_string(value);
-  }
-  std::string name;
-  if (fs_.used_ssa_names.find(ssa_id) == fs_.used_ssa_names.end()) {
-    fs_.used_ssa_names.insert(ssa_id);
-    name = "%" + ssa_id;
-  } else {
-    name = NewTemp();
-  }
-  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : i64\n";
-  fs_.emitted_i64_constants[value] = name;
-  return name;
-}
+std::string PTOCodegen::GetOrEmitConstant(double value, DataType dt) {
+  int64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  auto key = std::make_pair(bits, dt.Code());
+  auto it = fs_.emitted_numeric_constants.find(key);
+  if (it != fs_.emitted_numeric_constants.end()) return it->second;
 
-std::string PTOCodegen::GetOrEmitI32Constant(int32_t value) {
-  auto it = fs_.emitted_i32_constants.find(value);
-  if (it != fs_.emitted_i32_constants.end()) {
-    return it->second;
-  }
-  std::string ssa_id;
-  if (value == 0) {
-    ssa_id = "c0_i32";
-  } else if (value < 0) {
-    uint32_t magnitude = static_cast<uint32_t>(-(value + 1)) + 1;
-    ssa_id = "cn" + std::to_string(magnitude) + "_i32";
-  } else {
-    ssa_id = "c" + std::to_string(value) + "_i32";
+  std::string mlir_type = GetTypeString(dt);
+  std::string ssa_id = "cst";
+  if (!fs_.emitted_numeric_constants.empty()) {
+    ssa_id += "_" + std::to_string(fs_.emitted_numeric_constants.size());
   }
   std::string name;
-  if (fs_.used_ssa_names.find(ssa_id) == fs_.used_ssa_names.end()) {
+  if (!fs_.used_ssa_names.count(ssa_id)) {
     fs_.used_ssa_names.insert(ssa_id);
     name = "%" + ssa_id;
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : i32\n";
-  fs_.emitted_i32_constants[value] = name;
+  std::ostringstream val_str;
+  val_str << std::scientific << std::setprecision(6) << value;
+  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << val_str.str() << " : "
+                        << mlir_type << "\n";
+  fs_.emitted_numeric_constants[key] = name;
   return name;
 }
 
@@ -935,10 +924,10 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
     return GetVarName(var);
   }
   if (auto const_int = As<ir::ConstInt>(expr)) {
-    return GetIndexConstant(const_int->value_);
+    return GetOrEmitConstant(const_int->value_, const_int->dtype());
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
-    return GetOrEmitFloatConstant(const_float->value_, "f32");
+    return GetOrEmitConstant(const_float->value_, const_float->dtype());
   }
 
   // Fall back to visitor pattern for complex expressions (arithmetic, comparisons)
@@ -1060,34 +1049,6 @@ std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
   return "";
 }
 
-std::string PTOCodegen::GetIndexConstant(int64_t val) { return GetOrEmitIndexConstant(val); }
-
-std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& mlir_type) {
-  if (fs_.emitted_float_constants.find(value) == fs_.emitted_float_constants.end()) {
-    std::string ssa_id = "cst";
-    if (!fs_.emitted_float_constants.empty()) {
-      ssa_id += "_" + std::to_string(fs_.emitted_float_constants.size());
-    }
-    std::string name;
-    if (fs_.used_ssa_names.find(ssa_id) == fs_.used_ssa_names.end()) {
-      fs_.used_ssa_names.insert(ssa_id);
-      name = "%" + ssa_id;
-    } else {
-      name = NewTemp();
-    }
-
-    std::ostringstream val_str;
-    val_str << std::scientific << std::setprecision(6) << value;
-
-    fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << val_str.str() << " : "
-                          << mlir_type << "\n";
-    fs_.emitted_float_constants.insert(value);
-    fs_.float_const_names[value] = name;
-    return name;
-  }
-  return fs_.float_const_names[value];
-}
-
 std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_type) const {
   std::ostringstream oss;
   oss << "!pto.tensor_view<";
@@ -1173,10 +1134,10 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     }
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
-    return "f32";
+    return GetTypeString(const_float->dtype());
   }
   if (auto const_int = As<ir::ConstInt>(expr)) {
-    return "index";
+    return GetTypeString(const_int->dtype());
   }
   return "";
 }
