@@ -279,11 +279,12 @@ class TileMemorySpaceMutator : public IRMutator {
     }
 
     if (!changed) return op;
-    // GlobalVar calls (cross-function calls) bypass OpRegistry — reconstruct directly.
-    if (As<GlobalVar>(op->op_)) {
+    // GlobalVar calls and unregistered ops bypass OpRegistry — reconstruct directly.
+    auto& registry = OpRegistry::GetInstance();
+    if (As<GlobalVar>(op->op_) || !registry.IsRegistered(op->op_->name_)) {
       return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
     }
-    return OpRegistry::GetInstance().Create(op->op_->name_, new_args, op->kwargs_, op->span_);
+    return registry.Create(op->op_->name_, new_args, op->kwargs_, op->span_);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
