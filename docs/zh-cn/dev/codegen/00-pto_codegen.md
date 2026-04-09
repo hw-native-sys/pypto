@@ -61,8 +61,8 @@ class PTOCodegen : public CodegenBase {
   // PTO-specific helpers for operator codegen
   std::string NewTemp();
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
-  std::string GetIndexConstant(int64_t val);
-  std::string GetOrEmitFloatConstant(double value, const std::string& mlir_type = "f32");
+  std::string GetOrEmitConstant(int64_t value, DataType dt);   // int/index 重载
+  std::string GetOrEmitConstant(double value, DataType dt);    // float 重载
   std::string GetTensorViewTypeString(const ir::TensorType* tensor_type) const;
   std::string GetTileBufTypeString(const ir::MemRef* memref) const;
   std::string GetExprTypeAnnotation(const ir::ExprPtr& expr);
@@ -178,8 +178,8 @@ print(pto_code)
 
 ```mlir
 %0 = pto.make_tensor_view %arg0,
-     shape = [%c32, %c32]
-     strides = [%c32, %c1]
+     shape = [%c32_index, %c32_index]
+     strides = [%c32_index, %c1_index]
      {layout = #pto.layout<nd>}
      : !pto.tensor_view<?x?xf32>
 ```
@@ -188,7 +188,7 @@ print(pto_code)
 
 - 形状来自 `TensorType.shape_`
 - 步幅按行主序计算: 二维张量为 `[dim1, 1]`
-- 常量 (`%c32`, `%c1`) 自动生成
+- 常量 (`%c32_index`, `%c1_index`) 自动生成
 - 张量视图类型每个维度使用 `?` (如二维为 `?x?xf32`)
 
 #### 二维张量的 Layout 处理
@@ -211,7 +211,7 @@ print(pto_code)
 
 ```mlir
 %col_view = pto.make_tensor_view %arg1,
-    shape = [%c16, %c1], strides = [%c1, %c16]
+    shape = [%c16_index, %c1_index], strides = [%c1_index, %c16_index]
     {layout = #pto.layout<dn>}
     : !pto.tensor_view<?x?xf32>
 ```
@@ -221,10 +221,10 @@ print(pto_code)
 基于附加到 TileType 变量的 MemRef 对象。代码生成器从关联的 TileType 推导 Tile 维度和数据类型:
 
 ```mlir
-%mi_tile = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
+%mi_tile = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=16, cols=1,
                        v_row=16, v_col=1, blayout=col_major,
                        slayout=none_box, fractal=512, pad=0>
-%mi_tile_nd = pto.alloc_tile addr = %c8320 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
+%mi_tile_nd = pto.alloc_tile addr = %c8320_i64 : !pto.tile_buf<loc=vec, dtype=f32, rows=1, cols=16,
                        v_row=1, v_col=16, blayout=row_major,
                        slayout=none_box, fractal=512, pad=0>
 ```
@@ -249,8 +249,8 @@ tile_a = pl.load(tensor_a, [0, 0], [32, 32])
 
 ```mlir
 # 1. Create partition view
-%3 = pto.partition_view %tensor_view, offsets = [%c0, %c0],
-                 sizes = [%c32, %c32]
+%3 = pto.partition_view %tensor_view, offsets = [%c0_index, %c0_index],
+                 sizes = [%c32_index, %c32_index]
                  : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
 
 # 2. Load into tile buffer
@@ -276,8 +276,8 @@ pl.store(tile_c, [0, 0], tensor_out)
 
 ```mlir
 # 1. Create partition view for output
-%5 = pto.partition_view %output_view, offsets = [%c0, %c0],
-                 sizes = [%c32, %c32]
+%5 = pto.partition_view %output_view, offsets = [%c0_index, %c0_index],
+                 sizes = [%c32_index, %c32_index]
                  : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
 
 # 2. Store from tile buffer
@@ -342,17 +342,17 @@ module {
                           %arg1: !pto.ptr<f32>,
                           %arg2: !pto.ptr<f32>) {
     // Constants
-    %c32 = arith.constant 32 : index
-    %c1 = arith.constant 1 : index
-    %c0 = arith.constant 0 : index
+    %c32_index = arith.constant 32 : index
+    %c1_index = arith.constant 1 : index
+    %c0_index = arith.constant 0 : index
 
     // Tensor views
-    %3 = pto.make_tensor_view %arg0, shape = [%c32, %c32]
-         strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
-    %4 = pto.make_tensor_view %arg1, shape = [%c32, %c32]
-         strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
-    %5 = pto.make_tensor_view %arg2, shape = [%c32, %c32]
-         strides = [%c32, %c1] : !pto.tensor_view<?x?xf32>
+    %3 = pto.make_tensor_view %arg0, shape = [%c32_index, %c32_index]
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
+    %4 = pto.make_tensor_view %arg1, shape = [%c32_index, %c32_index]
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
+    %5 = pto.make_tensor_view %arg2, shape = [%c32_index, %c32_index]
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
 
     // Allocations
     %0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, ...>
@@ -360,13 +360,13 @@ module {
     %2 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, ...>
 
     // Load tile_a
-    %6 = pto.partition_view %3, offsets = [%c0, %c0], sizes = [%c32, %c32]
+    %6 = pto.partition_view %3, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
          : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tload ins(%6 : !pto.partition_tensor_view<32x32xf32>)
               outs(%0 : !pto.tile_buf<...>)
 
     // Load tile_b
-    %7 = pto.partition_view %4, offsets = [%c0, %c0], sizes = [%c32, %c32]
+    %7 = pto.partition_view %4, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
          : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tload ins(%7 : !pto.partition_tensor_view<32x32xf32>)
               outs(%1 : !pto.tile_buf<...>)
@@ -376,7 +376,7 @@ module {
              outs(%2 : !pto.tile_buf<...>)
 
     // Store tile_c
-    %8 = pto.partition_view %5, offsets = [%c0, %c0], sizes = [%c32, %c32]
+    %8 = pto.partition_view %5, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
          : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tstore ins(%2 : !pto.tile_buf<...>)
                outs(%8 : !pto.partition_tensor_view<32x32xf32>)
@@ -402,7 +402,7 @@ module {
 **SSA 值命名**:
 
 - 参数: `%arg0`, `%arg1`, `%arg2`, ...
-- 常量: `%c0`, `%c1`, `%c32`, `%cst`, ...
+- 常量: `%c0_index`, `%c1_index`, `%c32_index`, `%c0_i64`, `%cst`, ...
 - 结果: `%0`, `%1`, `%2`, ...
 
 ### 基于 MemRef 的解析
