@@ -940,3 +940,74 @@ def scatter_update(
     op_args: list[Expr] = [input, index, src]
     kwargs: dict[str, Any] = {"dim": dim_val}
     return _ir_core.create_op_call("tensor.scatter_update", op_args, kwargs, actual_span)
+
+
+def scatter_(
+    input: Expr,
+    *args: Expr | int | float,
+    dim: int | Expr | None = None,
+    index: Expr | None = None,
+    src: Expr | float | int | None = None,
+    reduce: str | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Element-level scatter into tensor along a dimension.
+
+    For each position (i₀,…,iₙ) in index, sets:
+      input[i₀]…[i_{d-1}][ index[i₀…iₙ] ][i_{d+1}]…[iₙ] = src[i₀…iₙ]
+
+    Follows PyTorch ``torch.Tensor.scatter_`` semantics.
+
+    Accepts call forms:
+    - scatter_(input, dim, index, src)
+    - scatter_(input, dim, index, src=1.0)
+
+    Args:
+        input: Destination tensor (N-D).
+        dim: Dimension along which to scatter.
+        index: Index tensor (same rank as input, integer dtype).
+        src: Source tensor (same shape as index) or scalar value.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression returning the updated input tensor.
+    """
+    if len(args) == 3 and dim is None and index is None and src is None:
+        dim, index, src = args
+    elif len(args) == 2 and dim is not None and index is None and src is None:
+        index, src = args
+    elif len(args) == 1 and dim is None and index is not None and src is not None:
+        dim = args[0]
+    elif len(args) != 0:
+        raise TypeError(
+            "scatter_ expects (input, dim, index, src), "
+            "(input, index, src, dim=...), or (input, dim, index=..., src=...)"
+        )
+
+    if dim is None or index is None or src is None:
+        raise TypeError("scatter_ requires input, dim, index, and src")
+
+    actual_span = _get_span_or_capture(span)
+    if isinstance(dim, ConstInt):
+        dim_val = int(dim.value)
+    elif isinstance(dim, int):
+        dim_val = dim
+    else:
+        raise TypeError(f"dim must be int or ConstInt, got {type(dim)}")
+
+    if not isinstance(index, Expr):
+        raise TypeError(f"index must be Expr, got {type(index)}")
+
+    # src can be Expr or scalar (int → ConstInt, float → ConstFloat)
+    if isinstance(src, int):
+        src = ConstInt(src, DataType.INT32, actual_span)
+    elif isinstance(src, float):
+        src = ConstFloat(src, DataType.FP32, actual_span)
+    elif not isinstance(src, Expr):
+        raise TypeError(f"src must be Expr or scalar, got {type(src)}")
+
+    op_args: list[Expr] = [input, index, src]
+    kwargs: dict[str, Any] = {"dim": dim_val}
+    if reduce is not None:
+        kwargs["reduce"] = reduce
+    return _ir_core.create_op_call("tensor.scatter_", op_args, kwargs, actual_span)

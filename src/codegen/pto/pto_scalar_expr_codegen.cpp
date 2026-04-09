@@ -171,7 +171,17 @@ void PTOCodegen::VisitExpr_(const ir::IterArgPtr& op) {
 }
 
 void PTOCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
-  fs_.current_expr_value = GetOrEmitIndexConstant(op->value_);
+  DataType dtype = op->dtype();
+  if (dtype == DataType::INDEX) {
+    fs_.current_expr_value = GetOrEmitIndexConstant(op->value_);
+  } else if (dtype == DataType::INT32) {
+    fs_.current_expr_value = GetOrEmitI32Constant(static_cast<int32_t>(op->value_));
+  } else {
+    std::string result = NewTemp();
+    std::string type_str = GetTypeString(dtype);
+    Emit(result + " = arith.constant " + std::to_string(op->value_) + " : " + type_str);
+    fs_.current_expr_value = result;
+  }
 }
 
 void PTOCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {

@@ -43,6 +43,7 @@ Operate on `Tensor` objects (DDR memory).
 | `transpose` | `(tensor: Tensor, axis1: int, axis2: int) -> Tensor` | Swap two axes |
 | `assemble` | `(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tensor` | Write source into target at offset |
 | `scatter_update` | `(input: Tensor, dim: int, index: Tensor, src: Tensor) -> Tensor` | Update rows of `input` at sparse positions given by `index` with values from `src`. `input`/`src`: 2D `[rows, d]` or 4D `[B, S, 1, d]`; `index`: 2D `[b, s]` integer. Only `dim=-2` is supported |
+| `scatter_` | `(input: Tensor, dim: int, index: Tensor, src: Tensor \| float \| int) -> Tensor` | Element-level scatter: write `src` values into `input` at positions given by `index` along `dim`. Follows PyTorch `scatter_` semantics. Supports arbitrary rank and any valid `dim` in `[-rank, rank)`. `src` can be a tensor or a scalar |
 | `add` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise add |
 | `sub` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise subtract |
 | `mul` | `(lhs: Tensor, rhs: Tensor \| int \| float \| Scalar) -> Tensor` | Element-wise multiply |

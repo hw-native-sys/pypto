@@ -717,22 +717,46 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
-// Compute a row-major flat offset string from a MakeTuple of indices and the shape of the container.
+// Compute a row-major flat offset from a MakeTuple of indices and the shape,
+// emitting proper arith.muli / arith.addi SSA operations.
+// Returns the SSA name of the final flat-offset value (index type).
 static std::string ComputeFlatOffsetPTO(const ir::MakeTuplePtr& indices_tuple,
                                         const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
   const auto& indices = indices_tuple->elements_;
   INTERNAL_CHECK(indices.size() == shape.size())
       << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
 
-  std::ostringstream idx_oss;
+  // Helper: ensure an index element SSA value has `index` type.
+  // If the expression is a non-index integer (e.g. i32 from tile.read on an
+  // INT32 tile), emit arith.index_cast to convert it.
+  auto ensure_index = [&](const ir::ExprPtr& expr, const std::string& ssa) -> std::string {
+    if (auto var = ir::As<ir::Var>(expr)) {
+      return codegen.EmitCastToIndex(var, ssa);
+    }
+    return ssa;
+  };
+
+  // For each dimension i, compute: index[i] * (shape[i+1] * shape[i+2] * ... * shape[rank-1])
+  // then sum all terms with arith.addi.
+  std::string accumulator;
   for (size_t i = 0; i < indices.size(); ++i) {
-    if (i > 0) idx_oss << " + ";
-    idx_oss << codegen.GetExprAsCode(indices[i]);
+    std::string term = ensure_index(indices[i], codegen.GetExprAsCode(indices[i]));
+    // Multiply by each trailing dimension size
     for (size_t j = i + 1; j < shape.size(); ++j) {
-      idx_oss << " * " << codegen.GetExprAsCode(shape[j]);
+      std::string dim = codegen.GetExprAsCode(shape[j]);
+      std::string tmp = codegen.NewTemp();
+      codegen.Emit(tmp + " = arith.muli " + term + ", " + dim + " : index");
+      term = tmp;
+    }
+    if (accumulator.empty()) {
+      accumulator = term;
+    } else {
+      std::string tmp = codegen.NewTemp();
+      codegen.Emit(tmp + " = arith.addi " + accumulator + ", " + term + " : index");
+      accumulator = tmp;
     }
   }
-  return idx_oss.str();
+  return accumulator;
 }
 
 // Get or emit a flat offset SSA value for a MakeTuple of indices and shape.
@@ -929,6 +953,15 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
     codegen.RegisterVarToMlir(target_var, shape_name);
   }
 
+  return "";
+}
+
+static std::string MakeSystemBarrierCodegenPTO(const std::string& pipe_name, const CallPtr& op,
+                                               codegen::CodegenBase& codegen_base) {
+  CHECK(op->args_.empty()) << "system.barrier_" << pipe_name << " expects 0 arguments, got "
+                           << op->args_.size();
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  codegen.Emit("pto.barrier #pto.pipe<" + pipe_name + ">");
   return "";
 }
 
@@ -1333,6 +1366,15 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.cast", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileCvtCodegenPTO("pto.tcvt", op, codegen);
+  });
+  reg("system.bar_v", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSystemBarrierCodegenPTO("PIPE_V", op, codegen);
+  });
+  reg("system.bar_m", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSystemBarrierCodegenPTO("PIPE_M", op, codegen);
+  });
+  reg("system.bar_all", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeSystemBarrierCodegenPTO("PIPE_ALL", op, codegen);
   });
   // tile.full (TEXPANDS): output is row_major per ISA
   if (exclude_ops.count("tile.full") == 0) {

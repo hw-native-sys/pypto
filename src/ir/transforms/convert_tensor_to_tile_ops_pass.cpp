@@ -720,6 +720,22 @@ class TensorToTileMutator : public TypePropagatingMutator {
     stmts.push_back(std::make_shared<AssignStmt>(tile_var, new_result, op->span_));
     var_remap_[op->var_.get()] = tile_var;
 
+    // If the conversion result is an existing Var (e.g. in-place ops like scatter_
+    // that return the modified input), record a direct alias instead of emitting a
+    // redundant assignment.  This prevents PTO codegen from allocating a separate
+    // tile buffer for the result, which would break SSA data-flow (the writes to
+    // the original tile would become dead and the result tile would be uninitialised).
+    if (auto alias_var = As<Var>(new_result)) {
+      var_remap_[op->var_.get()] = alias_var;
+      // Remove the redundant assignment we just added and return only prologue stmts
+      stmts.pop_back();
+      if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+    } else if (auto iter_arg = As<IterArg>(new_result)) {
+      var_remap_[op->var_.get()] = iter_arg;
+      stmts.pop_back();
+      if (stmts.empty()) return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+    }
+
     return SeqStmts::Flatten(std::move(stmts), op->span_);
   }
 
@@ -1508,6 +1524,31 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
   size_t num_added_outputs = 0;
   std::unordered_set<size_t> merged_return_indices;
 
+  // Collect InOut tensor params by base name for matching with return values.
+  // IterArg InOut returns are stored back to the existing InOut param instead
+  // of creating a new Out param.
+  std::unordered_map<std::string, VarPtr> inout_param_by_base;
+  // Collect existing Out tensor params that are not yet referenced by any tile.store
+  // in the body.  These can be reused for auto-inserted tile.store when the DSL
+  // cannot express pl.store() (e.g. scatter_ returns TensorType at DSL level).
+  std::vector<VarPtr> unused_out_params;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    if (func->param_directions_[i] == ParamDirection::InOut && As<TensorType>(func->params_[i]->GetType())) {
+      inout_param_by_base[auto_name::GetBaseName(func->params_[i]->name_hint_)] = func->params_[i];
+    } else if (func->param_directions_[i] == ParamDirection::Out &&
+               As<TensorType>(func->params_[i]->GetType())) {
+      // Check if this Out param is already used by a tile.store in the body
+      VarUseVisitor use_checker(func->params_[i].get());
+      for (const auto& s : new_stmts) {
+        use_checker.CheckStmt(s);
+        if (use_checker.Found()) break;
+      }
+      if (!use_checker.Found()) {
+        unused_out_params.push_back(func->params_[i]);
+      }
+    }
+  }
+
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
 
@@ -1708,11 +1749,52 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
           continue;
         }
 
-        // Add output tensor parameter
-        std::string out_name = MakeOutParamName(num_added_outputs);
-        auto out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
-        new_params.push_back(out_param);
-        new_param_directions.push_back(ParamDirection::Out);
+        // Determine target param: reuse existing InOut/Out param or create new Out param.
+        VarPtr out_param;
+        bool is_existing_param = false;
+        auto orig_ret_var = As<Var>(return_stmt->value_[i]);
+        if (orig_ret_var) {
+          std::string ret_base = auto_name::GetBaseName(orig_ret_var->name_hint_);
+          auto inout_it = inout_param_by_base.find(ret_base);
+          if (inout_it != inout_param_by_base.end()) {
+            out_param = inout_it->second;
+            is_existing_param = true;
+            inout_param_by_base.erase(inout_it);
+          }
+        }
+        // Try reusing an unused Out param with compatible tensor type (e.g. scatter_
+        // where the DSL has pl.Out but cannot use pl.store because the result is
+        // still TensorType at parse time).
+        if (!is_existing_param && !unused_out_params.empty()) {
+          for (auto out_it = unused_out_params.begin(); out_it != unused_out_params.end(); ++out_it) {
+            auto out_type = As<TensorType>((*out_it)->GetType());
+            if (out_type && out_type->dtype_ == orig_tensor_type->dtype_ &&
+                out_type->shape_.size() == orig_tensor_type->shape_.size()) {
+              bool shapes_match = true;
+              for (size_t k = 0; k < out_type->shape_.size(); ++k) {
+                auto out_dim = As<ConstInt>(out_type->shape_[k]);
+                auto orig_dim = As<ConstInt>(orig_tensor_type->shape_[k]);
+                if (!out_dim || !orig_dim || out_dim->value_ != orig_dim->value_) {
+                  shapes_match = false;
+                  break;
+                }
+              }
+              if (shapes_match) {
+                out_param = *out_it;
+                is_existing_param = true;
+                unused_out_params.erase(out_it);
+                break;
+              }
+            }
+          }
+        }
+        if (!is_existing_param) {
+          // Add new output tensor parameter
+          std::string out_name = MakeOutParamName(num_added_outputs);
+          out_param = std::make_shared<Var>(out_name, orig_tensor_type, span);
+          new_params.push_back(out_param);
+          new_param_directions.push_back(ParamDirection::Out);
+        }
 
         if (auto loop_rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,
                                                                    orig_tensor_type, op_registry)) {
@@ -1723,7 +1805,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
           }
           new_return_types.push_back(orig_tensor_type);
           new_return_exprs.push_back(loop_rewrite->new_return_var);
-          ++num_added_outputs;
+          if (!is_existing_param) ++num_added_outputs;
           continue;
         }
 
@@ -1737,7 +1819,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func,
 
         new_return_types.push_back(store_call->GetType());
         new_return_exprs.push_back(store_var);
-        ++num_added_outputs;
+        if (!is_existing_param) ++num_added_outputs;
       } else {
         // Non-tile return values pass through
         new_return_types.push_back(ret_expr->GetType());

@@ -14,6 +14,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -492,6 +493,205 @@ OpConversionRegistry::OpConversionRegistry() {
 
         auto scatter_call = op_reg.Create("tile.scatter_update", {input, index_tile, src_tile}, kwargs, span);
         return ConversionResult{std::move(prologue), scatter_call};
+      });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // tensor.scatter_ → nested ForStmt with tile.read + tile.write
+  //
+  // For every element position (i0, ..., in) in the index tensor:
+  //   idx = tile.read(index, [i0, ..., in])
+  //   src_val = tile.read(src, [i0, ..., in])  (or scalar src directly)
+  //   Build write_indices: same as (i0, ..., in) but replace dim-th with idx
+  //   tile.write(input, write_indices, src_val)
+  //
+  // For reduce="add":   old = tile.read(input, write_indices); write old + src_val
+  // For reduce="multiply": old = tile.read(input, write_indices); write old * src_val
+  //
+  // Uses nested ForStmt loops (scf.for) which PTOAS compiles to C++ for loops.
+  // PTOAS eliminates single-trip scf.for loops, so real multi-iteration loops
+  // are required for tgetval/tsetval to compile.
+  //
+  // When input is a TensorType (global memory), keep the op unchanged for
+  // orchestration codegen.
+  // ────────────────────────────────────────────────────────────────────────
+
+  RegisterCustom(
+      "tensor.scatter_",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "tensor.scatter_ conversion expects 3 args (input, index, src)";
+        auto& op_reg = OpRegistry::GetInstance();
+
+        const auto& input = args[0];
+        const auto& index = args[1];
+        const auto& src = args[2];
+
+        // Global tensor input → keep as tensor.scatter_ (orchestration codegen handles it)
+        if (As<TensorType>(input->GetType())) {
+          return ConversionResult{op_reg.Create("tensor.scatter_", args, kwargs, span)};
+        }
+
+        auto input_tile_type = As<TileType>(input->GetType());
+        CHECK(input_tile_type) << "tensor.scatter_: unexpected input type: " << input->GetType()->TypeName();
+
+        const size_t rank = input_tile_type->shape_.size();
+
+        // Extract kwargs
+        int dim = GetKwargOr<int>(kwargs, "dim", 0);
+        std::string reduce = GetKwargOr<std::string>(kwargs, "reduce", std::string("none"));
+        // Normalize negative dim
+        if (dim < 0) dim += static_cast<int>(rank);
+        CHECK(dim >= 0 && dim < static_cast<int>(rank))
+            << "tensor.scatter_: dim " << dim << " is out of range for rank " << rank;
+        CHECK(reduce == "none" || reduce == "add" || reduce == "multiply")
+            << "tensor.scatter_: unsupported reduce mode '" << reduce << "'";
+
+        std::vector<StmtPtr> prologue;
+
+        // Load index to Vec tile if it is still a global tensor
+        ExprPtr index_tile = index;
+        auto index_tile_type = As<TileType>(index->GetType());
+        if (auto index_tensor_type = As<TensorType>(index->GetType())) {
+          auto offsets = MakeZeroOffsetsTuple(index_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapesTuple(index_tensor_type->shape_, span);
+          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
+                                                                   {"transpose", false}};
+          auto load = op_reg.Create("tile.load", {index, offsets, shapes, shapes}, load_kw, span);
+          auto idx_var = std::make_shared<Var>("scatter_idx", load->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(idx_var, load, span));
+          index_tile = idx_var;
+          index_tile_type = As<TileType>(load->GetType());
+        }
+
+        // Determine whether src is scalar
+        bool src_is_scalar = static_cast<bool>(As<ScalarType>(src->GetType()));
+
+        // Load src to Vec tile if it is a global tensor
+        ExprPtr src_tile = src;
+        if (!src_is_scalar) {
+          if (auto src_tensor_type = As<TensorType>(src->GetType())) {
+            auto offsets = MakeZeroOffsetsTuple(src_tensor_type->shape_.size(), span);
+            auto shapes = MakeShapesTuple(src_tensor_type->shape_, span);
+            std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+            auto load = op_reg.Create("tile.load", {src, offsets, shapes, shapes}, load_kw, span);
+            auto src_var = std::make_shared<Var>("scatter_src", load->GetType(), span);
+            prologue.push_back(std::make_shared<AssignStmt>(src_var, load, span));
+            src_tile = src_var;
+          }
+        }
+
+        CHECK(index_tile_type) << "tensor.scatter_: index must be a tile at this point";
+        const DataType value_dtype = input_tile_type->dtype_;
+
+        // Build nested ForStmt loops over each dimension of the index tile.
+        // Recursion: build_loop(d, loop_vars) creates ForStmt for dimension d,
+        // passing accumulated loop variables down to the body.
+        std::function<StmtPtr(size_t, std::vector<VarPtr>&)> build_loop;
+        build_loop = [&](size_t d, std::vector<VarPtr>& loop_vars) -> StmtPtr {
+          if (d == rank) {
+            // Innermost body: generate tile.read + tile.write statements
+            std::vector<StmtPtr> body_stmts;
+
+            auto bind = [&](const std::string& name, const ExprPtr& expr) -> ExprPtr {
+              auto var = std::make_shared<Var>(name, expr->GetType(), span);
+              body_stmts.push_back(std::make_shared<AssignStmt>(var, expr, span));
+              return var;
+            };
+
+            // 1. Read index value: idx_val = tile.read(index, [loop_vars...])
+            std::vector<ExprPtr> idx_elems;
+            idx_elems.reserve(rank);
+            for (size_t k = 0; k < rank; ++k) {
+              idx_elems.push_back(loop_vars[k]);
+            }
+            auto read_indices = std::make_shared<MakeTuple>(idx_elems, span);
+            auto idx_val =
+                bind("scatter_idx_val", op_reg.Create("tile.read", {index_tile, read_indices}, {}, span));
+
+            // 2. Read or get src value
+            ExprPtr src_val;
+            if (src_is_scalar) {
+              src_val = src;
+            } else {
+              auto src_indices = std::make_shared<MakeTuple>(idx_elems, span);
+              src_val =
+                  bind("scatter_src_val", op_reg.Create("tile.read", {src_tile, src_indices}, {}, span));
+            }
+
+            // Cast src_val to input dtype if needed
+            if (As<ScalarType>(src_val->GetType())) {
+              DataType src_dtype = GetScalarDtype(src_val);
+              if (src_dtype != value_dtype) {
+                src_val = bind("scatter_src_cast", MakeCast(src_val, value_dtype, span));
+              }
+            }
+
+            // 3. Build write indices: same as loop_vars but dim-th replaced with idx_val
+            std::vector<ExprPtr> write_idx_elems;
+            write_idx_elems.reserve(rank);
+            for (size_t k = 0; k < rank; ++k) {
+              if (static_cast<int>(k) == dim) {
+                write_idx_elems.push_back(idx_val);
+              } else {
+                write_idx_elems.push_back(loop_vars[k]);
+              }
+            }
+            auto write_indices = std::make_shared<MakeTuple>(write_idx_elems, span);
+
+            // 4. Write (with optional reduce)
+            if (reduce == "none") {
+              body_stmts.push_back(std::make_shared<EvalStmt>(
+                  op_reg.Create("tile.write", {input, write_indices, src_val}, {}, span), span));
+            } else {
+              auto old_val =
+                  bind("scatter_old_val", op_reg.Create("tile.read", {input, write_indices}, {}, span));
+              ExprPtr new_val;
+              if (reduce == "add") {
+                new_val = bind("scatter_new_val", MakeAdd(old_val, src_val, span));
+              } else {
+                new_val = bind("scatter_new_val", MakeMul(old_val, src_val, span));
+              }
+              body_stmts.push_back(std::make_shared<EvalStmt>(
+                  op_reg.Create("tile.write", {input, write_indices, new_val}, {}, span), span));
+            }
+
+            // 5. Vector barrier after tile.write (required for tsetval hardware sync)
+            body_stmts.push_back(
+                std::make_shared<EvalStmt>(op_reg.Create("system.bar_v", {}, {}, span), span));
+
+            return SeqStmts::Flatten(std::move(body_stmts), span);
+          }
+
+          // Create ForStmt for dimension d
+          auto loop_var = std::make_shared<Var>("scatter_d" + std::to_string(d),
+                                                std::make_shared<ScalarType>(DataType::INDEX), span);
+          loop_vars.push_back(loop_var);
+          auto body = build_loop(d + 1, loop_vars);
+          loop_vars.pop_back();
+
+          auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+          auto step = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+          auto extent = index_tile_type->shape_[d];
+
+          return std::make_shared<ForStmt>(loop_var, zero, extent, step,
+                                           /*iter_args=*/std::vector<IterArgPtr>{}, body,
+                                           /*return_vars=*/std::vector<VarPtr>{}, span, ForKind::Sequential);
+        };
+
+        std::vector<VarPtr> loop_vars;
+        loop_vars.reserve(rank);
+        auto nested_for = build_loop(0, loop_vars);
+
+        // Emit bar_all before and after the scatter loops to ensure:
+        // - Pre-loop: TLOAD (index) and TEXPANDS (input fill) have completed
+        // - Post-loop: All tsetval writes are committed before tstore
+        prologue.push_back(std::make_shared<EvalStmt>(op_reg.Create("system.bar_all", {}, {}, span), span));
+        prologue.push_back(nested_for);
+        prologue.push_back(std::make_shared<EvalStmt>(op_reg.Create("system.bar_all", {}, {}, span), span));
+
+        // The input tile is modified in-place via tile.write; return it as the result.
+        return ConversionResult{std::move(prologue), input};
       });
 
   // ────────────────────────────────────────────────────────────────────────

@@ -1655,5 +1655,147 @@ class TestTensorFormatShapeError:
             ir.op.tensor.add(tensor_a, tensor_b)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# tensor.scatter_ tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_tensor_scatter_2d_dim1():
+    """Test tensor.scatter_ with 2D input, dim=1, tensor src."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([3, 4], DataType.FP32)
+    index_type = ir.TensorType([3, 2], DataType.INT32)
+    src_type = ir.TensorType([3, 2], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    call = ir.op.tensor.scatter_(input_var, 1, index_var, src_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter_"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_scatter_2d_dim0():
+    """Test tensor.scatter_ with 2D input, dim=0, tensor src."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([4, 3], DataType.FP32)
+    index_type = ir.TensorType([2, 3], DataType.INT32)
+    src_type = ir.TensorType([2, 3], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    call = ir.op.tensor.scatter_(input_var, 0, index_var, src_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter_"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_scatter_scalar_src():
+    """Test tensor.scatter_ with scalar src."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([3, 4], DataType.FP32)
+    index_type = ir.TensorType([3, 2], DataType.INT32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+
+    call = ir.op.tensor.scatter_(input_var, 1, index_var, 1.0)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter_"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_scatter_negative_dim():
+    """Test tensor.scatter_ with negative dim."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([3, 4], DataType.FP32)
+    index_type = ir.TensorType([3, 2], DataType.INT32)
+    src_type = ir.TensorType([3, 2], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    # dim=-1 should be valid (equivalent to dim=1 for 2D)
+    call = ir.op.tensor.scatter_(input_var, -1, index_var, src_var)
+    assert call.op.name == "tensor.scatter_"
+
+    # dim=-2 should also be valid (equivalent to dim=0 for 2D)
+    call2 = ir.op.tensor.scatter_(input_var, -2, index_var, src_var)
+    assert call2.op.name == "tensor.scatter_"
+
+
+def test_tensor_scatter_3d():
+    """Test tensor.scatter_ with 3D input."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([2, 3, 4], DataType.FP32)
+    index_type = ir.TensorType([2, 3, 2], DataType.INT32)
+    src_type = ir.TensorType([2, 3, 2], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    call = ir.op.tensor.scatter_(input_var, 2, index_var, src_var)
+    assert call.op.name == "tensor.scatter_"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 3
+
+
+def test_tensor_scatter_invalid_dim():
+    """Test tensor.scatter_ rejects out-of-range dim."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([3, 4], DataType.FP32)
+    index_type = ir.TensorType([3, 2], DataType.INT32)
+    src_type = ir.TensorType([3, 2], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    with pytest.raises(ValueError, match="dim must be in"):
+        ir.op.tensor.scatter_(input_var, 2, index_var, src_var)
+
+    with pytest.raises(ValueError, match="dim must be in"):
+        ir.op.tensor.scatter_(input_var, -3, index_var, src_var)
+
+
+def test_tensor_scatter_index_rank_mismatch():
+    """Test tensor.scatter_ rejects index with different rank than input."""
+    span = ir.Span.unknown()
+
+    input_type = ir.TensorType([3, 4], DataType.FP32)
+    index_type = ir.TensorType([3, 2, 1], DataType.INT32)  # 3D vs 2D input
+    src_type = ir.TensorType([3, 2, 1], DataType.FP32)
+
+    input_var = ir.Var("input", input_type, span)
+    index_var = ir.Var("index", index_type, span)
+    src_var = ir.Var("src", src_type, span)
+
+    with pytest.raises(ValueError, match="index rank"):
+        ir.op.tensor.scatter_(input_var, 0, index_var, src_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
