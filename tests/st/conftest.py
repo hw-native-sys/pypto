@@ -177,7 +177,7 @@ def pytest_addoption(parser):
         help="Pin the pto-isa clone to a specific git commit (hash or tag). Default: use latest remote HEAD.",
     )
     parser.addoption(
-        "--on-device-profiling",
+        "--runtime-profiling",
         action="store_true",
         default=False,
         help="Enable on-device runtime profiling and generate swimlane.json after execution.",
@@ -206,7 +206,7 @@ def test_config(request) -> RunConfig:
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
         pto_isa_commit=request.config.getoption("--pto-isa-commit"),
-        on_device_profiling=request.config.getoption("--on-device-profiling"),
+        runtime_profiling=request.config.getoption("--runtime-profiling"),
     )
 
 

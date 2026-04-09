@@ -18,7 +18,7 @@ import textwrap
 from collections.abc import Callable
 from typing import Any, TypeAlias, TypeVar, cast, overload
 
-from pypto.pipeline_profiling import PipelineProfiler
+from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
@@ -803,14 +803,14 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
     closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
 
     def _decorator(c: type) -> ir.Program:
-        prof = PipelineProfiler.current()
+        prof = get_active_profiler()
         if prof is not None:
             return _parse_program_with_profiling(c, prof, strict_ssa, closure_vars)
         return _parse_program_body(c, strict_ssa, closure_vars)
 
     def _parse_program_with_profiling(
         c: type,
-        prof: PipelineProfiler,
+        prof: CompileProfiler,
         strict_ssa: bool,
         closure_vars: dict[str, Any],
     ) -> ir.Program:

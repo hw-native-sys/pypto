@@ -28,7 +28,7 @@ from collections import OrderedDict
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
-from pypto.pipeline_profiling import PipelineProfiler
+from pypto.compile_profiling import CompileProfiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -605,7 +605,7 @@ def _emit_group_output(
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(func, ptoas_cpp)
 
 
-def _profiling_stage(prof: PipelineProfiler | None, name: str) -> AbstractContextManager[Any]:
+def _profiling_stage(prof: CompileProfiler | None, name: str) -> AbstractContextManager[Any]:
     """Return a profiling stage context if a profiler is active, else a no-op context."""
     if prof is not None:
         return prof.stage(name)
@@ -635,7 +635,7 @@ def generate(
     """
     result_files: dict[str, str] = {}
     errors: list[tuple[str, Exception]] = []
-    prof = PipelineProfiler.current()
+    prof = CompileProfiler.current()
 
     orch_func = next(
         (

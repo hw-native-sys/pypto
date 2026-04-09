@@ -138,7 +138,7 @@ jobs:
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device=$DEVICE_ID --platform=a2a3 --on-device-profiling --forked --pto-isa-commit=38fcfb17
+            -v --device=$DEVICE_ID --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=38fcfb17
 
   system-tests-a5sim:
     runs-on: ubuntu-latest

@@ -1,6 +1,6 @@
-# Pipeline Profiling
+# Compile Profiling
 
-PyPTO includes built-in pipeline profiling that records wall-clock timings at
+PyPTO includes built-in compile profiling that records wall-clock timings at
 each stage of the compilation pipeline — from frontend parsing through compiler
 passes and code generation to on-device execution.
 
@@ -9,7 +9,7 @@ passes and code generation to on-device execution.
 ### Option 1: Environment Variable
 
 ```bash
-PYPTO_PIPELINE_PROFILING=1 python3 my_program.py
+PYPTO_COMPILE_PROFILING=1 python3 my_program.py
 ```
 
 ### Option 2: `ir.compile()` Parameter
@@ -22,9 +22,9 @@ output_dir = ir.compile(program, profiling=True)
 ### Option 3: Context Manager
 
 ```python
-from pypto.pipeline_profiling import PipelineProfiler
+from pypto.compile_profiling import CompileProfiler
 
-with PipelineProfiler() as prof:
+with CompileProfiler() as prof:
     @pl.program
     class MyProgram:
         ...
@@ -43,7 +43,7 @@ result = run(
     program=MyProgram,
     tensor_specs=specs,
     golden=golden_fn,
-    config=RunConfig(pipeline_profiling=True),
+    config=RunConfig(compile_profiling=True),
 )
 # result.profile contains the profiling data as a dict
 ```
@@ -53,7 +53,7 @@ result = run(
 ### Human-Readable Summary (`pipeline_profile.txt`)
 
 ```text
-PyPTO Pipeline Profile
+PyPTO Compile Profile
 ======================
 Total: 2.847s
 
@@ -110,13 +110,13 @@ sub-stages) are recorded.
 ## Programmatic API
 
 ```python
-from pypto.pipeline_profiling import PipelineProfiler, get_active_profiler
+from pypto.compile_profiling import CompileProfiler, get_active_profiler
 
 # Check if profiling is active (explicit or via env var)
 prof = get_active_profiler()
 
 # Use as context manager
-with PipelineProfiler() as prof:
+with CompileProfiler() as prof:
     # Record custom stages
     with prof.stage("my_custom_stage"):
         do_something()
@@ -132,13 +132,13 @@ with PipelineProfiler() as prof:
 ## Overhead
 
 When profiling is **not** enabled (the default), the overhead is a single
-`PipelineProfiler.current()` null-check per stage boundary — effectively zero.
+`CompileProfiler.current()` null-check per stage boundary — effectively zero.
 
 When profiling **is** enabled, each stage records two `time.perf_counter()`
 calls (sub-microsecond on modern hardware).
 
 ## Related
 
-- **On-device profiling** (`RunConfig(on_device_profiling=True)`) generates
+- **Runtime profiling** (`RunConfig(runtime_profiling=True)`) generates
   hardware-level swimlane traces via Simpler's CodeRunner. This is orthogonal
-  to pipeline profiling and the two can be enabled independently.
+  to compile profiling and the two can be enabled independently.

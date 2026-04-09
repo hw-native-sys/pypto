@@ -7,15 +7,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the PipelineProfiler."""
+"""Unit tests for the CompileProfiler."""
 
 import json
 import os
 import time
 
-import pypto.pipeline_profiling as _pipeline_profiling_mod
+import pypto.compile_profiling as _compile_profiling_mod
 import pytest
-from pypto.pipeline_profiling import PipelineProfiler, StageRecord, get_active_profiler
+from pypto.compile_profiling import CompileProfiler, StageRecord, get_active_profiler
 
 
 class TestStageRecord:
@@ -35,25 +35,37 @@ class TestStageRecord:
         assert d["children"][0]["name"] == "child"
 
 
-class TestPipelineProfiler:
-    """PipelineProfiler core functionality."""
+class TestStageRecordOpenDuration:
+    """Verify open (unclosed) stages report non-negative duration."""
+
+    def test_open_stage_has_positive_duration(self):
+        record = StageRecord(name="open", start=time.perf_counter())
+        assert record.duration >= 0
+
+    def test_open_stage_end_zero_uses_current_time(self):
+        record = StageRecord(name="open", start=time.perf_counter(), end=0.0)
+        assert record.duration >= 0
+
+
+class TestCompileProfiler:
+    """CompileProfiler core functionality."""
 
     def test_context_manager_sets_current(self):
-        assert PipelineProfiler.current() is None
-        with PipelineProfiler() as prof:
-            assert PipelineProfiler.current() is prof
-        assert PipelineProfiler.current() is None
+        assert CompileProfiler.current() is None
+        with CompileProfiler() as prof:
+            assert CompileProfiler.current() is prof
+        assert CompileProfiler.current() is None
 
     def test_nested_context(self):
-        with PipelineProfiler() as outer:
-            assert PipelineProfiler.current() is outer
-            with PipelineProfiler() as inner:
-                assert PipelineProfiler.current() is inner
-            assert PipelineProfiler.current() is outer
-        assert PipelineProfiler.current() is None
+        with CompileProfiler() as outer:
+            assert CompileProfiler.current() is outer
+            with CompileProfiler() as inner:
+                assert CompileProfiler.current() is inner
+            assert CompileProfiler.current() is outer
+        assert CompileProfiler.current() is None
 
     def test_single_stage(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("compile"):
                 time.sleep(0.01)
         stages = prof.to_dict()["stages"]
@@ -62,7 +74,7 @@ class TestPipelineProfiler:
         assert stages[0]["seconds"] > 0
 
     def test_nested_stages(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("compile"):
                 with prof.stage("passes"):
                     time.sleep(0.005)
@@ -78,7 +90,7 @@ class TestPipelineProfiler:
         assert compile_stage["children"][1]["name"] == "codegen"
 
     def test_multiple_root_stages(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("parse"):
                 pass
             with prof.stage("passes"):
@@ -91,12 +103,12 @@ class TestPipelineProfiler:
         assert [s["name"] for s in stages] == ["parse", "passes", "codegen"]
 
     def test_total_seconds(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             time.sleep(0.01)
         assert prof.total_seconds > 0
 
     def test_begin_end_stage(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             prof._begin_stage("pass_1")
             time.sleep(0.005)
             prof._end_stage()
@@ -116,16 +128,16 @@ class TestSummary:
     """Human-readable summary output."""
 
     def test_summary_contains_header(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("passes"):
                 pass
         text = prof.summary()
-        assert "PyPTO Pipeline Profile" in text
+        assert "PyPTO Compile Profile" in text
         assert "Total:" in text
         assert "passes" in text
 
     def test_summary_shows_percentage(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("passes"):
                 time.sleep(0.01)
         text = prof.summary()
@@ -136,7 +148,7 @@ class TestJsonOutput:
     """JSON serialisation."""
 
     def test_to_json_string(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("test"):
                 pass
         text = prof.to_json()
@@ -146,7 +158,7 @@ class TestJsonOutput:
 
     def test_to_json_file(self, tmp_path):
         path = str(tmp_path / "profile.json")
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("test"):
                 pass
         prof.to_json(path)
@@ -161,7 +173,7 @@ class TestWriteReport:
 
     def test_write_report_creates_files(self, tmp_path):
         report_dir = str(tmp_path / "report")
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             with prof.stage("passes"):
                 pass
             with prof.stage("codegen"):
@@ -187,16 +199,34 @@ class TestGetActiveProfiler:
         assert get_active_profiler() is None
 
     def test_returns_current_profiler(self):
-        with PipelineProfiler() as prof:
+        with CompileProfiler() as prof:
             assert get_active_profiler() is prof
 
     def test_env_var_creates_profiler(self, monkeypatch):
-        monkeypatch.setenv("PYPTO_PIPELINE_PROFILING", "1")
-        _pipeline_profiling_mod._env_profiler = None
+        monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+        _compile_profiling_mod._env_profiler = None
         try:
             result = get_active_profiler()
             assert result is not None
-            assert isinstance(result, PipelineProfiler)
+            assert isinstance(result, CompileProfiler)
         finally:
-            PipelineProfiler._local.current = None
-            _pipeline_profiling_mod._env_profiler = None
+            CompileProfiler._local.current = None
+            _compile_profiling_mod._env_profiler = None
+
+    def test_env_var_binds_to_thread_local_every_call(self, monkeypatch):
+        """get_active_profiler() should always bind the env profiler to thread-local."""
+        monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
+        _compile_profiling_mod._env_profiler = None
+        try:
+            prof = get_active_profiler()
+            assert CompileProfiler.current() is prof
+            # Simulate thread-local being cleared
+            CompileProfiler._local.current = None
+            assert CompileProfiler.current() is None
+            # Should re-bind on next call
+            prof2 = get_active_profiler()
+            assert CompileProfiler.current() is prof2
+            assert prof is prof2
+        finally:
+            CompileProfiler._local.current = None
+            _compile_profiling_mod._env_profiler = None

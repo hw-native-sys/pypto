@@ -1,4 +1,4 @@
-# 编译管线 Profiling（Pipeline Profiling）
+# 编译 Profiling（Compile Profiling）
 
 PyPTO 内置编译管线 profiling，可记录编译管线各阶段的墙钟耗时——从前端解析、编译
 Pass、代码生成到上板执行。
@@ -8,7 +8,7 @@ Pass、代码生成到上板执行。
 ### 方式 1：环境变量
 
 ```bash
-PYPTO_PIPELINE_PROFILING=1 python3 my_program.py
+PYPTO_COMPILE_PROFILING=1 python3 my_program.py
 ```
 
 ### 方式 2：`ir.compile()` 参数
@@ -21,9 +21,9 @@ output_dir = ir.compile(program, profiling=True)
 ### 方式 3：Context Manager
 
 ```python
-from pypto.pipeline_profiling import PipelineProfiler
+from pypto.compile_profiling import CompileProfiler
 
-with PipelineProfiler() as prof:
+with CompileProfiler() as prof:
     @pl.program
     class MyProgram:
         ...
@@ -42,7 +42,7 @@ result = run(
     program=MyProgram,
     tensor_specs=specs,
     golden=golden_fn,
-    config=RunConfig(pipeline_profiling=True),
+    config=RunConfig(compile_profiling=True),
 )
 # result.profile 包含 profiling 数据（dict 格式）
 ```
@@ -52,7 +52,7 @@ result = run(
 ### 人类可读摘要（`pipeline_profile.txt`）
 
 ```text
-PyPTO Pipeline Profile
+PyPTO Compile Profile
 ======================
 Total: 2.847s
 
@@ -108,13 +108,13 @@ Total: 2.847s
 ## 编程接口
 
 ```python
-from pypto.pipeline_profiling import PipelineProfiler, get_active_profiler
+from pypto.compile_profiling import CompileProfiler, get_active_profiler
 
 # 检查 profiling 是否激活（显式或通过环境变量）
 prof = get_active_profiler()
 
 # 作为 context manager 使用
-with PipelineProfiler() as prof:
+with CompileProfiler() as prof:
     # 记录自定义阶段
     with prof.stage("my_custom_stage"):
         do_something()
@@ -130,13 +130,13 @@ with PipelineProfiler() as prof:
 ## 开销
 
 当 profiling **未启用**（默认），每个阶段边界仅执行一次
-`PipelineProfiler.current()` 空值检查，开销可忽略不计。
+`CompileProfiler.current()` 空值检查，开销可忽略不计。
 
 当 profiling **已启用**时，每个阶段记录两次 `time.perf_counter()`
 调用（现代硬件上为亚微秒级）。
 
 ## 相关功能
 
-- **设备侧 profiling**（`RunConfig(on_device_profiling=True)`）通过 Simpler 的
-  CodeRunner 生成硬件级 swimlane 跟踪。与编译管线 profiling 是正交功能，两者可独
-  立启用。
+- **运行时 profiling**（`RunConfig(runtime_profiling=True)`）通过 Simpler 的
+  CodeRunner 生成硬件级 swimlane 跟踪。与编译 profiling 是正交功能，两者可独立启
+  用。

@@ -12,8 +12,8 @@
 Runs matmul 64x64x64 (PTO backend) with profiling and validates the
 generated perf_swimlane_*.json in build_output/<run_dir>/swimlane_data/.
 
-Requires --on-device-profiling and real hardware (--platform=a2a3).
-All tests in this file are skipped automatically when --on-device-profiling
+Requires --runtime-profiling and real hardware (--platform=a2a3).
+All tests in this file are skipped automatically when --runtime-profiling
 is not passed.
 """
 
@@ -93,10 +93,10 @@ def swimlane_file(test_runner) -> Path:
     """Run matmul once with profiling and return the generated swimlane file.
 
     Skips the entire test session (all dependent tests) when
-    --on-device-profiling is not passed.
+    --runtime-profiling is not passed.
     """
-    if not test_runner.config.on_device_profiling:
-        pytest.skip("pass --on-device-profiling to run swimlane tests")
+    if not test_runner.config.runtime_profiling:
+        pytest.skip("pass --runtime-profiling to run swimlane tests")
 
     before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/perf_swimlane_*.json"))
 

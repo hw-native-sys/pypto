@@ -10,11 +10,13 @@
 """High-level API functions for PyPTO IR compilation."""
 
 import os
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
+from typing import Any
 
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate
-from pypto.pipeline_profiling import PipelineProfiler, get_active_profiler
+from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
@@ -67,7 +69,7 @@ def compile(
             None uses the default (PrePipeline, or PYPTO_WARNING_LEVEL env var).
         disabled_warnings: Set of warning checks to disable. None uses the default
             (UnusedControlFlowResult disabled).
-        profiling: If True, enable pipeline profiling that records per-stage
+        profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
 
     Returns:
@@ -93,14 +95,6 @@ def compile(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- Pipeline profiling --------------------------------------------------
-    prof = get_active_profiler()
-    owns_profiler = False
-    if prof is None and profiling:
-        prof = PipelineProfiler()
-        prof.__enter__()
-        owns_profiler = True
-
     outer = _passes.PassContext.current()
     if verification_level is not None and outer is not None:
         raise RuntimeError(
@@ -112,6 +106,14 @@ def compile(
             "compile() was called with warning_level while a PassContext is already active. "
             "Set the warning level on the existing PassContext instead."
         )
+
+    # --- Compile profiling ---------------------------------------------------
+    prof = get_active_profiler()
+    owns_profiler = False
+    if prof is None and profiling:
+        prof = CompileProfiler()
+        prof.__enter__()
+        owns_profiler = True
 
     report_dir = os.path.join(output_dir, "report")
     os.makedirs(report_dir, exist_ok=True)
@@ -135,24 +137,21 @@ def compile(
         disabled = disabled_warnings if disabled_warnings is not None else default_disabled
     ctx = _passes.PassContext(instruments, vlevel, wlevel, disabled)
 
+    def _stage(name: str) -> AbstractContextManager[Any]:
+        if prof is not None:
+            return prof.stage(name)
+        return nullcontext()
+
     try:
         with ctx:
             pm = PassManager.get_strategy(strategy)
             passes_dump_dir = os.path.join(output_dir, "passes_dump")
-            if prof is not None:
-                with prof.stage("passes"):
-                    transformed_program = pm.run_passes(
-                        program, dump_ir=dump_passes, output_dir=passes_dump_dir
-                    )
-            else:
+            with _stage("passes"):
                 transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
         if backend_type in (BackendType.Ascend910B, BackendType.Ascend950):
             try:
-                if prof is not None:
-                    with prof.stage("codegen"):
-                        files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
-                else:
+                with _stage("codegen"):
                     files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
             except PartialCodegenError as exc:
                 _write_files(exc.files, output_dir)

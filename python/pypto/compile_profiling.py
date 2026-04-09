@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end pipeline profiling for PyPTO compilation stages.
+"""End-to-end compile profiling for PyPTO compilation stages.
 
 Records wall-clock timing at stable stage boundaries (parse, passes, codegen,
 device execution) and outputs structured JSON or a human-readable hierarchical
@@ -15,13 +15,13 @@ summary suitable for CI logs and local debugging.
 
 Three opt-in mechanisms are supported:
 
-1. **Environment variable**: ``PYPTO_PIPELINE_PROFILING=1``
+1. **Environment variable**: ``PYPTO_COMPILE_PROFILING=1``
 2. **Function parameter**: ``ir.compile(..., profiling=True)``
 3. **Context manager**::
 
-       from pypto.pipeline_profiling import PipelineProfiler
+       from pypto.compile_profiling import CompileProfiler
 
-       with PipelineProfiler() as prof:
+       with CompileProfiler() as prof:
            prog = MyProgram          # @pl.program parse is timed
            ir.compile(prog, ...)     # passes + codegen are timed
        print(prof.summary())
@@ -48,7 +48,8 @@ class StageRecord:
 
     @property
     def duration(self) -> float:
-        return self.end - self.start
+        end = self.end if self.end > 0 else time.perf_counter()
+        return max(0.0, end - self.start)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,10 +59,10 @@ class StageRecord:
         }
 
 
-class PipelineProfiler:
+class CompileProfiler:
     """Hierarchical wall-clock profiler for the PyPTO compilation pipeline.
 
-    Implements a thread-local stack so that ``PipelineProfiler.current()``
+    Implements a thread-local stack so that ``CompileProfiler.current()``
     returns the innermost active profiler (similar to ``PassContext``).
     """
 
@@ -70,7 +71,7 @@ class PipelineProfiler:
     def __init__(self) -> None:
         self._root_stages: list[StageRecord] = []
         self._stack: list[StageRecord] = []
-        self._previous: PipelineProfiler | None = None
+        self._previous: CompileProfiler | None = None
         self._total_start: float = 0.0
         self._total_end: float = 0.0
 
@@ -78,21 +79,21 @@ class PipelineProfiler:
     # Context manager (thread-local stack)
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "PipelineProfiler":
-        self._previous = getattr(PipelineProfiler._local, "current", None)
-        PipelineProfiler._local.current = self
+    def __enter__(self) -> "CompileProfiler":
+        self._previous = getattr(CompileProfiler._local, "current", None)
+        CompileProfiler._local.current = self
         self._total_start = time.perf_counter()
         return self
 
     def __exit__(self, *exc: object) -> None:
         self._total_end = time.perf_counter()
-        PipelineProfiler._local.current = self._previous
+        CompileProfiler._local.current = self._previous
         self._previous = None
 
     @staticmethod
-    def current() -> "PipelineProfiler | None":
+    def current() -> "CompileProfiler | None":
         """Return the innermost active profiler, or ``None``."""
-        return getattr(PipelineProfiler._local, "current", None)
+        return getattr(CompileProfiler._local, "current", None)
 
     # ------------------------------------------------------------------
     # Recording API
@@ -161,7 +162,7 @@ class PipelineProfiler:
         """Return a human-readable hierarchical summary."""
         total = self.total_seconds
         lines: list[str] = [
-            "PyPTO Pipeline Profile",
+            "PyPTO Compile Profile",
             "=" * 22,
             f"Total: {_fmt_time(total)}",
             "",
@@ -184,23 +185,23 @@ class PipelineProfiler:
 # Module-level helpers
 # ------------------------------------------------------------------
 
-_ENV_VAR = "PYPTO_PIPELINE_PROFILING"
+_ENV_VAR = "PYPTO_COMPILE_PROFILING"
 
 # Lazily-created profiler driven by the environment variable.
 _env_profiler_lock = threading.Lock()
-_env_profiler: PipelineProfiler | None = None
+_env_profiler: CompileProfiler | None = None
 
 
-def get_active_profiler() -> PipelineProfiler | None:
+def get_active_profiler() -> CompileProfiler | None:
     """Return the active profiler if one exists.
 
     Checks (in order):
-    1. An explicit ``PipelineProfiler`` on the thread-local stack.
-    2. The ``PYPTO_PIPELINE_PROFILING`` environment variable.
+    1. An explicit ``CompileProfiler`` on the thread-local stack.
+    2. The ``PYPTO_COMPILE_PROFILING`` environment variable.
 
     Returns ``None`` when profiling is not enabled.
     """
-    prof = PipelineProfiler.current()
+    prof = CompileProfiler.current()
     if prof is not None:
         return prof
 
@@ -209,9 +210,9 @@ def get_active_profiler() -> PipelineProfiler | None:
         if _env_profiler is None:
             with _env_profiler_lock:
                 if _env_profiler is None:
-                    _env_profiler = PipelineProfiler()
+                    _env_profiler = CompileProfiler()
                     _env_profiler._total_start = time.perf_counter()
-                    PipelineProfiler._local.current = _env_profiler
+        CompileProfiler._local.current = _env_profiler
         return _env_profiler
 
     return None

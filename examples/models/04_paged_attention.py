@@ -594,7 +594,7 @@ def build_tensor_specs(
 def main():
     parser = argparse.ArgumentParser(description="Paged attention example")
     parser.add_argument(
-        "--on-device-profiling",
+        "--runtime-profiling",
         action="store_true",
         default=False,
         help="Enable on-device runtime profiling and generate swimlane JSON",
@@ -640,7 +640,7 @@ def main():
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
-            on_device_profiling=args.on_device_profiling,
+            runtime_profiling=args.runtime_profiling,
         ),
     )
     print(f"Result: {result}")
