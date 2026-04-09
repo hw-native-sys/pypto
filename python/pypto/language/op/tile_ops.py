@@ -53,6 +53,7 @@ __all__ = [
     "relu",
     "cast",
     "matmul",
+    "batch_matmul",
     "matmul_acc",
     "matmul_bias",
     "gemv",
@@ -698,6 +699,20 @@ def matmul(lhs: Tile, rhs: Tile) -> Tile:
         Tile wrapping the matmul operation
     """
     call_expr = _ir_ops.matmul(lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
+def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
+    """Batch matrix multiplication of two tiles.
+
+    Args:
+        lhs: Left-hand side tile
+        rhs: Right-hand side tile
+
+    Returns:
+        Tile wrapping the batch_matmul operation
+    """
+    call_expr = _ir_ops.batch_matmul(lhs.unwrap(), rhs.unwrap())
     return Tile(expr=call_expr)
 
 

@@ -52,6 +52,7 @@ namespace ir {
 TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const std::string& op_name) {
+  (void)kwargs;
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
@@ -79,7 +80,7 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
   size_t lhs_ndim = lhs_shape.size();
   size_t rhs_ndim = rhs_shape.size();
 
-  // Extract matrix dimensions (last 2 dimensions)
+  // Extract matrix dimensions from the trailing matrix axes.
   ExprPtr m_dim = lhs_shape[lhs_ndim - 2];
   ExprPtr k_dim_lhs = lhs_shape[lhs_ndim - 1];
   ExprPtr k_dim_rhs = rhs_shape[rhs_ndim - 2];
@@ -119,14 +120,22 @@ TypePtr DeduceTileBatchMatMulType(const std::vector<ExprPtr>& args,
     output_shape.push_back(n_dim);
   }
 
-  // Promote data types
-  auto result_dtype = PromoteDataTypes(lhs_type->dtype_, rhs_type->dtype_);
-  CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  CHECK(lhs_type->dtype_ == rhs_type->dtype_)
+      << "The operator " << op_name << " requires identical lhs and rhs data types, but got "
+      << lhs_type->dtype_.ToString() << " and " << rhs_type->dtype_.ToString();
+  // Hardware matmul accumulates to FP32 for float inputs, INT32 for integer inputs.
+  auto result_dtype =
+      (lhs_type->dtype_.IsFloat() && rhs_type->dtype_.IsFloat()) ? DataType::FP32 : DataType::INT32;
 
+  // The matmul output tile uses the hardware's native accumulator layout:
+  // - blayout=col_major, slayout=row_major: hardware's column-major block / row-major sub-block
+  // - fractal=1024: 32x32 sub-tile fractal size (standard for this hardware's matrix unit)
   TileView tile_view;
+  tile_view.blayout = TileLayout::col_major;
+  tile_view.slayout = TileLayout::row_major;
+  tile_view.fractal = 1024;
   tile_view.valid_shape = output_shape;
-  return std::make_shared<TileType>(output_shape, *result_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(output_shape, result_dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================
