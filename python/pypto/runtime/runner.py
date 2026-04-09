@@ -582,7 +582,9 @@ def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
             resolver = getattr(self, "_resolve_sim_context_path", None)
             sim_context_path = resolver() if resolver is not None else None
             return RuntimeBinaries(
-                host_path=host_file, aicpu_path=aicpu_file, aicore_path=aicore_file,
+                host_path=host_file,
+                aicpu_path=aicpu_file,
+                aicore_path=aicore_file,
                 sim_context_path=sim_context_path,
             )
         result = orig_get_binaries(self, name, build=build)
