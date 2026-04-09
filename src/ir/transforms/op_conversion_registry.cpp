@@ -31,6 +31,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -616,6 +617,207 @@ OpConversionRegistry::OpConversionRegistry() {
 
         CHECK(false) << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
+      });
+
+  RegisterCustom(
+      "tensor.expand_clone",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.expand_clone conversion expects 2 args (input, target)";
+        // # no broadcast
+        // # [m, k, n] -> [m, k, n]
+        // def expand_clone(src: [m, k, n], dst: [m, k, n]):
+        //   tmp_tile_0: [m, k, n] = tile.load(src, [0, 0, 0], [m, k, n])
+        //   dst = tile.store(tmp_tile_0, [0, 0, 0], dst)
+
+        // # dim = 0
+        // # [1, k, n] -> [m, k, n]
+        // def expand_clone(src: [1, k, n], dst: [m, k, n]):
+        //   tmp_tile_0: [1, k, n] = tile.load(src, [0, 0, 0], [1, k, n])
+        //   for i in dst.size(0):
+        //     dst = tile.store(tmp_tile_0, [i, 0, 0], dst)
+
+        // # dim = 1
+        // # [m, 1, n] -> [m, k, n]
+        // def expand_clone(src: [m, 1, n], dst: [m, k, n]):
+        //   for i in dst.size(0):
+        //     tmp_tile_0: [1, 1, n] = tile.load(src, [i, 0, 0], [1, 1, n])
+        //     tmp_tile_1: [1, k, n] = tile.create([1, k, n])
+        //     tmp_tile_2: [1, k, n] = tile.col_expand(tmp_tile_1, tmp_tile_0)
+        //     dst = tile.store(tmp_tile_2, [i, 0, 0], dst)
+
+        // # dim = 2
+        // # [m, k, 1] -> [m, k, n]
+        // def expand_clone(src: [m, k, 1], dst: [m, k, n]):
+        //   tmp_0: [m, k, n] = tile.load(src, [0, 0, 0], [m, k, n], valid_shape=[m, k, 1])
+        //   tmp_1: [m, k, n] = tile.row_expand(tmp_0)
+        //   dst = tile.store(tmp_1, [0, 0, 0], dst)
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+        const auto& target = args[1];
+
+        auto input_tensor_type = As<TensorType>(input->GetType());
+        auto input_tile_type = As<TileType>(input->GetType());
+        CHECK(input_tensor_type || input_tile_type)
+            << "tensor.expand_clone conversion: input must be TensorType or TileType, but got "
+            << input->GetType()->TypeName();
+
+        auto target_tensor_type = As<TensorType>(target->GetType());
+        CHECK(target_tensor_type) << "tensor.expand_clone conversion: target must be TensorType, but got "
+                                  << target->GetType()->TypeName();
+
+        const auto& input_shape = input_tensor_type ? input_tensor_type->shape_ : input_tile_type->shape_;
+        const auto& target_shape = target_tensor_type->shape_;
+
+        CHECK(input_shape.size() == 3)
+            << "tensor.expand_clone conversion: input rank must be 3, but got " << input_shape.size();
+        CHECK(target_shape.size() == input_shape.size())
+            << "tensor.expand_clone conversion: input rank (" << input_shape.size()
+            << ") must match target rank (" << target_shape.size() << ")";
+
+        int broadcast_dim = -1;
+        for (size_t i = 0; i < input_shape.size(); ++i) {
+          if (DimensionsEqual(input_shape[i], target_shape[i])) {
+            continue;
+          }
+          auto input_const = GetConstantDimension(input_shape[i]);
+          CHECK(input_const && *input_const == 1)
+              << "tensor.expand_clone conversion requires input dim " << i
+              << " to be 1 for broadcasting, but got " << input_shape[i]->TypeName();
+          CHECK(broadcast_dim < 0)
+              << "tensor.expand_clone conversion allows broadcasting in at most one dimension";
+          broadcast_dim = static_cast<int>(i);
+        }
+
+        std::vector<StmtPtr> prologue;
+
+        auto make_index_const = [&](int64_t value) -> ExprPtr {
+          return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+        };
+
+        auto make_tuple = [&](std::vector<ExprPtr> elems) -> ExprPtr {
+          return std::make_shared<MakeTuple>(std::move(elems), span);
+        };
+
+        auto load_tensor_tile = [&](const ExprPtr& tensor, const ExprPtr& offsets,
+                                    const std::vector<ExprPtr>& shape,
+                                    const std::vector<ExprPtr>& valid_shape, const std::string& name_hint,
+                                    std::vector<StmtPtr>& stmts) -> ExprPtr {
+          auto shapes = MakeShapesTuple(shape, span);
+          auto valid_shapes = MakeShapesTuple(valid_shape, span);
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                       {"transpose", false}};
+          auto load_call =
+              op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shapes}, load_kwargs, span);
+          auto load_var = std::make_shared<Var>(name_hint, load_call->GetType(), span);
+          stmts.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+          return load_var;
+        };
+
+        DataType input_dtype = input_tensor_type ? input_tensor_type->dtype_ : input_tile_type->dtype_;
+
+        std::vector<ExprPtr> input_valid_shape = input_shape;
+        if (input_tensor_type && input_tensor_type->tensor_view_.has_value() &&
+            !input_tensor_type->tensor_view_->valid_shape.empty()) {
+          input_valid_shape = input_tensor_type->tensor_view_->valid_shape;
+        }
+
+        ExprPtr zero = make_index_const(0);
+        ExprPtr one = make_index_const(1);
+
+        if (broadcast_dim < 0) {
+          ExprPtr input_tile = input;
+          if (input_tensor_type) {
+            auto offsets = MakeZeroOffsetsTuple(input_tensor_type->shape_.size(), span);
+            input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape,
+                                          "expand_clone_input", prologue);
+          }
+          auto offsets = MakeZeroOffsetsTuple(target_shape.size(), span);
+          auto store_call = op_reg.Create("tile.store", {input_tile, offsets, target}, span);
+          return ConversionResult{std::move(prologue), store_call};
+        }
+
+        if (broadcast_dim == 0) {
+          ExprPtr input_tile = input;
+          if (input_tensor_type) {
+            auto offsets = MakeZeroOffsetsTuple(input_tensor_type->shape_.size(), span);
+            input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape,
+                                          "expand_clone_input", prologue);
+          }
+
+          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
+          auto return_var = std::make_shared<Var>("expand_clone_d0_result", target_tensor_type, span);
+
+          auto offsets = make_tuple({loop_var, zero, zero});
+          auto store_call = op_reg.Create("tile.store", {input_tile, offsets, iter_arg}, span);
+          auto store_var = std::make_shared<Var>("expand_clone_d0_store", store_call->GetType(), span);
+
+          std::vector<StmtPtr> body_stmts;
+          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
+
+          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
+                                                    std::vector<IterArgPtr>{iter_arg}, body,
+                                                    std::vector<VarPtr>{return_var}, span);
+          prologue.push_back(for_stmt);
+          return ConversionResult{std::move(prologue), return_var};
+        }
+
+        if (broadcast_dim == 1) {
+          CHECK(input_tensor_type)
+              << "tensor.expand_clone conversion: broadcast dim 1 requires TensorType input, but got "
+              << input->GetType()->TypeName();
+
+          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
+          auto return_var = std::make_shared<Var>("expand_clone_d1_result", target_tensor_type, span);
+
+          auto offsets = make_tuple({loop_var, zero, zero});
+          std::vector<ExprPtr> slice_shape = {one, one, target_shape[2]};
+
+          std::vector<StmtPtr> body_stmts;
+          auto input_tile =
+              load_tensor_tile(input, offsets, slice_shape, slice_shape, "expand_clone_d1_input", body_stmts);
+
+          std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_dtype},
+                                                                         {"target_memory", MemorySpace::Vec}};
+          auto create_shape = MakeShapesTuple({one, target_shape[1], target_shape[2]}, span);
+          auto create_call = op_reg.Create("tile.create", {create_shape}, create_kwargs, span);
+          auto create_var = std::make_shared<Var>("expand_clone_d1_target", create_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(create_var, create_call, span));
+
+          auto col_expand_call = op_reg.Create("tile.col_expand", {create_var, input_tile}, span);
+          auto col_expand_var =
+              std::make_shared<Var>("expand_clone_d1_col", col_expand_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(col_expand_var, col_expand_call, span));
+
+          auto store_call = op_reg.Create("tile.store", {col_expand_var, offsets, iter_arg}, span);
+          auto store_var = std::make_shared<Var>("expand_clone_d1_store", store_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
+
+          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
+                                                    std::vector<IterArgPtr>{iter_arg}, body,
+                                                    std::vector<VarPtr>{return_var}, span);
+          prologue.push_back(for_stmt);
+          return ConversionResult{std::move(prologue), return_var};
+        }
+
+        CHECK(input_tensor_type)
+            << "tensor.expand_clone conversion: broadcast dim 2 requires TensorType input, but got "
+            << input->GetType()->TypeName();
+
+        auto offsets = MakeZeroOffsetsTuple(target_shape.size(), span);
+        auto input_tile =
+            load_tensor_tile(input, offsets, target_shape, input_valid_shape, "expand_clone_input", prologue);
+        auto row_expand_call = op_reg.Create("tile.row_expand", {input_tile}, span);
+        auto row_expand_var = std::make_shared<Var>("expand_clone_d2_row", row_expand_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(row_expand_var, row_expand_call, span));
+        auto store_call = op_reg.Create("tile.store", {row_expand_var, offsets, target}, span);
+        return ConversionResult{std::move(prologue), store_call};
       });
 }
 
