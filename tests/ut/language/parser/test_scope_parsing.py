@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for parsing ScopeStmt with pl.incore() syntax."""
+"""Unit tests for parsing ScopeStmt with pl.at(level=pl.Level.CORE_GROUP): syntax."""
 
 import pypto.language as pl
 import pytest
@@ -15,7 +15,7 @@ from pypto import ir
 
 
 class TestScopeParsing:
-    """Test parsing of with pl.incore(): syntax."""
+    """Test parsing of with pl.at(level=pl.Level.CORE_GROUP): syntax."""
 
     def test_parse_simple_incore_scope(self):
         """Test parsing a simple InCore scope."""
@@ -24,7 +24,7 @@ class TestScopeParsing:
         class TestProgram:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -47,7 +47,7 @@ class TestScopeParsing:
         class TestProgram:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                     z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
@@ -63,9 +63,9 @@ class TestScopeParsing:
         class TestProgram:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
 
@@ -81,7 +81,7 @@ class TestScopeParsing:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
                 return c
@@ -97,7 +97,7 @@ class TestScopeParsing:
         class Original:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -105,7 +105,7 @@ class TestScopeParsing:
         printed = Original.as_python()
 
         # Verify it contains the scope syntax
-        assert "with pl.incore():" in printed
+        assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
 
 
 if __name__ == "__main__":

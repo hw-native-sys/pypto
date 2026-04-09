@@ -420,7 +420,7 @@ class TestControlFlow:
             @pl.function
             def main(self):
                 for i in pl.range(8):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         _y: pl.Scalar[pl.INDEX] = i + 0
 
         @pl.program
@@ -428,7 +428,7 @@ class TestControlFlow:
             @pl.function
             def main(self):
                 for i in pl.range(8):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         _y: pl.Scalar[pl.INDEX] = i
 
         after = passes.simplify()(Before)
@@ -516,7 +516,7 @@ class TestControlFlow:
             @pl.function
             def main(self):
                 for i in pl.range(8):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
                             _y: pl.Scalar[pl.INDEX] = i // 4
 
@@ -525,7 +525,7 @@ class TestControlFlow:
             @pl.function
             def main(self):
                 for i in pl.range(8):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
                             _y: pl.Scalar[pl.INDEX] = 0
 

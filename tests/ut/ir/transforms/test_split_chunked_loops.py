@@ -57,7 +57,7 @@ class TestBasicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 10, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -69,7 +69,7 @@ class TestBasicChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
@@ -86,7 +86,7 @@ class TestBasicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 7, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -98,7 +98,7 @@ class TestBasicChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.range(0, 1, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
@@ -118,7 +118,7 @@ class TestBasicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 5, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -130,7 +130,7 @@ class TestBasicChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.range(0, 1, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
@@ -151,7 +151,7 @@ class TestChunkingWithStep:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 20, 2, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -163,7 +163,7 @@ class TestChunkingWithStep:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
@@ -180,7 +180,7 @@ class TestChunkingWithStep:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 3, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -192,7 +192,7 @@ class TestChunkingWithStep:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_rem, (x_iter_1_rem,) in pl.range(0, 3, 1, init_values=(x_0,)):
                         x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_rem, 1.0)
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
@@ -211,7 +211,7 @@ class TestChunkingWithKind:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -223,7 +223,7 @@ class TestChunkingWithKind:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
@@ -246,7 +246,7 @@ class TestChunkingWithKind:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.unroll(0, 12, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -296,7 +296,7 @@ class TestPrinterRoundTrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 10, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -311,7 +311,7 @@ class TestPrinterRoundTrip:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -331,7 +331,7 @@ class TestParserErrors:
         class Good:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i, (s,) in pl.range(10, init_values=(x,), chunk=5):
                         s = pl.add(s, 1.0)
                         s = pl.yield_(s)
@@ -345,7 +345,7 @@ class TestParserErrors:
             class Bad:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.auto_incore():
+                    with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                         for i in pl.range(0, 10, 1, chunk=0):
                             x = pl.add(x, 1.0)
                     return x
@@ -358,7 +358,7 @@ class TestParserErrors:
             class Bad:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.auto_incore():
+                    with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                         for i in pl.range(0, 10, 1, chunk=-1):
                             x = pl.add(x, 1.0)
                     return x
@@ -390,7 +390,7 @@ class TestLoopOrigin:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 10, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -415,7 +415,7 @@ class TestLoopOrigin:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 7, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -443,7 +443,7 @@ class TestLoopOrigin:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 3, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -489,7 +489,7 @@ class TestNestedChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(8, chunk=4):
                         for j in pl.parallel(1, chunk=2):
                             x = pl.add(x, 1.0)
@@ -502,7 +502,7 @@ class TestNestedChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
                             for j_0_rem, (x_iter_3_rem,) in pl.parallel(
@@ -523,7 +523,7 @@ class TestNestedChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(8, chunk=4):
                         for j in pl.parallel(12, chunk=4):
                             x = pl.add(x, 1.0)
@@ -536,7 +536,7 @@ class TestNestedChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
                             for j_0_out, (x_iter_3_outer,) in pl.parallel(
@@ -565,7 +565,7 @@ class TestNestedChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(6, chunk=4):
                         for j in pl.parallel(3, chunk=2):
                             x = pl.add(x, 1.0)
@@ -602,7 +602,7 @@ class TestDynamicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, n, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -615,7 +615,7 @@ class TestDynamicChunking:
             def main(
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.range(0, n_0 // 4, 1, init_values=(x_0,)):
                         for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
@@ -640,7 +640,7 @@ class TestDynamicChunking:
                 lo: pl.Scalar[pl.INDEX],
                 hi: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(lo, hi, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -656,7 +656,7 @@ class TestDynamicChunking:
                 lo_0: pl.Scalar[pl.INDEX],
                 hi_0: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.range(0, pl.max(hi_0 - lo_0, 0) // 4, 1, init_values=(x_0,)):
                         for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
@@ -678,7 +678,7 @@ class TestDynamicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, n, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -691,7 +691,7 @@ class TestDynamicChunking:
             def main(
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.parallel(0, n_0 // 4, 1, init_values=(x_0,)):
                         for i_in, (x_inner,) in pl.parallel(0, 4, 1, init_values=(x_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
@@ -711,7 +711,7 @@ class TestDynamicChunking:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 10, 1, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
@@ -723,7 +723,7 @@ class TestDynamicChunking:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
                         for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)

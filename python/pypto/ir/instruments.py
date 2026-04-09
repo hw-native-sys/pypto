@@ -131,6 +131,14 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
             # not a printer/parser asymmetry.
             if "TileType tile_view presence mismatch" in error_msg:
                 return
+            # ScopeStmt InCore split presence mismatch: interchange_chunk_loops creates
+            # ScopeKind::InCore scopes with split_ set (propagated from the consumed
+            # AutoInCore). The printer emits these as pl.at(level=pl.Level.CORE_GROUP)
+            # (no split), because there is no DSL syntax for InCore-with-split.
+            # The split is consumed by outline_incore_scopes, so it is a transient
+            # internal attribute that roundtrip cannot preserve.
+            if "SplitMode optional presence mismatch" in error_msg:
+                return
             raise RuntimeError(
                 f"[RoundtripInstrument] Structural equality failed after pass '{pass_name}'.\n"
                 f"\n"

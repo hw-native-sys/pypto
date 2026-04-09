@@ -210,12 +210,12 @@ def test_printer_hierarchy_scope():
 
 
 def test_printer_incore_scope_unchanged():
-    """Python printer still renders InCore scope as pl.incore()."""
+    """Python printer renders InCore scope as pl.at(level=pl.Level.CORE_GROUP)."""
     body = _empty_body()
     scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, _span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
-    assert "pl.incore()" in printed
+    assert "pl.at(level=pl.Level.CORE_GROUP)" in printed
 
 
 # ─── Outline pass safety ─────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ def test_outline_incore_works_with_normal_program():
     class P:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.incore():
+            with pl.at(level=pl.Level.CORE_GROUP):
                 y = pl.add(x, x)
             return y
 

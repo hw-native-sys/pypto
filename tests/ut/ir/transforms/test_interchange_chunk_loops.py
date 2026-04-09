@@ -48,7 +48,7 @@ class TestSingleParallelChunk:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -84,7 +84,7 @@ class TestNestedParallelChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         for j in pl.parallel(0, 12, 1, chunk=4):
                             x = pl.add(x, 1.0)
@@ -130,7 +130,7 @@ class TestNestedParallelChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         for j in pl.parallel(0, 12, 1, chunk=4):
                             x = pl.add(x, 1.0)
@@ -181,7 +181,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.parallel(0, 8, 1, chunk=4):
                         for h in pl.parallel(0, 12, 1, chunk=4):
                             x = pl.add(x, y)
@@ -215,7 +215,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.parallel(0, 8, 1, chunk=4):
                         for h in pl.parallel(0, 12, 1, chunk=4):
                             x = pl.add(x, y)
@@ -240,7 +240,7 @@ class TestNestedChunkChainsInitSubstitution:
                 x: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.parallel(0, 6, 1, chunk=4):
                         for h in pl.parallel(0, 14, 1, chunk=4):
                             x = pl.add(x, y)
@@ -264,7 +264,7 @@ class TestChunkWithRemainderInChain:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         for j in pl.parallel(0, 1, 1, chunk=2):
                             x = pl.add(x, 1.0)
@@ -300,7 +300,7 @@ class TestChunkWithRemainderInChain:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         for j in pl.parallel(0, 1, 1, chunk=2):
                             x = pl.add(x, 1.0)
@@ -325,7 +325,7 @@ class TestRemainderLoops:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 6, 1, chunk=4):
                         for j in pl.parallel(0, 14, 1, chunk=4):
                             x = pl.add(x, 1.0)
@@ -390,7 +390,7 @@ class TestSequentialChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -402,7 +402,7 @@ class TestSequentialChunks:
         # AutoInCore is consumed, sequential chunks fail interchange guard
         # but get InCore wrapping from the non-chunk statement handler
         assert "auto_incore" not in after_str
-        assert "incore" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
 
     def test_nested_sequential_chunks_get_incore(self):
         """Nested sequential chunked loops: no interchange, but get InCore wrapping."""
@@ -411,7 +411,7 @@ class TestSequentialChunks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 8, 1, chunk=4):
                         for j in pl.range(0, 12, 1, chunk=4):
                             x = pl.add(x, 1.0)
@@ -423,7 +423,7 @@ class TestSequentialChunks:
 
         # AutoInCore consumed, sequential loops not interchanged but wrapped in InCore
         assert "auto_incore" not in after_str
-        assert "incore" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
 
 
 class TestExistingInCore:
@@ -436,9 +436,9 @@ class TestExistingInCore:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
-                        with pl.incore():
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             x = pl.add(x, 1.0)
                 return x
 
@@ -460,7 +460,7 @@ class TestAutoIncoreConsumed:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x
@@ -503,7 +503,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                 return x
 
@@ -512,7 +512,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
 
         assert "auto_incore" not in after_str
-        assert "incore" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
 
     def test_standalone_op_before_parallel_chunk(self):
         """Standalone op before parallel chunk: op wrapped separately, chunk interchanged."""
@@ -521,7 +521,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 2.0)
@@ -547,7 +547,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 2.0)
                     x = pl.mul(x, 3.0)
@@ -566,7 +566,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Count incore occurrences: one for the chunk's inner, one for the standalone op
-        incore_count = after_str.count("pl.incore()")
+        incore_count = after_str.count("pl.at(level=pl.Level.CORE_GROUP)")
         assert incore_count >= 2
 
     def test_host_side_assemble_after_parallel_chunk_not_wrapped(self):
@@ -579,7 +579,7 @@ class TestNonChunkStatementsWrapping:
                 out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
                     [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
                 )
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 4, 1, chunk=2):
                         x = pl.tensor.adds(x, 1.0)
                     out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
@@ -590,7 +590,7 @@ class TestNonChunkStatementsWrapping:
 
         after_str = python_print(After)
         # Only the interchanged chunk body should be in InCore.
-        assert after_str.count("pl.incore()") == 1
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") == 1
         assert "pl.tensor.assemble(" in after_str
 
     def test_multiple_parallel_chunks_no_regression(self):
@@ -600,7 +600,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                     for j in pl.parallel(0, 12, 1, chunk=4):
@@ -628,7 +628,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(10):
                         x = pl.add(x, 1.0)
                 return x
@@ -638,7 +638,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
 
         assert "auto_incore" not in after_str
-        assert "incore" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
 
     def test_mixed_parallel_and_sequential_chunks(self):
         """Mixed parallel chunk + sequential chunk: parallel interchanged, sequential wrapped."""
@@ -647,7 +647,7 @@ class TestNonChunkStatementsWrapping:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                     for j in pl.range(0, 12, 1, chunk=4):
@@ -666,7 +666,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Both the interchanged chunk's inner and sequential chunk should have incore
-        assert after_str.count("pl.incore()") >= 2
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") >= 2
 
 
 class TestScalarAssignmentNotWrapped:
@@ -679,7 +679,7 @@ class TestScalarAssignmentNotWrapped:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for ob in pl.range(0, 8):
                         offset: pl.Scalar[pl.INDEX] = ob * 4  # noqa: F841
                         x = pl.add(x, 1.0)
@@ -691,14 +691,14 @@ class TestScalarAssignmentNotWrapped:
         After = passes.interchange_chunk_loops()(Before)
         after_str = python_print(After)
 
-        # The scalar assignment should NOT be inside any pl.incore() scope.
+        # The scalar assignment should NOT be inside any pl.at(level=pl.Level.CORE_GROUP) scope.
         scalar_assign_re = re.compile(r"offset\S*\s*:.*=.*\*\s*4")
         lines = after_str.split("\n")
         in_incore = False
         incore_depth = 0
         for line in lines:
             stripped = line.strip()
-            if "pl.incore()" in stripped:
+            if "pl.at(level=pl.Level.CORE_GROUP)" in stripped:
                 in_incore = True
                 incore_depth = len(line) - len(line.lstrip())
             elif in_incore and stripped and (len(line) - len(line.lstrip())) <= incore_depth:
@@ -716,7 +716,7 @@ class TestScalarAssignmentNotWrapped:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for ob in pl.range(0, 8):
                         offset: pl.Scalar[pl.INDEX] = ob * 4  # noqa: F841
                         for i in pl.parallel(0, 8, 1, chunk=4):
@@ -774,7 +774,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                 return x
 
@@ -788,7 +788,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 2.0)
@@ -804,7 +804,7 @@ class TestEndToEndNoComputeLeaks:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.range(0, 8, 1, chunk=4):
                         x = pl.add(x, 1.0)
                 return x

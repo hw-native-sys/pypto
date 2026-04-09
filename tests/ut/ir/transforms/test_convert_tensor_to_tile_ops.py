@@ -1454,7 +1454,7 @@ class TestNestedControlFlow:
                 out: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.tile.load(x, offsets=[0], shapes=[64])
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     out_alias: pl.Tensor[[64], pl.FP32] = out
                     pl.tensor.read(x, [0])
                 out_next: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_alias)
@@ -1469,7 +1469,7 @@ class TestNestedControlFlow:
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 x_tile: pl.Tile[[64], pl.FP32] = pl.tile.load(x, offsets=[0], shapes=[64])
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     out_alias: pl.Tensor[[64], pl.FP32] = out
                     pl.tensor.read(x, [0])
                 out_next: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_alias)

@@ -54,13 +54,13 @@ class TestScopeStmt:
         class TestProgram:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        # Print and verify it contains "with pl.incore():"
+        # Print and verify it contains "with pl.at(level=pl.Level.CORE_GROUP):"
         printed = TestProgram.as_python()
-        assert "with pl.incore():" in printed
+        assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
 
 
 if __name__ == "__main__":

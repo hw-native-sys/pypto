@@ -60,7 +60,7 @@ class TestNonParallelCodeBetweenChunks:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         # Parallel chunk 1 → gets InCore after interchange
                         for i in pl.parallel(4, chunk=2):
@@ -101,7 +101,7 @@ class TestNonParallelCodeBetweenChunks:
                 x: pl.Tensor[[8, 64], pl.FP32],
                 w: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         # Parallel chunk → gets InCore
                         for i in pl.parallel(4, chunk=2):
@@ -144,7 +144,7 @@ class TestNonParallelCodeBetweenChunks:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         for i in pl.parallel(4, chunk=2):
                             x = pl.tensor.adds(x, 1.0)
@@ -193,7 +193,7 @@ class TestNestedForStmtRecursion:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         for c in pl.range(2):
                             for i in pl.parallel(4, chunk=2):
@@ -231,7 +231,7 @@ class TestNestedForStmtRecursion:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         for i in pl.parallel(4, chunk=2):
                             x = pl.tensor.adds(x, 1.0)
@@ -262,7 +262,7 @@ class TestNestedForStmtRecursion:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         for i in pl.parallel(4, chunk=2):
                             x = pl.tensor.adds(x, 1.0)
@@ -302,7 +302,7 @@ class TestNestedForStmtRecursion:
                 self,
                 x: pl.Tensor[[8, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         x = pl.tensor.adds(x, 1.0)
                         x = pl.tensor.muls(x, 2.0)
@@ -334,7 +334,7 @@ class TestHostSideTailOps:
                 out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
                     [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
                 )
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i in pl.parallel(0, 4, 1, chunk=2):
                         x = pl.tensor.adds(x, 1.0)
                     out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])

@@ -1170,7 +1170,7 @@ class TestOrchestration:
                 input_tensor: pl.Tensor[[1024, 256], pl.FP32],
                 output_tensor: pl.Tensor[[1024, 256], pl.FP32],
             ) -> pl.Tensor[[1024, 256], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for r in pl.parallel(0, 1024, 1, chunk=64):
                         row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
                         row_result = pl.add(row_tile, 1.0)
@@ -1638,7 +1638,7 @@ class TestTensorReadWriteOffsetCodegen:
             ) -> pl.Tensor[[4, 16], pl.FP32]:
                 dst = pl.create_tensor([4, 16], dtype=pl.FP32)
                 acc = pl.create_tensor([4, 16], dtype=pl.FP32)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     # ForStmt: assemble rows into dst (produces yield return).
                     for i in pl.range(4):
                         row = pl.slice(src, [1, 16], [i, 0])
@@ -1646,7 +1646,7 @@ class TestTensorReadWriteOffsetCodegen:
                     # Top-level assemble into acc (produces tile.store return).
                     full_view = pl.slice(src, [4, 16], [0, 0])
                     acc = pl.assemble(acc, full_view, [0, 0])
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     # Consumer: uses both dst and acc from previous kernel.
                     dst_tile = pl.slice(dst, [4, 16], [0, 0])
                     acc_tile = pl.slice(acc, [4, 16], [0, 0])

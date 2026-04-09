@@ -998,24 +998,21 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
       stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
     }
     stream_ << "):\n";
-  } else {
-    // Map ScopeKind to DSL function name for robustness
-    static const std::unordered_map<ScopeKind, std::string> scope_kind_to_dsl = {
-        {ScopeKind::InCore, "incore"},
-        {ScopeKind::AutoInCore, "auto_incore"},
-        {ScopeKind::Cluster, "cluster"},
-    };
-
-    auto it = scope_kind_to_dsl.find(op->scope_kind_);
-    INTERNAL_CHECK(it != scope_kind_to_dsl.end())
-        << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
-
+  } else if (op->scope_kind_ == ScopeKind::InCore) {
+    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP):\n";
+  } else if (op->scope_kind_ == ScopeKind::AutoInCore) {
+    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
     if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-      stream_ << "with " << prefix_ << "." << it->second << "(split=" << prefix_ << ".SplitMode."
-              << SplitModeToPythonString(op->split_.value()) << "):\n";
+      stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
+              << SplitModeToPythonString(op->split_.value()) << ")):\n";
     } else {
-      stream_ << "with " << prefix_ << "." << it->second << "():\n";
+      stream_ << prefix_ << ".chunked_loop_optimizer):\n";
     }
+  } else if (op->scope_kind_ == ScopeKind::Cluster) {
+    stream_ << "with " << prefix_ << ".cluster():\n";
+  } else {
+    INTERNAL_CHECK(false) << "Internal error: Unknown ScopeKind in python_printer: "
+                          << ScopeKindToString(op->scope_kind_);
   }
 
   IncreaseIndent();
