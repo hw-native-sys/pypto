@@ -279,6 +279,10 @@ class TileMemorySpaceMutator : public IRMutator {
     }
 
     if (!changed) return op;
+    // GlobalVar calls (cross-function calls) bypass OpRegistry — reconstruct directly.
+    if (As<GlobalVar>(op->op_)) {
+      return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->GetType(), op->span_);
+    }
     return OpRegistry::GetInstance().Create(op->op_->name_, new_args, op->kwargs_, op->span_);
   }
 
