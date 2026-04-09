@@ -744,10 +744,10 @@ class YieldFixupMutator : public IRMutator {
     auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
 
     // Build intermediate ForStmt with new body, then patch iter_args/return_vars
-    auto intermediate_for = std::make_shared<ForStmt>(
-        for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
-        new_body, for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-        for_stmt->chunk_policy_, for_stmt->loop_origin_);
+    auto intermediate_for =
+        std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+                                  for_stmt->iter_args_, new_body, for_stmt->return_vars_, for_stmt->span_,
+                                  for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_);
 
     return PatchIterArgsAndReturnVars(intermediate_for, new_yield);
   }
@@ -910,8 +910,7 @@ class YieldFixupMutator : public IRMutator {
 
     return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
                                      new_iter_args, patched_body, std::move(new_return_vars), for_stmt->span_,
-                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
-                                     for_stmt->loop_origin_);
+                                     for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_);
   }
 
   // Replace YieldStmt in body and insert move AssignStmts before it.

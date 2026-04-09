@@ -62,13 +62,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_step = analyzer_->Simplify(op->step_);
 
     // Simplify chunk_size (pre-loop, before binding).
-    std::optional<ExprPtr> new_chunk_size = op->chunk_size_;
-    bool chunk_size_changed = false;
-    if (op->chunk_size_.has_value()) {
-      auto new_cs = analyzer_->Simplify(*op->chunk_size_);
-      if (new_cs.get() != (*op->chunk_size_).get()) {
-        new_chunk_size = new_cs;
-        chunk_size_changed = true;
+    std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
+    bool chunk_config_changed = false;
+    if (op->chunk_config_.has_value()) {
+      auto new_cs = analyzer_->Simplify(op->chunk_config_->size);
+      if (new_cs.get() != op->chunk_config_->size.get()) {
+        new_chunk_config = ChunkConfig{new_cs, op->chunk_config_->policy};
+        chunk_config_changed = true;
       }
     }
 
@@ -90,12 +90,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
                    (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||
-                   chunk_size_changed;
+                   chunk_config_changed;
     if (!changed) return op;
 
     return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                     op->return_vars_, op->span_, op->kind_, new_chunk_size,
-                                     op->chunk_policy_, op->loop_origin_);
+                                     op->return_vars_, op->span_, op->kind_, new_chunk_config, op->attrs_);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {

@@ -151,7 +151,7 @@ return x__cr_rv_v1
 | `ChunkInner` | 在分块内迭代的内层循环 |
 | `ChunkRemainder` | 处理剩余迭代的余数循环 |
 
-通过 `for_stmt.loop_origin`（Python）或 `for_stmt->loop_origin_`（C++）访问。下游 Pass 可使用此标记区分生成的循环与用户编写的循环。
+通过 `for_stmt.attrs.get("loop_origin")`（Python）或 `for_stmt->GetAttr<LoopOrigin>("loop_origin")`（C++）访问。下游 Pass 可使用此标记区分生成的循环与用户编写的循环。
 
 ## 流水线位置
 

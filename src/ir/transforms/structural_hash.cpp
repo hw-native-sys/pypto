@@ -196,8 +196,10 @@ class StructuralHasher {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }
 
-  result_type VisitLeafField(const LoopOrigin& field) {
-    return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
+  result_type VisitLeafField(const std::optional<ChunkConfig>& field) {
+    if (!field.has_value()) return 0;
+    result_type h = VisitIRNodeField(field->size);
+    return hash_combine(h, VisitLeafField(field->policy));
   }
 
   result_type VisitLeafField(const ScopeKind& field) {
@@ -287,6 +289,9 @@ class StructuralHasher {
         h = hash_combine(h, std::hash<float>{}(AnyCast<float>(value, "hashing kwarg: " + key)));
       } else if (value.type() == typeid(DataType)) {
         h = hash_combine(h, std::hash<uint8_t>{}(AnyCast<DataType>(value, "hashing kwarg: " + key).Code()));
+      } else if (value.type() == typeid(LoopOrigin)) {
+        h = hash_combine(h, std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(AnyCast<LoopOrigin>(value, "hashing kwarg: " + key))));
       } else {
         throw TypeError("Invalid kwarg type for key: " + key +
                         ", expected int, bool, std::string, double, float, or DataType, but got " +

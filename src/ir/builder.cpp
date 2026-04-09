@@ -94,15 +94,15 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
 
 void IRBuilder::BeginForLoop(const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
                              const ExprPtr& step, const Span& span, ForKind kind,
-                             std::optional<ExprPtr> chunk_size, ChunkPolicy chunk_policy,
-                             LoopOrigin loop_origin) {
+                             std::optional<ChunkConfig> chunk_config,
+                             std::vector<std::pair<std::string, std::any>> attrs) {
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot begin for loop: not inside a function or another valid context at " +
                               span.to_string());
   }
 
-  context_stack_.push_back(std::make_unique<ForLoopContext>(
-      loop_var, start, stop, step, span, kind, std::move(chunk_size), chunk_policy, loop_origin));
+  context_stack_.push_back(std::make_unique<ForLoopContext>(loop_var, start, stop, step, span, kind,
+                                                            std::move(chunk_config), std::move(attrs)));
 }
 
 void IRBuilder::AddIterArg(const IterArgPtr& iter_arg) {
@@ -141,10 +141,10 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create for statement
-  auto for_stmt = std::make_shared<ForStmt>(
-      loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(), loop_ctx->GetStep(),
-      loop_ctx->GetIterArgs(), body, loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind(),
-      loop_ctx->GetChunkSize(), loop_ctx->GetChunkPolicy(), loop_ctx->GetLoopOrigin());
+  auto for_stmt = std::make_shared<ForStmt>(loop_ctx->GetLoopVar(), loop_ctx->GetStart(), loop_ctx->GetStop(),
+                                            loop_ctx->GetStep(), loop_ctx->GetIterArgs(), body,
+                                            loop_ctx->GetReturnVars(), combined_span, loop_ctx->GetKind(),
+                                            loop_ctx->GetChunkConfig(), loop_ctx->GetAttrs());
 
   // Pop context
   context_stack_.pop_back();

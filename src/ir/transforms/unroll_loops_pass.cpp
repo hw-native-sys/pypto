@@ -130,7 +130,7 @@ class LoopUnrollMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (op->kind_ != ForKind::Unroll || op->chunk_size_.has_value()) {
+    if (op->kind_ != ForKind::Unroll || op->chunk_config_.has_value()) {
       return IRMutator::VisitStmt_(op);
     }
     return UnrollForStmt(op);

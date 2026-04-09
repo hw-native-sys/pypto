@@ -110,7 +110,7 @@ std::vector<ir::StmtPtr> ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts
       return std::make_shared<ir::ForStmt>(
           for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
           make_body(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-          for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_);
+          for_stmt->chunk_config_, for_stmt->attrs_);
     }
     if (auto if_stmt = As<ir::IfStmt>(stmt)) {
       auto new_then = ReorderTpopChains(flatten_body(if_stmt->then_body_), tpop_result_vars);

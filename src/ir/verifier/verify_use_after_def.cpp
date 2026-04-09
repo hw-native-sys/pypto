@@ -101,8 +101,8 @@ class UseAfterDefChecker : public IRVisitor {
     if (op->start_) VisitExpr(op->start_);
     if (op->stop_) VisitExpr(op->stop_);
     if (op->step_) VisitExpr(op->step_);
-    if (op->chunk_size_.has_value() && *op->chunk_size_) {
-      VisitExpr(*op->chunk_size_);
+    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
+      VisitExpr(op->chunk_config_->size);
     }
 
     // IterArg initial values are evaluated in the outer scope.

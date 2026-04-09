@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -38,6 +39,7 @@
 namespace pypto {
 namespace ir {
 
+using Attrs = std::vector<std::pair<std::string, std::any>>;
 using transform_utils::CollectDefVars;
 
 namespace {
@@ -184,7 +186,7 @@ static StmtPtr MakeResultStmt(const std::vector<StmtPtr>& stmts, const Span& spa
 }
 
 /**
- * @brief Mutator that splits ForStmt nodes with chunk_size_ into nested loops.
+ * @brief Mutator that splits ForStmt nodes with chunk_config_ into nested loops.
  *
  * Runs after SSA conversion. Propagates iter_args through generated loops.
  * Handles both compile-time constant and dynamic (runtime) loop bounds.
@@ -253,12 +255,12 @@ class ChunkedLoopSplitter : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (!op->chunk_size_.has_value() || !inside_auto_incore_) {
+    if (!op->chunk_config_.has_value() || !inside_auto_incore_) {
       return IRMutator::VisitStmt_(op);
     }
 
     // chunk_size and step must always be compile-time constants
-    int64_t chunk_size = GetConstIntValue(*op->chunk_size_, "chunk_size");
+    int64_t chunk_size = GetConstIntValue(op->chunk_config_->size, "chunk_size");
     int64_t step = GetConstIntValue(op->step_, "step");
     CHECK(step != 0) << "Chunked loop step cannot be zero";
     CHECK(chunk_size > 0) << "Chunk size must be positive, got " << chunk_size;
@@ -427,10 +429,10 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto inner_for = std::make_shared<ForStmt>(
           in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{}, inner_body, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
+          op->kind_, std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkInner}});
       auto outer_for = std::make_shared<ForStmt>(
           out_var, zero, n_full, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+          op->kind_, std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
       result_stmts.push_back(outer_for);
     }
 
@@ -452,7 +454,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body,
                                                std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
-                                               ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
+                                               Attrs{{"loop_origin", LoopOrigin::ChunkRemainder}});
       result_stmts.push_back(rem_for);
     }
 
@@ -522,14 +524,14 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, inner_iter_args, inner_body,
                                                  inner_return_vars, sp, op->kind_, std::nullopt,
-                                                 ChunkPolicy::LeadingFull, LoopOrigin::ChunkInner);
+                                                 Attrs{{"loop_origin", LoopOrigin::ChunkInner}});
       auto outer_yield = std::make_shared<YieldStmt>(
           std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
       auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
 
       auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_full, one, outer_iter_args, outer_body,
                                                  outer_return_vars, sp, op->kind_, std::nullopt,
-                                                 ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+                                                 Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
 
       result_stmts.push_back(outer_for);
       final_return_vars = outer_return_vars;
@@ -574,7 +576,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, rem_iter_args, rem_body,
                                                rem_return_vars, sp, op->kind_, std::nullopt,
-                                               ChunkPolicy::LeadingFull, LoopOrigin::ChunkRemainder);
+                                               Attrs{{"loop_origin", LoopOrigin::ChunkRemainder}});
 
       result_stmts.push_back(rem_for);
       final_return_vars = rem_return_vars;

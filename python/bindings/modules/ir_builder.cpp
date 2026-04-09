@@ -51,11 +51,7 @@ void BindIRBuilder(nb::module_& m) {
           "begin_function",
           [](IRBuilder& self, const std::string& name, const Span& span, FunctionType type,
              std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none) {
-            std::vector<std::pair<std::string, std::any>> attrs;
-            if (!attrs_or_none.is_none()) {
-              attrs = ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
-            }
-            self.BeginFunction(name, span, type, level, role, std::move(attrs));
+            self.BeginFunction(name, span, type, level, role, ConvertAttrsFromPython(attrs_or_none));
           },
           nb::arg("name"), nb::arg("span"), nb::arg("type") = FunctionType::Opaque,
           nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("attrs") = nb::none(),
@@ -104,24 +100,33 @@ void BindIRBuilder(nb::module_& m) {
            "    RuntimeError: If not inside a function context")
 
       // For loop building
-      .def("begin_for_loop", &IRBuilder::BeginForLoop, nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"),
-           nb::arg("step"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-           nb::arg("chunk_size") = nb::none(), nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
-           nb::arg("loop_origin") = LoopOrigin::Original,
-           "Begin building a for loop.\n\n"
-           "Creates a new for loop context. Must be closed with end_for_loop().\n\n"
-           "Args:\n"
-           "    loop_var: Loop variable\n"
-           "    start: Start value expression\n"
-           "    stop: Stop value expression\n"
-           "    step: Step value expression\n"
-           "    span: Source location for loop definition\n"
-           "    kind: Loop kind (Sequential or Parallel, default: Sequential)\n"
-           "    chunk_size: Optional chunk size for loop chunking\n"
-           "    chunk_policy: Chunk distribution policy (default: LeadingFull)\n"
-           "    loop_origin: Loop origin classification (default: Original)\n\n"
-           "Raises:\n"
-           "    RuntimeError: If not inside a valid context")
+      .def(
+          "begin_for_loop",
+          [](IRBuilder& self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
+             const ExprPtr& step, const Span& span, ForKind kind, std::optional<ExprPtr> chunk_size,
+             ChunkPolicy chunk_policy, const nb::object& attrs_or_none) {
+            std::optional<ChunkConfig> chunk_config =
+                chunk_size.has_value() ? std::optional{ChunkConfig{*chunk_size, chunk_policy}} : std::nullopt;
+            self.BeginForLoop(loop_var, start, stop, step, span, kind, std::move(chunk_config),
+                              ConvertAttrsFromPython(attrs_or_none));
+          },
+          nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("span"),
+          nb::arg("kind") = ForKind::Sequential, nb::arg("chunk_size") = nb::none(),
+          nb::arg("chunk_policy") = ChunkPolicy::LeadingFull, nb::arg("attrs") = nb::none(),
+          "Begin building a for loop.\n\n"
+          "Creates a new for loop context. Must be closed with end_for_loop().\n\n"
+          "Args:\n"
+          "    loop_var: Loop variable\n"
+          "    start: Start value expression\n"
+          "    stop: Stop value expression\n"
+          "    step: Step value expression\n"
+          "    span: Source location for loop definition\n"
+          "    kind: Loop kind (Sequential or Parallel, default: Sequential)\n"
+          "    chunk_size: Optional chunk size for loop chunking\n"
+          "    chunk_policy: Chunk distribution policy (default: LeadingFull)\n"
+          "    attrs: Loop-level attributes (default: empty)\n\n"
+          "Raises:\n"
+          "    RuntimeError: If not inside a valid context")
 
       .def("add_iter_arg", &IRBuilder::AddIterArg, nb::arg("iter_arg"),
            "Add an iteration argument to the current for loop.\n\n"

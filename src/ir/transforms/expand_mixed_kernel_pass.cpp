@@ -454,7 +454,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         result.push_back(std::make_shared<ForStmt>(
             for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
             MakeBody(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-            for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_));
+            for_stmt->chunk_config_, for_stmt->attrs_));
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
                                       tpop_var_remap, superseded_tpop_vars);
@@ -1001,10 +1001,10 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
       if (nb != for_stmt->body_) {
-        new_stmts.push_back(std::make_shared<ForStmt>(
-            for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_, nb,
-            for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-            for_stmt->chunk_policy_, for_stmt->loop_origin_));
+        new_stmts.push_back(
+            std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+                                      for_stmt->iter_args_, nb, for_stmt->return_vars_, for_stmt->span_,
+                                      for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_));
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);

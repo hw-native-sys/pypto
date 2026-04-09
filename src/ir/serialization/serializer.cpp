@@ -89,7 +89,8 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const ForKind& field);
   result_type VisitLeafField(const ChunkPolicy& field);
-  result_type VisitLeafField(const LoopOrigin& field);
+  result_type VisitLeafField(const std::optional<ChunkConfig>& field);
+
   result_type VisitLeafField(const ScopeKind& field);
   result_type VisitLeafField(const MemorySpace& field);
   result_type VisitLeafField(const Level& field);
@@ -539,8 +540,19 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ChunkPolicy& field)
   return msgpack::object(static_cast<uint8_t>(field), zone_);
 }
 
-msgpack::object FieldSerializerVisitor::VisitLeafField(const LoopOrigin& field) {
-  return msgpack::object(static_cast<uint8_t>(field), zone_);
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<ChunkConfig>& field) {
+  if (!field.has_value()) return msgpack::object();
+  // Serialize as a map with "size" and "policy" keys
+  auto* kv = static_cast<msgpack::object_kv*>(zone_.allocate_align(sizeof(msgpack::object_kv) * 2));
+  kv[0].key = msgpack::object("size", zone_);
+  kv[0].val = ctx_.SerializeNode(field->size, zone_);
+  kv[1].key = msgpack::object("policy", zone_);
+  kv[1].val = msgpack::object(static_cast<uint8_t>(field->policy), zone_);
+  msgpack::object obj;
+  obj.type = msgpack::type::MAP;
+  obj.via.map.size = 2;
+  obj.via.map.ptr = kv;
+  return obj;
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const ScopeKind& field) {
@@ -686,10 +698,16 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
           break;
       }
       kwargs_msgs.push_back(make_pair(key, msgpack::object(pad_map, zone_)));
+    } else if (value.type() == typeid(LoopOrigin)) {
+      auto origin = AnyCast<LoopOrigin>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> origin_map;
+      origin_map["type"] = msgpack::object("LoopOrigin", zone_);
+      origin_map["value"] = msgpack::object(LoopOriginToString(origin), zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(origin_map, zone_)));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "TensorLayout, TileLayout, or PadValue, but got " +
+                      "TensorLayout, TileLayout, PadValue, or LoopOrigin, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

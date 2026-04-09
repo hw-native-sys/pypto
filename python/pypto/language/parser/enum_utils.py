@@ -48,6 +48,13 @@ SPLIT_MODE_MAP: dict[str, ir.SplitMode] = {
     "LEFT_RIGHT": ir.SplitMode.LEFT_RIGHT,
 }
 
+LOOP_ORIGIN_MAP: dict[str, ir.LoopOrigin] = {
+    "Original": ir.LoopOrigin.Original,
+    "ChunkOuter": ir.LoopOrigin.ChunkOuter,
+    "ChunkInner": ir.LoopOrigin.ChunkInner,
+    "ChunkRemainder": ir.LoopOrigin.ChunkRemainder,
+}
+
 FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "Opaque": ir.FunctionType.Opaque,
     "Orchestration": ir.FunctionType.Orchestration,
@@ -101,6 +108,7 @@ def extract_enum_value(
 
 __all__ = [
     "LEVEL_MAP",
+    "LOOP_ORIGIN_MAP",
     "ROLE_MAP",
     "SPLIT_MODE_MAP",
     "FUNCTION_TYPE_MAP",

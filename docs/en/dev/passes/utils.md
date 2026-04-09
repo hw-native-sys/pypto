@@ -32,7 +32,7 @@ Reusable utilities in `include/pypto/ir/transforms/utils/` for passes.
 | Statement | `var_defs` / `var_defs_ordered` | `var_assign_defs` | `var_uses` |
 | --------- | ------------------------------- | ----------------- | ---------- |
 | `AssignStmt` | `var_` | `var_` | RHS `value_` |
-| `ForStmt` | `loop_var_`, `return_vars_`, `iter_args_` | — | bounds, `chunk_size_`, initValues |
+| `ForStmt` | `loop_var_`, `return_vars_`, `iter_args_` | — | bounds, `chunk_config_->size`, initValues |
 | `WhileStmt` | `return_vars_`, `iter_args_` | — | `condition_`, initValues |
 | `IfStmt` | `return_vars_` | — | `condition_` |
 

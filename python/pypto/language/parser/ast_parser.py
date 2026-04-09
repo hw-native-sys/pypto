@@ -29,7 +29,7 @@ from .diagnostics import (
     UnsupportedFeatureError,
     concise_error_message,
 )
-from .enum_utils import LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .enum_utils import LEVEL_MAP, LOOP_ORIGIN_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
@@ -903,6 +903,7 @@ class ASTParser:
         prev_in_for_loop = self.in_for_loop
         prev_in_while_loop = self.in_while_loop
 
+        attrs_dict = range_args.get("attrs") or None
         with self.builder.for_loop(
             loop_var,
             range_args["start"],
@@ -912,6 +913,7 @@ class ASTParser:
             kind,
             chunk_size=chunk_expr,
             chunk_policy=chunk_policy_str,
+            attrs=attrs_dict,
         ) as loop:
             self.current_loop_builder = loop
             self.in_for_loop = True
@@ -980,6 +982,50 @@ class ASTParser:
                 hint="Use a positive integer for chunk: chunk=5",
             )
 
+    def _parse_range_keyword(self, keyword: ast.keyword, result: dict[str, Any]) -> None:
+        """Parse a single keyword argument from a pl.range() call."""
+        if keyword.arg == "init_values":
+            if isinstance(keyword.value, (ast.List, ast.Tuple)):
+                result["init_values"] = [self.parse_expression(elt) for elt in keyword.value.elts]
+            else:
+                raise ParserSyntaxError(
+                    "init_values must be a list or tuple",
+                    span=self.span_tracker.get_span(keyword.value),
+                    hint="Use a tuple for init_values: init_values=(var1, var2)",
+                )
+        elif keyword.arg == "chunk":
+            result["chunk"] = self.parse_expression(keyword.value)
+        elif keyword.arg == "chunk_policy":
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                _VALID_CHUNK_POLICIES = {"leading_full"}
+                if keyword.value.value not in _VALID_CHUNK_POLICIES:
+                    raise ParserSyntaxError(
+                        f"Unsupported chunk_policy: {keyword.value.value!r}",
+                        span=self.span_tracker.get_span(keyword.value),
+                        hint=f"Supported values: {', '.join(sorted(_VALID_CHUNK_POLICIES))}",
+                    )
+                result["chunk_policy"] = keyword.value.value
+            else:
+                raise ParserSyntaxError(
+                    "chunk_policy must be a string literal",
+                    span=self.span_tracker.get_span(keyword.value),
+                    hint='Use a string like chunk_policy="leading_full"',
+                )
+        elif keyword.arg == "attrs":
+            if not isinstance(keyword.value, ast.Dict):
+                raise ParserSyntaxError(
+                    "attrs must be a dict literal",
+                    span=self.span_tracker.get_span(keyword.value),
+                    hint='Use a dict like attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}',
+                )
+            result["attrs"] = self._parse_attrs_dict(keyword.value)
+        else:
+            raise ParserSyntaxError(
+                f"Unknown keyword argument '{keyword.arg}' in range()",
+                span=self.span_tracker.get_span(keyword),
+                hint="Supported keywords: init_values, chunk, chunk_policy, attrs",
+            )
+
     def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
         """Parse pl.range() call arguments.
 
@@ -989,7 +1035,6 @@ class ASTParser:
         Returns:
             Dictionary with start, stop, step, init_values
         """
-        # Parse positional arguments
         if len(call.args) < 1:
             raise ParserSyntaxError(
                 "pl.range() requires at least 1 argument (stop)",
@@ -997,72 +1042,67 @@ class ASTParser:
                 hint="Provide at least the stop value: pl.range(10) or pl.range(0, 10)",
             )
 
-        # Default values
         start = 0
         step = 1
 
         if len(call.args) == 1:
-            # range(stop)
             stop = self.parse_expression(call.args[0])
         elif len(call.args) == 2:
-            # range(start, stop)
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
         elif len(call.args) >= 3:
-            # range(start, stop, step)
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
             step = self.parse_expression(call.args[2])
 
-        # Parse keyword arguments
-        init_values = []
-        chunk = None
-        chunk_policy = "leading_full"
+        result: dict[str, Any] = {
+            "init_values": [],
+            "chunk": None,
+            "chunk_policy": "leading_full",
+            "attrs": {},
+        }
         for keyword in call.keywords:
-            if keyword.arg == "init_values":
-                # Parse list of init values
-                if isinstance(keyword.value, (ast.List, ast.Tuple)):
-                    for elt in keyword.value.elts:
-                        init_values.append(self.parse_expression(elt))
-                else:
-                    raise ParserSyntaxError(
-                        "init_values must be a list or tuple",
-                        span=self.span_tracker.get_span(keyword.value),
-                        hint="Use a tuple for init_values: init_values=(var1, var2)",
-                    )
-            elif keyword.arg == "chunk":
-                chunk = self.parse_expression(keyword.value)
-            elif keyword.arg == "chunk_policy":
-                if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                    _VALID_CHUNK_POLICIES = {"leading_full"}
-                    if keyword.value.value not in _VALID_CHUNK_POLICIES:
-                        raise ParserSyntaxError(
-                            f"Unsupported chunk_policy: {keyword.value.value!r}",
-                            span=self.span_tracker.get_span(keyword.value),
-                            hint=f"Supported values: {', '.join(sorted(_VALID_CHUNK_POLICIES))}",
-                        )
-                    chunk_policy = keyword.value.value
-                else:
-                    raise ParserSyntaxError(
-                        "chunk_policy must be a string literal",
-                        span=self.span_tracker.get_span(keyword.value),
-                        hint='Use a string like chunk_policy="leading_full"',
-                    )
+            self._parse_range_keyword(keyword, result)
+
+        result["start"] = start
+        result["stop"] = stop
+        result["step"] = step
+        return result
+
+    def _parse_attrs_dict(self, node: ast.Dict) -> dict[str, object]:
+        """Parse an attrs dict literal from AST.
+
+        Supports string keys with values that are:
+        - Integer/float/bool/string constants
+        - pl.LoopOrigin.<name> enum references
+        """
+        # Map of known enum attr keys to their (enum_map, enum_name, qualified) configs
+        _ENUM_ATTRS: dict[str, tuple[dict[str, object], str, str]] = {
+            "loop_origin": (LOOP_ORIGIN_MAP, "LoopOrigin", "pl.LoopOrigin"),
+        }
+
+        result: dict[str, object] = {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                raise ParserSyntaxError(
+                    "attrs keys must be string literals",
+                    span=self.span_tracker.get_span(key_node) if key_node else None,
+                )
+            key = key_node.value
+
+            if key in _ENUM_ATTRS:
+                enum_map, enum_name, qualified = _ENUM_ATTRS[key]
+                result[key] = extract_enum_value(value_node, enum_map, enum_name, qualified)
+            elif isinstance(value_node, ast.Constant):
+                result[key] = value_node.value
             else:
                 raise ParserSyntaxError(
-                    f"Unknown keyword argument '{keyword.arg}' in range()",
-                    span=self.span_tracker.get_span(keyword),
-                    hint="Supported keywords: init_values, chunk, chunk_policy",
+                    f"Unsupported value type for attrs key '{key}'",
+                    span=self.span_tracker.get_span(value_node),
+                    hint="Supported values: integer, float, bool, string,"
+                    " or enum (e.g., pl.LoopOrigin.ChunkOuter)",
                 )
-
-        return {
-            "start": start,
-            "stop": stop,
-            "step": step,
-            "init_values": init_values,
-            "chunk": chunk,
-            "chunk_policy": chunk_policy,
-        }
+        return result
 
     def _is_cond_call(self, stmt: ast.stmt) -> bool:
         """Check if statement is a pl.cond() call (without parsing).

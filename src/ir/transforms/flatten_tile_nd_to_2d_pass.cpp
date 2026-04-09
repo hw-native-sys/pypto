@@ -359,8 +359,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
       result.push_back(std::make_shared<ForStmt>(for_stmt->loop_var_, new_start, new_stop, new_step,
                                                  new_iter_args, new_body, new_return_vars, for_stmt->span_,
-                                                 for_stmt->kind_, for_stmt->chunk_size_,
-                                                 for_stmt->chunk_policy_, for_stmt->loop_origin_));
+                                                 for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_));
       continue;
     }
 

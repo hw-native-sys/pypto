@@ -40,9 +40,12 @@ Typical usage:
 from pypto.ir import TensorView, TileView
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    ChunkConfig,
+    ChunkPolicy,
     ForKind,
     FunctionType,
     Level,
+    LoopOrigin,
     MemorySpace,
     PadValue,
     PipeType,
@@ -331,9 +334,12 @@ __all__ = [
     "dim",
     "full",
     "scatter_update",
+    "ChunkConfig",
+    "ChunkPolicy",
     "FunctionType",
     "ForKind",
     "Level",
+    "LoopOrigin",
     "MemRef",
     "Role",
     "SplitMode",

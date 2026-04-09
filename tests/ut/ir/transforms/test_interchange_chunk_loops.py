@@ -60,7 +60,7 @@ class TestSingleParallelChunk:
         stmts = _top_level_stmts(After)
 
         outer_for = cast(ir.ForStmt, stmts[0])
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         assert outer_for.kind == ir.ForKind.Parallel
 
         # Outer body = SeqStmts [InCore, yield]
@@ -70,7 +70,7 @@ class TestSingleParallelChunk:
 
         # InCore body = inner ForStmt
         inner_for = cast(ir.ForStmt, scope_stmt.body)
-        assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
+        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
         assert inner_for.kind == ir.ForKind.Parallel
 
 
@@ -98,13 +98,13 @@ class TestNestedParallelChunks:
 
         # i_out
         i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         assert i_out.kind == ir.ForKind.Parallel
 
         # j_out inside i_out body
         i_out_body = _body_stmts(i_out.body)
         j_out = cast(ir.ForStmt, i_out_body[0])
-        assert j_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert j_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         assert j_out.kind == ir.ForKind.Parallel
 
         # InCore inside j_out body
@@ -114,13 +114,13 @@ class TestNestedParallelChunks:
 
         # i_in inside InCore
         i_in = cast(ir.ForStmt, scope.body)
-        assert i_in.loop_origin == ir.LoopOrigin.ChunkInner
+        assert i_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
         assert i_in.kind == ir.ForKind.Parallel
 
         # j_in inside i_in body
         i_in_body = _body_stmts(i_in.body)
         j_in = cast(ir.ForStmt, i_in_body[0])
-        assert j_in.loop_origin == ir.LoopOrigin.ChunkInner
+        assert j_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
         assert j_in.kind == ir.ForKind.Parallel
 
     def test_two_nested_parallel_with_iter_args(self):
@@ -319,7 +319,7 @@ class TestChunkWithRemainderInChain:
 
         # i_out (ChunkOuter, Parallel — preserves original kind from pl.parallel)
         i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         assert i_out.kind == ir.ForKind.Parallel
         assert len(i_out.iter_args) == 1
 
@@ -329,7 +329,7 @@ class TestChunkWithRemainderInChain:
         assert scope.scope_kind == ir.ScopeKind.InCore
 
         i_in = cast(ir.ForStmt, scope.body)
-        assert i_in.loop_origin == ir.LoopOrigin.ChunkInner
+        assert i_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
         assert len(i_in.iter_args) == 1
 
         # i_in's iter_arg should chain from i_out's iter_arg (not from original init)
@@ -380,18 +380,18 @@ class TestRemainderLoops:
 
         # Main chunk pair: i_out → j_out → InCore { i_in → j_in → body }
         i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         # Remainder: i_rem contains j_out→InCore{j_in} + InCore{j_rem}
         i_rem = cast(ir.ForStmt, stmts[1])
-        assert i_rem.loop_origin == ir.LoopOrigin.ChunkRemainder
+        assert i_rem.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
 
         # Inside i_rem body, look for InCore scopes
         i_rem_body = _body_stmts(i_rem.body)
 
         # j_out should have InCore wrapping j_in inside its body
         j_out_in_rem = cast(ir.ForStmt, i_rem_body[0])
-        assert j_out_in_rem.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert j_out_in_rem.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         j_out_body = _body_stmts(j_out_in_rem.body)
         assert cast(ir.ScopeStmt, j_out_body[0]).scope_kind == ir.ScopeKind.InCore
 
@@ -637,7 +637,7 @@ class TestNonChunkStatementsWrapping:
 
         # Second stmt should be ChunkOuter (interchanged)
         outer_for = cast(ir.ForStmt, stmts[1])
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
     def test_standalone_op_after_parallel_chunk(self):
         """Standalone op after parallel chunk: chunk interchanged, op wrapped separately."""
@@ -659,7 +659,7 @@ class TestNonChunkStatementsWrapping:
 
         # First stmt should be ChunkOuter (interchanged)
         outer_for = cast(ir.ForStmt, stmts[0])
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         # There should be an InCore wrapping the standalone mul op
         after_str = python_print(After)
@@ -713,9 +713,9 @@ class TestNonChunkStatementsWrapping:
 
         # Both should be ChunkOuter loops (interchanged)
         i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
         j_out = cast(ir.ForStmt, stmts[1])
-        assert j_out.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert j_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         # No extra InCore wrapping around the outers themselves
         assert "auto_incore" not in python_print(After)
@@ -759,7 +759,7 @@ class TestNonChunkStatementsWrapping:
         stmts = _top_level_stmts(After)
 
         # First stmt: ChunkOuter from parallel chunk (interchanged)
-        assert cast(ir.ForStmt, stmts[0]).loop_origin == ir.LoopOrigin.ChunkOuter
+        assert cast(ir.ForStmt, stmts[0]).attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         # Sequential chunk should be wrapped in InCore
         after_str = python_print(After)

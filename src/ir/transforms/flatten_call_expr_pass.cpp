@@ -251,8 +251,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
   pending_stmts_ = range_pending;
 
   return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                   op->return_vars_, op->span_, op->kind_, op->chunk_size_, op->chunk_policy_,
-                                   op->loop_origin_);
+                                   op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {

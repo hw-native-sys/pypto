@@ -70,8 +70,16 @@ class TestBasicChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
@@ -99,12 +107,26 @@ class TestBasicChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 1, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 1, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):  # noqa: E501
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):  # noqa: E501
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
-                    for i_0_rem, (x_iter_1_rem,) in pl.range(0, 2, 1, init_values=(x_iter_1_outer_rv,)):
+                    for i_0_rem, (x_iter_1_rem,) in pl.range(
+                        0,
+                        2,
+                        1,
+                        init_values=(x_iter_1_outer_rv,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
+                    ):  # noqa: E501
                         x_3_f: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_rem, 1.0)
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3_f)
                 return x_iter_1_rem_rv
@@ -131,8 +153,16 @@ class TestBasicChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 1, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 1, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
@@ -164,8 +194,16 @@ class TestChunkingWithStep:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
@@ -193,7 +231,9 @@ class TestChunkingWithStep:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_rem, (x_iter_1_rem,) in pl.range(0, 3, 1, init_values=(x_0,)):
+                    for i_0_rem, (x_iter_1_rem,) in pl.range(
+                        0, 3, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                    ):
                         x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_rem, 1.0)
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                 return x_iter_1_rem_rv
@@ -224,8 +264,16 @@ class TestChunkingWithKind:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.parallel(
+                            0,
+                            4,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
@@ -401,12 +449,12 @@ class TestLoopOrigin:
         inner_stmts = self._get_auto_incore_body_stmts(After)
         outer_for = cast(ir.ForStmt, inner_stmts[0])
 
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         # Inner loop is inside outer body
         outer_body_stmts = _body_stmts(outer_for.body)
         inner_for = cast(ir.ForStmt, outer_body_stmts[0])
-        assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
+        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
 
     def test_non_divisible_chunk_origin(self):
         """Verify outer=ChunkOuter, inner=ChunkInner, remainder=ChunkRemainder."""
@@ -428,13 +476,13 @@ class TestLoopOrigin:
         outer_for = cast(ir.ForStmt, inner_stmts[0])
         remainder_for = cast(ir.ForStmt, inner_stmts[1])
 
-        assert outer_for.loop_origin == ir.LoopOrigin.ChunkOuter
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
 
         outer_body_stmts = _body_stmts(outer_for.body)
         inner_for = cast(ir.ForStmt, outer_body_stmts[0])
-        assert inner_for.loop_origin == ir.LoopOrigin.ChunkInner
+        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
 
-        assert remainder_for.loop_origin == ir.LoopOrigin.ChunkRemainder
+        assert remainder_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
 
     def test_all_remainder_origin(self):
         """Verify remainder=ChunkRemainder when trip_count < chunk_size."""
@@ -453,7 +501,7 @@ class TestLoopOrigin:
 
         inner_stmts = self._get_auto_incore_body_stmts(After)
         remainder_for = cast(ir.ForStmt, inner_stmts[0])
-        assert remainder_for.loop_origin == ir.LoopOrigin.ChunkRemainder
+        assert remainder_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
 
     def test_non_chunked_loop_origin(self):
         """Verify regular (non-chunked) loops have Original origin."""
@@ -471,7 +519,7 @@ class TestLoopOrigin:
 
         stmts = self._get_func_body_stmts(After)
         for_stmt = cast(ir.ForStmt, stmts[0])
-        assert for_stmt.loop_origin == ir.LoopOrigin.Original
+        assert "loop_origin" not in for_stmt.attrs
 
 
 class TestNestedChunking:
@@ -503,10 +551,22 @@ class TestNestedChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.parallel(
+                            0,
+                            4,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             for j_0_rem, (x_iter_3_rem,) in pl.parallel(
-                                0, 1, 1, init_values=(x_iter_1_inner,)
+                                0,
+                                1,
+                                1,
+                                init_values=(x_iter_1_inner,),
+                                attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
                             ):
                                 x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_rem, 1.0)
                                 x_iter_3_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
@@ -537,13 +597,29 @@ class TestNestedChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.parallel(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.parallel(0, 4, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.parallel(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.parallel(
+                            0,
+                            4,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             for j_0_out, (x_iter_3_outer,) in pl.parallel(
-                                0, 3, 1, init_values=(x_iter_1_inner,)
+                                0,
+                                3,
+                                1,
+                                init_values=(x_iter_1_inner,),
+                                attrs={"loop_origin": pl.LoopOrigin.ChunkOuter},
                             ):
                                 for j_0_in, (x_iter_3_inner,) in pl.parallel(
-                                    0, 4, 1, init_values=(x_iter_3_outer,)
+                                    0,
+                                    4,
+                                    1,
+                                    init_values=(x_iter_3_outer,),
+                                    attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
                                 ):
                                     x_5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x_iter_3_inner, 1.0)
                                     x_iter_3_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
@@ -616,12 +692,22 @@ class TestDynamicChunking:
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_out, (x_outer,) in pl.range(0, n_0 // 4, 1, init_values=(x_0,)):
-                        for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
+                    for i_out, (x_outer,) in pl.range(
+                        0, n_0 // 4, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            0, 4, 1, init_values=(x_outer,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                             x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
-                    for i_rem, (x_rem,) in pl.range(0, n_0 % 4, 1, init_values=(x_outer_rv,)):
+                    for i_rem, (x_rem,) in pl.range(
+                        0,
+                        n_0 % 4,
+                        1,
+                        init_values=(x_outer_rv,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
+                    ):
                         x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
@@ -657,13 +743,25 @@ class TestDynamicChunking:
                 hi_0: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_out, (x_outer,) in pl.range(0, pl.max(hi_0 - lo_0, 0) // 4, 1, init_values=(x_0,)):
-                        for i_in, (x_inner,) in pl.range(0, 4, 1, init_values=(x_outer,)):
+                    for i_out, (x_outer,) in pl.range(
+                        0,
+                        pl.max(hi_0 - lo_0, 0) // 4,
+                        1,
+                        init_values=(x_0,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkOuter},
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            0, 4, 1, init_values=(x_outer,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                             x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                     for i_rem, (x_rem,) in pl.range(
-                        0, pl.max(hi_0 - lo_0, 0) % 4, 1, init_values=(x_outer_rv,)
+                        0,
+                        pl.max(hi_0 - lo_0, 0) % 4,
+                        1,
+                        init_values=(x_outer_rv,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
                     ):
                         x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
@@ -692,12 +790,22 @@ class TestDynamicChunking:
                 self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_out, (x_outer,) in pl.parallel(0, n_0 // 4, 1, init_values=(x_0,)):
-                        for i_in, (x_inner,) in pl.parallel(0, 4, 1, init_values=(x_outer,)):
+                    for i_out, (x_outer,) in pl.parallel(
+                        0, n_0 // 4, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.parallel(
+                            0, 4, 1, init_values=(x_outer,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                             x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
-                    for i_rem, (x_rem,) in pl.parallel(0, n_0 % 4, 1, init_values=(x_outer_rv,)):
+                    for i_rem, (x_rem,) in pl.parallel(
+                        0,
+                        n_0 % 4,
+                        1,
+                        init_values=(x_outer_rv,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
+                    ):
                         x_4: pl.Tensor[[64], pl.FP32] = pl.add(x_rem, 1.0)
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
@@ -724,8 +832,16 @@ class TestDynamicChunking:
             @pl.function(strict_ssa=True)
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i_0_out, (x_iter_1_outer,) in pl.range(0, 2, 1, init_values=(x_0,)):
-                        for i_0_in, (x_iter_1_inner,) in pl.range(0, 5, 1, init_values=(x_iter_1_outer,)):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
                             x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
                             x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)

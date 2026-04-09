@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -35,6 +36,8 @@
 
 namespace pypto {
 namespace ir {
+
+using Attrs = std::vector<std::pair<std::string, std::any>>;
 
 namespace {
 
@@ -150,7 +153,8 @@ static bool ContainsChunkLoop(const StmtPtr& stmt) {
   switch (kind) {
     case ObjectKind::ForStmt: {
       auto for_stmt = std::static_pointer_cast<const ForStmt>(stmt);
-      return for_stmt->loop_origin_ != LoopOrigin::Original || ContainsChunkLoop(for_stmt->body_);
+      return for_stmt->GetAttr<LoopOrigin>("loop_origin") != LoopOrigin::Original ||
+             ContainsChunkLoop(for_stmt->body_);
     }
     case ObjectKind::SeqStmts: {
       auto seq = std::static_pointer_cast<const SeqStmts>(stmt);
@@ -212,8 +216,8 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
       auto new_body = WrapNonIncoreStatementsInInCore(fs->body_, span, split);
       if (new_body.get() != fs->body_.get()) {
         return std::make_shared<ForStmt>(fs->loop_var_, fs->start_, fs->stop_, fs->step_, fs->iter_args_,
-                                         new_body, fs->return_vars_, fs->span_, fs->kind_, fs->chunk_size_,
-                                         fs->chunk_policy_, fs->loop_origin_);
+                                         new_body, fs->return_vars_, fs->span_, fs->kind_, fs->chunk_config_,
+                                         fs->attrs_);
       }
     }
     return s;
@@ -316,11 +320,12 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    if (op->loop_origin_ == LoopOrigin::ChunkOuter) {
+    auto loop_origin = op->GetAttr<LoopOrigin>("loop_origin");
+    if (loop_origin == LoopOrigin::ChunkOuter) {
       return HandleChunkOuter(op);
     }
 
-    if (op->loop_origin_ == LoopOrigin::ChunkRemainder) {
+    if (loop_origin == LoopOrigin::ChunkRemainder) {
       return HandleChunkRemainder(op);
     }
 
@@ -382,7 +387,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
    */
   static std::vector<ChainEntry> CollectChunkChain(const ForStmtPtr& start) {
     std::vector<ChainEntry> chain;
-    chain.push_back({start, start->loop_origin_});
+    chain.push_back({start, start->GetAttr<LoopOrigin>("loop_origin")});
 
     StmtPtr body = start->body_;
 
@@ -416,9 +421,10 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       }
 
       if (!next_for) break;
-      if (next_for->loop_origin_ == LoopOrigin::Original) break;
+      auto next_origin = next_for->GetAttr<LoopOrigin>("loop_origin");
+      if (next_origin == LoopOrigin::Original) break;
 
-      chain.push_back({next_for, next_for->loop_origin_});
+      chain.push_back({next_for, next_origin});
       body = next_for->body_;
     }
 
@@ -517,8 +523,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     }
 
     return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, new_iter_args, new_body,
-                                     op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                     op->chunk_policy_, op->loop_origin_);
+                                     op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
   }
 
   /**
@@ -531,8 +536,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
                                                std::optional<SplitMode> split = std::nullopt) {
     auto should_wrap = [](const StmtPtr& s) -> bool {
       auto fs = std::dynamic_pointer_cast<const ForStmt>(s);
-      return fs && fs->loop_origin_ == LoopOrigin::ChunkRemainder && fs->kind_ == ForKind::Parallel &&
-             !ContainsInCoreScope(fs->body_);
+      return fs && fs->GetAttr<LoopOrigin>("loop_origin") == LoopOrigin::ChunkRemainder &&
+             fs->kind_ == ForKind::Parallel && !ContainsInCoreScope(fs->body_);
     };
 
     auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
@@ -597,8 +602,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       const auto& inner = inners[i];
       current = std::make_shared<ForStmt>(inner->loop_var_, inner->start_, inner->stop_, inner->step_,
                                           std::vector<IterArgPtr>{}, current, std::vector<VarPtr>{},
-                                          inner->span_, inner->kind_, std::nullopt, ChunkPolicy::LeadingFull,
-                                          LoopOrigin::ChunkInner);
+                                          inner->span_, inner->kind_, std::nullopt,
+                                          Attrs{{"loop_origin", LoopOrigin::ChunkInner}});
     }
 
     // Wrap in InCore — skip if a parent chain already provides InCore context
@@ -612,8 +617,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       const auto& outer = outers[i];
       current = std::make_shared<ForStmt>(outer->loop_var_, outer->start_, outer->stop_, outer->step_,
                                           std::vector<IterArgPtr>{}, current, std::vector<VarPtr>{},
-                                          outer->span_, outer->kind_, std::nullopt, ChunkPolicy::LeadingFull,
-                                          LoopOrigin::ChunkOuter);
+                                          outer->span_, outer->kind_, std::nullopt,
+                                          Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
     }
 
     return current;
@@ -698,7 +703,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
     for (int i = static_cast<int>(total_loops) - 1; i >= 0; --i) {
       const auto& orig_loop = reordered[i];
-      bool is_inner = (orig_loop->loop_origin_ == LoopOrigin::ChunkInner);
+      bool is_inner = (orig_loop->GetAttr<LoopOrigin>("loop_origin") == LoopOrigin::ChunkInner);
 
       // Build yield for this loop from the inner loop's return_vars
       // (or body's yield values for the innermost)
@@ -723,12 +728,12 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       current = std::make_shared<ForStmt>(
           orig_loop->loop_var_, orig_loop->start_, orig_loop->stop_, orig_loop->step_, new_iter_args[i],
           current, new_return_vars[i], orig_loop->span_, orig_loop->kind_, std::nullopt,
-          ChunkPolicy::LeadingFull, is_inner ? LoopOrigin::ChunkInner : LoopOrigin::ChunkOuter);
+          Attrs{{"loop_origin", is_inner ? LoopOrigin::ChunkInner : LoopOrigin::ChunkOuter}});
 
       // Insert InCore scope right after building all inners (at the boundary).
       // Skip if a parent chain already provides InCore context.
       if (!prev_incore && !is_inner && i + 1 < static_cast<int>(total_loops) &&
-          reordered[i + 1]->loop_origin_ == LoopOrigin::ChunkInner) {
+          reordered[i + 1]->GetAttr<LoopOrigin>("loop_origin") == LoopOrigin::ChunkInner) {
         // The current ForStmt body already contains the inner loops.
         // We need to wrap the inner loop nest (current's body) in InCore.
         // But current IS the outermost outer that contains inners already.
@@ -763,7 +768,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
           current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
                                               outer_for->step_, outer_for->iter_args_, new_body,
                                               outer_for->return_vars_, outer_for->span_, outer_for->kind_,
-                                              std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+                                              std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
         } else {
           // No yield, wrap entire body
           auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_body, span, std::nullopt,
@@ -771,7 +776,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
           current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
                                               outer_for->step_, outer_for->iter_args_, incore_scope,
                                               outer_for->return_vars_, outer_for->span_, outer_for->kind_,
-                                              std::nullopt, ChunkPolicy::LeadingFull, LoopOrigin::ChunkOuter);
+                                              std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
         }
       }
     }

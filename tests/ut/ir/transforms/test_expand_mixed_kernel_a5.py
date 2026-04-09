@@ -105,7 +105,7 @@ def _strip_auto_tfree_from_stmt(stmt):
             stmt.kind,
             stmt.chunk_size,
             stmt.chunk_policy,
-            stmt.loop_origin,
+            stmt.attrs,
         )
     if isinstance(stmt, ir.IfStmt):
         new_then = _strip_auto_tfree_from_body(stmt.then_body)

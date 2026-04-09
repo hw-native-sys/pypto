@@ -478,24 +478,24 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
-  std::optional<ExprPtr> new_chunk_size = op->chunk_size_;
-  bool chunk_size_changed = false;
-  if (op->chunk_size_.has_value()) {
-    auto new_cs = ExprFunctor<ExprPtr>::VisitExpr(*op->chunk_size_);
+  std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
+  bool chunk_config_changed = false;
+  if (op->chunk_config_.has_value()) {
+    auto new_cs = ExprFunctor<ExprPtr>::VisitExpr(op->chunk_config_->size);
     INTERNAL_CHECK(new_cs) << "ForStmt chunk_size mutated to null";
-    if (new_cs.get() != (*op->chunk_size_).get()) {
-      new_chunk_size = new_cs;
-      chunk_size_changed = true;
+    if (new_cs.get() != op->chunk_config_->size.get()) {
+      new_chunk_config = ChunkConfig{new_cs, op->chunk_config_->policy};
+      chunk_config_changed = true;
     }
   }
 
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
       new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || iter_args_changed ||
-      body_changed || return_vars_changed || chunk_size_changed) {
+      body_changed || return_vars_changed || chunk_config_changed) {
     return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
                                            std::move(new_step), std::move(new_iter_args), std::move(new_body),
                                            std::move(new_return_vars), op->span_, op->kind_,
-                                           std::move(new_chunk_size), op->chunk_policy_, op->loop_origin_);
+                                           std::move(new_chunk_config), op->attrs_);
   }
   return op;
 }

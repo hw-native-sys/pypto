@@ -151,7 +151,7 @@ Each generated loop is tagged with a `LoopOrigin` annotation indicating how it w
 | `ChunkInner` | Inner loop iterating within a chunk |
 | `ChunkRemainder` | Remainder loop for leftover iterations |
 
-Access via `for_stmt.loop_origin` (Python) or `for_stmt->loop_origin_` (C++). Downstream passes can use this to distinguish generated loops from user-written ones.
+Access via `for_stmt.attrs.get("loop_origin")` (Python) or `for_stmt->GetAttr<LoopOrigin>("loop_origin")` (C++). Downstream passes can use this to distinguish generated loops from user-written ones.
 
 ## Pipeline Position
 

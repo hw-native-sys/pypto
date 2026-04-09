@@ -349,16 +349,16 @@ class StructuralEqualImpl {
     return true;
   }
 
-  [[nodiscard]] result_type VisitLeafField(const LoopOrigin& lhs, const LoopOrigin& rhs) {
-    if (lhs != rhs) {
+  result_type VisitLeafField(const std::optional<ChunkConfig>& lhs, const std::optional<ChunkConfig>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
       if constexpr (AssertMode) {
-        std::ostringstream msg;
-        msg << "LoopOrigin mismatch (" << LoopOriginToString(lhs) << " != " << LoopOriginToString(rhs) << ")";
-        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+        ThrowMismatch("ChunkConfig presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
     }
-    return true;
+    if (!lhs.has_value()) return true;
+    if (!VisitIRNodeField(lhs->size, rhs->size)) return false;
+    return VisitLeafField(lhs->policy, rhs->policy);
   }
 
   [[nodiscard]] result_type VisitLeafField(const ScopeKind& lhs, const ScopeKind& rhs) {
@@ -529,6 +529,9 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(MemorySpace)) {
         values_equal = (AnyCast<MemorySpace>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
                         AnyCast<MemorySpace>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(LoopOrigin)) {
+        values_equal = (AnyCast<LoopOrigin>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<LoopOrigin>(rhs_val, "comparing kwarg: " + lhs[i].first));
       }
       if (!values_equal) {
         if constexpr (AssertMode) {

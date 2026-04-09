@@ -794,6 +794,23 @@ class ChunkPolicy(enum.Enum):
     LeadingFull = ...
     """Full chunks first, smaller remainder at end."""
 
+class ChunkConfig:
+    """Chunk configuration for parallel loop splitting."""
+
+    size: Final[Expr]
+    """Chunk size expression."""
+
+    policy: Final[ChunkPolicy]
+    """Chunk distribution policy."""
+
+    def __init__(self, size: Expr, policy: ChunkPolicy = ChunkPolicy.LeadingFull) -> None:
+        """Create a chunk configuration.
+
+        Args:
+            size: Chunk size expression
+            policy: Chunk distribution policy (default: LeadingFull)
+        """
+
 class LoopOrigin(enum.Enum):
     """Loop origin classification.
 
@@ -1661,14 +1678,17 @@ class ForStmt(Stmt):
     kind: Final[ForKind]
     """Loop kind (Sequential, Parallel, or Unroll)."""
 
+    chunk_config: Final[ChunkConfig | None]
+    """Chunk configuration (None = no chunking)."""
+
     chunk_size: Final[Expr | None]
-    """Chunk size for loop chunking (None = no chunking)."""
+    """Chunk size expression (None if no chunking). Convenience for chunk_config.size."""
 
     chunk_policy: Final[ChunkPolicy]
-    """Chunk distribution policy."""
+    """Chunk distribution policy. Convenience for chunk_config.policy."""
 
-    loop_origin: Final[LoopOrigin]
-    """Loop origin (Original, ChunkOuter, ChunkInner, or ChunkRemainder)."""
+    attrs: Final[dict[str, object]]
+    """Loop-level attributes (key-value metadata)."""
 
     def __init__(
         self,
@@ -1683,7 +1703,7 @@ class ForStmt(Stmt):
         kind: ForKind = ForKind.Sequential,
         chunk_size: Expr | None = None,
         chunk_policy: ChunkPolicy = ChunkPolicy.LeadingFull,
-        loop_origin: LoopOrigin = LoopOrigin.Original,
+        attrs: dict[str, object] | list[tuple[str, object]] | None = None,
     ) -> None:
         """Create a for loop statement.
 
@@ -1699,7 +1719,7 @@ class ForStmt(Stmt):
             kind: Loop kind (default: Sequential)
             chunk_size: Optional chunk size for loop chunking
             chunk_policy: Chunk distribution policy (default: LeadingFull)
-            loop_origin: Loop origin classification (default: Original)
+            attrs: Loop-level attributes (default: empty)
         """
 
 class WhileStmt(Stmt):
@@ -2411,7 +2431,7 @@ class IRBuilder:
         kind: ForKind = ForKind.Sequential,
         chunk_size: Expr | None = None,
         chunk_policy: ChunkPolicy = ChunkPolicy.LeadingFull,
-        loop_origin: LoopOrigin = LoopOrigin.Original,
+        attrs: dict[str, object] | list[tuple[str, object]] | None = None,
     ) -> None:
         """Begin building a for loop.
 
@@ -2424,7 +2444,7 @@ class IRBuilder:
             kind: Loop kind (default: Sequential)
             chunk_size: Optional chunk size for loop chunking
             chunk_policy: Chunk distribution policy (default: LeadingFull)
-            loop_origin: Loop origin classification (default: Original)
+            attrs: Loop-level attributes (default: empty)
         """
 
     def add_iter_arg(self, iter_arg: IterArg) -> None:

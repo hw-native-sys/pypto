@@ -357,8 +357,7 @@ class FuseCreateAssembleMutator : public IRMutator {
 
     return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
                                      new_iter_args, new_body, new_return_vars, for_stmt->span_,
-                                     for_stmt->kind_, for_stmt->chunk_size_, for_stmt->chunk_policy_,
-                                     for_stmt->loop_origin_);
+                                     for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_);
   }
 
   StmtPtr StripPassThroughWhileIterArgs(const StmtPtr& stmt) {

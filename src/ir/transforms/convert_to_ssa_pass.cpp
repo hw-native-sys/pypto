@@ -151,7 +151,7 @@ static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
     uc.CollectExpr(op->stop_);
     uc.CollectExpr(op->step_);
     for (const auto& ia : op->iter_args_) uc.CollectExpr(ia->initValue_);
-    if (op->chunk_size_.has_value()) uc.CollectExpr(*op->chunk_size_);
+    if (op->chunk_config_.has_value()) uc.CollectExpr(op->chunk_config_->size);
     auto body_li = ComputeStmtLiveIn(op->body_);
     body_li.erase(op->loop_var_.get());
     for (const auto& ia : op->iter_args_) body_li.erase(ia.get());
@@ -562,7 +562,7 @@ class SSAConverter {
     if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
 
     return std::make_shared<ForStmt>(new_lv, new_start, new_stop, new_step, ias, body, all_rvs, op->span_,
-                                     op->kind_, op->chunk_size_, op->chunk_policy_, op->loop_origin_);
+                                     op->kind_, op->chunk_config_, op->attrs_);
   }
 
   // ── WhileStmt ──────────────────────────────────────────────────────

@@ -827,10 +827,10 @@ class SyncInserter {
     auto normalized_body = EnsureSeqStmts(for_stmt->body_);
     auto new_body = ApplyInsertions(normalized_body, path);
     path.pop_back();
-    return std::make_shared<const ForStmt>(
-        for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
-        new_body, for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_, for_stmt->chunk_size_,
-        for_stmt->chunk_policy_, for_stmt->loop_origin_);
+    return std::make_shared<const ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_,
+                                           for_stmt->step_, for_stmt->iter_args_, new_body,
+                                           for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
+                                           for_stmt->chunk_config_, for_stmt->attrs_);
   }
 };
 

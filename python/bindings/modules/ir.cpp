@@ -126,6 +126,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, static_cast<int>(nb::cast<SplitMode>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
+    } else if (nb::isinstance<LoopOrigin>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<LoopOrigin>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -139,6 +141,25 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     }
   }
   return kwargs;
+}
+
+std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::object& attrs_or_none) {
+  if (attrs_or_none.is_none()) return {};
+  if (nb::isinstance<nb::dict>(attrs_or_none)) {
+    return ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
+  }
+  if (nb::isinstance<nb::list>(attrs_or_none)) {
+    std::vector<std::pair<std::string, std::any>> attrs;
+    for (auto item : nb::cast<nb::list>(attrs_or_none)) {
+      auto tup = nb::cast<nb::tuple>(item);
+      nb::dict d;
+      d[tup[0]] = tup[1];
+      auto converted = ConvertKwargsDict(d);
+      attrs.push_back(converted[0]);
+    }
+    return attrs;
+  }
+  throw pypto::TypeError("attrs must be a dict, list of (key, value) tuples, or None");
 }
 
 /// Conditionally apply the registered format callback.
@@ -816,6 +837,13 @@ void BindIR(nb::module_& m) {
       .value("LeadingFull", ChunkPolicy::LeadingFull, "Full chunks first, smaller remainder at end")
       .export_values();
 
+  // ChunkConfig struct (must be before ForStmt which uses it)
+  nb::class_<ChunkConfig>(ir, "ChunkConfig", "Chunk configuration for parallel loop splitting")
+      .def(nb::init<ExprPtr, ChunkPolicy>(), nb::arg("size"), nb::arg("policy") = ChunkPolicy::LeadingFull,
+           "Create a chunk configuration")
+      .def_ro("size", &ChunkConfig::size, "Chunk size expression")
+      .def_ro("policy", &ChunkConfig::policy, "Chunk distribution policy");
+
   // LoopOrigin enum (must be before ForStmt which uses it)
   nb::enum_<LoopOrigin>(ir, "LoopOrigin", "Loop origin classification")
       .value("Original", LoopOrigin::Original, "Regular loop (default)")
@@ -827,15 +855,51 @@ void BindIR(nb::module_& m) {
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
-  for_stmt_class.def(nb::init<const VarPtr&, const ExprPtr&, const ExprPtr&, const ExprPtr&,
-                              const std::vector<IterArgPtr>&, const StmtPtr&, const std::vector<VarPtr>&,
-                              const Span&, ForKind, const std::optional<ExprPtr>&, ChunkPolicy, LoopOrigin>(),
-                     nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"),
-                     nb::arg("iter_args"), nb::arg("body"), nb::arg("return_vars"), nb::arg("span"),
-                     nb::arg("kind") = ForKind::Sequential, nb::arg("chunk_size") = nb::none(),
-                     nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
-                     nb::arg("loop_origin") = LoopOrigin::Original, "Create a for loop statement");
+  for_stmt_class.def(
+      "__init__",
+      [](ForStmt* self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
+         const ExprPtr& step, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
+         const std::vector<VarPtr>& return_vars, const Span& span, ForKind kind,
+         const std::optional<ExprPtr>& chunk_size, ChunkPolicy chunk_policy,
+         const nb::object& attrs_or_none) {
+        auto attrs = ConvertAttrsFromPython(attrs_or_none);
+        std::optional<ChunkConfig> chunk_config =
+            chunk_size.has_value() ? std::optional{ChunkConfig{*chunk_size, chunk_policy}} : std::nullopt;
+        new (self) ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
+                           std::move(chunk_config), std::move(attrs));
+      },
+      nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
+      nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
+      nb::arg("chunk_size") = nb::none(), nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
+      nb::arg("attrs") = nb::none(), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
+  // Custom attrs property: convert vector<pair<string, any>> to Python dict
+  for_stmt_class.def_prop_ro(
+      "attrs",
+      [](const ForStmtPtr& self) {
+        nb::dict result;
+        for (const auto& [key, value] : self->attrs_) {
+          result[key.c_str()] = AnyToPyObject<int, bool, std::string, double, float, DataType, MemorySpace,
+                                              TensorLayout, TileLayout, PadValue, LoopOrigin>(value, key);
+        }
+        return result;
+      },
+      "Loop-level attributes as a dictionary");
+  // Convenience properties for chunk_size and chunk_policy (derived from chunk_config)
+  for_stmt_class.def_prop_ro(
+      "chunk_size",
+      [](const ForStmtPtr& self) -> std::optional<ExprPtr> {
+        if (self->chunk_config_.has_value()) return self->chunk_config_->size;
+        return std::nullopt;
+      },
+      "Chunk size expression (None if no chunking)");
+  for_stmt_class.def_prop_ro(
+      "chunk_policy",
+      [](const ForStmtPtr& self) -> ChunkPolicy {
+        if (self->chunk_config_.has_value()) return self->chunk_config_->policy;
+        return ChunkPolicy::LeadingFull;
+      },
+      "Chunk distribution policy");
 
   // WhileStmt - const shared_ptr
   auto while_stmt_class =
@@ -986,11 +1050,7 @@ void BindIR(nb::module_& m) {
             param_dirs.push_back(ParamDirection::In);
           }
         }
-        // Build attrs vector from attrs dict
-        std::vector<std::pair<std::string, std::any>> attrs;
-        if (!attrs_or_none.is_none()) {
-          attrs = ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
-        }
+        auto attrs = ConvertAttrsFromPython(attrs_or_none);
         new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
                             type, level, role, std::move(attrs));
       },

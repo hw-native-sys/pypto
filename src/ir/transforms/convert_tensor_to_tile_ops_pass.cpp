@@ -667,10 +667,10 @@ class TypePropagatingMutator : public IRMutator {
     return UpdateLoopReturnVars(
         new_for->iter_args_, new_for->return_vars_, op->return_vars_,
         [&](auto new_rv) {
-          return std::make_shared<ForStmt>(
-              new_for->loop_var_, new_for->start_, new_for->stop_, new_for->step_, new_for->iter_args_,
-              new_for->body_, std::move(new_rv), new_for->span_, new_for->kind_, new_for->chunk_size_,
-              new_for->chunk_policy_, new_for->loop_origin_);
+          return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_,
+                                           new_for->step_, new_for->iter_args_, new_for->body_,
+                                           std::move(new_rv), new_for->span_, new_for->kind_,
+                                           new_for->chunk_config_, new_for->attrs_);
         },
         result);
   }
@@ -988,8 +988,8 @@ class VarUseVisitor : public IRVisitor {
     if (found_) return;
     VisitExpr(op->step_);
     if (found_) return;
-    if (op->chunk_size_.has_value()) {
-      VisitExpr(*op->chunk_size_);
+    if (op->chunk_config_.has_value()) {
+      VisitExpr(op->chunk_config_->size);
       if (found_) return;
     }
     for (const auto& iter_arg : op->iter_args_) {
@@ -1319,8 +1319,8 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
     if (auto step_call = As<Call>(for_stmt->step_)) {
       AnalyzeCallAccess(step_call, origin_map, has_read, has_write);
     }
-    if (for_stmt->chunk_size_.has_value()) {
-      if (auto chunk_call = As<Call>(*for_stmt->chunk_size_)) {
+    if (for_stmt->chunk_config_.has_value()) {
+      if (auto chunk_call = As<Call>(for_stmt->chunk_config_->size)) {
         AnalyzeCallAccess(chunk_call, origin_map, has_read, has_write);
       }
     }
@@ -1521,7 +1521,7 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
                                   std::vector<IterArgPtr>{new_iter_arg},
                                   SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_),
                                   std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_,
-                                  for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_);
+                                  for_stmt->chunk_config_, for_stmt->attrs_);
 
     std::optional<size_t> dead_init_stmt_index;
     if (auto init_var = As<Var>(old_iter_arg->initValue_)) {

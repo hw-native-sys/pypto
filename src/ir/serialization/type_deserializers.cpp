@@ -189,6 +189,11 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
         } else {
           throw TypeError("Unknown PadValue: " + value_str + " for kwarg: " + key);
         }
+      } else if (type_name == "LoopOrigin") {
+        if (value_str.empty()) {
+          throw TypeError("Missing 'value' field for LoopOrigin kwarg: " + key);
+        }
+        kwargs.emplace_back(key, StringToLoopOrigin(value_str));
       } else {
         // Try to deserialize as DataType
         try {
@@ -461,29 +466,38 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     kind = static_cast<ForKind>(kind_obj->via.u64);
   }
 
-  // Deserialize chunk_size (optional)
-  std::optional<ExprPtr> chunk_size = std::nullopt;
-  auto chunk_size_obj = GetOptionalFieldObj(fields_obj, "chunk_size", ctx);
-  if (chunk_size_obj.has_value() && chunk_size_obj->type != msgpack::type::NIL) {
-    chunk_size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*chunk_size_obj, zone));
+  // Deserialize chunk_config (optional map with "size" and "policy")
+  std::optional<ChunkConfig> chunk_config = std::nullopt;
+  auto chunk_config_obj = GetOptionalFieldObj(fields_obj, "chunk_config", ctx);
+  if (chunk_config_obj.has_value() && chunk_config_obj->type == msgpack::type::MAP) {
+    auto size_obj = ctx.GetFieldObj(*chunk_config_obj, "size");
+    auto chunk_size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(size_obj, zone));
+    ChunkPolicy chunk_policy = ChunkPolicy::LeadingFull;
+    auto policy_obj = GetOptionalFieldObj(*chunk_config_obj, "policy", ctx);
+    if (policy_obj.has_value()) {
+      chunk_policy = static_cast<ChunkPolicy>(policy_obj->via.u64);
+    }
+    chunk_config = ChunkConfig{chunk_size, chunk_policy};
   }
 
-  // Deserialize chunk_policy with backward compatibility (defaults to LeadingFull)
-  ChunkPolicy chunk_policy = ChunkPolicy::LeadingFull;
-  auto chunk_policy_obj = GetOptionalFieldObj(fields_obj, "chunk_policy", ctx);
-  if (chunk_policy_obj.has_value()) {
-    chunk_policy = static_cast<ChunkPolicy>(chunk_policy_obj->via.u64);
-  }
-
-  // Deserialize loop_origin with backward compatibility (defaults to Original)
-  LoopOrigin loop_origin = LoopOrigin::Original;
-  auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
-  if (loop_origin_obj.has_value()) {
-    loop_origin = static_cast<LoopOrigin>(loop_origin_obj->via.u64);
+  // Deserialize attrs with backward compatibility for old loop_origin field
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_obj, "attrs");
+  } else {
+    // Legacy backward compat: convert old "loop_origin" field to attrs
+    auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
+    if (loop_origin_obj.has_value()) {
+      auto origin = static_cast<LoopOrigin>(loop_origin_obj->via.u64);
+      if (origin != LoopOrigin::Original) {
+        attrs.emplace_back("loop_origin", origin);
+      }
+    }
   }
 
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
-                                   chunk_size, chunk_policy, loop_origin);
+                                   chunk_config, std::move(attrs));
 }
 
 // Deserialize WhileStmt

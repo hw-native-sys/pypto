@@ -42,6 +42,17 @@ namespace python {
 std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nanobind::dict& kwargs_dict);
 
 /**
+ * @brief Convert a Python dict or list-of-tuples to a vector of (key, value) pairs
+ *
+ * Accepts either a dict or a list of (key, value) tuples. Returns empty vector for None.
+ * Used for attrs parameters on ForStmt, ScopeStmt, etc.
+ *
+ * @param attrs_or_none Python object (dict, list, or None)
+ * @return Vector of key-value pairs
+ */
+std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nanobind::object& attrs_or_none);
+
+/**
  * @brief Register error exception types and exception translator
  *
  * This function registers all PyPTO error classes with Python and sets up

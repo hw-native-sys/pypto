@@ -12,6 +12,8 @@
 #ifndef PYPTO_IR_STMT_H_
 #define PYPTO_IR_STMT_H_
 
+#include <algorithm>
+#include <any>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -29,6 +31,7 @@ enum class Role : uint8_t;
 }  // namespace ir
 }  // namespace pypto
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
@@ -83,6 +86,17 @@ inline ChunkPolicy StringToChunkPolicy(const std::string& str) {
   }
   throw pypto::TypeError("Unknown ChunkPolicy: " + str);
 }
+
+/**
+ * @brief Chunk configuration for parallel loop splitting.
+ *
+ * Groups chunk_size and chunk_policy which always appear together.
+ * Only meaningful on parallel (chunked) loops.
+ */
+struct ChunkConfig {
+  ExprPtr size;                                   ///< Chunk size expression
+  ChunkPolicy policy = ChunkPolicy::LeadingFull;  ///< Distribution policy
+};
 
 /**
  * @brief Loop origin classification for tracking how a loop was generated
@@ -499,14 +513,13 @@ class ForStmt : public Stmt {
    * @param return_vars Return variables (capture final values, accessible after loop)
    * @param span Source location
    * @param kind Loop kind (Sequential, Parallel, or Unroll; default: Sequential)
-   * @param chunk_size Optional chunk size for loop chunking (nullopt = no chunking)
-   * @param chunk_policy Chunk distribution policy (default: LeadingFull)
-   * @param loop_origin Loop origin classification (default: Original)
+   * @param chunk_config Optional chunk configuration (nullopt = no chunking)
+   * @param attrs Loop-level attributes (key-value metadata, default: empty)
    */
   ForStmt(VarPtr loop_var, ExprPtr start, ExprPtr stop, ExprPtr step, std::vector<IterArgPtr> iter_args,
           StmtPtr body, std::vector<VarPtr> return_vars, Span span, ForKind kind = ForKind::Sequential,
-          std::optional<ExprPtr> chunk_size = std::nullopt,
-          ChunkPolicy chunk_policy = ChunkPolicy::LeadingFull, LoopOrigin loop_origin = LoopOrigin::Original)
+          std::optional<ChunkConfig> chunk_config = std::nullopt,
+          std::vector<std::pair<std::string, std::any>> attrs = {})
       : Stmt(std::move(span)),
         loop_var_(std::move(loop_var)),
         start_(std::move(start)),
@@ -516,9 +529,8 @@ class ForStmt : public Stmt {
         body_(std::move(body)),
         return_vars_(std::move(return_vars)),
         kind_(kind),
-        chunk_size_(std::move(chunk_size)),
-        chunk_policy_(chunk_policy),
-        loop_origin_(loop_origin) {}
+        chunk_config_(std::move(chunk_config)),
+        attrs_(std::move(attrs)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ForStmt; }
   [[nodiscard]] std::string TypeName() const override { return "ForStmt"; }
@@ -538,9 +550,8 @@ class ForStmt : public Stmt {
                                           reflection::UsualField(&ForStmt::body_, "body"),
                                           reflection::DefField(&ForStmt::return_vars_, "return_vars"),
                                           reflection::UsualField(&ForStmt::kind_, "kind"),
-                                          reflection::UsualField(&ForStmt::chunk_size_, "chunk_size"),
-                                          reflection::UsualField(&ForStmt::chunk_policy_, "chunk_policy"),
-                                          reflection::IgnoreField(&ForStmt::loop_origin_, "loop_origin")));
+                                          reflection::UsualField(&ForStmt::chunk_config_, "chunk_config"),
+                                          reflection::UsualField(&ForStmt::attrs_, "attrs")));
   }
 
  public:
@@ -552,9 +563,25 @@ class ForStmt : public Stmt {
   StmtPtr body_;                       // Loop body statement (must yield if iter_args non-empty)
   std::vector<VarPtr> return_vars_;    // Variables capturing final iteration values (accessible after loop)
   ForKind kind_;                       // Loop kind (Sequential, Parallel, or Unroll)
-  std::optional<ExprPtr> chunk_size_;  // Chunk size (nullopt = no chunking)
-  ChunkPolicy chunk_policy_ = ChunkPolicy::LeadingFull;  // Chunk distribution policy
-  LoopOrigin loop_origin_ = LoopOrigin::Original;        // Loop origin classification
+  std::optional<ChunkConfig> chunk_config_;              // Chunk configuration (nullopt = no chunking)
+  std::vector<std::pair<std::string, std::any>> attrs_;  // Loop-level attributes (key-value metadata)
+
+  /// Get a typed attribute value (returns default_value if key not found)
+  template <typename T>
+  [[nodiscard]] T GetAttr(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : attrs_) {
+      if (k == key) return AnyCast<T>(v, "for_stmt attr key: " + key);
+    }
+    return default_value;
+  }
+
+  /// Check if an attribute exists
+  [[nodiscard]] bool HasAttr(const std::string& key) const {
+    return std::any_of(attrs_.begin(), attrs_.end(), [&key](const auto& pair) { return pair.first == key; });
+  }
+
+  /// Get all attributes
+  [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
 };
 
 using ForStmtPtr = std::shared_ptr<const ForStmt>;

@@ -39,15 +39,13 @@ StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
 
 StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const StmtPtr& new_body) {
   return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, f->iter_args_, new_body,
-                                   f->return_vars_, f->span_, f->kind_, f->chunk_size_, f->chunk_policy_,
-                                   f->loop_origin_);
+                                   f->return_vars_, f->span_, f->kind_, f->chunk_config_, f->attrs_);
 }
 
 StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const std::vector<IterArgPtr>& iter_args,
                        const StmtPtr& new_body, const std::vector<VarPtr>& return_vars) {
   return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, iter_args, new_body,
-                                   return_vars, f->span_, f->kind_, f->chunk_size_, f->chunk_policy_,
-                                   f->loop_origin_);
+                                   return_vars, f->span_, f->kind_, f->chunk_config_, f->attrs_);
 }
 
 StmtPtr RebuildWhileStmt(const std::shared_ptr<const WhileStmt>& w, const StmtPtr& new_body) {

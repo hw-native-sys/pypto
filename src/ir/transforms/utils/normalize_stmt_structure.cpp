@@ -131,8 +131,7 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const ForStmtPtr& op) {
     auto new_step = VisitExpr(op->step_);
 
     return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                     op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                     op->chunk_policy_, op->loop_origin_);
+                                     op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
   }
   return op;
 }

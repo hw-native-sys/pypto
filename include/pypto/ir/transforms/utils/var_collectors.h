@@ -83,8 +83,8 @@ class VarDefUseCollector : public IRVisitor {
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
-    if (op->chunk_size_.has_value() && *op->chunk_size_) {
-      VisitExpr(*op->chunk_size_);
+    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
+      VisitExpr(op->chunk_config_->size);
     }
     VisitStmt(op->body_);
   }

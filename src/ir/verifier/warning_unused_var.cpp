@@ -64,8 +64,8 @@ class UseCollector : public IRVisitor {
     if (op->start_) VisitExpr(op->start_);
     if (op->stop_) VisitExpr(op->stop_);
     if (op->step_) VisitExpr(op->step_);
-    if (op->chunk_size_.has_value() && *op->chunk_size_) {
-      VisitExpr(*op->chunk_size_);
+    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
+      VisitExpr(op->chunk_config_->size);
     }
     for (const auto& iter_arg : op->iter_args_) {
       if (iter_arg && iter_arg->initValue_) {

@@ -141,7 +141,7 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
       result.push_back(std::make_shared<ForStmt>(
           for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
           MakeBody(filtered, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-          for_stmt->chunk_size_, for_stmt->chunk_policy_, for_stmt->loop_origin_));
+          for_stmt->chunk_config_, for_stmt->attrs_));
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto filtered_then = FilterDeadCode(FlattenBody(if_stmt->then_body_), live);
       std::optional<StmtPtr> filtered_else;

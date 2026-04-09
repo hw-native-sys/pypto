@@ -663,8 +663,8 @@ class CtrlFlowTransformMutator : public IRMutator {
       return op;
     }
     return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     new_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                     op->chunk_policy_, op->loop_origin_);
+                                     new_body, op->return_vars_, op->span_, op->kind_, op->chunk_config_,
+                                     op->attrs_);
   }
 
   BodyResult ProcessBodyForBreakAndContinue(const DecomposedBody& decomposed,
@@ -690,8 +690,8 @@ class CtrlFlowTransformMutator : public IRMutator {
     auto final_body = BuildFinalBody(std::move(result), decomposed.had_yield, op->span_);
 
     return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     final_body, op->return_vars_, op->span_, op->kind_, op->chunk_size_,
-                                     op->chunk_policy_, op->loop_origin_);
+                                     final_body, op->return_vars_, op->span_, op->kind_, op->chunk_config_,
+                                     op->attrs_);
   }
 
   // --------------------------------------------------------------------------

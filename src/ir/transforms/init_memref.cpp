@@ -370,14 +370,14 @@ class InitMemRefMutator : public IRMutator {
     }
 
     // Visit chunk_size if present
-    std::optional<ExprPtr> new_chunk_size = op->chunk_size_;
-    if (op->chunk_size_.has_value()) {
-      new_chunk_size = VisitExpr(*op->chunk_size_);
+    std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
+    if (op->chunk_config_.has_value()) {
+      new_chunk_config = ChunkConfig{VisitExpr(op->chunk_config_->size), op->chunk_config_->policy};
     }
 
-    auto new_for = std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args,
-                                             new_body, new_return_vars, op->span_, op->kind_, new_chunk_size,
-                                             op->chunk_policy_, op->loop_origin_);
+    auto new_for =
+        std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args, new_body,
+                                  new_return_vars, op->span_, op->kind_, new_chunk_config, op->attrs_);
 
     // Patch return_vars so each shares its yield value's MemRef.
     auto yield_stmt = FindYieldStmt(new_body);
@@ -395,8 +395,7 @@ class InitMemRefMutator : public IRMutator {
 
     return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_, new_for->step_,
                                      new_for->iter_args_, new_for->body_, std::move(patched), new_for->span_,
-                                     new_for->kind_, new_for->chunk_size_, new_for->chunk_policy_,
-                                     new_for->loop_origin_);
+                                     new_for->kind_, new_for->chunk_config_, new_for->attrs_);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
