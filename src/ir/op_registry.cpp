@@ -98,7 +98,15 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
                            const std::vector<std::pair<std::string, std::any>>& kwargs, Span span) const {
   // Look up operator in registry
   auto it = registry_.find(op_name);
-  CHECK(it != registry_.end()) << "Operator '" + op_name + "' not found in registry";
+  if (it == registry_.end()) {
+    std::string msg = "Operator '" + op_name + "' not found in registry";
+    if (op_name.find('.') == std::string::npos) {
+      msg +=
+          ". This looks like a function name (GlobalVar), not a registered operator. "
+          "Callers should check for GlobalVar before using OpRegistry::Create.";
+    }
+    throw ValueError(msg);
+  }
 
   const auto& entry = it->second;
 
