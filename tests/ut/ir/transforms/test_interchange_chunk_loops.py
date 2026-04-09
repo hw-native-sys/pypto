@@ -254,6 +254,51 @@ class TestNestedChunkChainsInitSubstitution:
         assert len(incore_funcs) >= 1
 
 
+class TestNestedChunksWithInterveningStatements:
+    """Tests for nested chunked parallel loops with intervening statements (issue #911)."""
+
+    @staticmethod
+    def _make_input():
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for b in pl.parallel(0, 16, 1, chunk=4):
+                        x = pl.add(x, y)
+                        for h in pl.parallel(0, 8, 1, chunk=2):
+                            x = pl.add(x, y)
+                return x
+
+        return Input
+
+    def test_no_nested_incore_with_intervening_stmt(self):
+        """Nested chunks with intervening add: single InCore, no nesting."""
+        Before = _prepare_for_interchange(self._make_input())
+        After = passes.interchange_chunk_loops()(Before)
+        after_str = python_print(After)
+
+        # AutoInCore consumed
+        assert "auto_incore" not in after_str
+
+        # Exactly 1 InCore scope (no nesting)
+        assert after_str.count("pl.incore()") == 1
+
+    def test_outline_no_crash_with_intervening_stmt(self):
+        """Nested chunks with intervening stmt: outline must not crash."""
+        program = _prepare_for_interchange(self._make_input())
+        program = passes.interchange_chunk_loops()(program)
+        # This must not crash with nested InCore or missing operator
+        program = passes.outline_incore_scopes()(program)
+
+        incore_funcs = [f for f in program.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) >= 1
+
+
 class TestChunkWithRemainderInChain:
     """Tests for chunk chains that include remainder loops (non-divisible inner)."""
 

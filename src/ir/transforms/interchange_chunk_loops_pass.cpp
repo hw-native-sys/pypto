@@ -353,8 +353,23 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
  private:
   bool inside_auto_incore_ = false;
+  bool inside_incore_context_ = false;
   std::optional<SplitMode> current_split_;
   std::unordered_map<const Var*, ExprPtr> substitution_map_;
+
+  /**
+   * @brief Visit a body that will be placed inside an InCore scope.
+   *
+   * Sets inside_incore_context_ so nested chains skip their own InCore wrapping.
+   * Returns whether a parent chain already provides InCore context (prev value).
+   */
+  std::pair<StmtPtr, bool> VisitBodyInIncoreContext(const StmtPtr& body) {
+    bool prev_incore = inside_incore_context_;
+    inside_incore_context_ = true;
+    auto result = VisitStmt(body);
+    inside_incore_context_ = prev_incore;
+    return {result, prev_incore};
+  }
 
   /**
    * @brief Collect a chain of chunk loops starting from a ChunkOuter.
@@ -561,7 +576,8 @@ class InterchangeChunkLoopsMutator : public IRMutator {
                         const std::vector<ChainEntry>& chain, const Span& span) {
     // Get the body from the last loop in inners (not chain.back(), which may be a remainder)
     const auto& innermost = inners.back();
-    auto body = VisitStmt(innermost->body_);
+
+    auto [body, prev_incore] = VisitBodyInIncoreContext(innermost->body_);
 
     // Build inners inside-out
     StmtPtr current = body;
@@ -573,9 +589,11 @@ class InterchangeChunkLoopsMutator : public IRMutator {
                                           LoopOrigin::ChunkInner);
     }
 
-    // Wrap in InCore
-    current = std::make_shared<ScopeStmt>(ScopeKind::InCore, current, span, std::nullopt, std::nullopt,
-                                          current_split_);
+    // Wrap in InCore — skip if a parent chain already provides InCore context
+    if (!prev_incore) {
+      current = std::make_shared<ScopeStmt>(ScopeKind::InCore, current, span, std::nullopt, std::nullopt,
+                                            current_split_);
+    }
 
     // Build outers inside-out, preserving the original ForKind.
     for (int i = static_cast<int>(outers.size()) - 1; i >= 0; --i) {
@@ -661,7 +679,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     }
 
     // Visit the innermost body with substitutions
-    auto body = VisitStmt(orig_innermost->body_);
+    auto [body, prev_incore] = VisitBodyInIncoreContext(orig_innermost->body_);
 
     // Build the loop nest inside-out, starting from the innermost (last in reordered)
     StmtPtr current = body;
@@ -695,8 +713,9 @@ class InterchangeChunkLoopsMutator : public IRMutator {
           current, new_return_vars[i], orig_loop->span_, orig_loop->kind_, std::nullopt,
           ChunkPolicy::LeadingFull, is_inner ? LoopOrigin::ChunkInner : LoopOrigin::ChunkOuter);
 
-      // Insert InCore scope right after building all inners (at the boundary)
-      if (!is_inner && i + 1 < static_cast<int>(total_loops) &&
+      // Insert InCore scope right after building all inners (at the boundary).
+      // Skip if a parent chain already provides InCore context.
+      if (!prev_incore && !is_inner && i + 1 < static_cast<int>(total_loops) &&
           reordered[i + 1]->loop_origin_ == LoopOrigin::ChunkInner) {
         // The current ForStmt body already contains the inner loops.
         // We need to wrap the inner loop nest (current's body) in InCore.
