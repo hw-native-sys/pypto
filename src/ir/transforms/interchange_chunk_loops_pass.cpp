@@ -41,6 +41,16 @@ using Attrs = std::vector<std::pair<std::string, std::any>>;
 
 namespace {
 
+/// Build attrs for a generated loop: copy original attrs (excluding loop_origin) and set the new origin.
+Attrs MakeLoopAttrs(const Attrs& original_attrs, LoopOrigin origin) {
+  Attrs result;
+  for (const auto& [key, value] : original_attrs) {
+    if (key != "loop_origin") result.emplace_back(key, value);
+  }
+  result.emplace_back("loop_origin", origin);
+  return result;
+}
+
 /**
  * @brief A single entry in a chunk-loop chain.
  */
@@ -603,7 +613,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       current = std::make_shared<ForStmt>(inner->loop_var_, inner->start_, inner->stop_, inner->step_,
                                           std::vector<IterArgPtr>{}, current, std::vector<VarPtr>{},
                                           inner->span_, inner->kind_, std::nullopt,
-                                          Attrs{{"loop_origin", LoopOrigin::ChunkInner}});
+                                          MakeLoopAttrs(inner->attrs_, LoopOrigin::ChunkInner));
     }
 
     // Wrap in InCore — skip if a parent chain already provides InCore context
@@ -618,7 +628,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       current = std::make_shared<ForStmt>(outer->loop_var_, outer->start_, outer->stop_, outer->step_,
                                           std::vector<IterArgPtr>{}, current, std::vector<VarPtr>{},
                                           outer->span_, outer->kind_, std::nullopt,
-                                          Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
+                                          MakeLoopAttrs(outer->attrs_, LoopOrigin::ChunkOuter));
     }
 
     return current;
@@ -728,7 +738,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       current = std::make_shared<ForStmt>(
           orig_loop->loop_var_, orig_loop->start_, orig_loop->stop_, orig_loop->step_, new_iter_args[i],
           current, new_return_vars[i], orig_loop->span_, orig_loop->kind_, std::nullopt,
-          Attrs{{"loop_origin", is_inner ? LoopOrigin::ChunkInner : LoopOrigin::ChunkOuter}});
+          MakeLoopAttrs(orig_loop->attrs_, is_inner ? LoopOrigin::ChunkInner : LoopOrigin::ChunkOuter));
 
       // Insert InCore scope right after building all inners (at the boundary).
       // Skip if a parent chain already provides InCore context.
@@ -765,18 +775,18 @@ class InterchangeChunkLoopsMutator : public IRMutator {
                                                           std::nullopt, std::nullopt, current_split_);
           auto new_body = SeqStmts::Flatten(std::vector<StmtPtr>{incore_scope, last_stmt}, span);
 
-          current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
-                                              outer_for->step_, outer_for->iter_args_, new_body,
-                                              outer_for->return_vars_, outer_for->span_, outer_for->kind_,
-                                              std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
+          current = std::make_shared<ForStmt>(
+              outer_for->loop_var_, outer_for->start_, outer_for->stop_, outer_for->step_,
+              outer_for->iter_args_, new_body, outer_for->return_vars_, outer_for->span_, outer_for->kind_,
+              std::nullopt, MakeLoopAttrs(outer_for->attrs_, LoopOrigin::ChunkOuter));
         } else {
           // No yield, wrap entire body
           auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_body, span, std::nullopt,
                                                           std::nullopt, current_split_);
-          current = std::make_shared<ForStmt>(outer_for->loop_var_, outer_for->start_, outer_for->stop_,
-                                              outer_for->step_, outer_for->iter_args_, incore_scope,
-                                              outer_for->return_vars_, outer_for->span_, outer_for->kind_,
-                                              std::nullopt, Attrs{{"loop_origin", LoopOrigin::ChunkOuter}});
+          current = std::make_shared<ForStmt>(
+              outer_for->loop_var_, outer_for->start_, outer_for->stop_, outer_for->step_,
+              outer_for->iter_args_, incore_scope, outer_for->return_vars_, outer_for->span_,
+              outer_for->kind_, std::nullopt, MakeLoopAttrs(outer_for->attrs_, LoopOrigin::ChunkOuter));
         }
       }
     }

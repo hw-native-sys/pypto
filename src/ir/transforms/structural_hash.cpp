@@ -292,9 +292,20 @@ class StructuralHasher {
       } else if (value.type() == typeid(LoopOrigin)) {
         h = hash_combine(h, std::hash<uint8_t>{}(
                                 static_cast<uint8_t>(AnyCast<LoopOrigin>(value, "hashing kwarg: " + key))));
+      } else if (value.type() == typeid(MemorySpace)) {
+        h = hash_combine(h, std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(AnyCast<MemorySpace>(value, "hashing kwarg: " + key))));
+      } else if (value.type() == typeid(TensorLayout)) {
+        h = hash_combine(h, std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(AnyCast<TensorLayout>(value, "hashing kwarg: " + key))));
+      } else if (value.type() == typeid(TileLayout)) {
+        h = hash_combine(h, std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(AnyCast<TileLayout>(value, "hashing kwarg: " + key))));
+      } else if (value.type() == typeid(PadValue)) {
+        h = hash_combine(
+            h, std::hash<uint8_t>{}(static_cast<uint8_t>(AnyCast<PadValue>(value, "hashing kwarg: " + key))));
       } else {
-        throw TypeError("Invalid kwarg type for key: " + key +
-                        ", expected int, bool, std::string, double, float, or DataType, but got " +
+        throw TypeError("Unsupported kwarg type for key: " + key + ": " +
                         DemangleTypeName(value.type().name()));
       }
     }

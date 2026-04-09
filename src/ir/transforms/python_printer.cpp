@@ -954,12 +954,17 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
         stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
       } else if (value.type() == typeid(int)) {
         stream_ << AnyCast<int>(value, key);
+      } else if (value.type() == typeid(double)) {
+        stream_ << AnyCast<double>(value, key);
+      } else if (value.type() == typeid(float)) {
+        stream_ << AnyCast<float>(value, key);
       } else if (value.type() == typeid(bool)) {
         stream_ << (AnyCast<bool>(value, key) ? "True" : "False");
       } else if (value.type() == typeid(std::string)) {
         stream_ << "\"" << AnyCast<std::string>(value, key) << "\"";
       } else {
-        stream_ << "...";  // Unknown type placeholder
+        INTERNAL_CHECK(false) << "Unsupported attrs value type for key '" << key
+                              << "': " << DemangleTypeName(value.type().name());
       }
     }
     stream_ << "}";

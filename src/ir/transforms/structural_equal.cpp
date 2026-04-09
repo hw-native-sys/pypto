@@ -532,6 +532,21 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(LoopOrigin)) {
         values_equal = (AnyCast<LoopOrigin>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
                         AnyCast<LoopOrigin>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(TensorLayout)) {
+        values_equal = (AnyCast<TensorLayout>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<TensorLayout>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(TileLayout)) {
+        values_equal = (AnyCast<TileLayout>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<TileLayout>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(PadValue)) {
+        values_equal = (AnyCast<PadValue>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<PadValue>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(float)) {
+        values_equal = (AnyCast<float>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
+                        AnyCast<float>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else {
+        INTERNAL_CHECK(false) << "Unsupported kwargs value type for key '" << lhs[i].first
+                              << "': " << DemangleTypeName(lhs_val.type().name());
       }
       if (!values_equal) {
         if constexpr (AssertMode) {
