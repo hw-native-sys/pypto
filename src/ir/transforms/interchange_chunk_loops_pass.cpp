@@ -17,10 +17,12 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -29,6 +31,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -465,6 +468,14 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
+    // Warn if this interchange is nested inside a parent chain's InCore context
+    if (inside_incore_context_) {
+      LOG_WARN << "Nested chunked parallel loop found with intervening statements between it and its parent "
+               << "chunked parallel — the inner chunk will share the parent's InCore scope instead of "
+               << "getting its own. Consider removing the intervening statements or restructuring the loop "
+               << "nest so the chunked parallels are directly nested.";
+    }
+
     // Perform the interchange
     return RebuildInterchanged(outers, inners, chain, op->span_);
   }
@@ -801,6 +812,60 @@ Pass InterchangeChunkLoops() {
                             kInterchangeChunkLoopsProperties);
 }
 }  // namespace pass
+
+// ============================================================================
+// NoNestedInCore structural property verifier
+// ============================================================================
+
+namespace {
+
+/// Detects nested ScopeStmt(InCore) scopes in an IR tree.
+class NestedInCoreScopeDetector : public IRVisitor {
+ public:
+  explicit NestedInCoreScopeDetector(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+
+  void VisitStmt_(const ScopeStmtPtr& op) override {
+    if (!op) return;
+    if (op->scope_kind_ == ScopeKind::InCore) {
+      if (inside_incore_) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoNestedInCore", 0,
+                                  "Nested InCore scope detected — InCore scopes must not contain other "
+                                  "InCore scopes",
+                                  op->span_);
+      }
+      bool prev = inside_incore_;
+      inside_incore_ = true;
+      IRVisitor::VisitStmt_(op);
+      inside_incore_ = prev;
+    } else {
+      IRVisitor::VisitStmt_(op);
+    }
+  }
+
+ private:
+  std::vector<Diagnostic>& diagnostics_;
+  bool inside_incore_ = false;
+};
+
+}  // namespace
+
+class NoNestedIncorePropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "NoNestedInCore"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    for (const auto& [gv, func] : program->functions_) {
+      if (!func || !func->body_) continue;
+      NestedInCoreScopeDetector detector(diagnostics);
+      detector.VisitStmt(func->body_);
+    }
+  }
+};
+
+PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier() {
+  return std::make_shared<NoNestedIncorePropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

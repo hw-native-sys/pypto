@@ -215,8 +215,8 @@ class TestOutlineIncoreScopes:
 
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_nested_incore_scopes(self):
-        """Test outlining nested InCore scopes."""
+    def test_nested_incore_scopes_rejected_by_verifier(self):
+        """Nested InCore scopes are rejected by the NoNestedInCore structural verifier."""
 
         @pl.program
         class Before:
@@ -228,28 +228,13 @@ class TestOutlineIncoreScopes:
                         z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0_incore_0(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
-                return z
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0_incore_0(y)
-                return z
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
-                return z
-
-        Before = passes.convert_to_ssa()(Before)
-        Expected = passes.convert_to_ssa()(Expected)
-        After = passes.outline_incore_scopes()(Before)
-        ir.assert_structural_equal(After, Expected)
+        # Verify directly (no pass pipeline) — nested InCore is a structural invariant violation
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.NoNestedInCore)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, Before)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) >= 1
+        assert "Nested InCore scope" in errors[0].message
 
     def test_outline_scope_with_single_input_single_output(self):
         """Test outlining scope with simple single input/output."""

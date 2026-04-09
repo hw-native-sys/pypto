@@ -68,7 +68,9 @@ void BindPass(nb::module_& m) {
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
              "AIV functions with split mode have tpop shapes and store offsets adjusted")
-      .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned");
+      .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned")
+      .value("NoNestedInCore", IRProperty::NoNestedInCore,
+             "No nested InCore scopes (ScopeStmt inside ScopeStmt)");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")

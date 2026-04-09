@@ -57,6 +57,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::UseAfterDef, CreateUseAfterDefPropertyVerifier);
   Register(IRProperty::StructuredCtrlFlow, CreateStructuredCtrlFlowPropertyVerifier);
   Register(IRProperty::OutParamNotShadowed, CreateOutParamNotShadowedPropertyVerifier);
+  Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

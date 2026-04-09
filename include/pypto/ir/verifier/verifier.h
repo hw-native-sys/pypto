@@ -213,6 +213,14 @@ PropertyVerifierPtr CreateStructuredCtrlFlowPropertyVerifier();
  */
 PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
 
+/**
+ * @brief Factory function for creating NoNestedInCore property verifier
+ *
+ * Verifies that no ScopeStmt(InCore) is nested inside another ScopeStmt(InCore).
+ * @return Shared pointer to NoNestedInCore PropertyVerifier
+ */
+PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

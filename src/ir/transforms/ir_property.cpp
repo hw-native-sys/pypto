@@ -61,6 +61,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "VectorKernelSplit";
     case IRProperty::OutParamNotShadowed:
       return "OutParamNotShadowed";
+    case IRProperty::NoNestedInCore:
+      return "NoNestedInCore";
     default:
       return "Unknown";
   }
@@ -125,9 +127,9 @@ VerificationLevel GetDefaultVerificationLevel() {
 }
 
 const IRPropertySet& GetStructuralProperties() {
-  static const IRPropertySet props{IRProperty::TypeChecked, IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks, IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed};
+  static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore};
   return props;
 }
 

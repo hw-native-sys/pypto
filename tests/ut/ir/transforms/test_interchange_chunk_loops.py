@@ -538,6 +538,63 @@ class TestPassProperties:
         assert prod.contains(passes.IRProperty.SSAForm)
 
 
+class TestNoNestedIncoreVerifier:
+    """Tests for the NoNestedInCore structural property verifier (issue #912)."""
+
+    def test_no_nested_incore_is_structural_property(self):
+        """NoNestedInCore is in the structural property set."""
+        structural = passes.get_structural_properties()
+        assert structural.contains(passes.IRProperty.NoNestedInCore)
+
+    def test_verifier_passes_on_valid_ir(self):
+        """Verifier passes when InterchangeChunkLoops produces valid (non-nested) InCore."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for i in pl.parallel(0, 8, 1, chunk=4):
+                        x = pl.add(x, 1.0)
+                return x
+
+        program = _prepare_for_interchange(Input)
+        program = passes.interchange_chunk_loops()(program)
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.NoNestedInCore)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) == 0
+
+    def test_verifier_passes_with_intervening_stmts(self):
+        """Verifier passes on fixed nested chunks with intervening statements."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.auto_incore():
+                    for b in pl.parallel(0, 16, 1, chunk=4):
+                        x = pl.add(x, y)
+                        for h in pl.parallel(0, 8, 1, chunk=2):
+                            x = pl.add(x, y)
+                return x
+
+        program = _prepare_for_interchange(Input)
+        program = passes.interchange_chunk_loops()(program)
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.NoNestedInCore)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+        errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+        assert len(errors) == 0
+
+
 class TestNonChunkStatementsWrapping:
     """Tests that non-chunk statements inside auto_incore get InCore wrapping."""
 

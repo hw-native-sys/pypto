@@ -49,6 +49,7 @@ enum class IRProperty : uint64_t {
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
+  NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
   kCount                    ///< Sentinel (must be last)
 };
 
@@ -189,7 +190,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed}.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}.
  */
 const IRPropertySet& GetStructuralProperties();
 
