@@ -1,6 +1,6 @@
 ---
 name: create-issue
-description: Create a GitHub issue following the project's issue templates. Classifies the issue type, fills required fields per template, and creates it via gh CLI. Use when the user wants to file a bug, request a feature, report a pass bug, or create any GitHub issue.
+description: Create a GitHub issue following the project's issue templates. Classifies the issue type, fills required fields per template, creates it via gh CLI, and sets project board fields (Status, Priority, Effort, Sprint). Use when the user wants to file a bug, request a feature, report a pass bug, or create any GitHub issue.
 ---
 
 # Create GitHub Issue
@@ -37,6 +37,8 @@ gh auth status
 ```
 
 If not authenticated, tell the user to run `gh auth login` and **stop**.
+
+Verify the token has `project` scope (needed for Step 7). If missing, tell the user to run `gh auth refresh -s project` and **stop**.
 
 ## Step 2: Check for Existing Issues
 
@@ -150,46 +152,83 @@ EOF
 )"
 ```
 
-**After creation**, display the issue URL to the user.
+**After creation**, capture the issue number from the output URL (e.g., `https://github.com/.../issues/123` → `ISSUE_NUMBER=123`) for use in Step 7. Display the issue URL to the user.
+
+## Step 7: Set Project Board Fields
+
+After creation, the "Auto-add to project" workflow adds the issue to **hw-native-sys project #3**. Set Status, Priority, Effort, and Sprint.
+
+### 7a: Retrieve Project Item ID
+
+```bash
+gh api graphql -f query='{ repository(owner:"hw-native-sys",name:"pypto") {
+  issue(number:ISSUE_NUMBER) { projectItems(first:5) { nodes { id project { number } } } } } }'
+```
+
+Extract the item ID where `project.number == 3`. If not found, run `sleep 5` and retry once (auto-add may be delayed).
+
+### 7b: Fetch Field Options
+
+Query current field option IDs dynamically (do NOT hardcode option IDs):
+
+```bash
+gh api graphql -f query='{ organization(login:"hw-native-sys") { projectV2(number:3) {
+  id
+  fields(first:20) { nodes {
+    ... on ProjectV2SingleSelectField { name id options { id name } }
+    ... on ProjectV2IterationField { name id configuration {
+      iterations { id title startDate duration } } } } } } } }'
+```
+
+Extract the project ID, and field/option IDs for Status, Priority, Effort, Sprint.
+
+### 7c: Analyze and Suggest Values
+
+Based on the issue type and content, suggest values using this logic:
+
+| Field | Logic |
+| ----- | ----- |
+| **Status** | Bugs with clear repro → Ready; Features with proposal/design included → Ready; Features needing design → Backlog; External dependency → Blocked |
+| **Priority** | Data corruption / security / blocking → Critical; Most issues → Normal; Cosmetic / code-health → Trivial |
+| **Effort** | Cross-layer / new pass / major refactor → Large; Single-layer / moderate → Medium; One-file / docs → Small |
+| **Sprint** | Critical + Ready → current sprint; Normal planned → next sprint; Backlog → no sprint |
+
+To determine current sprint: get today's date (e.g., via `date +%Y-%m-%d`), then find the sprint where `startDate <= today < startDate + duration`.
+
+### 7d: Present to User
+
+Use `AskUserQuestion` to present 4 questions (one per field), each with the relevant options. Put the suggested value first with "(Recommended)" suffix. For Sprint, include a "None" option.
+
+### 7e: Apply Values via GraphQL
+
+For each field, run the mutation using the project/field/option IDs from step 7b:
+
+```bash
+gh api graphql -f query='mutation { updateProjectV2ItemFieldValue(input: {
+  projectId:"PROJECT_ID" itemId:"ITEM_ID" fieldId:"FIELD_ID"
+  value:{ singleSelectOptionId:"OPTION_ID" }
+}) { projectV2Item { id } } }'
+```
+
+For Sprint (iteration field), use `value:{ iterationId:"ITER_ID" }` instead. If user chose "None" for Sprint, skip it.
 
 ## Template Field Reference
 
-### Bug Report (`[Bug]`)
-
-Required: Component (dropdown), Description, Steps to Reproduce, Expected Behavior, Actual Behavior, Git Commit ID, NPU Kind (dropdown), Host Platform (dropdown)
-
-### Pass Bug (`[Pass Bug]`)
-
-Required: Pass Name, Description, Git Commit ID, Before IR (`@pl.program`), Expected IR, Actual IR or Error
-Optional: NPU Kind (dropdown), Host Platform (dropdown)
-
-### Feature Request (`[Feature]`)
-
-Required: Summary, Motivation / Use Case
-
-### New Operation (`[New Op]`)
-
-Required: Operation Level (dropdown), Proposed Name & Signature, Semantics Description, Example Usage, Motivation / Use Case
-
-### Performance Issue (`[Performance]`)
-
-Required: Summary, Git Commit ID, NPU Kind (dropdown), Host Platform (dropdown), Reproduction Script, Expected Performance, Actual Performance
-
-### Documentation (`[Docs]`)
-
-Required: Documentation Location, What's Wrong or Missing?
+| Template | Required Fields |
+| -------- | --------------- |
+| Bug `[Bug]` | Component, Description, Steps to Reproduce, Expected/Actual Behavior, Git Commit ID, NPU Kind, Host Platform |
+| Pass Bug `[Pass Bug]` | Pass Name, Description, Git Commit ID, Before IR, Expected IR, Actual IR/Error. Optional: NPU Kind, Host Platform |
+| Feature `[Feature]` | Summary, Motivation / Use Case |
+| New Op `[New Op]` | Operation Level, Proposed Name & Signature, Semantics, Example Usage, Motivation |
+| Performance `[Performance]` | Summary, Git Commit ID, NPU Kind, Host Platform, Reproduction Script, Expected/Actual Performance |
+| Docs `[Docs]` | Documentation Location, What's Wrong or Missing? |
 
 ## Checklist
 
 - [ ] Input source determined (KNOWN_ISSUES.md or direct)
-- [ ] If from KNOWN_ISSUES.md: issue verified as still real and unresolved
-- [ ] gh CLI authenticated
-- [ ] Searched for existing issues (no exact duplicate found)
-- [ ] Related issues referenced in body (if any)
-- [ ] Issue classified to correct template
-- [ ] All required fields filled
-- [ ] Title uses correct prefix from template
-- [ ] Labels match template
-- [ ] Body formatted with markdown sections matching template fields
-- [ ] Issue created and URL displayed
+- [ ] gh CLI authenticated with `project` scope
+- [ ] Searched for existing issues (no duplicate)
+- [ ] Issue classified to correct template, all required fields filled
+- [ ] Issue created with correct prefix, labels, and markdown body
 - [ ] If from KNOWN_ISSUES.md: entry removed from file
+- [ ] Project board fields set (Status, Priority, Effort, Sprint)

@@ -44,18 +44,35 @@ gh CLI is not authenticated. Please run: gh auth login
 
 ⚠️ **Stop here if not authenticated** - user must login first.
 
-## Step 2: Fetch Issue Content and Comments
+## Step 2: Fetch Issue Content and Check Ownership
 
 ```bash
-gh issue view ISSUE_NUMBER --json number,title,body,state,labels
+gh issue view ISSUE_NUMBER --json number,title,body,state,labels,assignees
 gh issue view ISSUE_NUMBER --comments
 ```
 
-**Parse**: Issue number, title, description, state (open/closed), labels, and all comments.
+**Parse**: Issue number, title, description, state (open/closed), labels, assignees, and all comments.
 
 Comments often contain clarifications, reproduction steps, or design decisions that are critical for understanding the full context of the issue.
 
 **If issue is closed**: Ask user if they still want to work on it.
+
+**Check for existing ownership** before proceeding:
+
+1. Check if anyone is already assigned (`assignees` field)
+2. Query the project board status:
+
+   ```bash
+   gh api graphql -f query='{ repository(owner:"hw-native-sys",name:"pypto") {
+     issue(number:ISSUE_NUMBER) { projectItems(first:5) { nodes { id project { number }
+       fieldValues(first:10) { nodes {
+         ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { name } } name }
+       } } } } } } }'
+   ```
+
+   If the project item is not found, skip the board status check (the issue may not be linked to the project yet) and continue.
+
+3. If **assigned to someone** or **Status in project #3 is "In Progress"**: warn the user with `AskUserQuestion` — show who is assigned and/or the current status, and ask whether to proceed anyway or stop.
 
 ## Step 3: Create Issue Branch
 
@@ -80,6 +97,23 @@ Use `EnterPlanMode` to design the fix.
 - Testing approach
 - Documentation updates
 - Cross-layer changes (C++, Python, type stubs)
+
+## Step 4b: Mark Issue as In Progress
+
+After plan approval, self-assign and set project status to "In Progress":
+
+```bash
+# Self-assign
+gh issue edit ISSUE_NUMBER --add-assignee @me
+```
+
+Update the project board status using the same GraphQL pattern as `create-issue` Step 7:
+
+1. Get project item ID from the query in Step 2 (already fetched)
+2. Fetch field options dynamically (query `organization.projectV2.fields`)
+3. Set Status to "In Progress" via `updateProjectV2ItemFieldValue` mutation
+
+If the project item or Status field is not found, skip the board update and notify the user that manual update is needed. Do not block the fix workflow.
 
 ## Step 5: Implement the Fix
 
@@ -136,8 +170,10 @@ Detailed explanation of the fix.
 
 - [ ] gh CLI authenticated
 - [ ] Issue content fetched and understood
+- [ ] Checked for existing assignees / In Progress status
 - [ ] Issue branch created from latest main
 - [ ] Plan created and approved
+- [ ] Issue self-assigned and set to In Progress on project board
 - [ ] Fix implemented following PyPTO rules
 - [ ] Tests added/updated and passing
 - [ ] Changes committed with issue reference
