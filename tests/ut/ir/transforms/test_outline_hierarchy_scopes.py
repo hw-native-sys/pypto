@@ -155,7 +155,7 @@ class TestOutlineHierarchyScopes:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -163,7 +163,7 @@ class TestOutlineHierarchyScopes:
         class Expected:
             @pl.function(level=pl.Level.HOST, role=pl.Role.Worker)
             def main_host_worker_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -299,7 +299,7 @@ class TestOutlineHierarchyScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -507,7 +507,7 @@ class TestOutlineHierarchyScopes:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -521,7 +521,7 @@ class TestOutlineHierarchyScopes:
         assert hierarchy_func is not None
         assert hierarchy_func.level == ir.Level.HOST
         printed1 = After1.as_python()
-        assert "pl.incore()" in printed1
+        assert "pl.at(level=pl.Level.CORE_GROUP)" in printed1
 
         # Step 2: Outline incore scopes (processes Opaque functions including hierarchy-outlined ones)
         After2 = passes.outline_incore_scopes()(After1)

@@ -186,7 +186,7 @@ class TestConvertToSSAScope:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -194,7 +194,7 @@ class TestConvertToSSAScope:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -211,7 +211,7 @@ class TestConvertToSSAScope:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                     y = pl.mul(y, y)
                 return y
@@ -234,7 +234,7 @@ class TestConvertToSSAScope:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
                 return c

@@ -27,7 +27,7 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -60,9 +60,9 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
 
@@ -106,7 +106,7 @@ class TestOutlineIncoreScopes:
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 return y
 
@@ -148,7 +148,7 @@ class TestOutlineIncoreScopes:
             ) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
                 b: pl.Tensor[[64], pl.FP32] = pl.mul(x, y)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     result: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return result
 
@@ -186,7 +186,7 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                     z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 result: pl.Tensor[[64], pl.FP32] = pl.add(y, z)
@@ -222,9 +222,9 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
                 return z
 
@@ -259,7 +259,7 @@ class TestOutlineIncoreScopes:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 result: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
                 return result
@@ -290,13 +290,13 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def func1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
             @pl.function
             def func2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
                 return y
 
@@ -335,7 +335,7 @@ class TestOutlineIncoreScopes:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
                 if cond:
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # type: ignore[no-redef]
                 else:
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # type: ignore[no-redef,unreachable]
@@ -368,7 +368,7 @@ class TestOutlineIncoreScopes:
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     if cond:
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                         z = pl.yield_(y)  # Unannotated - should infer type
@@ -394,7 +394,7 @@ class TestOutlineIncoreScopes:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
                     d: pl.Tensor[[64], pl.FP32] = pl.mul(c, c)
                 e: pl.Tensor[[64], pl.FP32] = pl.add(d, d)
@@ -434,7 +434,7 @@ class TestOutlineIncoreScopes:
             @pl.function
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
                 buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                     pl.store(tile, [0, 0], buf)
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf, x)
@@ -462,7 +462,7 @@ class TestOutlineIncoreScopes:
             def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
                 buf_a: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
                 buf_b: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     tile_a = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
                     tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
                     pl.store(tile_a, [0, 0], buf_a)
@@ -496,7 +496,7 @@ class TestOutlineIncoreScopes:
                 self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
             ) -> pl.Tensor[[64], pl.FP32]:
                 for i, (acc,) in pl.range(3, init_values=(x,)):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for j, (inner,) in pl.range(2, init_values=(acc,)):
                             updated: pl.Tensor[[64], pl.FP32] = pl.add(inner, y)
                             inner_rv = pl.yield_(updated)
@@ -538,7 +538,7 @@ class TestOutlineIncoreScopes:
                 self, init: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
             ) -> pl.Tensor[[64], pl.FP32]:
                 for sb, (acc,) in pl.range(4, init_values=(init,)):
-                    with pl.incore():
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         result: pl.Tensor[[64], pl.FP32] = pl.add(acc, y)
                     acc_rv = pl.yield_(result)
                 return acc_rv
@@ -585,7 +585,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -600,7 +600,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -621,7 +621,7 @@ class TestSplitIncoreOrchVerifier:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 return y
 
@@ -637,7 +637,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
@@ -653,7 +653,7 @@ class TestSplitIncoreOrchVerifier:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.incore():
+                with pl.at(level=pl.Level.CORE_GROUP):
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 result: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
                 return result
@@ -675,7 +675,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.auto_incore():
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4):
                         x = pl.add(x, 2.0)

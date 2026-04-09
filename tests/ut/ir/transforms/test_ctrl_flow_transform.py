@@ -2015,7 +2015,7 @@ def test_pipeline_integration():
     class Input:
         @pl.function
         def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.incore():
+            with pl.at(level=pl.Level.CORE_GROUP):
                 for i in pl.range(10):
                     if i < 5:
                         continue
