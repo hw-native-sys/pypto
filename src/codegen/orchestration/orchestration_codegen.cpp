@@ -334,6 +334,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else {
           GenerateTupleReturnAliases(call);
         }
+      } else {
+        INTERNAL_CHECK(false) << "Builtin op '" << op_name
+                              << "' found in Orchestration function (should be inside InCore block)";
       }
     } else if (As<TupleGetItemExpr>(assign->value_)) {
       // No-op: tuple elements handled via tuple_var_to_elements_
@@ -373,6 +376,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         GenerateTensorOpCode(call, "", nullptr);
       } else if (!IsBuiltinOp(op_name)) {
         GenerateFunctionCallCode(call, "");
+      } else {
+        INTERNAL_CHECK(false) << "Builtin op '" << op_name
+                              << "' found in Orchestration function (should be inside InCore block)";
       }
     }
   }
@@ -509,9 +515,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto& registry = OrchestrationOpRegistry::GetInstance();
     auto codegen_func = registry.Get(op_name);
-    if (!codegen_func.has_value()) {
-      return;
-    }
+    INTERNAL_CHECK(codegen_func.has_value()) << "Unregistered tensor op '" << op_name
+                                             << "' in Orchestration function (should be inside InCore block)";
 
     if (op_name == "tensor.create" && assign_var &&
         (declared_var_ptrs_.count(assign_var.get()) || param_name_set_.count(GetVarName(assign_var)))) {

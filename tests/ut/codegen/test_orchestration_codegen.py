@@ -1753,5 +1753,30 @@ class TestTensorReadWriteOffsetCodegen:
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
 
+class TestUnregisteredOpError:
+    """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
+
+    def test_unregistered_tensor_op_raises_error(self):
+        """Unregistered tensor op (tensor.full) in Orchestration must raise RuntimeError."""
+        from pypto.ir.builder import IRBuilder
+        from pypto.ir.op import tensor as tensor_ops
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+            x = orch_f.param("x", ir.TensorType([16, 16], pl.FP32))
+            orch_f.return_type(ir.TensorType([16, 16], pl.FP32))
+            filled = ib.let("filled", tensor_ops.full([16, 16], pl.FP32, 0.0))
+            ib.return_stmt(filled)
+        orch_func = orch_f.get_result()
+
+        program = ir.Program([orch_func], "test_prog", ir.Span.unknown())
+
+        with pytest.raises(RuntimeError, match="Unregistered tensor op.*tensor.full"):
+            codegen.generate_orchestration(program, orch_func)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
