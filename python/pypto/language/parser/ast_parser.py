@@ -10,6 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
+import keyword as _keyword_mod
 import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -1600,7 +1601,7 @@ class ASTParser:
         level = None
         role = None
         opt_split: ir.SplitMode | None = None
-        name = ""
+        name_hint = ""
 
         # Parse positional arguments
         if len(call.args) >= 1:
@@ -1629,8 +1630,8 @@ class ASTParser:
                         span=self.span_tracker.get_span(kw),
                     )
                 opt_split = self._parse_chunked_loop_optimizer(kw.value)
-            elif kw.arg == "name":
-                name = self._parse_scope_name(kw.value, "pl.at()")
+            elif kw.arg == "name_hint":
+                name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
             elif kw.arg is None:
                 raise ParserSyntaxError(
                     "Unsupported **kwargs in pl.at()",
@@ -1639,14 +1640,14 @@ class ASTParser:
             else:
                 raise ParserSyntaxError(
                     f"Unknown keyword argument '{kw.arg}' in pl.at()",
-                    hint="Supported arguments: level, role, optimization, name",
+                    hint="Supported arguments: level, role, optimization, name_hint",
                 )
         if level is None:
             raise ParserSyntaxError(
                 "pl.at() requires a level argument",
                 hint="Use pl.at(pl.Level.HOST) or pl.at(level=pl.Level.HOST)",
             )
-        return level, role, opt_split, name
+        return level, role, opt_split, name_hint
 
     def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode":
         """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
@@ -1707,30 +1708,30 @@ class ASTParser:
         """Extract SplitMode enum value from AST expression."""
         return extract_enum_value(value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
 
-    def _parse_scope_name(self, value: ast.expr, func_name: str) -> str:
-        """Extract and validate a scope name from an AST expression.
+    def _parse_scope_name_hint(self, value: ast.expr, func_name: str) -> str:
+        """Extract and validate a scope name hint from an AST expression.
 
         Args:
-            value: AST expression node for the name value
+            value: AST expression node for the name_hint value
             func_name: Function name for error messages (e.g. "pl.at()")
 
         Returns:
-            Validated name string.
+            Validated name hint string.
         """
         if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
             raise ParserSyntaxError(
-                f"{func_name} 'name' argument must be a string literal",
+                f"{func_name} 'name_hint' argument must be a string literal",
                 span=self.span_tracker.get_span(value),
-                hint='Use name="my_scope_name"',
+                hint='Use name_hint="my_scope_name"',
             )
-        name = value.value
-        if name and not name.isidentifier():
+        name_hint = value.value
+        if name_hint and (not name_hint.isidentifier() or _keyword_mod.iskeyword(name_hint)):
             raise ParserSyntaxError(
-                f"{func_name} 'name' must be a valid identifier, got {name!r}",
+                f"{func_name} 'name_hint' must be a valid non-keyword identifier, got {name_hint!r}",
                 span=self.span_tracker.get_span(value),
                 hint="Use a valid Python identifier like 'fused_matmul_add'",
             )
-        return name
+        return name_hint
 
     def _parse_legacy_scope(
         self,
@@ -1741,7 +1742,7 @@ class ASTParser:
     ) -> None:
         """Parse legacy scope context managers (pl.incore, pl.auto_incore, pl.cluster)."""
         split_mode = None
-        name = ""
+        name_hint = ""
         if func_attr in ("auto_incore", "incore"):
             if context_expr.args:
                 raise ParserSyntaxError(
@@ -1752,13 +1753,13 @@ class ASTParser:
             for kw in context_expr.keywords:
                 if kw.arg == "split":
                     split_mode = self._eval_split_mode(kw.value, stmt)
-                elif kw.arg == "name":
-                    name = self._parse_scope_name(kw.value, f"pl.{func_attr}()")
+                elif kw.arg == "name_hint":
+                    name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keywords: 'split', 'name'",
+                        hint="Supported keywords: 'split', 'name_hint'",
                     )
             if func_attr == "incore":
                 warnings.warn(
@@ -1782,13 +1783,13 @@ class ASTParser:
                     hint=f"Use 'with pl.{func_attr}():'",
                 )
             for kw in context_expr.keywords:
-                if kw.arg == "name":
-                    name = self._parse_scope_name(kw.value, f"pl.{func_attr}()")
+                if kw.arg == "name_hint":
+                    name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keywords: 'name'",
+                        hint="Supported keywords: 'name_hint'",
                     )
         elif context_expr.args or context_expr.keywords:
             raise ParserSyntaxError(
@@ -1798,7 +1799,7 @@ class ASTParser:
             )
         scope_kind = scope_kind_map[func_attr]
         span = self.span_tracker.get_span(stmt)
-        self._parse_scope_body(stmt, scope_kind, span, split=split_mode, name=name)
+        self._parse_scope_body(stmt, scope_kind, span, split=split_mode, name_hint=name_hint)
 
     def _parse_scope_body(
         self,
@@ -1809,10 +1810,10 @@ class ASTParser:
         level: "ir.Level | None" = None,
         role: "ir.Role | None" = None,
         split: "ir.SplitMode | None" = None,
-        name: str = "",
+        name_hint: str = "",
     ) -> None:
         """Build a scope statement from a with-statement body."""
-        with self.builder.scope(scope_kind, span, level=level, role=role, split=split, name=name):
+        with self.builder.scope(scope_kind, span, level=level, role=role, split=split, name_hint=name_hint):
             with self._scope_kind_context(scope_kind):
                 self.scope_manager.enter_scope("scope")
                 for body_stmt in stmt.body:
@@ -1821,7 +1822,7 @@ class ASTParser:
 
     def _parse_at_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
         """Parse pl.at(...) context manager into a ScopeStmt."""
-        level, role, opt_split, name = self._parse_at_kwargs(context_expr)
+        level, role, opt_split, name_hint = self._parse_at_kwargs(context_expr)
         span = self.span_tracker.get_span(stmt)
 
         is_core_group = level == ir.Level.CORE_GROUP
@@ -1843,11 +1844,13 @@ class ASTParser:
             )
 
         if not is_core_group:
-            self._parse_scope_body(stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role, name=name)
+            self._parse_scope_body(
+                stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role, name_hint=name_hint
+            )
         elif opt_split is not None:
-            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split, name=name)
+            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split, name_hint=name_hint)
         else:
-            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, name=name)
+            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, name_hint=name_hint)
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.

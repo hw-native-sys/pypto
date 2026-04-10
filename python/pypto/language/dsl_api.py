@@ -604,8 +604,8 @@ class IncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(InCore).
     """
 
-    def __init__(self, name: str = "") -> None:
-        self.name = name
+    def __init__(self, name_hint: str = "") -> None:
+        self.name_hint = name_hint
 
     def __enter__(self) -> None:
         """Enter the InCore scope context."""
@@ -623,9 +623,9 @@ class AutoIncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(AutoInCore).
     """
 
-    def __init__(self, split: SplitMode = SplitMode.NONE, name: str = "") -> None:
+    def __init__(self, split: SplitMode = SplitMode.NONE, name_hint: str = "") -> None:
         self.split = split
-        self.name = name
+        self.name_hint = name_hint
 
     def __enter__(self) -> None:
         """Enter the AutoInCore scope context."""
@@ -636,7 +636,7 @@ class AutoIncoreContext:
         pass
 
 
-def auto_incore(split: SplitMode = SplitMode.UP_DOWN) -> AutoIncoreContext:
+def auto_incore(split: SplitMode = SplitMode.UP_DOWN, *, name_hint: str = "") -> AutoIncoreContext:
     """Mark a region of code for automatic incore chunking.
 
     This function returns a context manager that should be used with the 'with' statement.
@@ -658,17 +658,17 @@ def auto_incore(split: SplitMode = SplitMode.UP_DOWN) -> AutoIncoreContext:
     """
     if split == SplitMode.NONE:
         raise ValueError("SplitMode.NONE is not supported by pto-isa now")
-    return AutoIncoreContext(split=split)
+    return AutoIncoreContext(split=split, name_hint=name_hint)
 
 
-def incore(*, name: str = "") -> IncoreContext:
+def incore(*, name_hint: str = "") -> IncoreContext:
     """Mark a region of code as belonging to the InCore execution context.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.InCore.
 
     Args:
-        name: Optional name for the outlined function (must be a valid identifier)
+        name_hint: Optional name hint for the outlined function (must be a valid identifier)
 
     Returns:
         Context manager for InCore scope
@@ -678,7 +678,7 @@ def incore(*, name: str = "") -> IncoreContext:
         ...     y = pl.ops.add(x, x)
         ...     z = pl.ops.mul(y, y)
     """
-    return IncoreContext(name=name)
+    return IncoreContext(name_hint=name_hint)
 
 
 class ClusterContext:
@@ -688,8 +688,8 @@ class ClusterContext:
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
 
-    def __init__(self, name: str = "") -> None:
-        self.name = name
+    def __init__(self, name_hint: str = "") -> None:
+        self.name_hint = name_hint
 
     def __enter__(self) -> None:
         """Enter the Cluster scope context."""
@@ -700,7 +700,7 @@ class ClusterContext:
         pass
 
 
-def cluster(*, name: str = "") -> ClusterContext:
+def cluster(*, name_hint: str = "") -> ClusterContext:
     """Mark a region of code as belonging to a Cluster execution context.
 
     A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
@@ -715,7 +715,7 @@ def cluster(*, name: str = "") -> ClusterContext:
         ...     with pl.incore():
         ...         y = pl.add(x, x)
     """
-    return ClusterContext(name=name)
+    return ClusterContext(name_hint=name_hint)
 
 
 class AtContext:
@@ -734,12 +734,12 @@ class AtContext:
         role: ir.Role | None = None,
         *,
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-        name: str = "",
+        name_hint: str = "",
     ) -> None:
         self.level = level
         self.role = role
         self.optimization = optimization
-        self.name = name
+        self.name_hint = name_hint
 
     def __enter__(self) -> None:
         pass
@@ -753,7 +753,7 @@ def at(
     role: ir.Role | None = None,
     *,
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-    name: str = "",
+    name_hint: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
 
@@ -772,7 +772,7 @@ def at(
         optimization: Optional optimization hint. Use pl.chunked_loop_optimizer
             (or pl.chunked_loop_optimizer(split=...)) with level=CORE_GROUP
             to enable compiler-driven chunked loop outlining.
-        name: Optional name for the outlined function (must be a valid identifier)
+        name_hint: Optional name hint for the outlined function (must be a valid identifier)
 
     Returns:
         Context manager for the appropriate scope
@@ -783,7 +783,7 @@ def at(
         ...     y = pl.ops.add(x, x)
 
         >>> # Named InCore scope:
-        >>> with pl.at(level=pl.Level.CORE_GROUP, name="fused_matmul_add"):
+        >>> with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_matmul_add"):
         ...     y = pl.ops.add(x, x)
 
         >>> # AutoInCore scope (replaces pl.auto_incore()):
@@ -801,7 +801,7 @@ def at(
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role, optimization=optimization, name=name)
+    return AtContext(level, role, optimization=optimization, name_hint=name_hint)
 
 
 __all__ = [

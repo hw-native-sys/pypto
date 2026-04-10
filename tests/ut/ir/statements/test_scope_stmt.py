@@ -69,8 +69,8 @@ class TestScopeStmt:
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
         body = ir.AssignStmt(var_y, var_x, span)
 
-        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span, name="my_kernel")
-        assert scope.name == "my_kernel"
+        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span, name_hint="my_kernel")
+        assert scope.name_hint == "my_kernel"
         assert scope.scope_kind == ir.ScopeKind.InCore
 
     def test_scope_stmt_default_name_is_empty(self):
@@ -81,7 +81,7 @@ class TestScopeStmt:
         body = ir.AssignStmt(var_y, var_x, span)
 
         scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
-        assert scope.name == ""
+        assert scope.name_hint == ""
 
 
 if __name__ == "__main__":

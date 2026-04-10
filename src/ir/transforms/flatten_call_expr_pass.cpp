@@ -312,7 +312,7 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ScopeStmtPtr& op) {
 
   if (new_body.get() != op->body_.get()) {
     return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
-                                             op->role_, op->split_, op->name_);
+                                             op->role_, op->split_, op->name_hint_);
   }
   return op;
 }

@@ -718,14 +718,14 @@ class ScopeStmt : public Stmt {
    */
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
             std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-            std::string name = "")
+            std::string name_hint = "")
       : Stmt(std::move(span)),
         scope_kind_(scope_kind),
         body_(std::move(body)),
         level_(level),
         role_(role),
         split_(split),
-        name_(std::move(name)) {
+        name_hint_(std::move(name_hint)) {
     CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
   }
 
@@ -743,7 +743,7 @@ class ScopeStmt : public Stmt {
                                           reflection::UsualField(&ScopeStmt::level_, "level"),
                                           reflection::UsualField(&ScopeStmt::role_, "role"),
                                           reflection::UsualField(&ScopeStmt::split_, "split"),
-                                          reflection::UsualField(&ScopeStmt::name_, "name"),
+                                          reflection::UsualField(&ScopeStmt::name_hint_, "name_hint"),
                                           reflection::UsualField(&ScopeStmt::body_, "body")));
   }
 
@@ -752,7 +752,7 @@ class ScopeStmt : public Stmt {
   std::optional<Level> level_;      // Hierarchy level (nullopt for non-Hierarchy scopes)
   std::optional<Role> role_;        // Function role (nullopt for non-Hierarchy scopes)
   std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
-  std::string name_;                // User-provided scope name (empty = auto-generate)
+  std::string name_hint_;           // User-provided scope name hint (empty = auto-generate)
   StmtPtr body_;                    // The nested statements
 };
 

@@ -1024,9 +1024,9 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
   // Helper: append name= kwarg when user-provided name is non-empty
-  auto append_name = [&]() {
-    if (!op->name_.empty()) {
-      stream_ << ", name=\"" << op->name_ << "\"";
+  auto append_name_hint = [&]() {
+    if (!op->name_hint_.empty()) {
+      stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
   };
 
@@ -1042,11 +1042,11 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
       if (!first) stream_ << ", ";
       stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
     }
-    append_name();
+    append_name_hint();
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::InCore) {
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
-    append_name();
+    append_name_hint();
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::AutoInCore) {
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
@@ -1056,12 +1056,12 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     } else {
       stream_ << prefix_ << ".chunked_loop_optimizer";
     }
-    append_name();
+    append_name_hint();
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::Cluster) {
     stream_ << "with " << prefix_ << ".cluster(";
-    if (!op->name_.empty()) {
-      stream_ << "name=\"" << op->name_ << "\"";
+    if (!op->name_hint_.empty()) {
+      stream_ << "name_hint=\"" << op->name_hint_ << "\"";
     }
     stream_ << "):\n";
   } else {

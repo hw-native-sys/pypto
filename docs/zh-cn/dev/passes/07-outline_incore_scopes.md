@@ -51,8 +51,8 @@ program_outlined = outline_pass(program)
 **命名规则**：
 
 - 默认：`{原函数名}_incore_{计数器}`（如 `main_incore_0`、`main_incore_1`）
-- 用户自定义：当 `ScopeStmt.name` 非空时，直接使用该名称
-  - `with pl.at(level=pl.Level.CORE_GROUP, name="fused_add"):` → 函数名为 `fused_add`
+- 用户自定义：当 `ScopeStmt.name_hint` 非空时，直接使用该名称
+  - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → 函数名为 `fused_add`
 
 ## 示例
 
