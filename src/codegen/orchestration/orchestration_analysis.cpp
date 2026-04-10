@@ -250,62 +250,6 @@ std::vector<const Var*> BufferRootCollector::CollectCallOutputRoots(const CallPt
 }
 
 // ---------------------------------------------------------------------------
-// LoopEscapeInfoCollector
-// ---------------------------------------------------------------------------
-
-namespace {
-
-class VarReferenceCollector : public IRVisitor {
- public:
-  explicit VarReferenceCollector(const Var* target) : target_(target) {}
-
-  bool found = false;
-
- protected:
-  void VisitExpr_(const VarPtr& op) override {
-    if (op.get() == target_) {
-      found = true;
-    }
-    IRVisitor::VisitExpr_(op);
-  }
-
-  void VisitExpr_(const IterArgPtr& op) override {
-    if (op.get() == target_) {
-      found = true;
-    }
-    IRVisitor::VisitExpr_(op);
-  }
-
- private:
-  const Var* target_;
-};
-
-}  // namespace
-
-void LoopEscapeInfoCollector::VisitStmt_(const SeqStmtsPtr& seq) {
-  for (size_t i = 0; i < seq->stmts_.size(); ++i) {
-    if (auto for_stmt = As<ForStmt>(seq->stmts_[i])) {
-      for (const auto& return_var : for_stmt->return_vars_) {
-        if (!return_var) continue;
-        if (IsVarReferencedLater(seq, i + 1, return_var.get())) {
-          escaping_loop_returns.insert(return_var.get());
-        }
-      }
-    }
-    VisitStmt(seq->stmts_[i]);
-  }
-}
-
-bool LoopEscapeInfoCollector::IsVarReferencedLater(const SeqStmtsPtr& seq, size_t start_index,
-                                                   const Var* target) {
-  VarReferenceCollector collector(target);
-  for (size_t i = start_index; i < seq->stmts_.size() && !collector.found; ++i) {
-    collector.VisitStmt(seq->stmts_[i]);
-  }
-  return collector.found;
-}
-
-// ---------------------------------------------------------------------------
 // VarLineageCollector
 // ---------------------------------------------------------------------------
 

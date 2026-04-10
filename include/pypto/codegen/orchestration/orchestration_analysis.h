@@ -12,11 +12,9 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 
-#include <cstddef>
 #include <map>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -102,23 +100,6 @@ class BufferRootCollector : public ir::IRVisitor {
 
   ir::ProgramPtr program_;
   std::unordered_map<const ir::Var*, std::vector<const ir::Var*>> tuple_output_roots_;
-};
-
-/**
- * @brief Detect ForStmt return variables that are referenced after the loop
- *
- * Identifies loop-carried variables whose values escape the loop scope and are
- * used in subsequent statements, enabling codegen to emit tracking state tensors.
- */
-class LoopEscapeInfoCollector : public ir::IRVisitor {
- public:
-  std::unordered_set<const ir::Var*> escaping_loop_returns;
-
- protected:
-  void VisitStmt_(const ir::SeqStmtsPtr& seq) override;
-
- private:
-  static bool IsVarReferencedLater(const ir::SeqStmtsPtr& seq, size_t start_index, const ir::Var* target);
 };
 
 /**
