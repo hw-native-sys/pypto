@@ -2140,7 +2140,8 @@ class TestNestedStructures:
     def test_bidirectional_inside_for_loop(self):
         """V->C and C->V boundaries inside same loop body.
 
-        Pattern: load(Vec) -> add (V) -> move(Vec->Mat->Left) -> matmul (C) -> move(Acc->Vec) -> exp (V) -> store
+        Pattern: load(Vec) -> add (V) -> move(Vec->Mat->Left) -> matmul (C)
+                 -> move(Acc->Vec) -> exp (V) -> store
         V->C: add result flows to matmul via tpush_to_aic / tpop_from_aiv
         C->V: matmul result flows to exp via tpush_to_aiv / tpop_from_aic
         """
