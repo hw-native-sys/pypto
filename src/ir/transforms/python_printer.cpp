@@ -949,19 +949,19 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     for (const auto& [key, value] : op->attrs_) {
       if (!first_attr) stream_ << ", ";
       first_attr = false;
-      stream_ << "\"" << key << "\": ";
+      stream_ << std::quoted(key) << ": ";
       if (value.type() == typeid(LoopOrigin)) {
         stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
       } else if (value.type() == typeid(int)) {
         stream_ << AnyCast<int>(value, key);
       } else if (value.type() == typeid(double)) {
-        stream_ << AnyCast<double>(value, key);
+        stream_ << FormatFloatLiteral(AnyCast<double>(value, key));
       } else if (value.type() == typeid(float)) {
-        stream_ << AnyCast<float>(value, key);
+        stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, key)));
       } else if (value.type() == typeid(bool)) {
         stream_ << (AnyCast<bool>(value, key) ? "True" : "False");
       } else if (value.type() == typeid(std::string)) {
-        stream_ << "\"" << AnyCast<std::string>(value, key) << "\"";
+        stream_ << std::quoted(AnyCast<std::string>(value, key));
       } else {
         INTERNAL_CHECK(false) << "Unsupported attrs value type for key '" << key
                               << "': " << DemangleTypeName(value.type().name());
