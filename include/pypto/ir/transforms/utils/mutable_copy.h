@@ -13,9 +13,12 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_MUTABLE_COPY_H_
 
 #include <memory>
+#include <type_traits>
 
 namespace pypto {
 namespace ir {
+
+class Var;
 
 /// Create a mutable copy of an immutable IR node.
 ///
@@ -27,12 +30,12 @@ namespace ir {
 /// The mutable window is intentionally small — modify fields,
 /// then return as const. This preserves the IR's immutability contract
 /// while eliminating verbose constructor calls in passes.
-///
-/// WARNING: Do not use on identity-bearing nodes (Var, IterArg, MemRef)
-/// whose unique_id_ must remain unique per instance.
 template <typename T>
 std::shared_ptr<T> MutableCopy(const std::shared_ptr<const T>& node) {
-  return std::shared_ptr<T>(new T(*node));
+  static_assert(!std::is_base_of_v<Var, T>,
+                "MutableCopy must not be used on identity-bearing nodes "
+                "(Var, IterArg, MemRef) — their unique_id_ must stay unique");
+  return std::make_shared<T>(*node);
 }
 
 }  // namespace ir
