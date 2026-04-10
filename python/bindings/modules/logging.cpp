@@ -22,6 +22,7 @@
 #include <string>
 
 #include "../module.h"
+#include "pypto/ir/span.h"
 
 namespace nb = nanobind;
 
@@ -78,6 +79,10 @@ void check(bool condition, const std::string& message) { CHECK(condition) << mes
  */
 void internal_check(bool condition, const std::string& message) { INTERNAL_CHECK(condition) << message; }
 
+void internal_check_span(bool condition, const std::string& message, const ir::Span& span) {
+  INTERNAL_CHECK_SPAN(condition, span) << message;
+}
+
 void BindLogging(nb::module_& m) {
   // Bind LogLevel enum with arithmetic support for int conversion
   nb::enum_<LogLevel>(m, "LogLevel", nb::is_arithmetic(), "Enumeration of available log levels")
@@ -105,6 +110,9 @@ void BindLogging(nb::module_& m) {
   m.def("internal_check", &internal_check, nb::arg("condition"), nb::arg("message"),
         "Check an internal invariant and throw InternalError if it fails. "
         "Usage: internal_check(ptr is not None, 'pointer should never be None')");
+  m.def("internal_check_span", &internal_check_span, nb::arg("condition"), nb::arg("message"),
+        nb::arg("span"),
+        "Check an internal invariant with IR source location and throw InternalError if it fails.");
 }
 
 }  // namespace python

@@ -173,17 +173,19 @@ std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
 // the given permutation.  Returns a new Function with the reordered return.
 FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& permutation) {
   auto seq = As<SeqStmts>(func->body_);
-  INTERNAL_CHECK(seq && !seq->stmts_.empty()) << "NormalizeReturnOrder: function body has no statements";
+  INTERNAL_CHECK_SPAN(seq && !seq->stmts_.empty(), func->span_)
+      << "NormalizeReturnOrder: function body has no statements";
   auto return_stmt = As<ReturnStmt>(seq->stmts_.back());
-  INTERNAL_CHECK(return_stmt) << "NormalizeReturnOrder: function body has no ReturnStmt";
-  INTERNAL_CHECK(permutation.size() == return_stmt->value_.size())
+  INTERNAL_CHECK_SPAN(return_stmt, seq->span_) << "NormalizeReturnOrder: function body has no ReturnStmt";
+  INTERNAL_CHECK_SPAN(permutation.size() == return_stmt->value_.size(), return_stmt->span_)
       << "NormalizeReturnOrder: permutation size mismatch";
 
   std::vector<ExprPtr> new_values(return_stmt->value_.size());
   std::vector<TypePtr> new_return_types(func->return_types_.size());
 
   for (int i = 0; i < static_cast<int>(permutation.size()); ++i) {
-    INTERNAL_CHECK(permutation[i] >= 0 && permutation[i] < static_cast<int>(new_values.size()))
+    INTERNAL_CHECK_SPAN(permutation[i] >= 0 && permutation[i] < static_cast<int>(new_values.size()),
+                        return_stmt->span_)
         << "NormalizeReturnOrder: permutation index out of range";
     new_values[permutation[i]] = return_stmt->value_[i];
     if (i < static_cast<int>(func->return_types_.size()) &&

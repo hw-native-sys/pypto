@@ -218,9 +218,9 @@ class MemRefUpdateMutator : public IRMutator {
     new_args.reserve(op->args_.size());
 
     for (const auto& arg : op->args_) {
-      INTERNAL_CHECK(arg) << "Call has null argument during AllocateMemoryAddr mutation";
+      INTERNAL_CHECK_SPAN(arg, op->span_) << "Call has null argument during AllocateMemoryAddr mutation";
       auto new_arg = IRMutator::VisitExpr(arg);
-      INTERNAL_CHECK(new_arg) << "Call argument mutated to null during AllocateMemoryAddr";
+      INTERNAL_CHECK_SPAN(new_arg, op->span_) << "Call argument mutated to null during AllocateMemoryAddr";
       args_changed = args_changed || new_arg.get() != arg.get();
       new_args.push_back(new_arg);
     }

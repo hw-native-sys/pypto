@@ -278,7 +278,7 @@ result = verify_pass(program)
 - **Pass 系统**（`00-pass_manager.md`）：验证器作为 Pass 集成，PropertyVerifierRegistry 由 PassPipeline 使用
 - **IR 构建器**（`../ir/06-builder.md`）：构造验证器验证的 IR
 - **类型系统**（`../ir/02-types.md`）：TypeCheck 规则根据类型系统进行验证
-- **错误处理**（`include/pypto/core/error.h`）：Diagnostic 和 VerificationError 定义
+- **错误处理**（`../02-error-handling.md`）：异常体系、断言宏（`CHECK`、`INTERNAL_CHECK_SPAN`）以及 `Diagnostic` / `VerificationError` 定义
 
 ## 测试
 

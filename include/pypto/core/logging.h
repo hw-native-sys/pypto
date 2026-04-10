@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"  // NOLINT(misc-include-cleaner)
+#include "pypto/ir/span.h"
 
 namespace pypto {
 
@@ -520,12 +521,19 @@ class FatalLogger {
   const char* file;
   int line;
   const char* expr_str;
+  ir::Span span_;
 
  public:
   FatalLogger(const char* expr_str, const char* file, int line)
-      : file(file), line(line), expr_str(expr_str) {}
+      : file(file), line(line), expr_str(expr_str), span_(ir::Span::unknown()) {}
+
+  FatalLogger(const char* expr_str, const char* file, int line, ir::Span span)
+      : file(file), line(line), expr_str(expr_str), span_(std::move(span)) {}
 
   [[noreturn]] ~FatalLogger() noexcept(false) {
+    if (span_.is_valid()) {
+      ss << " [" << span_.to_string() << "]";
+    }
     ss << "\n" << "Check failed: " << expr_str << " at " << file << ":" << line;
     throw ExceptionType(ss.str());
   }
@@ -555,6 +563,9 @@ class FatalLogger {
 /**
  * @brief Check an internal invariant and throw InternalError if it fails
  *
+ * When an IR Span is available, prefer INTERNAL_CHECK_SPAN(expr, span) to
+ * attach the IR source location to the error message.
+ *
  * Usage: INTERNAL_CHECK(condition) << "error message";
  */
 #define INTERNAL_CHECK(expr) \
@@ -570,9 +581,30 @@ class FatalLogger {
 /**
  * @brief Mark a code path as internally unreachable and throw InternalError if reached
  *
+ * When an IR Span is available, prefer INTERNAL_UNREACHABLE_SPAN(span).
+ *
  * Usage: INTERNAL_UNREACHABLE << "optional message";
  */
 #define INTERNAL_UNREACHABLE pypto::FatalLogger<pypto::InternalError>("unreachable", __FILE__, __LINE__)
+
+/**
+ * @brief Check an internal invariant with IR source location and throw InternalError if it fails
+ *
+ * Usage: INTERNAL_CHECK_SPAN(condition, node->span_) << "error message";
+ */
+#define INTERNAL_CHECK_SPAN(expr, span) \
+  if (!!(expr))                         \
+    ;                                   \
+  else                                  \
+    pypto::FatalLogger<pypto::InternalError>(#expr, __FILE__, __LINE__, span)
+
+/**
+ * @brief Mark a code path as internally unreachable with IR source location
+ *
+ * Usage: INTERNAL_UNREACHABLE_SPAN(node->span_) << "optional message";
+ */
+#define INTERNAL_UNREACHABLE_SPAN(span) \
+  pypto::FatalLogger<pypto::InternalError>("unreachable", __FILE__, __LINE__, span)
 
 }  // namespace pypto
 

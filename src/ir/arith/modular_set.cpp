@@ -273,7 +273,7 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   /// Floor division by a known constant.
   Entry FloorDivByConst(const ExprPtr& lhs, int64_t val) {
     Entry a = VisitExpr(lhs);
-    INTERNAL_CHECK(val != 0) << "Internal error: division by zero in FloorDivByConst";
+    INTERNAL_CHECK_SPAN(val != 0, lhs->span_) << "Internal error: division by zero in FloorDivByConst";
     if (a.coeff % val == 0) {
       if (a.base == 0) {
         return {std::abs(a.coeff / val), 0};
@@ -288,7 +288,7 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   /// Floor mod by a known constant.
   Entry FloorModByConst(const ExprPtr& lhs, int64_t val) {
     Entry a = VisitExpr(lhs);
-    INTERNAL_CHECK(val != 0) << "Internal error: modulo by zero in FloorModByConst";
+    INTERNAL_CHECK_SPAN(val != 0, lhs->span_) << "Internal error: modulo by zero in FloorModByConst";
     int64_t coeff = ZeroAwareGCD(a.coeff, val);
     if (a.base >= 0) {
       return {coeff, a.base % coeff};

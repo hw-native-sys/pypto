@@ -326,7 +326,7 @@ class ChunkedLoopSplitter : public IRMutator {
 
     // Zero-trip optimization: when statically known, skip loop emission entirely
     if (n_full_c && n_rem_c && *n_full_c == 0 && *n_rem_c == 0) {
-      INTERNAL_CHECK(op->return_vars_.size() == op->iter_args_.size())
+      INTERNAL_CHECK_SPAN(op->return_vars_.size() == op->iter_args_.size(), op->span_)
           << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
@@ -594,7 +594,7 @@ class ChunkedLoopSplitter : public IRMutator {
       final_return_vars = rem_return_vars;
     }
 
-    INTERNAL_CHECK(op->return_vars_.size() == final_return_vars.size())
+    INTERNAL_CHECK_SPAN(op->return_vars_.size() == final_return_vars.size(), op->span_)
         << "SplitChunkedLoops produced mismatched return vars";
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       substitution_map_[op->return_vars_[i].get()] = final_return_vars[i];

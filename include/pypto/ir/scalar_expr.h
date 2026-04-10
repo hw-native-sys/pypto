@@ -109,8 +109,8 @@ class ConstInt : public Expr {
     // Note: Must use dynamic_pointer_cast here because this header is included before
     // the TypePtr overload of As<> is defined in kind_traits.h
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(GetType());
-    INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " +
-                                       GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(scalar_type, this->span_)
+        << "ConstInt is expected to have ScalarType type, but got " + GetType()->TypeName();
     return scalar_type->dtype_;
   }
 };
@@ -153,8 +153,8 @@ class ConstFloat : public Expr {
     // Note: Must use dynamic_pointer_cast here because this header is included before
     // the TypePtr overload of As<> is defined in kind_traits.h
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(GetType());
-    INTERNAL_CHECK(scalar_type) << "ConstFloat is expected to have ScalarType type, but got " +
-                                       GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(scalar_type, this->span_)
+        << "ConstFloat is expected to have ScalarType type, but got " + GetType()->TypeName();
     return scalar_type->dtype_;
   }
 };

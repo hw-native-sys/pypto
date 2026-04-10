@@ -313,7 +313,8 @@ class StructuralHasher {
   }
 
   result_type VisitLeafField(const Span& field) {
-    INTERNAL_UNREACHABLE << "structural_hash should not visit Span field";
+    INTERNAL_UNREACHABLE_SPAN(field) << "structural_hash should not visit Span field";
+    return 0;
   }
 
   template <typename Desc>
@@ -479,19 +480,21 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
 }
 
 // Type dispatch macro
-#define HASH_DISPATCH(Type)                                                                      \
-  if (auto p = As<Type>(node)) {                                                                 \
-    INTERNAL_CHECK(dispatched == false) << "HashNodeImpl already dispatched for type " << #Type; \
-    hash_value = HashNodeImpl(p);                                                                \
-    dispatched = true;                                                                           \
+#define HASH_DISPATCH(Type)                                      \
+  if (auto p = As<Type>(node)) {                                 \
+    INTERNAL_CHECK_SPAN(dispatched == false, node->span_)        \
+        << "HashNodeImpl already dispatched for type " << #Type; \
+    hash_value = HashNodeImpl(p);                                \
+    dispatched = true;                                           \
   }
 
 // Dispatch macro for abstract base classes
-#define HASH_DISPATCH_BASE(Type)                                                                 \
-  if (auto p = As<Type>(node)) {                                                                 \
-    INTERNAL_CHECK(dispatched == false) << "HashNodeImpl already dispatched for type " << #Type; \
-    hash_value = HashNodeImpl(p);                                                                \
-    dispatched = true;                                                                           \
+#define HASH_DISPATCH_BASE(Type)                                 \
+  if (auto p = As<Type>(node)) {                                 \
+    INTERNAL_CHECK_SPAN(dispatched == false, node->span_)        \
+        << "HashNodeImpl already dispatched for type " << #Type; \
+    hash_value = HashNodeImpl(p);                                \
+    dispatched = true;                                           \
   }
 
 StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) {

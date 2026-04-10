@@ -92,7 +92,7 @@ class DeepCloneMutator : public IRMutator {
       return it->second;
     }
     // Create fresh IterArg with cloned initValue_
-    INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
+    INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
     auto new_init = IRMutator::VisitExpr(op->initValue_);
     auto fresh = std::make_shared<IterArg>(op->name_hint_, op->GetType(), std::move(new_init), op->span_);
     expr_map_[op.get()] = fresh;

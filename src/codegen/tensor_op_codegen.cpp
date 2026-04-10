@@ -247,20 +247,20 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
 REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
   // tensor.dim(tensor, axis) -> extract shape dimension as scalar
   // Validation already performed by DeduceTensorDimType during type deduction.
-  INTERNAL_CHECK(op->args_.size() == 2) << "Internal error: tensor.dim expected 2 arguments";
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_) << "Internal error: tensor.dim expected 2 arguments";
 
   auto tensor_type = As<TensorType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tensor_type) << "Internal error: tensor.dim input must be TensorType";
+  INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "Internal error: tensor.dim input must be TensorType";
 
   auto axis_const = As<ConstInt>(op->args_[1]);
-  INTERNAL_CHECK(axis_const) << "Internal error: tensor.dim axis must be ConstInt";
+  INTERNAL_CHECK_SPAN(axis_const, op->span_) << "Internal error: tensor.dim axis must be ConstInt";
 
   int64_t axis = axis_const->value_;
   int64_t rank = static_cast<int64_t>(tensor_type->shape_.size());
   if (axis < 0) {
     axis += rank;
   }
-  INTERNAL_CHECK(axis >= 0 && axis < rank) << "Internal error: tensor.dim axis out of range";
+  INTERNAL_CHECK_SPAN(axis >= 0 && axis < rank, op->span_) << "Internal error: tensor.dim axis out of range";
 
   std::string result_var = codegen.GetCurrentResultTarget();
 
@@ -300,7 +300,8 @@ REGISTER_ORCHESTRATION_OP(tensor_scatter_update, ("tensor.scatter_update")) {
 
   auto input_type = As<TensorType>(op->args_[0]->GetType());
   auto index_type = As<TensorType>(op->args_[1]->GetType());
-  INTERNAL_CHECK(input_type && index_type) << "Internal error: invalid types for tensor.scatter_update";
+  INTERNAL_CHECK_SPAN(input_type && index_type, op->span_)
+      << "Internal error: invalid types for tensor.scatter_update";
 
   std::string input_ptr = codegen.GetTensorDataPtr(input_name);
   std::string index_ptr = codegen.GetTensorDataPtr(index_name);

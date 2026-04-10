@@ -278,7 +278,7 @@ result = verify_pass(program)
 - **Pass System** (`00-pass_manager.md`): Verifier integrates as a Pass, PropertyVerifierRegistry used by PassPipeline
 - **IRBuilder** (`../ir/06-builder.md`): Construct IR that verifier validates
 - **Type System** (`../ir/02-types.md`): TypeCheck rule validates against type system
-- **Error Handling** (`include/pypto/core/error.h`): Diagnostic and VerificationError definitions
+- **Error Handling** (`../02-error-handling.md`): Exception hierarchy, assertion macros (`CHECK`, `INTERNAL_CHECK_SPAN`), and `Diagnostic` / `VerificationError` definitions
 
 ## Testing
 

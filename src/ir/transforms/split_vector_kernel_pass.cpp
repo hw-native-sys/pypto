@@ -456,7 +456,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     // iter_args.  If an iter_arg carries a halved tile, the return_var must
     // inherit the tile info so that downstream tile.store gets the correct
     // subblock offset adjustment.
-    INTERNAL_CHECK(for_stmt->iter_args_.size() == for_stmt->return_vars_.size())
+    INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
     for (size_t i = 0; i < new_iter_args.size() && i < new_return_vars.size(); ++i) {

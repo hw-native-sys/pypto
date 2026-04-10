@@ -58,7 +58,7 @@ void IRVisitor::VisitExpr_(const VarPtr& op) { VisitVarLike_(op); }
 
 void IRVisitor::VisitExpr_(const IterArgPtr& op) {
   VisitVarLike_(op);
-  INTERNAL_CHECK(op->initValue_) << "IterArg has null initValue";
+  INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
   VisitExpr(op->initValue_);
 }
 
@@ -72,32 +72,32 @@ void IRVisitor::VisitExpr_(const ConstBoolPtr& op) {}
 
 void IRVisitor::VisitExpr_(const CallPtr& op) {
   for (size_t i = 0; i < op->args_.size(); ++i) {
-    INTERNAL_CHECK(op->args_[i]) << "Call has null argument at index " << i;
+    INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Call has null argument at index " << i;
     VisitExpr(op->args_[i]);
   }
 }
 
 void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
   for (size_t i = 0; i < op->elements_.size(); ++i) {
-    INTERNAL_CHECK(op->elements_[i]) << "MakeTuple has null element at index " << i;
+    INTERNAL_CHECK_SPAN(op->elements_[i], op->span_) << "MakeTuple has null element at index " << i;
     VisitExpr(op->elements_[i]);
   }
 }
 
 void IRVisitor::VisitExpr_(const TupleGetItemExprPtr& op) {
-  INTERNAL_CHECK(op->tuple_) << "TupleGetItemExpr has null tuple";
+  INTERNAL_CHECK_SPAN(op->tuple_, op->span_) << "TupleGetItemExpr has null tuple";
   VisitExpr(op->tuple_);
 }
 
 void IRVisitor::VisitBinaryExpr_(const BinaryExprPtr& op) {
-  INTERNAL_CHECK(op->left_) << "BinaryExpr has null left operand";
-  INTERNAL_CHECK(op->right_) << "BinaryExpr has null right operand";
+  INTERNAL_CHECK_SPAN(op->left_, op->span_) << "BinaryExpr has null left operand";
+  INTERNAL_CHECK_SPAN(op->right_, op->span_) << "BinaryExpr has null right operand";
   VisitExpr(op->left_);
   VisitExpr(op->right_);
 }
 
 void IRVisitor::VisitUnaryExpr_(const UnaryExprPtr& op) {
-  INTERNAL_CHECK(op->operand_) << "UnaryExpr has null operand";
+  INTERNAL_CHECK_SPAN(op->operand_, op->span_) << "UnaryExpr has null operand";
   VisitExpr(op->operand_);
 }
 
@@ -142,91 +142,91 @@ DEFINE_UNARY_VISITOR(Cast)
 #undef DEFINE_UNARY_VISITOR
 
 void IRVisitor::VisitStmt_(const AssignStmtPtr& op) {
-  INTERNAL_CHECK(op->var_) << "AssignStmt has null var";
-  INTERNAL_CHECK(op->value_) << "AssignStmt has null value";
+  INTERNAL_CHECK_SPAN(op->var_, op->span_) << "AssignStmt has null var";
+  INTERNAL_CHECK_SPAN(op->value_, op->span_) << "AssignStmt has null value";
   VisitExpr(op->var_);
   VisitExpr(op->value_);
 }
 
 void IRVisitor::VisitStmt_(const IfStmtPtr& op) {
-  INTERNAL_CHECK(op->condition_) << "IfStmt has null condition";
+  INTERNAL_CHECK_SPAN(op->condition_, op->span_) << "IfStmt has null condition";
   VisitExpr(op->condition_);
-  INTERNAL_CHECK(op->then_body_) << "IfStmt has null then_body";
+  INTERNAL_CHECK_SPAN(op->then_body_, op->span_) << "IfStmt has null then_body";
   VisitStmt(op->then_body_);
   if (op->else_body_.has_value()) {
-    INTERNAL_CHECK(*op->else_body_) << "IfStmt has null else_body";
+    INTERNAL_CHECK_SPAN(*op->else_body_, op->span_) << "IfStmt has null else_body";
     VisitStmt(*op->else_body_);
   }
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-    INTERNAL_CHECK(op->return_vars_[i]) << "IfStmt has null return_vars at index " << i;
+    INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "IfStmt has null return_vars at index " << i;
     VisitExpr(op->return_vars_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const YieldStmtPtr& op) {
   for (size_t i = 0; i < op->value_.size(); ++i) {
-    INTERNAL_CHECK(op->value_[i]) << "YieldStmt has null value at index " << i;
+    INTERNAL_CHECK_SPAN(op->value_[i], op->span_) << "YieldStmt has null value at index " << i;
     VisitExpr(op->value_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const ReturnStmtPtr& op) {
   for (size_t i = 0; i < op->value_.size(); ++i) {
-    INTERNAL_CHECK(op->value_[i]) << "ReturnStmt has null value at index " << i;
+    INTERNAL_CHECK_SPAN(op->value_[i], op->span_) << "ReturnStmt has null value at index " << i;
     VisitExpr(op->value_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const ForStmtPtr& op) {
-  INTERNAL_CHECK(op->loop_var_) << "ForStmt has null loop_var";
-  INTERNAL_CHECK(op->start_) << "ForStmt has null start";
-  INTERNAL_CHECK(op->stop_) << "ForStmt has null stop";
-  INTERNAL_CHECK(op->step_) << "ForStmt has null step";
+  INTERNAL_CHECK_SPAN(op->loop_var_, op->span_) << "ForStmt has null loop_var";
+  INTERNAL_CHECK_SPAN(op->start_, op->span_) << "ForStmt has null start";
+  INTERNAL_CHECK_SPAN(op->stop_, op->span_) << "ForStmt has null stop";
+  INTERNAL_CHECK_SPAN(op->step_, op->span_) << "ForStmt has null step";
   VisitExpr(op->loop_var_);
   VisitExpr(op->start_);
   VisitExpr(op->stop_);
   VisitExpr(op->step_);
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    INTERNAL_CHECK(op->iter_args_[i]) << "ForStmt has null iter_args at index " << i;
+    INTERNAL_CHECK_SPAN(op->iter_args_[i], op->span_) << "ForStmt has null iter_args at index " << i;
     VisitExpr(op->iter_args_[i]);
   }
-  INTERNAL_CHECK(op->body_) << "ForStmt has null body";
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ForStmt has null body";
   VisitStmt(op->body_);
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-    INTERNAL_CHECK(op->return_vars_[i]) << "ForStmt has null return_vars at index " << i;
+    INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "ForStmt has null return_vars at index " << i;
     VisitExpr(op->return_vars_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
-  INTERNAL_CHECK(op->condition_) << "WhileStmt has null condition";
+  INTERNAL_CHECK_SPAN(op->condition_, op->span_) << "WhileStmt has null condition";
   VisitExpr(op->condition_);
   for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-    INTERNAL_CHECK(op->iter_args_[i]) << "WhileStmt has null iter_args at index " << i;
+    INTERNAL_CHECK_SPAN(op->iter_args_[i], op->span_) << "WhileStmt has null iter_args at index " << i;
     VisitExpr(op->iter_args_[i]);
   }
-  INTERNAL_CHECK(op->body_) << "WhileStmt has null body";
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "WhileStmt has null body";
   VisitStmt(op->body_);
   for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-    INTERNAL_CHECK(op->return_vars_[i]) << "WhileStmt has null return_vars at index " << i;
+    INTERNAL_CHECK_SPAN(op->return_vars_[i], op->span_) << "WhileStmt has null return_vars at index " << i;
     VisitExpr(op->return_vars_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const ScopeStmtPtr& op) {
-  INTERNAL_CHECK(op->body_) << "ScopeStmt has null body";
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ScopeStmt has null body";
   VisitStmt(op->body_);
 }
 
 void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    INTERNAL_CHECK(op->stmts_[i]) << "SeqStmts has null statement at index " << i;
+    INTERNAL_CHECK_SPAN(op->stmts_[i], op->span_) << "SeqStmts has null statement at index " << i;
     VisitStmt(op->stmts_[i]);
   }
 }
 
 void IRVisitor::VisitStmt_(const EvalStmtPtr& op) {
-  INTERNAL_CHECK(op->expr_) << "EvalStmt has null expr";
+  INTERNAL_CHECK_SPAN(op->expr_, op->span_) << "EvalStmt has null expr";
   VisitExpr(op->expr_);
 }
 

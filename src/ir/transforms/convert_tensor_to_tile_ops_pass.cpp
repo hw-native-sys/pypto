@@ -820,7 +820,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
       if (op_registry_.IsRegistered(call->op_->name_)) {
         const auto& entry = op_registry_.GetEntry(call->op_->name_);
         static const std::unordered_set<std::string> kPassthroughTensorOps = {"tensor.dim"};
-        INTERNAL_CHECK(entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_))
+        INTERNAL_CHECK_SPAN(
+            entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_), call->span_)
             << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
             << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
       }
@@ -1696,7 +1697,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
 
     // Apply store sinking into both branches.
     if (!sink_candidates.empty()) {
-      INTERNAL_CHECK(last_if_stmt->else_body_.has_value())
+      INTERNAL_CHECK_SPAN(last_if_stmt->else_body_.has_value(), last_if_stmt->span_)
           << "Internal error: sink candidates require IfStmt with else branch";
 
       auto then_stmts = FlattenToStmts(last_if_stmt->then_body_);
@@ -1711,9 +1712,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
 
         size_t then_yield_idx = FindYieldIndex(then_stmts);
         size_t else_yield_idx = FindYieldIndex(else_stmts);
-        INTERNAL_CHECK(then_yield_idx < then_stmts.size())
+        INTERNAL_CHECK_SPAN(then_yield_idx < then_stmts.size(), last_if_stmt->span_)
             << "Internal error: yield not found in then branch";
-        INTERNAL_CHECK(else_yield_idx < else_stmts.size())
+        INTERNAL_CHECK_SPAN(else_yield_idx < else_stmts.size(), last_if_stmt->span_)
             << "Internal error: yield not found in else branch";
 
         auto new_then_yield_values = then_yield->value_;
@@ -1817,7 +1818,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
       if (tile_type) {
         // Find the original tensor type from the function's return types
         auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
-        INTERNAL_CHECK(orig_tensor_type)
+        INTERNAL_CHECK_SPAN(orig_tensor_type, func->span_)
             << "Internal error: return type " << i << " should be TensorType but got "
             << func->return_types_[i]->TypeName();
 
@@ -1826,7 +1827,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
         auto map_it = iter_arg_mapping.find(i);
         if (map_it != iter_arg_mapping.end()) {
           size_t arg_idx = map_it->second;
-          INTERNAL_CHECK(arg_idx < new_params.size())
+          INTERNAL_CHECK_SPAN(arg_idx < new_params.size(), func->span_)
               << "Internal error: iter-arg mapping arg_idx " << arg_idx << " exceeds param count "
               << new_params.size();
 
@@ -1916,7 +1917,7 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
     new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
   } else {
     // Void function (e.g. cross-core producer): add empty return
-    INTERNAL_CHECK(func->return_types_.empty())
+    INTERNAL_CHECK_SPAN(func->return_types_.empty(), func->span_)
         << "Internal error: function '" << func->name_ << "' has no ReturnStmt but declares "
         << func->return_types_.size() << " return type(s) — possible malformed IR";
     new_stmts.push_back(std::make_shared<ReturnStmt>(std::vector<ExprPtr>{}, span));
@@ -1966,7 +1967,7 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     // This call targets a transformed InCore function — add output tensor args
     size_t num_outputs = it->second;
     auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
-    INTERNAL_CHECK(incore_func_it != transformed_incore_funcs_.end())
+    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), call->span_)
         << "Internal error: transformed InCore function not found: " << global_var->name_;
     const auto& incore_func = incore_func_it->second;
 
@@ -1977,7 +1978,7 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     for (size_t i = 0; i < num_outputs; ++i) {
       const auto& out_param = incore_func->params_[orig_param_count + i];
       auto out_tensor_type = As<TensorType>(out_param->GetType());
-      INTERNAL_CHECK(out_tensor_type) << "Internal error: output param is not TensorType";
+      INTERNAL_CHECK_SPAN(out_tensor_type, call->span_) << "Internal error: output param is not TensorType";
 
       auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, call->span_);
       TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout

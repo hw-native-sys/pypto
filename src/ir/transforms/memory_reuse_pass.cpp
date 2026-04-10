@@ -835,7 +835,7 @@ class YieldFixupMutator : public IRMutator {
   // Returns (moved_var, move_assign_stmt).
   std::pair<VarPtr, StmtPtr> CreateTileMove(const VarPtr& source, const MemRefPtr& target_memref,
                                             std::optional<MemorySpace> target_memory) {
-    INTERNAL_CHECK(target_memory.has_value())
+    INTERNAL_CHECK_SPAN(target_memory.has_value(), source->span_)
         << "Internal error: target TileType must have memory_space for tile.move";
     auto& op_reg = OpRegistry::GetInstance();
     std::vector<std::pair<std::string, std::any>> kwargs = {

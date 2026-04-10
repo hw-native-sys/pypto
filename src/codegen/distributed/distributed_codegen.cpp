@@ -502,7 +502,8 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 // ========================================================================
 
 void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee) {
-  INTERNAL_CHECK(callee->level_.has_value()) << "Worker function must have a level: " << callee->name_;
+  INTERNAL_CHECK_SPAN(callee->level_.has_value(), call->span_)
+      << "Worker function must have a level: " << callee->name_;
 
   std::string rt_var = RuntimeVarForLevel(*callee->level_);
 
@@ -567,7 +568,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
 }
 
 void DistributedCodegen::EmitCallToOrchestrator(const ir::CallPtr& call, const ir::FunctionPtr& callee) {
-  INTERNAL_CHECK(callee->level_.has_value()) << "Orchestrator function must have a level: " << callee->name_;
+  INTERNAL_CHECK_SPAN(callee->level_.has_value(), call->span_)
+      << "Orchestrator function must have a level: " << callee->name_;
 
   std::string rt_var = RuntimeVarForLevel(*callee->level_);
 

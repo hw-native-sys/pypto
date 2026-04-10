@@ -25,6 +25,8 @@
 
 #include "../module.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/span.h"
 
 namespace nb = nanobind;
 
@@ -85,6 +87,12 @@ namespace python {
  */
 [[noreturn]] void raise_internal_error(const std::string& message) { throw pypto::InternalError(message); }
 
+[[noreturn]] void raise_internal_error_with_span(const std::string& message, const std::string& filename,
+                                                 int line, int col) {
+  ir::Span span(filename, line, col);
+  INTERNAL_CHECK_SPAN(false, span) << message;
+}
+
 // ============================================================================
 // Module binding
 // ============================================================================
@@ -118,6 +126,10 @@ void BindTesting(nb::module_& m) {
 
   testing.def("raise_internal_error", &raise_internal_error, nb::arg("message"),
               "Raise an InternalError from C++ for testing error handling");
+
+  testing.def("raise_internal_error_with_span", &raise_internal_error_with_span, nb::arg("message"),
+              nb::arg("filename"), nb::arg("line"), nb::arg("col"),
+              "Raise an InternalError with IR source span for testing");
 }
 
 }  // namespace python

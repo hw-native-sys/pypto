@@ -177,7 +177,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {
-    INTERNAL_CHECK(ir::IsInCoreType(func->func_type_))
+    INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
         << "PTO backend only supports InCore-variant functions (InCore, AIC, AIV), but function '"
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
@@ -634,7 +634,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   }
 
   auto mlir_it = fs_.var_to_mlir.find(var_key);
-  INTERNAL_CHECK(mlir_it != fs_.var_to_mlir.end())
+  INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), tile_var->span_)
       << "Tile var " << tile_var->name_hint_ << " not found in fs_.var_to_mlir";
   std::string tile_buf = mlir_it->second;
 
@@ -759,8 +759,9 @@ std::string PTOCodegen::GetOrEmitConstant(double value, DataType dt) {
 }
 
 std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) const {
+  INTERNAL_CHECK(memref != nullptr) << "Internal error: null MemRef passed to GetTileBufForMemRef";
   auto it = fs_.memref_to_mlir.find(memref->base_.get());
-  INTERNAL_CHECK(it != fs_.memref_to_mlir.end())
+  INTERNAL_CHECK_SPAN(it != fs_.memref_to_mlir.end(), memref->span_)
       << "Internal error: no MLIR mapping for MemRef base '" << memref->base_->name_hint_ << "'";
   return it->second;
 }
@@ -792,8 +793,9 @@ std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_s
 
 int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
                                       const std::string& tfree_op_name) const {
+  INTERNAL_CHECK(var != nullptr) << "Internal error: null var passed to GetValidatedTpopSplit";
   auto it = fs_.tpop_result_vars.find(var);
-  INTERNAL_CHECK(it != fs_.tpop_result_vars.end())
+  INTERNAL_CHECK_SPAN(it != fs_.tpop_result_vars.end(), var->span_)
       << "Internal error: GetValidatedTpopSplit called for var not in fs_.tpop_result_vars";
   CHECK(it->second.op_name == expected_tpop_op_name)
       << tfree_op_name << " requires its tile argument to come from " << expected_tpop_op_name << ", got "
@@ -1047,7 +1049,8 @@ std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
       return GetOrCreateTensorView(init_iter);
     }
   }
-  INTERNAL_CHECK(false) << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+  INTERNAL_CHECK_SPAN(false, tensor_var->span_)
+      << "Tensor view not found for parameter: " << tensor_var->name_hint_;
   return "";
 }
 
@@ -1063,11 +1066,13 @@ std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_typ
 }
 
 std::string PTOCodegen::GetTileBufTypeString(const ir::Var* base_ptr) const {
+  INTERNAL_CHECK(base_ptr != nullptr) << "Internal error: null base_ptr passed to GetTileBufTypeString";
   auto tile_it = fs_.memref_to_tile_type.find(base_ptr);
-  INTERNAL_CHECK(tile_it != fs_.memref_to_tile_type.end())
+  INTERNAL_CHECK_SPAN(tile_it != fs_.memref_to_tile_type.end(), base_ptr->span_)
       << "Internal error: missing tile type for base Ptr '" << base_ptr->name_hint_ << "'";
   auto memory_space = tile_it->second->GetMemorySpace();
-  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile type must have memory_space";
+  INTERNAL_CHECK_SPAN(memory_space.has_value(), base_ptr->span_)
+      << "Internal error: tile type must have memory_space";
 
   std::string loc = MemorySpaceToMLIR(*memory_space);
   auto c = ExtractTileTypeInfo(*tile_it->second, GetTypeString(tile_it->second->dtype_));

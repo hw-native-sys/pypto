@@ -365,7 +365,7 @@ class TileMemorySpaceMutator : public IRMutator {
                       std::optional<TileLayout> required_slayout = std::nullopt) {
     auto mutated_producer = IRMutator::VisitExpr(original_var);
     auto mutated_producer_var = As<Var>(mutated_producer);
-    INTERNAL_CHECK(mutated_producer_var)
+    INTERNAL_CHECK_SPAN(mutated_producer_var, span)
         << "Internal error: inferred tile-memory producer is not a Var expression";
 
     // Create tile.move call via OpRegistry
@@ -381,7 +381,7 @@ class TileMemorySpaceMutator : public IRMutator {
 
     // Create moved var with memory_space_ set
     auto move_type = As<TileType>(move_call->GetType());
-    INTERNAL_CHECK(move_type) << "Internal error: tile.move return type is not TileType";
+    INTERNAL_CHECK_SPAN(move_type, span) << "Internal error: tile.move return type is not TileType";
     auto moved_type = std::make_shared<TileType>(move_type->shape_, move_type->dtype_, move_type->memref_,
                                                  move_type->tile_view_, target);
     auto moved_var = std::make_shared<Var>(

@@ -227,7 +227,7 @@ class IRSerializer::Impl {
 #undef SERIALIZE_FIELDS
 #undef SERIALIZE_FIELDS_BASE
 
-    INTERNAL_UNREACHABLE << "Unknown IR node type in serialization: " << node->TypeName();
+    INTERNAL_UNREACHABLE_SPAN(node->span_) << "Unknown IR node type in serialization: " << node->TypeName();
   }
 
   msgpack::object SerializeSpan(const Span& span, msgpack::zone& zone) {

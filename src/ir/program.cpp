@@ -36,7 +36,7 @@ Program::Program(const std::vector<FunctionPtr>& functions, std::string name, Sp
   for (const auto& func : functions) {
     INTERNAL_CHECK(func) << "Program constructor encountered null function";
     auto name = func->name_;
-    INTERNAL_CHECK(!name.empty()) << "Program constructor encountered empty function name";
+    INTERNAL_CHECK_SPAN(!name.empty(), func->span_) << "Program constructor encountered empty function name";
     CHECK(function_names.find(name) == function_names.end()) << "Duplicate function name \"" << name << "\"";
     function_names.insert(name);
     auto global_var = std::make_shared<const GlobalVar>(name);
