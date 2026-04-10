@@ -883,9 +883,9 @@ class TestConstDtypeCodegen:
 
         mlir = self._generate_mlir(Prog)
         assert "bf16" in mlir, f"Expected bf16 in MLIR output:\n{mlir}"
-        assert "1.000000e+00 : bf16" in mlir, f"Expected bf16 float constant in MLIR:\n{mlir}"
+        assert "1.00000000000000000e+00 : bf16" in mlir, f"Expected bf16 float constant in MLIR:\n{mlir}"
         # Ensure no f32 constant was emitted for the fill value
-        assert "1.000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
+        assert "1.00000000000000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
 
     def test_full_f16_const_emits_f16(self):
         """tile.full with an f16 fill value must emit f16, not f32 (Issue #934)."""
@@ -902,8 +902,8 @@ class TestConstDtypeCodegen:
 
         mlir = self._generate_mlir(Prog)
         assert "f16" in mlir, f"Expected f16 in MLIR output:\n{mlir}"
-        assert "0.000000e+00 : f16" in mlir, f"Expected f16 float constant in MLIR:\n{mlir}"
-        assert "0.000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
+        assert "0.00000000000000000e+00 : f16" in mlir, f"Expected f16 float constant in MLIR:\n{mlir}"
+        assert "0.00000000000000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
 
 
 if __name__ == "__main__":

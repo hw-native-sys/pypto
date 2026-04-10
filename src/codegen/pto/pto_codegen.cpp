@@ -17,6 +17,7 @@
 #include <cstring>
 #include <iomanip>
 #include <ios>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -749,7 +750,7 @@ std::string PTOCodegen::GetOrEmitConstant(double value, DataType dt) {
     name = NewTemp();
   }
   std::ostringstream val_str;
-  val_str << std::scientific << std::setprecision(6) << value;
+  val_str << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
   fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << val_str.str() << " : "
                         << mlir_type << "\n";
   fs_.emitted_numeric_constants[key] = name;
