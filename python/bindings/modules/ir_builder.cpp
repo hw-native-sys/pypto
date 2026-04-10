@@ -242,6 +242,7 @@ void BindIRBuilder(nb::module_& m) {
       // Scope building
       .def("begin_scope", &IRBuilder::BeginScope, nb::arg("scope_kind"), nb::arg("span"),
            nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
+           nb::arg("name_hint") = "",
            "Begin building a scope statement.\n\n"
            "Creates a new scope context. Must be closed with end_scope().\n\n"
            "Args:\n"
@@ -249,7 +250,8 @@ void BindIRBuilder(nb::module_& m) {
            "    span: Source location for scope statement\n"
            "    level: Hierarchy level (default: None)\n"
            "    role: Hierarchy scope role (default: None)\n"
-           "    split: Split mode for cross-core transfer (default: None)\n\n"
+           "    split: Split mode for cross-core transfer (default: None)\n"
+           "    name_hint: User-provided scope name hint (default: empty, auto-generated)\n\n"
            "Raises:\n"
            "    RuntimeError: If not inside a function or loop")
       .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),

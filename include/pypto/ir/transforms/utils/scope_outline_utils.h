@@ -317,13 +317,29 @@ class ScopeOutliner : public IRMutator {
    * @param used_after Variables (by pointer) used in subsequent statements (determines outputs)
    */
   StmtPtr OutlineScope(const ScopeStmtPtr& op, const std::unordered_set<const Var*>& used_after) {
-    // Generate unique function name (use level/role-aware suffix for Hierarchy scopes)
-    std::string suffix = (op->scope_kind_ == ScopeKind::Hierarchy && op->level_.has_value())
-                             ? GenerateHierarchySuffix(op->level_.value(), op->role_)
-                             : name_suffix_;
-    std::ostringstream name_stream;
-    name_stream << func_name_ << suffix << scope_counter_++;
-    std::string outlined_func_name = name_stream.str();
+    // Generate function name: use user-provided hint when available, otherwise auto-generate.
+    // On collision, auto-deduplicate with a numeric suffix (name_hint semantics).
+    std::string outlined_func_name;
+    if (!op->name_hint_.empty()) {
+      outlined_func_name = op->name_hint_;
+      scope_counter_++;  // Keep counter stable for unnamed scopes
+    } else {
+      std::string suffix = (op->scope_kind_ == ScopeKind::Hierarchy && op->level_.has_value())
+                               ? GenerateHierarchySuffix(op->level_.value(), op->role_)
+                               : name_suffix_;
+      std::ostringstream name_stream;
+      name_stream << func_name_ << suffix << scope_counter_++;
+      outlined_func_name = name_stream.str();
+    }
+    // Deduplicate: append _0, _1, ... if name already taken
+    if (known_names_.count(outlined_func_name)) {
+      std::string base = outlined_func_name;
+      int dedup_counter = 0;
+      do {
+        outlined_func_name = base + "_" + std::to_string(dedup_counter++);
+      } while (known_names_.count(outlined_func_name));
+    }
+    known_names_.insert(outlined_func_name);
 
     // Analyze the scope body for inputs and outputs (before recursing).
     // A single VarDefUseCollector replaces the old VarRefCollector + VarDefCollector pair.

@@ -1797,6 +1797,9 @@ class ScopeStmt(Stmt):
     split: Final[SplitMode | None]
     """Split mode for cross-core transfer (None for no split)."""
 
+    name_hint: Final[str]
+    """User-provided scope name hint (empty string = auto-generate)."""
+
     body: Final[Stmt]
     """The nested statements."""
 
@@ -1808,6 +1811,7 @@ class ScopeStmt(Stmt):
         level: Level | None = None,
         role: Role | None = None,
         split: SplitMode | None = None,
+        name_hint: str = "",
     ) -> None:
         """Create a scope statement.
 
@@ -1818,6 +1822,7 @@ class ScopeStmt(Stmt):
             level: Hierarchy level (for Hierarchy scopes)
             role: Function role (for Hierarchy scopes)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
+            name_hint: User-provided scope name hint (empty = auto-generate)
         """
 
 class SeqStmts(Stmt):
@@ -2562,6 +2567,8 @@ class IRBuilder:
         span: Span,
         level: Level | None = None,
         role: Role | None = None,
+        split: SplitMode | None = None,
+        name_hint: str = "",
     ) -> None:
         """Begin building a scope statement.
 
@@ -2570,6 +2577,8 @@ class IRBuilder:
             span: Source location for scope statement
             level: Hierarchy level (default: None)
             role: Hierarchy scope role (default: None)
+            split: Split mode for cross-core transfer (default: None)
+            name_hint: User-provided scope name hint (default: empty, auto-generated)
         """
 
     def end_scope(self, end_span: Span) -> ScopeStmt:
