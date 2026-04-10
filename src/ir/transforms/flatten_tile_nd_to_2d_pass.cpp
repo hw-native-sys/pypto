@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -271,9 +272,9 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformBody(body_stmts, ctx, op_registry, span);
-      result.push_back(std::make_shared<ScopeStmt>(scope->scope_kind_,
-                                                   SeqStmts::Flatten(std::move(inner), scope->body_->span_),
-                                                   scope->span_, scope->level_, scope->role_, scope->split_));
+      auto new_scope = MutableCopy(scope);
+      new_scope->body_ = SeqStmts::Flatten(std::move(inner), scope->body_->span_);
+      result.push_back(new_scope);
       continue;
     }
 
@@ -313,8 +314,12 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
       }
 
-      result.push_back(
-          std::make_shared<IfStmt>(new_cond, new_then_body, new_else_body, new_return_vars, if_stmt->span_));
+      auto new_if = MutableCopy(if_stmt);
+      new_if->condition_ = new_cond;
+      new_if->then_body_ = new_then_body;
+      new_if->else_body_ = new_else_body;
+      new_if->return_vars_ = new_return_vars;
+      result.push_back(new_if);
       continue;
     }
 
@@ -357,9 +362,14 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
       }
 
-      result.push_back(std::make_shared<ForStmt>(for_stmt->loop_var_, new_start, new_stop, new_step,
-                                                 new_iter_args, new_body, new_return_vars, for_stmt->span_,
-                                                 for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_));
+      auto new_for = MutableCopy(for_stmt);
+      new_for->start_ = new_start;
+      new_for->stop_ = new_stop;
+      new_for->step_ = new_step;
+      new_for->iter_args_ = new_iter_args;
+      new_for->body_ = new_body;
+      new_for->return_vars_ = new_return_vars;
+      result.push_back(new_for);
       continue;
     }
 
@@ -399,8 +409,12 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
       }
 
-      result.push_back(
-          std::make_shared<WhileStmt>(new_cond, new_iter_args, new_body, new_return_vars, while_stmt->span_));
+      auto new_while = MutableCopy(while_stmt);
+      new_while->condition_ = new_cond;
+      new_while->iter_args_ = new_iter_args;
+      new_while->body_ = new_body;
+      new_while->return_vars_ = new_return_vars;
+      result.push_back(new_while);
       continue;
     }
 
@@ -655,10 +669,9 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
 
   // return_types_ are unchanged: InCore functions return tensors (not tiles),
   // and this pass only flattens tile ops. Tensor types are never modified.
-  auto result =
-      std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                 new_body, span, func->func_type_, func->level_, func->role_, func->attrs_);
-  return result;
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 // ============================================================================

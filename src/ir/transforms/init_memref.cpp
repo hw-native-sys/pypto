@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -375,9 +376,15 @@ class InitMemRefMutator : public IRMutator {
       new_chunk_config = ChunkConfig{VisitExpr(op->chunk_config_->size), op->chunk_config_->policy};
     }
 
-    auto new_for =
-        std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step, new_iter_args, new_body,
-                                  new_return_vars, op->span_, op->kind_, new_chunk_config, op->attrs_);
+    auto new_for = MutableCopy(op);
+    new_for->loop_var_ = new_loop_var;
+    new_for->start_ = new_start;
+    new_for->stop_ = new_stop;
+    new_for->step_ = new_step;
+    new_for->iter_args_ = new_iter_args;
+    new_for->body_ = new_body;
+    new_for->return_vars_ = new_return_vars;
+    new_for->chunk_config_ = new_chunk_config;
 
     // Patch return_vars so each shares its yield value's MemRef.
     auto yield_stmt = FindYieldStmt(new_body);
@@ -393,9 +400,8 @@ class InitMemRefMutator : public IRMutator {
 
     if (!changed) return new_for;
 
-    return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_, new_for->step_,
-                                     new_for->iter_args_, new_for->body_, std::move(patched), new_for->span_,
-                                     new_for->kind_, new_for->chunk_config_, new_for->attrs_);
+    new_for->return_vars_ = std::move(patched);
+    return new_for;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
@@ -417,8 +423,9 @@ class InitMemRefMutator : public IRMutator {
 
     if (!changed) return result;
 
-    return std::make_shared<IfStmt>(new_if->condition_, new_if->then_body_, new_if->else_body_,
-                                    std::move(patched), new_if->span_);
+    auto patched_if = MutableCopy(new_if);
+    patched_if->return_vars_ = std::move(patched);
+    return patched_if;
   }
 
  private:
@@ -501,10 +508,9 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
 
   auto new_body = mutator.VisitStmt(normalized_func->body_);
 
-  auto result_func = std::make_shared<Function>(
-      normalized_func->name_, new_params, normalized_func->param_directions_, normalized_func->return_types_,
-      new_body, normalized_func->span_, normalized_func->func_type_, normalized_func->level_,
-      normalized_func->role_, normalized_func->attrs_);
+  auto result_func = MutableCopy(normalized_func);
+  result_func->params_ = new_params;
+  result_func->body_ = new_body;
 
   // Step 3: Collect ALL MemRefs (DDR gets tensor.alloc, on-chip gets tile.alloc)
   memref_collectors::MemRefWithSpaceCollector collector(/*skip_ddr=*/false);
@@ -529,10 +535,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // Step 4: Insert alloc statements at the beginning of the function body
   auto final_body = InsertAllocsIntoBody(new_body, alloc_stmts);
 
-  return std::make_shared<Function>(result_func->name_, new_params, result_func->param_directions_,
-                                    result_func->return_types_, final_body, result_func->span_,
-                                    result_func->func_type_, result_func->level_, result_func->role_,
-                                    result_func->attrs_);
+  result_func->body_ = final_body;
+  return result_func;
 }
 
 }  // namespace

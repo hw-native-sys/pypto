@@ -125,10 +125,15 @@ class IRNode {
   explicit IRNode(Span s) : span_(std::move(s)) {}
   virtual ~IRNode() = default;
 
-  // Disable copying and moving to enforce immutability
+  // Disable move to enforce shared_ptr-based ownership
   IRNode(IRNode&&) = delete;
   IRNode& operator=(IRNode&&) = delete;
 
+ protected:
+  // Allow derived classes to copy (for MutableCopy utility)
+  IRNode(const IRNode&) = default;
+
+ public:
   /**
    * @brief Get the Kind of this IR node
    *

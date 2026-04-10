@@ -26,6 +26,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto {
 namespace ir {
@@ -150,9 +151,9 @@ FunctionPtr TransformUnrollLoops(const FunctionPtr& func) {
     return func;  // No changes
   }
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 }  // namespace

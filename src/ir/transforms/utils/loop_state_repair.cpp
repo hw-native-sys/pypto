@@ -24,6 +24,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
@@ -38,23 +39,33 @@ StmtPtr MakeBody(const std::vector<StmtPtr>& stmts, const Span& span) {
 }
 
 StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const StmtPtr& new_body) {
-  return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, f->iter_args_, new_body,
-                                   f->return_vars_, f->span_, f->kind_, f->chunk_config_, f->attrs_);
+  auto new_for = MutableCopy(f);
+  new_for->body_ = new_body;
+  return new_for;
 }
 
 StmtPtr RebuildForStmt(const std::shared_ptr<const ForStmt>& f, const std::vector<IterArgPtr>& iter_args,
                        const StmtPtr& new_body, const std::vector<VarPtr>& return_vars) {
-  return std::make_shared<ForStmt>(f->loop_var_, f->start_, f->stop_, f->step_, iter_args, new_body,
-                                   return_vars, f->span_, f->kind_, f->chunk_config_, f->attrs_);
+  auto new_for = MutableCopy(f);
+  new_for->iter_args_ = iter_args;
+  new_for->body_ = new_body;
+  new_for->return_vars_ = return_vars;
+  return new_for;
 }
 
 StmtPtr RebuildWhileStmt(const std::shared_ptr<const WhileStmt>& w, const StmtPtr& new_body) {
-  return std::make_shared<WhileStmt>(w->condition_, w->iter_args_, new_body, w->return_vars_, w->span_);
+  auto new_while = MutableCopy(w);
+  new_while->body_ = new_body;
+  return new_while;
 }
 
 StmtPtr RebuildWhileStmt(const std::shared_ptr<const WhileStmt>& w, const std::vector<IterArgPtr>& iter_args,
                          const StmtPtr& new_body, const std::vector<VarPtr>& return_vars) {
-  return std::make_shared<WhileStmt>(w->condition_, iter_args, new_body, return_vars, w->span_);
+  auto new_while = MutableCopy(w);
+  new_while->iter_args_ = iter_args;
+  new_while->body_ = new_body;
+  new_while->return_vars_ = return_vars;
+  return new_while;
 }
 
 StmtPtr RebuildIfStmt(const std::shared_ptr<const IfStmt>& s, const std::vector<StmtPtr>& new_then,
@@ -63,8 +74,10 @@ StmtPtr RebuildIfStmt(const std::shared_ptr<const IfStmt>& s, const std::vector<
   if (new_else_stmts.has_value()) {
     new_else = MakeBody(new_else_stmts.value(), s->span_);
   }
-  return std::make_shared<IfStmt>(s->condition_, MakeBody(new_then, s->span_), new_else, s->return_vars_,
-                                  s->span_);
+  auto new_if = MutableCopy(s);
+  new_if->then_body_ = MakeBody(new_then, s->span_);
+  new_if->else_body_ = new_else;
+  return new_if;
 }
 
 StmtPtr RebuildLoop(const std::shared_ptr<const ForStmt>& for_stmt,

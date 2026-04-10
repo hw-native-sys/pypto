@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -667,10 +668,9 @@ class TypePropagatingMutator : public IRMutator {
     return UpdateLoopReturnVars(
         new_for->iter_args_, new_for->return_vars_, op->return_vars_,
         [&](auto new_rv) {
-          return std::make_shared<ForStmt>(new_for->loop_var_, new_for->start_, new_for->stop_,
-                                           new_for->step_, new_for->iter_args_, new_for->body_,
-                                           std::move(new_rv), new_for->span_, new_for->kind_,
-                                           new_for->chunk_config_, new_for->attrs_);
+          auto copy = MutableCopy(new_for);
+          copy->return_vars_ = std::move(new_rv);
+          return copy;
         },
         result);
   }
@@ -733,8 +733,12 @@ class TypePropagatingMutator : public IRMutator {
       return op;
     }
 
-    return std::make_shared<IfStmt>(new_condition, new_then_body, new_else_body, std::move(new_return_vars),
-                                    op->span_);
+    auto new_if = MutableCopy(op);
+    new_if->condition_ = new_condition;
+    new_if->then_body_ = new_then_body;
+    new_if->else_body_ = new_else_body;
+    new_if->return_vars_ = std::move(new_return_vars);
+    return new_if;
   }
 
   /// Handle a non-converted assignment: propagate type change if value type changed.
@@ -1516,12 +1520,10 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
 
     auto new_return_var = std::make_shared<Var>(for_stmt->return_vars_[0]->name_hint_, out_tensor_type,
                                                 for_stmt->return_vars_[0]->span_);
-    auto new_for_stmt =
-        std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                  std::vector<IterArgPtr>{new_iter_arg},
-                                  SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_),
-                                  std::vector<VarPtr>{new_return_var}, for_stmt->span_, for_stmt->kind_,
-                                  for_stmt->chunk_config_, for_stmt->attrs_);
+    auto new_for_stmt = MutableCopy(for_stmt);
+    new_for_stmt->iter_args_ = std::vector<IterArgPtr>{new_iter_arg};
+    new_for_stmt->body_ = SeqStmts::Flatten(std::move(new_body_stmts), for_stmt->body_->span_);
+    new_for_stmt->return_vars_ = std::vector<VarPtr>{new_return_var};
 
     std::optional<size_t> dead_init_stmt_index;
     if (auto init_var = As<Var>(old_iter_arg->initValue_)) {
@@ -1782,8 +1784,10 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func, const Ite
 
         auto new_then_body = SeqStmts::Flatten(std::move(then_stmts), last_if_stmt->then_body_->span_);
         auto new_else_body = SeqStmts::Flatten(std::move(else_stmts), (*last_if_stmt->else_body_)->span_);
-        auto new_if_stmt =
-            std::make_shared<IfStmt>(last_if_stmt->condition_, new_then_body, new_else_body, new_rv, span);
+        auto new_if_stmt = MutableCopy(last_if_stmt);
+        new_if_stmt->then_body_ = new_then_body;
+        new_if_stmt->else_body_ = new_else_body;
+        new_if_stmt->return_vars_ = new_rv;
         new_stmts[last_if_index] = new_if_stmt;
 
         // Update mutator mappings so Phase 3b sees the new TensorType return vars.
@@ -2028,9 +2032,9 @@ FunctionPtr UpdateCallSites(const FunctionPtr& func,
   CallSiteUpdateMutator mutator(incore_added_outputs, transformed_incore_funcs, OpRegistry::GetInstance());
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 }  // namespace

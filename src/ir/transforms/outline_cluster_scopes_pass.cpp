@@ -19,6 +19,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -72,9 +73,8 @@ Pass OutlineClusterScopes() {
                                             FunctionType::Group, "_cluster_");
       auto new_body = outliner.VisitStmt(func->body_);
 
-      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                                 func->return_types_, new_body, func->span_, func->func_type_,
-                                                 func->level_, func->role_, func->attrs_);
+      auto new_func = MutableCopy(func);
+      new_func->body_ = new_body;
       new_functions.push_back(new_func);
 
       const auto& outlined = outliner.GetOutlinedFunctions();

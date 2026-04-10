@@ -28,6 +28,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -355,9 +356,11 @@ class FuseCreateAssembleMutator : public IRMutator {
       new_body = transform_utils::Substitute(new_body, body_subst);
     }
 
-    return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                     new_iter_args, new_body, new_return_vars, for_stmt->span_,
-                                     for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_);
+    auto new_for = MutableCopy(for_stmt);
+    new_for->iter_args_ = std::move(new_iter_args);
+    new_for->body_ = std::move(new_body);
+    new_for->return_vars_ = std::move(new_return_vars);
+    return new_for;
   }
 
   StmtPtr StripPassThroughWhileIterArgs(const StmtPtr& stmt) {
@@ -398,8 +401,11 @@ class FuseCreateAssembleMutator : public IRMutator {
       new_body = transform_utils::Substitute(new_body, body_subst);
     }
 
-    return std::make_shared<WhileStmt>(while_stmt->condition_, new_iter_args, new_body, new_return_vars,
-                                       while_stmt->span_);
+    auto new_while = MutableCopy(while_stmt);
+    new_while->iter_args_ = std::move(new_iter_args);
+    new_while->body_ = std::move(new_body);
+    new_while->return_vars_ = std::move(new_return_vars);
+    return new_while;
   }
 
   static YieldStmtPtr GetTrailingYield(const StmtPtr& body) {

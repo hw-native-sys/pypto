@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -196,9 +197,10 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& perm
   new_stmts.push_back(new_return);
   auto new_body = std::make_shared<SeqStmts>(new_stmts, seq->span_);
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, new_return_types,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto new_func = MutableCopy(func);
+  new_func->return_types_ = new_return_types;
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 // Mutator that applies return-order permutations to TupleGetItemExpr indices

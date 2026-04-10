@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -242,8 +243,9 @@ class ChunkedLoopSplitter : public IRMutator {
       if (new_body.get() == op->body_.get()) {
         return op;
       }
-      return std::make_shared<ScopeStmt>(op->scope_kind_, new_body, op->span_, op->level_, op->role_,
-                                         op->split_);
+      auto new_scope = MutableCopy(op);
+      new_scope->body_ = std::move(new_body);
+      return new_scope;
     }
     return IRMutator::VisitStmt_(op);
   }
@@ -619,10 +621,9 @@ FunctionPtr TransformSplitChunkedLoops(const FunctionPtr& func) {
     return func;
   }
 
-  auto result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                           func->return_types_, new_body, func->span_, func->func_type_,
-                                           func->level_, func->role_, func->attrs_);
-  return result;
+  auto new_func = MutableCopy(func);
+  new_func->body_ = std::move(new_body);
+  return new_func;
 }
 
 }  // namespace

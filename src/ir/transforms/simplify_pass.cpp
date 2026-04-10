@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto {
 namespace ir {
@@ -93,8 +94,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
                    chunk_config_changed;
     if (!changed) return op;
 
-    return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                     op->return_vars_, op->span_, op->kind_, new_chunk_config, op->attrs_);
+    auto result = MutableCopy(op);
+    result->start_ = new_start;
+    result->stop_ = new_stop;
+    result->step_ = new_step;
+    result->body_ = new_body;
+    result->chunk_config_ = new_chunk_config;
+    return result;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
@@ -119,7 +125,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
                    (new_else.has_value() != op->else_body_.has_value()) ||
                    (new_else.has_value() && new_else->get() != op->else_body_->get());
     if (!changed) return op;
-    return std::make_shared<IfStmt>(new_condition, new_then, new_else, op->return_vars_, op->span_);
+    auto result = MutableCopy(op);
+    result->condition_ = new_condition;
+    result->then_body_ = new_then;
+    result->else_body_ = new_else;
+    return result;
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
@@ -127,7 +137,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_body = VisitStmt(op->body_);
     bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
     if (!changed) return op;
-    return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
+    auto result = MutableCopy(op);
+    result->condition_ = new_condition;
+    result->body_ = new_body;
+    return result;
   }
 
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
@@ -168,9 +181,9 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   SimplifyMutator mutator(analyzer.get());
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto result = MutableCopy(func);
+  result->body_ = new_body;
+  return result;
 }
 
 }  // namespace

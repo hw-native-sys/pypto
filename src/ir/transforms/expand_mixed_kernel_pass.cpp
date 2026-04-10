@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -461,10 +462,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
                                       tpop_var_remap, superseded_tpop_vars);
-        result.push_back(std::make_shared<ForStmt>(
-            for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
-            MakeBody(new_body, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-            for_stmt->chunk_config_, for_stmt->attrs_));
+        auto new_for = MutableCopy(for_stmt);
+        new_for->body_ = MakeBody(new_body, for_stmt->span_);
+        result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
                                       tpop_var_remap, superseded_tpop_vars);
@@ -475,14 +475,16 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                               tpop_var_remap, superseded_tpop_vars);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
-        result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(new_then, if_stmt->span_),
-                                                  new_else, if_stmt->return_vars_, if_stmt->span_));
+        auto new_if = MutableCopy(if_stmt);
+        new_if->then_body_ = MakeBody(new_then, if_stmt->span_);
+        new_if->else_body_ = new_else;
+        result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
                                       tpop_var_remap, superseded_tpop_vars);
-        result.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
-                                                     MakeBody(new_body, while_stmt->span_),
-                                                     while_stmt->return_vars_, while_stmt->span_));
+        auto new_while = MutableCopy(while_stmt);
+        new_while->body_ = MakeBody(new_body, while_stmt->span_);
+        result.push_back(new_while);
       } else {
         result.push_back(stmt);  // Unknown compound, include as-is
       }
@@ -983,8 +985,10 @@ FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func, int64_t gm_buffer_elem
   new_params.push_back(gm_var);
   auto new_directions = func->param_directions_;
   new_directions.push_back(ParamDirection::Out);
-  return std::make_shared<Function>(func->name_, new_params, new_directions, func->return_types_, func->body_,
-                                    func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+  auto result = MutableCopy(func);
+  result->params_ = new_params;
+  result->param_directions_ = new_directions;
+  return result;
 }
 
 StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<std::string>& modified_funcs,
@@ -1018,10 +1022,9 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
       if (nb != for_stmt->body_) {
-        new_stmts.push_back(
-            std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                      for_stmt->iter_args_, nb, for_stmt->return_vars_, for_stmt->span_,
-                                      for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_));
+        auto new_for = MutableCopy(for_stmt);
+        new_for->body_ = nb;
+        new_stmts.push_back(new_for);
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);
@@ -1038,8 +1041,10 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         body_changed = (*ne != *else_body);
       }
       if (body_changed) {
-        new_stmts.push_back(
-            std::make_shared<IfStmt>(if_stmt->condition_, nt, ne, if_stmt->return_vars_, if_stmt->span_));
+        auto new_if = MutableCopy(if_stmt);
+        new_if->then_body_ = nt;
+        new_if->else_body_ = ne;
+        new_stmts.push_back(new_if);
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);
@@ -1047,8 +1052,9 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       auto nb = RewriteCallsForGMBuffer(while_stmt->body_, modified_funcs, gm_param);
       if (nb != while_stmt->body_) {
-        new_stmts.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_, nb,
-                                                        while_stmt->return_vars_, while_stmt->span_));
+        auto new_while = MutableCopy(while_stmt);
+        new_while->body_ = nb;
+        new_stmts.push_back(new_while);
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);
@@ -1300,9 +1306,9 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
 
     if (!mod_callees.empty()) {
       auto nb = RewriteCallsForGMBuffer(func->body_, mod_callees, gm_param);
-      func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                        func->return_types_, nb, func->span_, func->func_type_, func->level_,
-                                        func->role_, func->attrs_);
+      auto updated = MutableCopy(func);
+      updated->body_ = nb;
+      func = updated;
     }
   }
 
@@ -1324,9 +1330,9 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     int counter = 0;
     auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, gm_buffer_bytes,
                                                     gm_buffer_elems, func->span_, counter);
-    func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_);
+    auto updated = MutableCopy(func);
+    updated->body_ = new_body;
+    func = updated;
   }
 }
 
@@ -1388,9 +1394,11 @@ Pass ExpandMixedKernel() {
         attrs.erase(
             std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
             attrs.end());
-        auto converted = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                                    func->return_types_, func->body_, func->span_, new_type,
-                                                    std::nullopt, std::nullopt, attrs);
+        auto converted = MutableCopy(func);
+        converted->func_type_ = new_type;
+        converted->level_ = std::nullopt;
+        converted->role_ = std::nullopt;
+        converted->attrs_ = attrs;
         new_functions.push_back(converted);
         continue;
       }

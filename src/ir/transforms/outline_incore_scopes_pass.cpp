@@ -21,6 +21,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -82,9 +83,9 @@ Pass OutlineIncoreScopes() {
       // If any InCore scopes were outlined, promote Opaque -> Orchestration.
       const auto& outlined = outliner.GetOutlinedFunctions();
       FunctionType new_func_type = outlined.empty() ? func->func_type_ : FunctionType::Orchestration;
-      auto new_func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                                 func->return_types_, new_body, func->span_, new_func_type,
-                                                 func->level_, func->role_, func->attrs_);
+      auto new_func = MutableCopy(func);
+      new_func->body_ = new_body;
+      new_func->func_type_ = new_func_type;
       new_functions.push_back(new_func);
 
       // Collect outlined functions (prepend before parent so inner functions come first)

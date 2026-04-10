@@ -26,6 +26,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -135,9 +136,10 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
 
   auto new_body = Substitute(func->body_, substitutions);
 
-  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto new_func = MutableCopy(func);
+  new_func->params_ = new_params;
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 }  // namespace

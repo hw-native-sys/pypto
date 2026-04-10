@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -225,9 +226,9 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
     if (fs && ContainsInCoreScope(fs->body_)) {
       auto new_body = WrapNonIncoreStatementsInInCore(fs->body_, span, split);
       if (new_body.get() != fs->body_.get()) {
-        return std::make_shared<ForStmt>(fs->loop_var_, fs->start_, fs->stop_, fs->step_, fs->iter_args_,
-                                         new_body, fs->return_vars_, fs->span_, fs->kind_, fs->chunk_config_,
-                                         fs->attrs_);
+        auto new_for = MutableCopy(fs);
+        new_for->body_ = new_body;
+        return new_for;
       }
     }
     return s;
@@ -532,8 +533,10 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       return op;
     }
 
-    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, new_iter_args, new_body,
-                                     op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
+    auto new_for = MutableCopy(op);
+    new_for->iter_args_ = new_iter_args;
+    new_for->body_ = new_body;
+    return new_for;
   }
 
   /**
@@ -813,10 +816,9 @@ FunctionPtr TransformInterchangeChunkLoops(const FunctionPtr& func) {
     return func;
   }
 
-  auto result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                           func->return_types_, new_body, func->span_, func->func_type_,
-                                           func->level_, func->role_, func->attrs_);
-  return result;
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 }  // namespace

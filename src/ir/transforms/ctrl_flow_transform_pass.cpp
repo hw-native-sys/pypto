@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -638,8 +639,9 @@ class CtrlFlowTransformMutator : public IRMutator {
 
     if (!scan.has_break && !scan.has_continue) {
       if (new_body.get() != op->body_.get()) {
-        return std::make_shared<WhileStmt>(op->condition_, op->iter_args_, new_body, op->return_vars_,
-                                           op->span_);
+        auto result = MutableCopy(op);
+        result->body_ = new_body;
+        return result;
       }
       return op;
     }
@@ -662,9 +664,9 @@ class CtrlFlowTransformMutator : public IRMutator {
     if (new_body.get() == op->body_.get()) {
       return op;
     }
-    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     new_body, op->return_vars_, op->span_, op->kind_, op->chunk_config_,
-                                     op->attrs_);
+    auto result = MutableCopy(op);
+    result->body_ = new_body;
+    return result;
   }
 
   BodyResult ProcessBodyForBreakAndContinue(const DecomposedBody& decomposed,
@@ -689,9 +691,9 @@ class CtrlFlowTransformMutator : public IRMutator {
                                          name_counter_, op->span_);
     auto final_body = BuildFinalBody(std::move(result), decomposed.had_yield, op->span_);
 
-    return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_, op->iter_args_,
-                                     final_body, op->return_vars_, op->span_, op->kind_, op->chunk_config_,
-                                     op->attrs_);
+    auto new_for = MutableCopy(op);
+    new_for->body_ = final_body;
+    return new_for;
   }
 
   // --------------------------------------------------------------------------
@@ -751,8 +753,9 @@ class CtrlFlowTransformMutator : public IRMutator {
                                          name_counter_, op->span_);
     auto final_body = BuildFinalBody(std::move(result), decomposed.had_yield, op->span_);
 
-    return std::make_shared<WhileStmt>(op->condition_, op->iter_args_, final_body, op->return_vars_,
-                                       op->span_);
+    auto new_while = MutableCopy(op);
+    new_while->body_ = final_body;
+    return new_while;
   }
 
   // --------------------------------------------------------------------------
@@ -797,9 +800,9 @@ FunctionPtr TransformCtrlFlow(const FunctionPtr& func) {
     return func;
   }
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto result = MutableCopy(func);
+  result->body_ = new_body;
+  return result;
 }
 
 }  // namespace

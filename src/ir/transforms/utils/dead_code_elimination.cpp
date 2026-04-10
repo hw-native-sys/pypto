@@ -20,6 +20,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
@@ -138,10 +139,9 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
       }
     } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto filtered = FilterDeadCode(FlattenBody(for_stmt->body_), live);
-      result.push_back(std::make_shared<ForStmt>(
-          for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_, for_stmt->iter_args_,
-          MakeBody(filtered, for_stmt->span_), for_stmt->return_vars_, for_stmt->span_, for_stmt->kind_,
-          for_stmt->chunk_config_, for_stmt->attrs_));
+      auto new_for = MutableCopy(for_stmt);
+      new_for->body_ = MakeBody(filtered, for_stmt->span_);
+      result.push_back(new_for);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto filtered_then = FilterDeadCode(FlattenBody(if_stmt->then_body_), live);
       std::optional<StmtPtr> filtered_else;
@@ -149,13 +149,15 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
         auto fe = FilterDeadCode(FlattenBody(if_stmt->else_body_.value()), live);
         filtered_else = MakeBody(fe, if_stmt->span_);
       }
-      result.push_back(std::make_shared<IfStmt>(if_stmt->condition_, MakeBody(filtered_then, if_stmt->span_),
-                                                filtered_else, if_stmt->return_vars_, if_stmt->span_));
+      auto new_if = MutableCopy(if_stmt);
+      new_if->then_body_ = MakeBody(filtered_then, if_stmt->span_);
+      new_if->else_body_ = filtered_else;
+      result.push_back(new_if);
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       auto filtered = FilterDeadCode(FlattenBody(while_stmt->body_), live);
-      result.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_,
-                                                   MakeBody(filtered, while_stmt->span_),
-                                                   while_stmt->return_vars_, while_stmt->span_));
+      auto new_while = MutableCopy(while_stmt);
+      new_while->body_ = MakeBody(filtered, while_stmt->span_);
+      result.push_back(new_while);
     } else {
       result.push_back(stmt);
     }

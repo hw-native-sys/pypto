@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -417,10 +418,9 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
   TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves());
   auto new_body = mutator.VisitStmt(func->body_);
 
-  auto result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                           func->return_types_, new_body, func->span_, func->func_type_,
-                                           func->level_, func->role_, func->attrs_);
-  return result;
+  auto new_func = MutableCopy(func);
+  new_func->body_ = new_body;
+  return new_func;
 }
 
 }  // namespace

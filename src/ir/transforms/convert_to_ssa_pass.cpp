@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -231,8 +232,11 @@ class SSAConverter {
 
     StmtPtr new_body = func->body_ ? ConvertStmt(func->body_) : nullptr;
 
-    return std::make_shared<Function>(func->name_, new_params, new_dirs, func->return_types_, new_body,
-                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+    auto result = MutableCopy(func);
+    result->params_ = std::move(new_params);
+    result->param_directions_ = std::move(new_dirs);
+    result->body_ = std::move(new_body);
+    return result;
   }
 
  private:
@@ -561,8 +565,15 @@ class SSAConverter {
     StmtPtr body = new_body;
     if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
 
-    return std::make_shared<ForStmt>(new_lv, new_start, new_stop, new_step, ias, body, all_rvs, op->span_,
-                                     op->kind_, op->chunk_config_, op->attrs_);
+    auto result = MutableCopy(op);
+    result->loop_var_ = std::move(new_lv);
+    result->start_ = std::move(new_start);
+    result->stop_ = std::move(new_stop);
+    result->step_ = std::move(new_step);
+    result->iter_args_ = std::move(ias);
+    result->body_ = std::move(body);
+    result->return_vars_ = std::move(all_rvs);
+    return result;
   }
 
   // ── WhileStmt ──────────────────────────────────────────────────────
@@ -688,7 +699,12 @@ class SSAConverter {
     StmtPtr body = new_body;
     if (!yields.empty()) body = ReplaceOrAppendYield(new_body, yields, op->span_);
 
-    return std::make_shared<WhileStmt>(new_cond, ias, body, all_rvs, op->span_);
+    auto result = MutableCopy(op);
+    result->condition_ = std::move(new_cond);
+    result->iter_args_ = std::move(ias);
+    result->body_ = std::move(body);
+    result->return_vars_ = std::move(all_rvs);
+    return result;
   }
 
   // ── IfStmt — phi node synthesis ────────────────────────────────────
@@ -737,7 +753,12 @@ class SSAConverter {
     // No divergence — return simple IfStmt
     if (phis.empty() && op->return_vars_.empty()) {
       cur_ = before;
-      return std::make_shared<IfStmt>(cond, new_then, new_else, std::vector<VarPtr>{}, op->span_);
+      auto result = MutableCopy(op);
+      result->condition_ = std::move(cond);
+      result->then_body_ = std::move(new_then);
+      result->else_body_ = std::move(new_else);
+      result->return_vars_ = {};
+      return result;
     }
 
     // No new phis but existing return_vars (explicit SSA) — version return_vars, keep branch yields
@@ -752,7 +773,12 @@ class SSAConverter {
         return_vars.push_back(nrv);
         cur_[rv_key] = nrv;
       }
-      return std::make_shared<IfStmt>(cond, new_then, new_else, return_vars, op->span_);
+      auto result = MutableCopy(op);
+      result->condition_ = std::move(cond);
+      result->then_body_ = std::move(new_then);
+      result->else_body_ = std::move(new_else);
+      result->return_vars_ = std::move(return_vars);
+      return result;
     }
 
     // Create phi outputs
@@ -801,8 +827,12 @@ class SSAConverter {
       else_with_yield = std::make_shared<YieldStmt>(else_yields, op->span_);
     }
 
-    return std::make_shared<IfStmt>(cond, then_with_yield, std::make_optional(else_with_yield), return_vars,
-                                    op->span_);
+    auto result = MutableCopy(op);
+    result->condition_ = std::move(cond);
+    result->then_body_ = std::move(then_with_yield);
+    result->else_body_ = std::make_optional(std::move(else_with_yield));
+    result->return_vars_ = std::move(return_vars);
+    return result;
   }
 
   // ── Simple statements ──────────────────────────────────────────────
@@ -826,9 +856,10 @@ class SSAConverter {
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
     auto body = ConvertStmt(op->body_);
-    return body != op->body_ ? std::make_shared<ScopeStmt>(op->scope_kind_, body, op->span_, op->level_,
-                                                           op->role_, op->split_)
-                             : op;
+    if (body == op->body_) return op;
+    auto result = MutableCopy(op);
+    result->body_ = std::move(body);
+    return result;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

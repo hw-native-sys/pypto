@@ -21,6 +21,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 
 namespace pypto::ir {
 
@@ -114,7 +115,11 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const IfStmtPtr& op) {
   if (changed) {
     // Visit condition (shouldn't change for normalization, but call for consistency)
     auto new_condition = VisitExpr(op->condition_);
-    return std::make_shared<IfStmt>(new_condition, new_then, new_else, op->return_vars_, op->span_);
+    auto new_if = MutableCopy(op);
+    new_if->condition_ = std::move(new_condition);
+    new_if->then_body_ = std::move(new_then);
+    new_if->else_body_ = std::move(new_else);
+    return new_if;
   }
   return op;
 }
@@ -130,8 +135,12 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const ForStmtPtr& op) {
     auto new_stop = VisitExpr(op->stop_);
     auto new_step = VisitExpr(op->step_);
 
-    return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                     op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
+    auto new_for = MutableCopy(op);
+    new_for->start_ = std::move(new_start);
+    new_for->stop_ = std::move(new_stop);
+    new_for->step_ = std::move(new_step);
+    new_for->body_ = std::move(new_body);
+    return new_for;
   }
   return op;
 }
@@ -145,7 +154,10 @@ StmtPtr NormalizeStmtStructureMutator::VisitStmt_(const WhileStmtPtr& op) {
     // Visit condition (shouldn't change for normalization, but call for consistency)
     auto new_condition = VisitExpr(op->condition_);
 
-    return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
+    auto new_while = MutableCopy(op);
+    new_while->condition_ = std::move(new_condition);
+    new_while->body_ = std::move(new_body);
+    return new_while;
   }
   return op;
 }
@@ -157,9 +169,9 @@ FunctionPtr NormalizeStmtStructure(const FunctionPtr& func) {
   NormalizeStmtStructureMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
 
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto new_func = MutableCopy(func);
+  new_func->body_ = std::move(new_body);
+  return new_func;
 }
 
 }  // namespace pypto::ir

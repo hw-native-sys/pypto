@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -503,8 +504,10 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       new_else = (new_else_stmts.size() == 1) ? new_else_stmts[0]
                                               : std::make_shared<SeqStmts>(new_else_stmts, if_stmt->span_);
     }
-    return std::make_shared<IfStmt>(if_stmt->condition_, new_then_body, new_else, if_stmt->return_vars_,
-                                    if_stmt->span_);
+    auto new_if = MutableCopy(if_stmt);
+    new_if->then_body_ = new_then_body;
+    new_if->else_body_ = new_else;
+    return new_if;
   }
 
   if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
@@ -594,10 +597,11 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   auto [cloned_body, clone_map_unused] = DeepClone(new_body);
   (void)clone_map_unused;
 
-  auto attrs = WithSplitAttr(func, mode);
-  return std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
-                                    cloned_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    attrs);
+  auto new_func = MutableCopy(func);
+  new_func->params_ = new_params;
+  new_func->body_ = cloned_body;
+  new_func->attrs_ = WithSplitAttr(func, mode);
+  return new_func;
 }
 
 }  // namespace

@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -219,7 +220,11 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const IfStmtPtr& op) {
   // Restore condition pending for parent to handle
   pending_stmts_ = condition_pending;
 
-  return std::make_shared<IfStmt>(new_condition, new_then, new_else, op->return_vars_, op->span_);
+  auto result = MutableCopy(op);
+  result->condition_ = new_condition;
+  result->then_body_ = new_then;
+  result->else_body_ = new_else;
+  return result;
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
@@ -250,8 +255,12 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ForStmtPtr& op) {
   // Restore range pending for parent to handle
   pending_stmts_ = range_pending;
 
-  return std::make_shared<ForStmt>(op->loop_var_, new_start, new_stop, new_step, op->iter_args_, new_body,
-                                   op->return_vars_, op->span_, op->kind_, op->chunk_config_, op->attrs_);
+  auto result = MutableCopy(op);
+  result->start_ = new_start;
+  result->stop_ = new_stop;
+  result->step_ = new_step;
+  result->body_ = new_body;
+  return result;
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
@@ -274,7 +283,10 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
   // Restore condition pending for parent to handle
   pending_stmts_ = condition_pending;
 
-  return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
+  auto result = MutableCopy(op);
+  result->condition_ = new_condition;
+  result->body_ = new_body;
+  return result;
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ScopeStmtPtr& op) {
@@ -373,9 +385,9 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
 
   FlattenCallExprMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
-  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                    func->attrs_);
+  auto result = MutableCopy(func);
+  result->body_ = new_body;
+  return result;
 }
 
 }  // namespace
