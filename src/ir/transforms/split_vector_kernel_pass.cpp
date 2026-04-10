@@ -237,6 +237,25 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
 }
 
+TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
+
+  std::vector<ExprPtr> new_shape = tt->shape_;
+  new_shape[dim] = half_dim_size;
+
+  std::optional<TileView> new_tile_view = tt->tile_view_;
+  if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
+    TileView tv = tile_view.value();
+    if (dim < static_cast<int>(tv.valid_shape.size())) {
+      tv.valid_shape[dim] = half_dim_size;
+    }
+    new_tile_view = std::move(tv);
+  }
+
+  return std::make_shared<TileType>(new_shape, tt->dtype_, tt->memref_, new_tile_view, tt->memory_space_);
+}
+
 std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode mode, int split_int,
                                   int split_dim, std::unordered_map<const Var*, TileInfo>& tile_vars,
                                   bool is_aiv, const ExprPtr& subblock_idx,
@@ -375,29 +394,50 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
   }
 
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    // Phase 1: Update iter_args — halve tile types and eagerly substitute initValues.
-    // Eager initValue substitution ensures new_ia is the final form. If we deferred to the
-    // final Substitute, it would create new_ia2 (with updated initValue) while body references
-    // would get new_ia — causing a pointer mismatch in structural equality.
+    // Eagerly substitute initValues while rebuilding iter_args. If this is
+    // deferred to the final Substitute pass, it can create a second IterArg
+    // instance whose pointer diverges from the one referenced by the rebuilt
+    // loop body, breaking structural equality.
     std::vector<IterArgPtr> new_iter_args;
     new_iter_args.reserve(for_stmt->iter_args_.size());
+    std::vector<VarPtr> new_return_vars = for_stmt->return_vars_;
+
+    // Propagate tile_vars from init values to iter_args BEFORE processing body.
+    // Iter_args carry the init_value into the loop; if the init is a tracked
+    // halved tile, the iter_arg must also be tracked so that operations on it
+    // inside the loop body are correctly recognized.
     for (const auto& ia : for_stmt->iter_args_) {
-      auto tt = std::dynamic_pointer_cast<const TileType>(ia->GetType());
-      if (is_aiv && tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        auto new_type = HalveTileShape(ia->GetType(), split_dim);
-        auto new_init = transform_utils::Substitute(ia->initValue_, var_replacements);
-        auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
-        var_replacements[ia.get()] = new_ia;
-        TileInfo info{ComputeHalfDimSize(tt->shape_[split_dim])};
-        tile_vars[ia.get()] = info;
-        tile_vars[new_ia.get()] = info;
-        new_iter_args.push_back(new_ia);
+      auto new_init_value = ia->initValue_;
+      if (new_init_value && !var_replacements.empty()) {
+        new_init_value = transform_utils::Substitute(new_init_value, var_replacements);
+      }
+      TypePtr new_type = ia->GetType();
+      bool has_tracked_tile = false;
+      TileInfo tracked_info;
+      if (ia->initValue_) {
+        if (auto init_var = AsVarLike(ia->initValue_)) {
+          auto it = tile_vars.find(init_var.get());
+          if (it != tile_vars.end()) {
+            has_tracked_tile = true;
+            tracked_info = it->second;
+            tile_vars[ia.get()] = it->second;
+            new_type = ApplyTrackedTileShape(ia->GetType(), split_dim, it->second.half_dim_size);
+          }
+        }
+      }
+
+      if (new_type != ia->GetType() || new_init_value != ia->initValue_) {
+        auto new_iter_arg = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init_value, ia->span_);
+        new_iter_args.push_back(new_iter_arg);
+        var_replacements[ia.get()] = new_iter_arg;
+        if (has_tracked_tile) {
+          tile_vars[new_iter_arg.get()] = tracked_info;
+        }
       } else {
         new_iter_args.push_back(ia);
       }
     }
 
-    // Phase 2: Process loop body with updated var_replacements.
     auto flat = std::vector<StmtPtr>();
     if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(for_stmt->body_)) {
       flat = seq->stmts_;
@@ -410,29 +450,27 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
                            ? new_body_stmts[0]
                            : std::make_shared<SeqStmts>(new_body_stmts, for_stmt->span_);
 
-    // Phase 3: Update return_vars — halve type if corresponding iter_arg was halved,
-    // and register in tile_vars so downstream tile.store picks up the subblock offset.
-    // Invariant: |iter_args| == |return_vars|, so indexing is safe.
+    // Propagate tile_vars tracking from iter_args to return_vars.
+    // ForStmt return_vars are the loop-exit versions of the corresponding
+    // iter_args.  If an iter_arg carries a halved tile, the return_var must
+    // inherit the tile info so that downstream tile.store gets the correct
+    // subblock offset adjustment.
     INTERNAL_CHECK(for_stmt->iter_args_.size() == for_stmt->return_vars_.size())
         << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
-    std::vector<VarPtr> new_return_vars;
-    new_return_vars.reserve(for_stmt->return_vars_.size());
-    for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
-      const auto& rv = for_stmt->return_vars_[i];
-      const bool ia_halved = (new_iter_args[i].get() != for_stmt->iter_args_[i].get());
-      if (ia_halved) {
-        auto new_rv_type = HalveTileShape(rv->GetType(), split_dim);
-        auto new_rv = std::make_shared<Var>(rv->name_hint_, new_rv_type, rv->span_);
-        var_replacements[rv.get()] = new_rv;
-        // Register in tile_vars so tile.store after this loop adjusts its offset.
-        auto old_tt = std::dynamic_pointer_cast<const TileType>(for_stmt->iter_args_[i]->GetType());
-        TileInfo info{ComputeHalfDimSize(old_tt->shape_[split_dim])};
-        tile_vars[rv.get()] = info;
-        tile_vars[new_rv.get()] = info;
-        new_return_vars.push_back(new_rv);
-      } else {
-        new_return_vars.push_back(rv);
+    for (size_t i = 0; i < new_iter_args.size() && i < new_return_vars.size(); ++i) {
+      auto it = tile_vars.find(new_iter_args[i].get());
+      if (it != tile_vars.end()) {
+        tile_vars[new_return_vars[i].get()] = it->second;
+        auto new_type =
+            ApplyTrackedTileShape(new_return_vars[i]->GetType(), split_dim, it->second.half_dim_size);
+        if (new_type != new_return_vars[i]->GetType()) {
+          auto new_return_var =
+              std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);
+          new_return_vars[i] = new_return_var;
+          tile_vars[new_return_var.get()] = it->second;
+          var_replacements[for_stmt->return_vars_[i].get()] = new_return_var;
+        }
       }
     }
 

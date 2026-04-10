@@ -224,5 +224,258 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
     assert "blayout=pl.TileLayout.col_major" in aic_printed
 
 
+def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
+    """On Ascend910B, C2V Vec pops must stay in the final Vec layout.
+
+    The A2A3 GM-backed pipe consumer materializes the popped tile through an ND
+    GlobalTensor. PTO-ISA does not support loading that ND buffer into an NZ
+    Vec tile, so ExpandMixedKernel must not introduce an NZ Vec bridge tile
+    here.
+    """
+
+    @pl.program
+    class MixedMatmul:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            z_vec = pl.move(
+                z_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(passes.convert_to_ssa()(MixedMatmul))
+        )
+
+    aiv_func = transformed.get_function("main_incore_0_aiv")
+    assert aiv_func is not None
+
+    aiv_printed = python_print(aiv_func)
+    assert "pl.tile.tpop_from_aic(" in aiv_printed
+    assert "pl.tile.move(" not in aiv_printed
+    assert "blayout=pl.TileLayout.col_major" not in aiv_printed
+    assert "slayout=pl.TileLayout.row_major" not in aiv_printed
+
+
+def test_gm_pipe_buffer_per_call_allocation():
+    """Each cross-core Group call gets its own gm_pipe_buffer tensor.create.
+
+    When an orchestration function calls multiple Group functions that use
+    cross-core pipes, each call must independently allocate its own
+    gm_pipe_buffer via a separate tensor.create.  Sharing a single buffer
+    causes scope escape and synchronization conflicts.
+    """
+
+    @pl.program
+    class MultiCallProgram:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def vector_producer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
+            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+            pl.tpush_to_aic(tile_a, split=0)
+
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cube_consumer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+            pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
+            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+            pl.tfree_to_aiv(received)
+            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.cube_consumer(a, out)
+            self.vector_producer(a, out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            out = self.group_func(a, out)
+            out = self.group_func(a, out)
+            return out
+
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(passes.convert_to_ssa()(MultiCallProgram))
+        )
+
+    orch_func = transformed.get_function("main")
+    assert orch_func is not None
+    orch_printed = python_print(orch_func)
+
+    # Each call should have its own tensor.create with a unique name
+    creates = [
+        line for line in orch_printed.split("\n") if "gm_pipe_buffer" in line and "tensor.create" in line
+    ]
+    assert len(creates) == 2, f"Expected 2 tensor.creates, got {len(creates)}: {creates}"
+    assert "gm_pipe_buffer_0" in orch_printed
+    assert "gm_pipe_buffer_1" in orch_printed
+
+
+def test_gm_pipe_buffer_per_call_inside_for_loop():
+    """Per-call gm_pipe_buffer must also work inside for-loops."""
+
+    @pl.program
+    class LoopedCrossCore:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def vector_producer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
+            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+            pl.tpush_to_aic(tile_a, split=0)
+
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cube_consumer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+            pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
+            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+            pl.tfree_to_aiv(received)
+            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.cube_consumer(a, out)
+            self.vector_producer(a, out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            for b in pl.range(4):
+                out = self.group_func(a, out)
+            return out
+
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(passes.convert_to_ssa()(LoopedCrossCore))
+        )
+
+    orch_func = transformed.get_function("main")
+    assert orch_func is not None
+    orch_printed = python_print(orch_func)
+    lines = orch_printed.strip().split("\n")
+
+    # tensor.create must appear inside the for-loop (after the for header)
+    for_line_idx = None
+    create_line_idx = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if for_line_idx is None and stripped.startswith("for ") and "pl.range" in stripped:
+            for_line_idx = idx
+        if create_line_idx is None and "gm_pipe_buffer" in stripped and "tensor.create" in stripped:
+            create_line_idx = idx
+
+    assert for_line_idx is not None, "for-loop not found in orchestration body"
+    assert create_line_idx is not None, "gm_pipe_buffer tensor.create not found"
+    assert for_line_idx < create_line_idx, "gm_pipe_buffer tensor.create must appear inside the for-loop body"
+
+
+def test_gm_pipe_buffer_param_direction_is_out():
+    """The __gm_pipe_buffer parameter must have Out direction."""
+
+    @pl.program
+    class CrossCoreProgram:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def vector_producer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
+            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+            pl.tpush_to_aic(tile_a, split=0)
+
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cube_consumer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+            pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
+            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+            pl.tfree_to_aiv(received)
+            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.cube_consumer(a, out)
+            self.vector_producer(a, out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.group_func(a, out)
+            return updated
+
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(passes.convert_to_ssa()(CrossCoreProgram))
+        )
+
+    group_func = transformed.get_function("group_func")
+    assert group_func is not None
+    gm_idx = next(i for i, p in enumerate(group_func.params) if p.name_hint == "__gm_pipe_buffer")
+    assert group_func.param_directions[gm_idx] == ir.ParamDirection.Out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

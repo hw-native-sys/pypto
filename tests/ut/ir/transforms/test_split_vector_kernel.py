@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.printer import python_print
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +182,78 @@ class TestSplitVectorKernelUpDown:
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
+
+    def test_loop_iter_arg_keeps_split_tracking(self):
+        """Loop iter_args seeded by halved tiles must keep split-aware store offsets."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                for i in pl.range(2):
+                    out_0 = pl.store(accum, [0, 0], out_0)
+                    pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
+                        pl.tpop_from_aic(split=0)
+                    )
+                    accum = pl.add(accum, pop_tile)
+                return out_0
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        main_aiv = actual.get_function("main_aiv")
+        assert main_aiv is not None
+        loop_stmt = next(stmt for stmt in ir.flatten_to_stmts(main_aiv.body) if isinstance(stmt, ir.ForStmt))
+        iter_arg_type = loop_stmt.iter_args[0].type
+        assert isinstance(iter_arg_type, ir.TileType)
+        assert isinstance(iter_arg_type.shape[0], ir.ConstInt)
+        assert iter_arg_type.shape[0].value == 8
+        assert "def main_aiv(" in printed
+        assert "def main_aiv__aiv1(" not in printed
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
+        assert "pl.tile.tpop_from_aic(split=1)" in printed
+        assert "pl.tile.store(accum__iter_v1, [0 + subblock_idx * 8, 0], out_0__iter_v1)" in printed
+
+    def test_loop_return_var_keeps_split_tracking(self):
+        """Loop return_vars fed by split tiles must keep split-aware store offsets after the loop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                for i in pl.range(2):
+                    pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
+                        pl.tpop_from_aic(split=0)
+                    )
+                    accum = pl.add(accum, pop_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0, 0], out_0)
+                return out_0_store
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        main_aiv = actual.get_function("main_aiv")
+        assert main_aiv is not None
+        loop_stmt = next(stmt for stmt in ir.flatten_to_stmts(main_aiv.body) if isinstance(stmt, ir.ForStmt))
+        return_var_type = loop_stmt.return_vars[0].type
+        assert isinstance(return_var_type, ir.TileType)
+        assert isinstance(return_var_type.shape[0], ir.ConstInt)
+        assert return_var_type.shape[0].value == 8
+        assert "def main_aiv(" in printed
+        assert "def main_aiv__aiv1(" not in printed
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
+        assert "pl.tile.tpop_from_aic(split=1)" in printed
+        assert "pl.tile.store(accum__rv_v2, [0 + subblock_idx * 8, 0], out_0__ssa_v0)" in printed
 
     def test_injected_subblock_idx_avoids_name_collision(self):
         """Injected lane temp should pick a fresh name when subblock_idx already exists."""

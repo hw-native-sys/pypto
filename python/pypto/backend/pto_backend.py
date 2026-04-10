@@ -336,6 +336,23 @@ def _get_fixed_subblock_id(func: _ir_core.Function) -> int | None:
     return 1 if func.name.endswith("__aiv1") else None
 
 
+def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
+    """Return whether the function reads subblock id from the runtime lane context."""
+    stmts = _ir_core.flatten_to_stmts(func.body)
+    for stmt in stmts:
+        call = None
+        if isinstance(stmt, _ir_core.EvalStmt):
+            call = stmt.expr
+        elif isinstance(stmt, _ir_core.AssignStmt):
+            call = stmt.value
+        if not isinstance(call, _ir_core.Call):
+            continue
+        op = getattr(call, "op", None)
+        if isinstance(op, _ir_core.Op) and op.name == "tile.get_subblock_idx":
+            return True
+    return False
+
+
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     """Return whether A2A3 split AIV wrappers must source subblock id from runtime context."""
     split_mode = getattr(func, "split", None)
@@ -345,7 +362,7 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
         return False
     if _backend_core.get_backend_type() != _backend_core.BackendType.Ascend910B:
         return False
-    return not func.name.endswith("__aiv1")
+    return _uses_dynamic_subblock_id(func)
 
 
 def _generate_kernel_header(func: _ir_core.Function) -> str:
@@ -772,10 +789,11 @@ def generate(
     groups, ungrouped = _build_group_mapping(transformed_program)
 
     # ── Phase 1: IR → MLIR (sequential, fast) ────────────────────────
-    # PTOCodegen converts IR to MLIR strings.  This is cheap (pure string
+    # PTOCodegen converts IR to MLIR strings. This is cheap (pure string
     # generation) and runs sequentially so that we don't contend on the GIL.
     units: list[_CodegenUnit] = []
 
+    # Grouped functions: one MLIR module per group
     for group_name, members in groups.items():
         try:
             grouped_program = _ir_core.Program(members, group_name, transformed_program.span)

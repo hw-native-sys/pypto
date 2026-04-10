@@ -265,6 +265,73 @@ class TestLegalSharingPreserved:
         _assert_shares_memref(result_func, "loaded", "padded")
 
 
+class TestAscend910BSplitLoadTpopHazard:
+    """Ascend910B split AIV kernels should split load+tpop writer reuse."""
+
+    def _build_split_aiv_program(self) -> ir.Program:
+        alloc = _MemRefAlloc()
+        shared = alloc.vec([8, 128], _FP32)
+        pipe = alloc.vec([8, 128], _FP32)
+
+        down_tensor_t = _tensor_t([16, 128], _FP32)
+        load_t = _tile_t([8, 128], _FP32, shared)
+        add_t = _tile_t([8, 128], _FP32, shared)
+        pipe_t = _tile_t([8, 128], _FP32, pipe)
+
+        down = ir.Var("down", down_tensor_t, _SPAN)
+        down_prev = ir.Var("down_prev", load_t, _SPAN)
+        pipe_chunk = ir.Var("pipe_chunk", pipe_t, _SPAN)
+        down_next = ir.Var("down_next", add_t, _SPAN)
+        result = ir.Var("result", down_tensor_t, _SPAN)
+
+        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
+        tile_shape = ir.MakeTuple([_ci(8), _ci(128)], _SPAN)
+
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [down, offsets, tile_shape, tile_shape],
+            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+            load_t,
+            _SPAN,
+        )
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 1}, pipe_t, _SPAN)
+        add_call = ir.Call(ir.Op("tile.add"), [down_prev, pipe_chunk], {}, add_t, _SPAN)
+        store_call = ir.Call(ir.Op("tile.store"), [down_next, offsets, down], down_tensor_t, _SPAN)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(down_prev, load_call, _SPAN),
+                ir.AssignStmt(pipe_chunk, tpop_call, _SPAN),
+                ir.AssignStmt(down_next, add_call, _SPAN),
+                ir.AssignStmt(result, store_call, _SPAN),
+                ir.ReturnStmt([result], _SPAN),
+            ],
+            _SPAN,
+        )
+
+        func = ir.Function(
+            "main",
+            [(down, ir.ParamDirection.InOut)],
+            [down_tensor_t],
+            body,
+            _SPAN,
+            type=ir.FunctionType.AIV,
+            attrs={"split": ir.SplitMode.UP_DOWN},
+        )
+        return ir.Program([func], "Test", _SPAN)
+
+    def test_ascend910b_split_aiv_splits_load_plus_tpop_reuse(self):
+        result_func = _run_legalize(self._build_split_aiv_program())
+        _assert_different_memref(result_func, "down_prev", "down_next")
+
+    def test_ascend950_keeps_compatible_share(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        result_func = _run_legalize(self._build_split_aiv_program())
+        _assert_shares_memref(result_func, "down_prev", "down_next")
+
+
 # ---------------------------------------------------------------------------
 # Tests: incompatible signatures cause split
 # ---------------------------------------------------------------------------

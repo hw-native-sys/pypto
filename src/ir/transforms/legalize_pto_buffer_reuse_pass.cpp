@@ -29,9 +29,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -70,7 +73,14 @@ static bool IsLegalViewOp(const std::string& op_name) {
 struct MemRefUsageInfo {
   const Var* base_ptr = nullptr;  ///< base_ Ptr identity key
   uint64_t alloc_size = 0;        ///< Size of the root allocation in bytes
-  std::vector<std::pair<const Var*, TileBufSignature>> writers;
+  struct WriterInfo {
+    const Var* var = nullptr;
+    TileBufSignature signature;
+    std::string op_name;
+    std::vector<const Var*> input_vars;
+  };
+
+  std::vector<WriterInfo> writers;
   std::vector<std::pair<const Var*, TileBufSignature>> view_users;
   std::vector<std::pair<const Var*, const Var*>> view_edges;
 };
@@ -111,16 +121,34 @@ class MemRefUsageCollector : public IRVisitor {
         }
       }
     } else {
-      info.writers.emplace_back(op->var_.get(), sig);
+      std::vector<const Var*> input_vars;
+      std::string op_name;
+      if (call && call->op_) {
+        op_name = call->op_->name_;
+        for (const auto& arg : call->args_) {
+          if (auto input_var = As<Var>(arg)) {
+            input_vars.push_back(input_var.get());
+          }
+        }
+        if (op_name == "tile.tpop_from_aic") {
+          tpop_from_aic_vars_.insert(op->var_.get());
+        }
+      }
+      info.writers.push_back(
+          MemRefUsageInfo::WriterInfo{op->var_.get(), sig, std::move(op_name), std::move(input_vars)});
     }
 
     IRVisitor::VisitStmt_(op);
   }
 
   [[nodiscard]] const std::map<const Var*, MemRefUsageInfo>& GetUsages() const { return usages_; }
+  [[nodiscard]] const std::unordered_set<const Var*>& GetTpopFromAicVars() const {
+    return tpop_from_aic_vars_;
+  }
 
  private:
   std::map<const Var*, MemRefUsageInfo> usages_;
+  std::unordered_set<const Var*> tpop_from_aic_vars_;
 
   MemRefUsageInfo& GetOrCreate(const Var* base_ptr, uint64_t size) {
     auto it = usages_.find(base_ptr);
@@ -141,12 +169,68 @@ class MemRefUsageCollector : public IRVisitor {
 // Phase 2 — Decide which MemRefs must be split
 // -------------------------------------------------------------------------
 
+bool NeedsAscend910BSplitLoadTpopHazardWorkaround(const FunctionPtr& func) {
+  if (backend::GetBackendType() != backend::BackendType::Ascend910B ||
+      func->func_type_ != FunctionType::AIV) {
+    return false;
+  }
+
+  const auto split_mode = func->GetSplitMode();
+  return split_mode.has_value() && *split_mode != SplitMode::None;
+}
+
+std::unordered_set<const Var*> CollectLoadFamilyVars(const MemRefUsageInfo& info) {
+  std::unordered_set<const Var*> load_family;
+  std::vector<const Var*> worklist;
+  for (const auto& writer : info.writers) {
+    if (writer.op_name != "tile.load") continue;
+    load_family.insert(writer.var);
+    worklist.push_back(writer.var);
+  }
+  for (size_t i = 0; i < worklist.size(); ++i) {
+    const Var* source = worklist[i];
+    for (const auto& [view_source, view_user] : info.view_edges) {
+      if (view_source != source || load_family.count(view_user) != 0) continue;
+      load_family.insert(view_user);
+      worklist.push_back(view_user);
+    }
+  }
+  return load_family;
+}
+
+std::unordered_set<size_t> CollectForcedSplitWriterIndices(
+    const MemRefUsageInfo& info, const std::unordered_set<const Var*>& tpop_from_aic_vars,
+    bool enable_ascend910b_split_workaround) {
+  std::unordered_set<size_t> forced_indices;
+  if (!enable_ascend910b_split_workaround) return forced_indices;
+
+  const auto load_family = CollectLoadFamilyVars(info);
+  if (load_family.empty()) return forced_indices;
+
+  for (size_t i = 0; i < info.writers.size(); ++i) {
+    const auto& writer = info.writers[i];
+    if (writer.op_name.empty() || writer.op_name == "tile.load") continue;
+
+    bool uses_shared_load = false;
+    bool uses_tpop = false;
+    for (const Var* input_var : writer.input_vars) {
+      uses_shared_load = uses_shared_load || load_family.count(input_var) != 0;
+      uses_tpop = uses_tpop || tpop_from_aic_vars.count(input_var) != 0;
+    }
+    if (uses_shared_load && uses_tpop) {
+      forced_indices.insert(i);
+    }
+  }
+  return forced_indices;
+}
+
 /// For each MemRef that has multiple writers with incompatible signatures,
 /// collect the set of Var* that need a fresh MemRef.
 ///
-/// Strategy: the first writer keeps the original MemRef.  Every subsequent
-/// writer that is not PTO-materializable from the first writer's signature
-/// gets a new MemRef.
+/// Strategy: the first writer keeps the original MemRef. Every subsequent
+/// writer that is not PTO-materializable from the first writer's signature,
+/// or that matches an Ascend910B split-AIV load+tpop hazard pattern, gets a
+/// new MemRef.
 void PropagateSplitToViewUsers(const MemRefUsageInfo& info, const std::vector<const Var*>& split_roots,
                                const MemRefPtr& new_memref, std::map<const Var*, MemRefPtr>& splits) {
   std::vector<const Var*> worklist = split_roots;
@@ -169,16 +253,20 @@ void PropagateSplitToViewUsers(const MemRefUsageInfo& info, const std::vector<co
 }
 
 std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const Var*, MemRefUsageInfo>& usages,
-                                                 uint64_t& next_id) {
+                                                 const std::unordered_set<const Var*>& tpop_from_aic_vars,
+                                                 bool enable_ascend910b_split_workaround, uint64_t& next_id) {
   std::map<const Var*, MemRefPtr> splits;
 
   for (const auto& [base_ptr, info] : usages) {
     if (info.writers.size() <= 1) continue;
 
-    const auto& ref_sig = info.writers[0].second;
+    const auto& ref_sig = info.writers[0].signature;
+    const auto forced_split_indices =
+        CollectForcedSplitWriterIndices(info, tpop_from_aic_vars, enable_ascend910b_split_workaround);
+
     bool needs_split = false;
     for (size_t i = 1; i < info.writers.size(); ++i) {
-      if (!ref_sig.IsPTOMaterializable(info.writers[i].second)) {
+      if (forced_split_indices.count(i) != 0 || !ref_sig.IsPTOMaterializable(info.writers[i].signature)) {
         needs_split = true;
         break;
       }
@@ -186,11 +274,14 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const Var*, MemR
     if (!needs_split) continue;
 
     // Group writers by materializable-compatibility; first group keeps original MemRef
-    std::map<int, std::vector<size_t>> sig_groups;
-    std::vector<TileBufSignature> group_reps;
+    std::vector<int> group_ids(info.writers.size(), -1);
+    std::vector<TileBufSignature> group_reps{info.writers[0].signature};
+    group_ids[0] = 0;
 
-    for (size_t i = 0; i < info.writers.size(); ++i) {
-      const auto& sig = info.writers[i].second;
+    for (size_t i = 1; i < info.writers.size(); ++i) {
+      if (forced_split_indices.count(i) != 0) continue;
+
+      const auto& sig = info.writers[i].signature;
       int group_id = -1;
       for (size_t g = 0; g < group_reps.size(); ++g) {
         if (group_reps[g].IsPTOMaterializable(sig)) {
@@ -202,22 +293,33 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const Var*, MemR
         group_id = static_cast<int>(group_reps.size());
         group_reps.push_back(sig);
       }
-      sig_groups[group_id].push_back(i);
+      group_ids[i] = group_id;
+    }
+
+    for (size_t i = 1; i < info.writers.size(); ++i) {
+      if (forced_split_indices.count(i) == 0) continue;
+      group_ids[i] = static_cast<int>(group_reps.size());
+      group_reps.push_back(info.writers[i].signature);
+    }
+
+    std::map<int, std::vector<size_t>> sig_groups;
+    for (size_t i = 0; i < group_ids.size(); ++i) {
+      sig_groups[group_ids[i]].push_back(i);
     }
 
     // Group 0 keeps original MemRef; groups 1..N get fresh MemRefs
     for (auto& [gid, indices] : sig_groups) {
       if (gid == 0) continue;
 
-      auto memory_space = info.writers[indices[0]].second.memory_space;
+      auto memory_space = info.writers[indices[0]].signature.memory_space;
       auto new_base =
           std::make_shared<Var>(BuildBasePtrName(memory_space, next_id++), GetPtrType(), Span::unknown());
       auto new_memref = std::make_shared<MemRef>(new_base, static_cast<int64_t>(0), info.alloc_size);
       std::vector<const Var*> split_roots;
 
       for (size_t idx : indices) {
-        splits[info.writers[idx].first] = new_memref;
-        split_roots.push_back(info.writers[idx].first);
+        splits[info.writers[idx].var] = new_memref;
+        split_roots.push_back(info.writers[idx].var);
       }
       PropagateSplitToViewUsers(info, split_roots, new_memref, splits);
     }
@@ -288,8 +390,13 @@ StmtPtr InsertNewAllocStatements(const StmtPtr& body, const std::map<const Var*,
   for (const auto& [var, memref] : splits) {
     if (new_memrefs.count(memref->base_.get()) > 0) continue;
     auto tile_type = As<TileType>(var->GetType());
-    MemorySpace space =
-        tile_type && tile_type->memory_space_.has_value() ? *tile_type->memory_space_ : MemorySpace::Vec;
+    MemorySpace space = MemorySpace::Vec;
+    if (tile_type) {
+      const auto& memory_space = tile_type->memory_space_;
+      if (memory_space.has_value()) {
+        space = *memory_space;
+      }
+    }
     new_memrefs[memref->base_.get()] = {memref, space};
   }
   if (new_memrefs.empty()) return body;
@@ -345,8 +452,10 @@ FunctionPtr TransformLegalizePTOBufferReuse(const FunctionPtr& func) {
   MaxMemRefIdCollector id_collector;
   if (func->body_) id_collector.VisitStmt(func->body_);
   uint64_t next_id = id_collector.GetNextId();
+  const bool enable_ascend910b_split_workaround = NeedsAscend910BSplitLoadTpopHazardWorkaround(func);
 
-  auto splits = PlanMemRefSplits(usages, next_id);
+  auto splits =
+      PlanMemRefSplits(usages, collector.GetTpopFromAicVars(), enable_ascend910b_split_workaround, next_id);
   if (splits.empty()) return func;
 
   LOG_DEBUG << "LegalizePTOBufferReuse: splitting " << splits.size() << " variable(s) into new MemRefs";
