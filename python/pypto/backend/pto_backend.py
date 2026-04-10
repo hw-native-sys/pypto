@@ -705,7 +705,7 @@ def _collect_emit_result(
 ) -> None:
     """Finalize one emit result: merge profiling, collect files and errors."""
     unit.stage_record.children.append(result.ptoas_record)
-    unit.stage_record.end = time.perf_counter()
+    unit.stage_record.end = result.ptoas_record.end
     _merge_stage_record(prof, unit.stage_record)
     result_files.update(result.files)
     if result.error is not None:
