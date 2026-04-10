@@ -131,7 +131,7 @@ jobs:
           git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
           cd $GITHUB_WORKSPACE/simpler
           pip install -v .
-
+      # TEST:
       - name: Test system tests
         run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=38fcfb17
 
