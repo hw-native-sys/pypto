@@ -283,7 +283,7 @@ class TestNestedChunksWithInterveningStatements:
         after_str = python_print(After)
 
         # Exactly 1 InCore scope (no nesting)
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") == 1
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") == 1
 
     def test_outline_no_crash_with_intervening_stmt(self):
         """Nested chunks with intervening stmt: outline must not crash."""
@@ -444,7 +444,7 @@ class TestSequentialChunks:
         # AutoInCore is consumed, sequential chunks fail interchange guard
         # but get InCore wrapping from the non-chunk statement handler
         assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
 
     def test_nested_sequential_chunks_get_incore(self):
         """Nested sequential chunked loops: no interchange, but get InCore wrapping."""
@@ -465,7 +465,7 @@ class TestSequentialChunks:
 
         # AutoInCore consumed, sequential loops not interchanged but wrapped in InCore
         assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
 
 
 class TestExistingInCore:
@@ -611,7 +611,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
 
         assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
 
     def test_standalone_op_before_parallel_chunk(self):
         """Standalone op before parallel chunk: op wrapped separately, chunk interchanged."""
@@ -665,7 +665,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Count incore occurrences: one for the chunk's inner, one for the standalone op
-        incore_count = after_str.count("pl.at(level=pl.Level.CORE_GROUP)")
+        incore_count = after_str.count("pl.at(level=pl.Level.CORE_GROUP")
         assert incore_count >= 2
 
     def test_host_side_assemble_after_parallel_chunk_not_wrapped(self):
@@ -689,7 +689,7 @@ class TestNonChunkStatementsWrapping:
 
         after_str = python_print(After)
         # Only the interchanged chunk body should be in InCore.
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") == 1
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") == 1
         assert "pl.tensor.assemble(" in after_str
 
     def test_multiple_parallel_chunks_no_regression(self):
@@ -737,7 +737,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
 
         assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP)" in after_str
+        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
 
     def test_mixed_parallel_and_sequential_chunks(self):
         """Mixed parallel chunk + sequential chunk: parallel interchanged, sequential wrapped."""
@@ -765,7 +765,7 @@ class TestNonChunkStatementsWrapping:
         after_str = python_print(After)
         assert "auto_incore" not in after_str
         # Both the interchanged chunk's inner and sequential chunk should have incore
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP)") >= 2
+        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") >= 2
 
 
 class TestScalarAssignmentNotWrapped:
@@ -797,7 +797,7 @@ class TestScalarAssignmentNotWrapped:
         incore_depth = 0
         for line in lines:
             stripped = line.strip()
-            if "pl.at(level=pl.Level.CORE_GROUP)" in stripped:
+            if "pl.at(level=pl.Level.CORE_GROUP" in stripped:
                 in_incore = True
                 incore_depth = len(line) - len(line.lstrip())
             elif in_incore and stripped and (len(line) - len(line.lstrip())) <= incore_depth:
