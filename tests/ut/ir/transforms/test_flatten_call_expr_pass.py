@@ -548,5 +548,148 @@ class TestFlattenPreservesFuncType:
         assert after_func.func_type == pl.FunctionType.InCore
 
 
+class TestFlattenCallInScopeStmt:
+    """Tests for flattening nested calls inside ScopeStmt (pl.incore / pl.at) blocks.
+
+    Verifies that extracted temporaries stay inside the enclosing scope,
+    preventing tensor ops from being hoisted outside incore/at blocks.
+    Regression tests for issue #941.
+    """
+
+    def test_nested_call_inside_at_core_group(self):
+        """Test that nested call inside pl.at(level=CORE_GROUP) keeps temp inside the scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_multiple_nested_calls_inside_scope(self):
+        """Test multiple nested calls inside a scope block preserve ordering."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(pl.mul(x, 2.0), 1.0)
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(a, 3.0), 4.0)
+                return b
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
+                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(a, 3.0)
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 4.0)
+                return b
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_nested_scope_blocks(self):
+        """Test nested scope blocks keep temporaries in the correct inner scope."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(pl.exp(y), 3.0)
+                return pl.add(a, b)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                a: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.exp(y)
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v1, 3.0)
+                return pl.add(a, b)
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_scope_inside_for_loop_with_nested_calls(self):
+        """Test scope block inside a for loop with nested calls."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = x
+                for _i in pl.range(10):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        result = pl.mul(pl.add(result, 1.0), 2.0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = x
+                for _i in pl.range(10):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(result, 1.0)
+                        result = pl.mul(t__tmp_v0, 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(After, NormalizeIR(passes.convert_to_ssa()(Expected)))
+
+    def test_deeply_nested_call_inside_scope(self):
+        """Test deeply nested calls inside scope: mul(add(exp(x), 1.0), 2.0)"""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(pl.exp(x), 1.0), 2.0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
+                    t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -48,6 +48,7 @@ program_flat = flatten_pass(program)
 
 - Before AssignStmt/EvalStmt: Insert directly before
 - Before IfStmt/ForStmt: Insert as sibling statements in the enclosing `SeqStmts`
+- Inside ScopeStmt (`pl.at()`): Temporaries are always inserted **inside** the scope body, preserving execution-context boundaries
 
 ## Example
 
@@ -116,6 +117,25 @@ t__tmp_v1 = compute(b)
 x = t__tmp_v0 + t__tmp_v1
 ```
 
+### Nested Call inside Scope Block
+
+**Before**:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    result = assemble(target, cast(x, BF16), offsets)
+```
+
+**After**:
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    t__tmp_v0 = cast(x, BF16)
+    result = assemble(target, t__tmp_v0, offsets)
+```
+
+The temporary stays inside the `pl.at()` block. Without this scope-awareness, `t__tmp_v0 = cast(...)` would be hoisted outside the scope, causing a "Misplaced tensor op" error during codegen.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`
@@ -144,6 +164,7 @@ passes.def("flatten_call_expr", &pass::FlattenCallExpr, "Flatten nested calls");
 - Tests for range extraction
 - Tests binary/unary expression extraction
 - Tests multiple nested calls
+- Tests scope-aware extraction (`pl.at()` blocks)
 
 ## Error Types
 

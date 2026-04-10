@@ -48,6 +48,7 @@ program_flat = flatten_pass(program)
 
 - AssignStmt/EvalStmt 之前：直接插入在前面
 - 在 IfStmt/ForStmt 之前：作为外层 `SeqStmts` 中的同级语句插入
+- ScopeStmt 内部（`pl.at()`）：临时变量始终插入在 scope body **内部**，保持执行上下文边界
 
 ## 示例
 
@@ -116,6 +117,25 @@ t__tmp_v1 = compute(b)
 x = t__tmp_v0 + t__tmp_v1
 ```
 
+### Scope 块内的嵌套调用
+
+**变换前**：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    result = assemble(target, cast(x, BF16), offsets)
+```
+
+**变换后**：
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP):
+    t__tmp_v0 = cast(x, BF16)
+    result = assemble(target, t__tmp_v0, offsets)
+```
+
+临时变量保留在 `pl.at()` 块内。如果没有这种 scope 感知机制，`t__tmp_v0 = cast(...)` 会被提升到 scope 外部，导致代码生成时出现 "Misplaced tensor op" 错误。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`
@@ -144,6 +164,7 @@ passes.def("flatten_call_expr", &pass::FlattenCallExpr, "Flatten nested calls");
 - 测试 for 范围提取
 - 测试二元/一元表达式提取
 - 测试多个嵌套调用
+- 测试 scope 感知提取（`pl.at()` 块）
 
 ## 错误类型
 

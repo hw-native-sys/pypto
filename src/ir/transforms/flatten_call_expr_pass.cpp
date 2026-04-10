@@ -56,6 +56,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
+  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override;
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
@@ -275,6 +276,34 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
   pending_stmts_ = condition_pending;
 
   return std::make_shared<WhileStmt>(new_condition, op->iter_args_, new_body, op->return_vars_, op->span_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const ScopeStmtPtr& op) {
+  auto outer_pending = std::move(pending_stmts_);
+  pending_stmts_.clear();
+
+  auto new_body = VisitStmt(op->body_);
+
+  // When body is a SeqStmts, VisitStmt_(SeqStmts) already flushed pending
+  // stmts as siblings inside the sequence.  Only single-statement bodies
+  // need explicit flushing here.
+  if (!As<SeqStmts>(op->body_) && !pending_stmts_.empty()) {
+    std::vector<StmtPtr> body_stmts;
+    body_stmts.reserve(pending_stmts_.size() + 1);
+    for (const auto& pending : pending_stmts_) {
+      body_stmts.push_back(pending);
+    }
+    body_stmts.push_back(new_body);
+    new_body = SeqStmts::Flatten(std::move(body_stmts), op->body_->span_);
+  }
+
+  pending_stmts_ = std::move(outer_pending);
+
+  if (new_body.get() != op->body_.get()) {
+    return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
+                                             op->role_, op->split_);
+  }
+  return op;
 }
 
 // Expression visitors implementation
