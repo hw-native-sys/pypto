@@ -122,7 +122,10 @@ pypto.check(condition, "error message")
 # 带 span 的内部不变式检查（抛出 RuntimeError）
 pypto.internal_check_span(condition, "error message", span)
 
-# 不带 span 的内部不变式检查（已弃用）
+# 带 span 抛出 InternalError（用于测试或无条件错误路径）
+pypto.raise_internal_error_with_span("error message", span)
+
+# 不带 span 的内部不变式检查
 pypto.internal_check(condition, "error message")
 ```
 
@@ -136,10 +139,10 @@ pypto.internal_check(condition, "error message")
 4. 如果函数参数中已有 `Span`（例如 `Reconstruct*` 辅助函数），直接使用该参数
 
 ```cpp
-// 之前（已弃用 — 触发编译器警告）：
+// 之前：
 INTERNAL_CHECK(op->body_) << "ForStmt has null body";
 
-// 之后：
+// 之后（当 span 可用时推荐）：
 INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ForStmt has null body";
 ```
 

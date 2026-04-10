@@ -314,6 +314,7 @@ class StructuralHasher {
 
   result_type VisitLeafField(const Span& field) {
     INTERNAL_UNREACHABLE_SPAN(field) << "structural_hash should not visit Span field";
+    return 0;
   }
 
   template <typename Desc>

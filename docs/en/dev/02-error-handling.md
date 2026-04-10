@@ -122,7 +122,10 @@ pypto.check(condition, "error message")
 # Internal invariant check with span (raises RuntimeError)
 pypto.internal_check_span(condition, "error message", span)
 
-# Internal invariant check without span (deprecated)
+# Raise InternalError with span (for testing or unconditional error paths)
+pypto.raise_internal_error_with_span("error message", span)
+
+# Internal invariant check without span
 pypto.internal_check(condition, "error message")
 ```
 
@@ -136,10 +139,10 @@ When writing new code in IR transforms, passes, or codegen that uses `INTERNAL_C
 4. If a `Span` is available as a function parameter (e.g., in `Reconstruct*` helpers), use that directly
 
 ```cpp
-// Before (deprecated — triggers compiler warning):
+// Before:
 INTERNAL_CHECK(op->body_) << "ForStmt has null body";
 
-// After:
+// After (preferred when span is available):
 INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ForStmt has null body";
 ```
 

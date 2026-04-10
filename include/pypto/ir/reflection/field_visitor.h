@@ -171,7 +171,7 @@ class FieldIterator {
     } else if constexpr (std::is_same_v<KindTag, UsualFieldTag>) {
       visitor.VisitUsualField([&]() { VisitFieldImpl(visitor, desc, result, nodes...); });
     } else {
-      INTERNAL_UNREACHABLE_SPAN(std::get<0>(std::forward_as_tuple(nodes...)).span_)
+      INTERNAL_UNREACHABLE_SPAN(std::get<0>(std::tie(nodes...))->span_)
           << "Invalid field kind tag: " << typeid(KindTag).name() << " for field " << desc.name;
     }
   }

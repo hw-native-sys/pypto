@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"  // NOLINT(misc-include-cleaner)
+#include "pypto/ir/span.h"
 
 namespace pypto {
 
@@ -592,7 +593,10 @@ class FatalLogger {
  * Usage: INTERNAL_CHECK_SPAN(condition, node->span_) << "error message";
  */
 #define INTERNAL_CHECK_SPAN(expr, span) \
-  if (!(expr)) pypto::FatalLogger<pypto::InternalError>(#expr, __FILE__, __LINE__, span)
+  if (!!(expr))                         \
+    ;                                   \
+  else                                  \
+    pypto::FatalLogger<pypto::InternalError>(#expr, __FILE__, __LINE__, span)
 
 /**
  * @brief Mark a code path as internally unreachable with IR source location
