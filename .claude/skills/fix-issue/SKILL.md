@@ -14,10 +14,11 @@ Create tasks to track progress through this workflow:
 
 1. Fetch issue & create branch
 2. Plan the fix
-3. Implement the fix
-4. Run tests
-5. Commit changes
-6. Create PR (optional)
+3. Self-assign & set In Progress
+4. Implement the fix
+5. Run tests
+6. Commit changes
+7. Create PR (optional)
 
 ## Workflow
 
@@ -25,10 +26,11 @@ Create tasks to track progress through this workflow:
 2. Fetch issue content
 3. Create issue branch
 4. Enter plan mode to design fix
-5. Implement the fix
-6. Run tests (use `testing` skill)
-7. Commit changes (use `git-commit` skill)
-8. Create PR (optional, use `github-pr` skill)
+5. **Self-assign & set In Progress** (immediately after plan approval)
+6. Implement the fix
+7. Run tests (use `testing` skill)
+8. Commit changes (use `git-commit` skill)
+9. Create PR (optional, use `github-pr` skill)
 
 ## Step 1: Check gh CLI Authentication
 
@@ -98,9 +100,9 @@ Use `EnterPlanMode` to design the fix.
 - Documentation updates
 - Cross-layer changes (C++, Python, type stubs)
 
-## Step 4b: Mark Issue as In Progress
+## Step 5: Self-Assign & Set In Progress
 
-After plan approval, self-assign and set project status to "In Progress":
+**Do this IMMEDIATELY after plan approval, before writing any code.**
 
 ```bash
 # Self-assign
@@ -115,7 +117,7 @@ Update the project board status using the same GraphQL pattern as `create-issue`
 
 If the project item or Status field is not found, skip the board update and notify the user that manual update is needed. Do not block the fix workflow.
 
-## Step 5: Implement the Fix
+## Step 6: Implement the Fix
 
 After plan approval, follow PyPTO conventions:
 
@@ -125,7 +127,7 @@ After plan approval, follow PyPTO conventions:
 4. Add/update tests
 5. Maintain cross-layer sync (C++, Python, type stubs)
 
-## Step 6: Run Tests
+## Step 7: Run Tests
 
 ```text
 /testing
@@ -133,7 +135,7 @@ After plan approval, follow PyPTO conventions:
 
 Fix any failures before committing.
 
-## Step 7: Commit Changes
+## Step 8: Commit Changes
 
 ```text
 /git-commit
@@ -149,7 +151,7 @@ Fixes #ISSUE_NUMBER
 Detailed explanation of the fix.
 ```
 
-## Step 8: Create PR (Optional)
+## Step 9: Create PR (Optional)
 
 ```text
 /github-pr
