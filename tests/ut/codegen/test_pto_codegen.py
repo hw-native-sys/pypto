@@ -410,8 +410,8 @@ def test_pto_codegen_fillpad_inplace():
 
     # Both allocs share the same addr (same MemRef)
     assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
-    assert "addr = %c0i" in alloc_lines[0]
-    assert "addr = %c0i" in alloc_lines[1]
+    assert "addr = %c0_i64" in alloc_lines[0]
+    assert "addr = %c0_i64" in alloc_lines[1]
     # Dynamic valid_shape tile: type has v_row=?, v_col=? (both dynamic per PTOAS requirement)
     assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
     assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
