@@ -50,8 +50,9 @@ program_outlined = outline_pass(program)
 
 **Naming**:
 
-- Outlined functions named: `{original_func}_incore_{counter}`
-- Example: `main_incore_0`, `main_incore_1`
+- Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)
+- User-provided: when `ScopeStmt.name_hint` is non-empty, that name is used directly
+  - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → function named `fused_add`
 
 ## Example
 

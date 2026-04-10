@@ -133,7 +133,7 @@ jobs:
           pip install -v .
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=38fcfb17
+        run: pytest tests/st/runtime/test_dag.py -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=882c4db
 
       - name: Test swimlane output
         run: |

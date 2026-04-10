@@ -681,5 +681,133 @@ class TestSplitIncoreOrchVerifier:
                 assert "tensor.add" not in func_str
 
 
+class TestOutlineNamedIncoreScopes:
+    """Test OutlineIncoreScopes pass with user-provided scope names."""
+
+    def test_outline_named_incore_scope(self):
+        """Test that user-provided name is used for the outlined function."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fused_add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.fused_add(x)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_mixed_named_and_unnamed_scopes(self):
+        """Test that unnamed scopes still get auto-generated names when mixed with named scopes."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="first_kernel"):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
+                return b
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def first_kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return a
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_1(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = self.first_kernel(x)
+                b: pl.Tensor[[64], pl.FP32] = self.main_incore_1(a, y)
+                return b
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_duplicate_name_hint_auto_dedup(self):
+        """Test that duplicate name_hints are auto-deduplicated."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="my_kernel"):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="my_kernel"):
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
+                return b
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def my_kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return a
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def my_kernel_0(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = self.my_kernel(x)
+                b: pl.Tensor[[64], pl.FP32] = self.my_kernel_0(a, y)
+                return b
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

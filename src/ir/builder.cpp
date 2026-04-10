@@ -288,12 +288,13 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 // ========== Scope Building ==========
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
-                           std::optional<Role> role, std::optional<SplitMode> split) {
+                           std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
-  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split));
+  context_stack_.push_back(
+      std::make_unique<ScopeContext>(scope_kind, span, level, role, split, std::move(name_hint)));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -314,7 +315,7 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   // Create scope statement
   auto scope_stmt =
       std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span, scope_ctx->GetLevel(),
-                                  scope_ctx->GetRole(), scope_ctx->GetSplit());
+                                  scope_ctx->GetRole(), scope_ctx->GetSplit(), scope_ctx->GetNameHint());
 
   // Pop context
   context_stack_.pop_back();
