@@ -261,6 +261,9 @@ class IRPythonPrinter : public IRVisitor {
   // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
   std::unordered_map<const Var*, std::string> var_rename_map_;
 
+  // Vars defined in the current function body (for PrintMemRef formatting).
+  std::unordered_set<const Var*> body_defined_vars_;
+
   // Program-level dyn var rename map: Var pointer → disambiguated printed name.
   // Built once by VisitProgram for dynamic dimension variables used in type annotations.
   // When two distinct Var* share the same name_hint_, they get unique suffixed names.
@@ -1188,10 +1191,12 @@ void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
   // Collect all Var def-sites in DFS pre-order: params first, then body.
   std::vector<const Var*> defs;
   for (auto& p : func->params_) defs.push_back(p.get());
+  body_defined_vars_.clear();
   if (func->body_) {
     var_collectors::VarDefUseCollector body_collector;
     body_collector.VisitStmt(func->body_);
     defs.insert(defs.end(), body_collector.var_defs_ordered.begin(), body_collector.var_defs_ordered.end());
+    body_defined_vars_ = std::move(body_collector.var_defs);
   }
   auto_name::BuildRenameMapForDefs(defs, var_rename_map_);
 }
@@ -1592,10 +1597,14 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   std::ostringstream oss;
   oss << prefix_ << ".MemRef(";
 
-  // Print base Ptr name as string literal to handle forward references
-  // (DDR bases appear in parameter annotations before their alloc statements).
-  // Use GetVarName to respect SSA rename disambiguation.
-  oss << "\"" << GetVarName(memref.base_.get()) << "\"";
+  // Base Ptrs defined in the function body (by alloc statements) are printed as
+  // bare variable references; everything else uses a string literal (forward
+  // references in parameter annotations, standalone type printing, etc.).
+  if (body_defined_vars_.count(memref.base_.get())) {
+    oss << GetVarName(memref.base_.get());
+  } else {
+    oss << "\"" << GetVarName(memref.base_.get()) << "\"";
+  }
 
   // Print byte offset using a temp printer to avoid corrupting the main stream.
   // The temp printer has its own stream_ but shares no rename maps — that's fine

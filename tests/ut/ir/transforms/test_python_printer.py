@@ -220,7 +220,8 @@ class TestPythonPrinterProgram:
         code = after.as_python()
 
         assert "pl.Ptr = pl.tile.alloc(" in code
-        assert 'pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_' in code
+        # Body MemRefs use bare variable references (not string literals)
+        assert "pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_" in code
 
 
 class TestPythonPrinterConstDtypeRoundtrip:

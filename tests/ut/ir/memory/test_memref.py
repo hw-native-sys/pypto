@@ -1754,6 +1754,7 @@ class TestMemRefRoundTrip:
         # Verify valid Python syntax
         compile(printed, "<test_memref_valid_python>", "exec")
 
+        # No alloc statement defines the base Ptr → falls back to string literal
         assert 'pl.MemRef("mem_vec_0", 0, 16384)' in printed
         assert "pl.Mem.Vec" in printed
 
@@ -1772,6 +1773,7 @@ class TestMemRefRoundTrip:
 
         # Verify the parsed IR contains memref by re-printing
         printed = program.as_python()
+        # No alloc statement defines the base Ptr → falls back to string literal
         assert 'pl.MemRef("mem_ddr_1", 0, 256)' in printed
 
     def test_parse_tile_with_memref(self):
@@ -1790,6 +1792,7 @@ class TestMemRefRoundTrip:
         assert isinstance(program, ir.Program)
 
         printed = program.as_python()
+        # No alloc statement defines the base Ptr → falls back to string literal
         assert 'pl.MemRef("mem_vec_0", 0, 16384)' in printed
         assert "pl.Mem.Vec" in printed
         reparsed = pl.parse(printed)
@@ -1813,6 +1816,7 @@ class TestMemRefRoundTrip:
 
         # Verify both layout and memref are preserved
         printed = program.as_python()
+        # No alloc statement defines the base Ptr → falls back to string literal
         assert 'pl.MemRef("mem_ddr_2", 0, 256)' in printed
         # Layout appears as positional TensorView arg (fixes #323)
         assert "pl.TensorView" in printed
@@ -1866,8 +1870,9 @@ class TestMemRefRoundTrip:
             """)
             parsed1 = pl.parse(code)
             printed = parsed1.as_python()
+            # No alloc statement defines the base Ptr → falls back to string literal
             assert f'pl.MemRef("{base_name}", 0, 16384)' in printed, (
-                f"Expected explicit MemRef constructor in printed output, got: {printed}"
+                f"Expected MemRef string literal in printed output, got: {printed}"
             )
             assert f"pl.Mem.{space_name}" in printed, (
                 f"Expected pl.Mem.{space_name} in printed output, got: {printed}"
