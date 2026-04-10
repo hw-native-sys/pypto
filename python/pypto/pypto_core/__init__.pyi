@@ -19,6 +19,7 @@ from .logging import (
     LogLevel,
     check,
     internal_check,
+    internal_check_span,
     log_debug,
     log_error,
     log_event,
@@ -159,6 +160,7 @@ __all__ = [
     "log_event",
     "check",
     "internal_check",
+    "internal_check_span",
     # DataType class
     "DataType",
 ]

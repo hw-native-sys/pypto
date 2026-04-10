@@ -147,7 +147,7 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
     static const std::map<std::string, std::string> pred_map = {
         {"eq", "oeq"}, {"ne", "one"}, {"slt", "olt"}, {"sle", "ole"}, {"sgt", "ogt"}, {"sge", "oge"}};
     auto it = pred_map.find(predicate);
-    INTERNAL_CHECK(it != pred_map.end()) << "Unsupported float predicate for " << predicate;
+    INTERNAL_CHECK_SPAN(it != pred_map.end(), op->span_) << "Unsupported float predicate for " << predicate;
     std::string float_pred = it->second;
 
     std::string result = NewTemp();

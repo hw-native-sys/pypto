@@ -98,7 +98,7 @@ StmtPtr FilterYieldStmt(const StmtPtr& stmt, const std::vector<size_t>& kept_ind
     if (kept_indices.empty()) return nullptr;
     std::vector<ExprPtr> new_values;
     for (size_t idx : kept_indices) {
-      INTERNAL_CHECK(idx < yield_stmt->value_.size())
+      INTERNAL_CHECK_SPAN(idx < yield_stmt->value_.size(), yield_stmt->span_)
           << "Internal error: yield index " << idx << " out of range " << yield_stmt->value_.size();
       new_values.push_back(yield_stmt->value_[idx]);
     }

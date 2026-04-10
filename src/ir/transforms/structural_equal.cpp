@@ -109,7 +109,7 @@ class StructuralEqualImpl {
   template <typename IRNodePtrType>
   result_type VisitIRNodeField(const IRNodePtrType& lhs, const IRNodePtrType& rhs) {
     INTERNAL_CHECK(lhs) << "structural_equal encountered null lhs IR node field";
-    INTERNAL_CHECK(rhs) << "structural_equal encountered null rhs IR node field";
+    INTERNAL_CHECK_SPAN(rhs, lhs->span_) << "structural_equal encountered null rhs IR node field";
     return Equal(lhs, rhs);
   }
 
@@ -154,7 +154,8 @@ class StructuralEqualImpl {
     }
     for (size_t i = 0; i < lhs.size(); ++i) {
       INTERNAL_CHECK(lhs[i]) << "structural_equal encountered null lhs IR node in vector at index " << i;
-      INTERNAL_CHECK(rhs[i]) << "structural_equal encountered null rhs IR node in vector at index " << i;
+      INTERNAL_CHECK_SPAN(rhs[i], lhs[i]->span_)
+          << "structural_equal encountered null rhs IR node in vector at index " << i;
 
       if constexpr (AssertMode) {
         std::ostringstream index_str;
@@ -193,7 +194,8 @@ class StructuralEqualImpl {
       INTERNAL_CHECK(lhs_it->first) << "structural_equal encountered null lhs key in map";
       INTERNAL_CHECK(lhs_it->second) << "structural_equal encountered null lhs value in map";
       INTERNAL_CHECK(rhs_it->first) << "structural_equal encountered null rhs key in map";
-      INTERNAL_CHECK(rhs_it->second) << "structural_equal encountered null rhs value in map";
+      INTERNAL_CHECK_SPAN(rhs_it->second, lhs_it->second->span_)
+          << "structural_equal encountered null rhs value in map";
 
       if (lhs_it->first->name_ != rhs_it->first->name_) {
         if constexpr (AssertMode) {
@@ -593,7 +595,7 @@ class StructuralEqualImpl {
   }
 
   [[nodiscard]] result_type VisitLeafField(const Span& lhs, const Span& rhs) const {
-    INTERNAL_UNREACHABLE << "structural_equal should not visit Span field";
+    INTERNAL_UNREACHABLE_SPAN(lhs) << "structural_equal should not visit Span field";
     return true;  // Never reached
   }
 

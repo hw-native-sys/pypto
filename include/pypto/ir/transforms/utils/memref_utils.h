@@ -291,12 +291,12 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
 
   if (op_name == "tensor.slice" || op_name == "tile.slice") {
     auto shaped = std::dynamic_pointer_cast<const ShapedType>(parent_type);
-    INTERNAL_CHECK(shaped) << "Internal error: slice parent must be ShapedType";
+    INTERNAL_CHECK_SPAN(shaped, call->span_) << "Internal error: slice parent must be ShapedType";
 
     // tensor.slice(input, shape, offset) → offset is args[2]
     // tile.slice(input, shape, offset[, valid_shape]) → offset is args[2]
     size_t offset_arg_idx = 2;
-    INTERNAL_CHECK(offset_arg_idx < call->args_.size())
+    INTERNAL_CHECK_SPAN(offset_arg_idx < call->args_.size(), call->span_)
         << "Internal error: " << op_name << " missing offset argument";
 
     // Extract individual offset elements from the MakeTuple expression

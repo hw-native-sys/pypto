@@ -413,7 +413,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     // Phase 3: Update return_vars — halve type if corresponding iter_arg was halved,
     // and register in tile_vars so downstream tile.store picks up the subblock offset.
     // Invariant: |iter_args| == |return_vars|, so indexing is safe.
-    INTERNAL_CHECK(for_stmt->iter_args_.size() == for_stmt->return_vars_.size())
+    INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
         << "Internal error: ForStmt iter_args and return_vars sizes must match, got "
         << for_stmt->iter_args_.size() << " vs " << for_stmt->return_vars_.size();
     std::vector<VarPtr> new_return_vars;

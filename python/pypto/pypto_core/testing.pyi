@@ -38,3 +38,6 @@ def raise_assertion_error(message: str) -> NoReturn:
 
 def raise_internal_error(message: str) -> NoReturn:
     """Raise an InternalError from C++ for testing error handling"""
+
+def raise_internal_error_with_span(message: str, filename: str, line: int, col: int) -> NoReturn:
+    """Raise an InternalError with IR source span for testing"""

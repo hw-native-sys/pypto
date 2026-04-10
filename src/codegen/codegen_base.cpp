@@ -61,16 +61,16 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
   }
   if (auto min_expr = As<Min>(expr)) {
     auto scalar_type = As<ScalarType>(min_expr->GetType());
-    INTERNAL_CHECK(scalar_type) << "Internal error: Min expression should have ScalarType, got "
-                                << min_expr->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(scalar_type, expr->span_)
+        << "Internal error: Min expression should have ScalarType, got " << min_expr->GetType()->TypeName();
     std::string cpp_type = scalar_type->dtype_.ToCTypeString();
     return "std::min<" + cpp_type + ">(" + GenerateExprString(min_expr->left_) + ", " +
            GenerateExprString(min_expr->right_) + ")";
   }
   if (auto max_expr = As<Max>(expr)) {
     auto scalar_type = As<ScalarType>(max_expr->GetType());
-    INTERNAL_CHECK(scalar_type) << "Internal error: Max expression should have ScalarType, got "
-                                << max_expr->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(scalar_type, expr->span_)
+        << "Internal error: Max expression should have ScalarType, got " << max_expr->GetType()->TypeName();
     std::string cpp_type = scalar_type->dtype_.ToCTypeString();
     return "std::max<" + cpp_type + ">(" + GenerateExprString(max_expr->left_) + ", " +
            GenerateExprString(max_expr->right_) + ")";
@@ -104,8 +104,8 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
   }
   if (auto cast_expr = As<Cast>(expr)) {
     auto scalar_type = As<ScalarType>(cast_expr->GetType());
-    INTERNAL_CHECK(scalar_type) << "Internal error: Cast expression should have ScalarType, got "
-                                << cast_expr->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(scalar_type, expr->span_)
+        << "Internal error: Cast expression should have ScalarType, got " << cast_expr->GetType()->TypeName();
     std::string cpp_type = scalar_type->dtype_.ToCTypeString();
     return "static_cast<" + cpp_type + ">(" + GenerateExprString(cast_expr->operand_) + ")";
   }

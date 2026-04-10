@@ -480,7 +480,7 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
-  INTERNAL_CHECK(op->op_) << "Call has null op";
+  INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
   // Check if this is a GlobalVar call within a Program context
 
   if (auto gvar = As<GlobalVar>(op->op_)) {
@@ -767,7 +767,7 @@ void IRPythonPrinter::VisitExpr_(const AbsPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const CastPtr& op) {
   auto scalar_type = As<ScalarType>(op->GetType());
-  INTERNAL_CHECK(scalar_type) << "Cast has non-scalar type";
+  INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Cast has non-scalar type";
   stream_ << prefix_ << ".cast(";
   VisitExpr(op->operand_);
   stream_ << ", " << prefix_ << "." << DataTypeToString(scalar_type->dtype_) << ")";
@@ -878,7 +878,8 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     case ForKind::Sequential:
       break;
     default:
-      INTERNAL_CHECK(false) << "Unknown ForKind in python_printer: " << ForKindToString(op->kind_);
+      INTERNAL_CHECK_SPAN(false, op->span_)
+          << "Unknown ForKind in python_printer: " << ForKindToString(op->kind_);
       break;
   }
   stream_ << " in " << prefix_ << range_func;
@@ -920,7 +921,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
   // always take the simple (no iter_args) path.
   if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
-    INTERNAL_CHECK(false) << "ForKind::Unroll does not support iter_args/init_values";
+    INTERNAL_CHECK_SPAN(false, op->span_) << "ForKind::Unroll does not support iter_args/init_values";
   }
   if (!op->iter_args_.empty()) {
     stream_ << ", init_values=(";
@@ -1049,8 +1050,8 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
   } else if (op->scope_kind_ == ScopeKind::Cluster) {
     stream_ << "with " << prefix_ << ".cluster():\n";
   } else {
-    INTERNAL_CHECK(false) << "Internal error: Unknown ScopeKind in python_printer: "
-                          << ScopeKindToString(op->scope_kind_);
+    INTERNAL_CHECK_SPAN(false, op->span_)
+        << "Internal error: Unknown ScopeKind in python_printer: " << ScopeKindToString(op->scope_kind_);
   }
 
   IncreaseIndent();
@@ -1312,7 +1313,7 @@ class GlobalVarCollector : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     // Visit the op field (which may be a GlobalVar for cross-function calls)
-    INTERNAL_CHECK(op->op_) << "Call has null op";
+    INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
     if (auto gvar = As<GlobalVar>(op->op_)) {
       collected_gvars.insert(gvar);
     }

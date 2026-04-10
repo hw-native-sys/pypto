@@ -10,6 +10,8 @@
 
 from enum import IntEnum
 
+from pypto.pypto_core.ir import Span
+
 class InternalError(Exception):
     """Exception raised when an internal system error occurs"""
 
@@ -50,3 +52,6 @@ def check(condition: bool, message: str) -> None:
 
 def internal_check(condition: bool, message: str) -> None:
     """Check an internal invariant and throw InternalError if it fails"""
+
+def internal_check_span(condition: bool, message: str, span: Span) -> None:
+    """Check an internal invariant with IR source location and throw InternalError if it fails."""

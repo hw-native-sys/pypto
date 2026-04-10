@@ -123,7 +123,7 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    INTERNAL_CHECK(memory_space.has_value())
+    INTERNAL_CHECK_SPAN(memory_space.has_value(), var->span_)
         << "Internal error: memory_space must be resolved before CreateMemRef";
 
     auto base =
@@ -328,7 +328,8 @@ class InitMemRefMutator : public IRMutator {
     // Step 1: Visit loop bounds and loop_var
     auto new_loop_var_expr = VisitExpr(op->loop_var_);
     auto new_loop_var = As<Var>(new_loop_var_expr);
-    INTERNAL_CHECK(new_loop_var) << "Internal error: ForStmt loop_var is not a Var after mutation";
+    INTERNAL_CHECK_SPAN(new_loop_var, op->span_)
+        << "Internal error: ForStmt loop_var is not a Var after mutation";
     auto new_start = VisitExpr(op->start_);
     auto new_stop = VisitExpr(op->stop_);
     auto new_step = VisitExpr(op->step_);
@@ -340,7 +341,8 @@ class InitMemRefMutator : public IRMutator {
       auto new_ia_expr = VisitExpr(ia);
       auto new_ia =
           std::dynamic_pointer_cast<const IterArg>(std::static_pointer_cast<const IRNode>(new_ia_expr));
-      INTERNAL_CHECK(new_ia) << "Internal error: ForStmt iter_arg is not an IterArg after mutation";
+      INTERNAL_CHECK_SPAN(new_ia, op->span_)
+          << "Internal error: ForStmt iter_arg is not an IterArg after mutation";
       new_iter_args.push_back(new_ia);
     }
 
@@ -365,7 +367,8 @@ class InitMemRefMutator : public IRMutator {
     for (const auto& rv : op->return_vars_) {
       auto new_rv_expr = VisitExpr(rv);
       auto new_rv = As<Var>(new_rv_expr);
-      INTERNAL_CHECK(new_rv) << "Internal error: ForStmt return_var is not a Var after mutation";
+      INTERNAL_CHECK_SPAN(new_rv, op->span_)
+          << "Internal error: ForStmt return_var is not a Var after mutation";
       new_return_vars.push_back(new_rv);
     }
 

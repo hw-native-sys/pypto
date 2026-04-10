@@ -131,7 +131,7 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
     std::string location = span.is_valid() ? " at " + span.to_string() : "";
     throw ValueError(std::string(e.what()) + location);
   }
-  INTERNAL_CHECK(result_type) << "Type deduction failed for '" + op_name + "'";
+  INTERNAL_CHECK_SPAN(result_type, span) << "Type deduction failed for '" + op_name + "'";
 
   // Apply OpMemorySpaceSpec to TileType results that lack memory_space.
   // This ensures the deduced type carries memory_space even when individual

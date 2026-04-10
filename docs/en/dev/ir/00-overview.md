@@ -28,7 +28,10 @@ PyPTO's Intermediate Representation (IR) is a tree-based, immutable data structu
 
 ### Source Location Tracking
 
-Every IR node contains a `Span` object tracking its source location:
+Every IR node contains a `Span` object tracking its source location. Spans are used in two error-reporting paths:
+
+1. **Verification diagnostics** — verifier passes record `op->span_` into `Diagnostic` objects (see [IR Verifier](../passes/99-verifier.md))
+2. **Internal assertion checks** — `INTERNAL_CHECK_SPAN` embeds the span into `InternalError` messages (see [Error Handling](../02-error-handling.md))
 
 ```python
 from pypto import ir

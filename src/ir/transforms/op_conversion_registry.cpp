@@ -100,7 +100,7 @@ ExprPtr LoadOperandToMat(const ExprPtr& operand, bool transpose, const std::stri
   if (tile_type) {
     return operand;
   }
-  INTERNAL_CHECK(false) << "LoadOperandToMat: unexpected type: " << operand->GetType()->TypeName();
+  INTERNAL_UNREACHABLE_SPAN(span) << "LoadOperandToMat: unexpected type: " << operand->GetType()->TypeName();
   return nullptr;  // unreachable
 }
 

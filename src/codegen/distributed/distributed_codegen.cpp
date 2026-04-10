@@ -310,7 +310,7 @@ void DistributedCodegen::EmitMain() {
 // ========================================================================
 
 void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null AssignStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null AssignStmt";
 
   std::string var_name = SanitizeName(op->var_->name_hint_);
 
@@ -357,7 +357,7 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
 }
 
 void DistributedCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null EvalStmt";
 
   current_target_var_ = "";
   current_expr_value_ = "";
@@ -371,7 +371,7 @@ void DistributedCodegen::VisitStmt_(const ir::EvalStmtPtr& op) {
 }
 
 void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ReturnStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ReturnStmt";
 
   // Workers are void — skip return value
   if (is_worker_context_ || op->value_.empty()) {
@@ -384,7 +384,7 @@ void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& op) {
 }
 
 void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ForStmt";
 
   std::string loop_var = SanitizeName(op->loop_var_->name_hint_);
   declared_vars_.insert(loop_var);
@@ -414,7 +414,7 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
 }
 
 void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null IfStmt";
 
   VisitExpr(op->condition_);
   std::string condition = current_expr_value_;
@@ -436,7 +436,7 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
 }
 
 void DistributedCodegen::VisitStmt_(const ir::SeqStmtsPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null SeqStmts";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null SeqStmts";
   for (const auto& stmt : op->stmts_) {
     VisitStmt(stmt);
   }
@@ -447,7 +447,7 @@ void DistributedCodegen::VisitStmt_(const ir::SeqStmtsPtr& op) {
 // ========================================================================
 
 void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null Call";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null Call";
 
   // Check if callee is a GlobalVar (program function reference)
   if (auto gv = std::dynamic_pointer_cast<const ir::GlobalVar>(op->op_)) {
@@ -478,22 +478,22 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
 }
 
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null Var";
   current_expr_value_ = SanitizeName(op->name_hint_);
 }
 
 void DistributedCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstInt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ConstInt";
   current_expr_value_ = std::to_string(op->value_);
 }
 
 void DistributedCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstFloat";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ConstFloat";
   current_expr_value_ = std::to_string(op->value_);
 }
 
 void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstBool";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ConstBool";
   current_expr_value_ = op->value_ ? "true" : "false";
 }
 
@@ -502,7 +502,8 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 // ========================================================================
 
 void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee) {
-  INTERNAL_CHECK(callee->level_.has_value()) << "Worker function must have a level: " << callee->name_;
+  INTERNAL_CHECK_SPAN(callee->level_.has_value(), call->span_)
+      << "Worker function must have a level: " << callee->name_;
 
   std::string rt_var = RuntimeVarForLevel(*callee->level_);
 
@@ -567,7 +568,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
 }
 
 void DistributedCodegen::EmitCallToOrchestrator(const ir::CallPtr& call, const ir::FunctionPtr& callee) {
-  INTERNAL_CHECK(callee->level_.has_value()) << "Orchestrator function must have a level: " << callee->name_;
+  INTERNAL_CHECK_SPAN(callee->level_.has_value(), call->span_)
+      << "Orchestrator function must have a level: " << callee->name_;
 
   std::string rt_var = RuntimeVarForLevel(*callee->level_);
 

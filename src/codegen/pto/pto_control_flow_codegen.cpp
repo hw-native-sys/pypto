@@ -85,13 +85,13 @@ static std::string JoinPairs(const std::vector<std::string>& lhs, const std::str
 // ========================================================================
 
 void PTOCodegen::VisitStmt_(const EvalStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null EvalStmt";
-  INTERNAL_CHECK(op->expr_ != nullptr) << "Internal error: EvalStmt has null expression";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null EvalStmt";
+  INTERNAL_CHECK_SPAN(op->expr_ != nullptr, op->span_) << "Internal error: EvalStmt has null expression";
   VisitExpr(op->expr_);
 }
 
 void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null YieldStmt";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null YieldStmt";
 
   if (op->value_.empty()) {
     return;
@@ -113,9 +113,9 @@ std::string PTOCodegen::GetScalarIterArgTypeString(
 }
 
 void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
-  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: IfStmt has null condition";
-  INTERNAL_CHECK(op->then_body_ != nullptr) << "Internal error: IfStmt has null then_body";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null IfStmt";
+  INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: IfStmt has null condition";
+  INTERNAL_CHECK_SPAN(op->then_body_ != nullptr, op->span_) << "Internal error: IfStmt has null then_body";
 
   // Evaluate condition
   VisitExpr(op->condition_);
@@ -162,7 +162,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         scf_return_types.push_back(GetTensorViewTypeString(tensor_type.get()));
         returns_via_scf[i] = true;
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
-        INTERNAL_CHECK(tile_type->memref_.has_value())
+        INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
         std::string tile_type_string = GetTileBufTypeStringFromTileType(tile_type);
         std::string addr_ssa;
@@ -178,8 +178,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
       } else {
-        INTERNAL_CHECK(false) << "Internal error: unsupported IfStmt return_var type for "
-                              << return_var->name_hint_;
+        INTERNAL_CHECK_SPAN(false, op->span_)
+            << "Internal error: unsupported IfStmt return_var type for " << return_var->name_hint_;
       }
     }
 
@@ -234,9 +234,9 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
-  INTERNAL_CHECK(op->loop_var_ != nullptr) << "Internal error: ForStmt has null loop_var";
-  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: ForStmt has null body";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null ForStmt";
+  INTERNAL_CHECK_SPAN(op->loop_var_ != nullptr, op->span_) << "Internal error: ForStmt has null loop_var";
+  INTERNAL_CHECK_SPAN(op->body_ != nullptr, op->span_) << "Internal error: ForStmt has null body";
 
   CHECK(op->iter_args_.size() == op->return_vars_.size())
       << "ForStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
@@ -288,7 +288,7 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
     auto tensor_type = As<TensorType>(iter_arg->GetType());
     if (tensor_type) {
       auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);
@@ -395,9 +395,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
 }
 
 void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
-  INTERNAL_CHECK(op != nullptr) << "Internal error: null WhileStmt";
-  INTERNAL_CHECK(op->condition_ != nullptr) << "Internal error: WhileStmt has null condition";
-  INTERNAL_CHECK(op->body_ != nullptr) << "Internal error: WhileStmt has null body";
+  INTERNAL_CHECK_SPAN(op != nullptr, op->span_) << "Internal error: null WhileStmt";
+  INTERNAL_CHECK_SPAN(op->condition_ != nullptr, op->span_) << "Internal error: WhileStmt has null condition";
+  INTERNAL_CHECK_SPAN(op->body_ != nullptr, op->span_) << "Internal error: WhileStmt has null body";
 
   CHECK(op->iter_args_.size() == op->return_vars_.size())
       << "WhileStmt iter_args size (" << op->iter_args_.size() << ") must equal return_vars size ("
@@ -427,7 +427,7 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
     auto tensor_type = As<TensorType>(iter_arg->GetType());
     if (tensor_type) {
       auto init_var = std::dynamic_pointer_cast<const ir::Var>(iter_arg->initValue_);
-      INTERNAL_CHECK(init_var) << "TensorType iter_arg init value must be a Var or IterArg";
+      INTERNAL_CHECK_SPAN(init_var, op->span_) << "TensorType iter_arg init value must be a Var or IterArg";
       init_mlir_name = GetOrCreateTensorView(init_var);
     } else {
       VisitExpr(iter_arg->initValue_);

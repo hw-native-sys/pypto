@@ -314,5 +314,38 @@ class TestErrorEdgeCases:
             pass
 
 
+class TestSpanInErrors:
+    """Test that IR source span information is included in internal errors."""
+
+    def test_internal_error_with_span_contains_source_location(self):
+        """Test that InternalError with span includes the source location."""
+        with pytest.raises(RuntimeError) as exc_info:
+            testing.raise_internal_error_with_span("shape mismatch", "user_model.py", 42, 5)
+
+        error_str = str(exc_info.value)
+        assert "Source location:" in error_str
+        assert "user_model.py" in error_str
+        assert "42" in error_str
+
+    def test_internal_error_with_span_preserves_message(self):
+        """Test that the user-provided error message is still present."""
+        with pytest.raises(RuntimeError) as exc_info:
+            testing.raise_internal_error_with_span("tensor rank error", "my_script.py", 10, 1)
+
+        error_str = str(exc_info.value)
+        assert "tensor rank error" in error_str
+        assert "Check failed:" in error_str
+
+    def test_internal_error_with_span_contains_cpp_location(self):
+        """Test that C++ file/line info is also present alongside the span."""
+        with pytest.raises(RuntimeError) as exc_info:
+            testing.raise_internal_error_with_span("bad state", "example.py", 99, 3)
+
+        error_str = str(exc_info.value)
+        assert "Source location:" in error_str
+        assert "Check failed:" in error_str
+        assert "example.py:99:3" in error_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -53,7 +53,7 @@ ProgramPtr Pass::operator()(const ProgramPtr& program) const {
   }
 
   ProgramPtr result = (*impl_)(program);
-  INTERNAL_CHECK(result) << "Pass '" << GetName() << "' returned null program";
+  INTERNAL_CHECK_SPAN(result, program->span_) << "Pass '" << GetName() << "' returned null program";
 
   if (ctx) {
     ctx->RunAfterPass(*this, result);
@@ -106,7 +106,7 @@ class ProgramPassImpl : public PassImpl {
       : transform_(std::move(transform)), name_(std::move(name)), properties_(properties) {}
 
   ProgramPtr operator()(const ProgramPtr& program) override {
-    INTERNAL_CHECK(program) << "ProgramPass cannot run on null program";
+    INTERNAL_CHECK_SPAN(program, program->span_) << "ProgramPass cannot run on null program";
     return transform_(program);
   }
 
@@ -131,7 +131,7 @@ class FunctionPassImpl : public PassImpl {
       : transform_(std::move(transform)), name_(std::move(name)), properties_(properties) {}
 
   ProgramPtr operator()(const ProgramPtr& program) override {
-    INTERNAL_CHECK(program) << "FunctionPass cannot run on null program";
+    INTERNAL_CHECK_SPAN(program, program->span_) << "FunctionPass cannot run on null program";
 
     // Apply the function transform to each function in the program
     std::vector<FunctionPtr> transformed_functions;

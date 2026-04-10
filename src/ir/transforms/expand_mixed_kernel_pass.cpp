@@ -192,7 +192,8 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
       if (call) {
         auto dir = ClassifyMoveDirection(call);
         if (dir != CVDirection::NONE) {
-          INTERNAL_CHECK(!call->args_.empty()) << "Internal error: tile.move must have at least one argument";
+          INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
+              << "Internal error: tile.move must have at least one argument";
           // Look up whether the source tile was produced by a tpop call
           CallPtr source_tpop;
           if (auto source_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
@@ -365,8 +366,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // directly use nd
           if (side == CoreSide::AIV && backend_type == backend::BackendType::Ascend950) {
             auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-            INTERNAL_CHECK(push_dest_type && push_dest_type->memory_space_.has_value() &&
-                           push_dest_type->tile_view_.has_value())
+            INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value() &&
+                                    push_dest_type->tile_view_.has_value(),
+                                stmt->span_)
                 << "Boundary move destination must have TileType, MemSpace and TileView";
 
             // NOLINT: optional checked by INTERNAL_CHECK above
@@ -375,7 +377,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                 push_dest_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
 
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
-            INTERNAL_CHECK(src_type) << "V->C tpush source must have TileType";
+            INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "V->C tpush source must have TileType";
             auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
                                                         fractal_view, MemorySpace::Vec);
             std::string src_name = "tile";
@@ -392,8 +394,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
               std::make_shared<EvalStmt>(CreateTpush(push_op, push_source, stmt->span_), stmt->span_));
         } else {
           auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-          INTERNAL_CHECK(dest_tile_type && dest_tile_type->memory_space_.has_value() &&
-                         dest_tile_type->tile_view_.has_value())
+          INTERNAL_CHECK_SPAN(dest_tile_type && dest_tile_type->memory_space_.has_value() &&
+                                  dest_tile_type->tile_view_.has_value(),
+                              stmt->span_)
               << "Boundary move destination must have TileType, MemSpace and TileView";
           auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
           bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
@@ -424,7 +427,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
               tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, kwargs), stmt->span_));
           if (needs_post_move) {
             auto target_memory = dest_tile_type->memory_space_;
-            INTERNAL_CHECK(target_memory.has_value())
+            INTERNAL_CHECK_SPAN(target_memory.has_value(), stmt->span_)
                 << "Boundary move destination must have memory_space before post-tpop move emission";
             result.push_back(std::make_shared<AssignStmt>(
                 bm.dest_var, CreateMove(tpop_var, *target_memory, bm.dest_var->GetType(), stmt->span_),
@@ -1167,7 +1170,8 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
         break;
       }
     }
-    INTERNAL_CHECK(gm_param) << "Internal error: " << func->name_ << " should have " << kGMPipeBufferName;
+    INTERNAL_CHECK_SPAN(gm_param, func->span_)
+        << "Internal error: " << func->name_ << " should have " << kGMPipeBufferName;
 
     std::unordered_set<std::string> mod_callees;
     auto ci = callees.find(func->name_);

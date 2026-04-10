@@ -69,7 +69,8 @@ CVDirection ClassifyMoveDirection(const CallPtr& call) {
       break;
     }
   }
-  INTERNAL_CHECK(target_memory.has_value()) << "Internal error: tile.move missing target_memory kwarg";
+  INTERNAL_CHECK_SPAN(target_memory.has_value(), call->span_)
+      << "Internal error: tile.move missing target_memory kwarg";
 
   bool src_cube = IsCubeMemorySpace(src_memory.value());
   bool tgt_cube = IsCubeMemorySpace(target_memory.value());

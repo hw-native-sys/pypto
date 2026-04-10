@@ -143,7 +143,7 @@ class FlattenCallExprMutator : public IRMutator {
     if (changed) {
       // Extract DataType from op's type (which should be ScalarType)
       auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
-      INTERNAL_CHECK(scalar_type) << "Binary expression type must be ScalarType";
+      INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Binary expression type must be ScalarType";
       return std::make_shared<const BinaryExprType>(new_left, new_right, scalar_type->dtype_, op->span_);
     }
     return op;
@@ -164,7 +164,7 @@ class FlattenCallExprMutator : public IRMutator {
     if (new_operand.get() != op->operand_.get()) {
       // Extract DataType from op's type (which should be ScalarType)
       auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
-      INTERNAL_CHECK(scalar_type) << "Unary expression type must be ScalarType";
+      INTERNAL_CHECK_SPAN(scalar_type, op->span_) << "Unary expression type must be ScalarType";
       return std::make_shared<const UnaryExprType>(new_operand, scalar_type->dtype_, op->span_);
     }
     return op;

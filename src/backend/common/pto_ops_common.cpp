@@ -278,8 +278,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
   auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
-  INTERNAL_CHECK(offset_tuple) << "tile.assemble third argument must be a tuple (offset)";
-  INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
+  INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "tile.assemble third argument must be a tuple (offset)";
+  INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
       << "tile.assemble offset tuple must have at least 2 elements (row, col), got "
       << offset_tuple->elements_.size();
   std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
@@ -504,24 +504,24 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto tensor = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tensor) << "tile.load first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tensor, op->span_) << "tile.load first argument must be a Var or IterArg";
 
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(offsets_tuple) << "tile.load second argument must be a tuple (offsets)";
+  INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "tile.load second argument must be a tuple (offsets)";
 
   auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
-  INTERNAL_CHECK(shapes_tuple) << "tile.load third argument must be a tuple (shapes)";
+  INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "tile.load third argument must be a tuple (shapes)";
 
   auto tensor_type = As<TensorType>(tensor->GetType());
-  INTERNAL_CHECK(tensor_type) << "tile.load tensor argument must have TensorType";
+  INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "tile.load tensor argument must have TensorType";
 
   const size_t ndim = shapes_tuple->elements_.size();
-  INTERNAL_CHECK(ndim >= 1) << "tile.load shapes tuple must have at least one element";
+  INTERNAL_CHECK_SPAN(ndim >= 1, op->span_) << "tile.load shapes tuple must have at least one element";
 
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
-  INTERNAL_CHECK(!tile_buf.empty()) << "tile.load requires assignment target (tile_buf)";
+  INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_) << "tile.load requires assignment target (tile_buf)";
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
@@ -620,25 +620,26 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
 static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tile.store first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tile, op->span_) << "tile.store first argument must be a Var or IterArg";
 
   auto offsets_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(offsets_tuple) << "tile.store second argument must be a tuple (offsets)";
+  INTERNAL_CHECK_SPAN(offsets_tuple, op->span_) << "tile.store second argument must be a tuple (offsets)";
 
   auto tile_type = As<ir::TileType>(tile->GetType());
-  INTERNAL_CHECK(tile_type) << "tile.store first argument must have TileType";
-  INTERNAL_CHECK(tile_type->tile_view_.has_value()) << "tile.store tile must have TileView with valid_shape";
+  INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
+  INTERNAL_CHECK_SPAN(tile_type->tile_view_.has_value(), op->span_)
+      << "tile.store tile must have TileView with valid_shape";
   auto& valid_shape = tile_type->tile_view_->valid_shape;
-  INTERNAL_CHECK(valid_shape.size() == 2) << "tile.store tile valid_shape must be 2D";
+  INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);
   auto width_code = codegen.GetExprAsCode(valid_shape[1]);
 
   auto output_tensor = AsVarLike(op->args_[2]);
-  INTERNAL_CHECK(output_tensor) << "tile.store output_tensor must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(output_tensor, op->span_) << "tile.store output_tensor must be a Var or IterArg";
 
   auto tensor_type = As<TensorType>(output_tensor->GetType());
-  INTERNAL_CHECK(tensor_type) << "tile.store output_tensor must have TensorType";
+  INTERNAL_CHECK_SPAN(tensor_type, op->span_) << "tile.store output_tensor must have TensorType";
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);
@@ -666,9 +667,10 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     // Use the explicit shapes tuple (args[3]) injected by FlattenTileNdTo2D.
     // Signature: (tile, offsets, output_tensor[, shapes]) — shapes at args[3]
     // when 4 args total.
-    INTERNAL_CHECK(op->args_.size() > 3) << "tile.store on ND tensor requires shapes tuple (args[3])";
+    INTERNAL_CHECK_SPAN(op->args_.size() > 3, op->span_)
+        << "tile.store on ND tensor requires shapes tuple (args[3])";
     auto shapes_tuple = As<ir::MakeTuple>(op->args_[3]);
-    INTERNAL_CHECK(shapes_tuple) << "tile.store args[3] must be a shapes MakeTuple";
+    INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "tile.store args[3] must be a shapes MakeTuple";
     partition_type = "!pto.partition_tensor_view<";
     for (size_t i = 0; i < shapes_tuple->elements_.size(); ++i) {
       if (i > 0) partition_line << ", ";
@@ -722,7 +724,7 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
 static std::string ComputeFlatOffsetPTO(const ir::MakeTuplePtr& indices_tuple,
                                         const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
   const auto& indices = indices_tuple->elements_;
-  INTERNAL_CHECK(indices.size() == shape.size())
+  INTERNAL_CHECK_SPAN(indices.size() == shape.size(), indices_tuple->span_)
       << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
 
   std::ostringstream idx_oss;
@@ -776,10 +778,10 @@ static std::string MakeTileReadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   CHECK(op->args_.size() == 2) << "tile.read requires 2 arguments, but got " << op->args_.size();
 
   auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tile_type) << "tile.read first argument must be TileType";
+  INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.read first argument must be TileType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(indices_tuple) << "tile.read second argument must be MakeTuple (indices)";
+  INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tile.read second argument must be MakeTuple (indices)";
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -806,10 +808,10 @@ static std::string MakeTileWriteCodegenPTO(const CallPtr& op, codegen::CodegenBa
   CHECK(op->args_.size() == 3) << "tile.write requires 3 arguments, but got " << op->args_.size();
 
   auto tile_type = As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tile_type) << "tile.write first argument must be TileType";
+  INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.write first argument must be TileType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(indices_tuple) << "tile.write second argument must be MakeTuple (indices)";
+  INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tile.write second argument must be MakeTuple (indices)";
 
   std::string tile = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -839,13 +841,13 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(op->args_.size() == 2) << "tensor.read requires 2 arguments, but got " << op->args_.size();
 
   auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tensor_type_ptr) << "tensor.read first argument must be TensorType";
+  INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.read first argument must be TensorType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(indices_tuple) << "tensor.read second argument must be MakeTuple (indices)";
+  INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.read second argument must be MakeTuple (indices)";
 
   auto scalar_type_ptr = As<ir::ScalarType>(op->GetType());
-  INTERNAL_CHECK(scalar_type_ptr) << "tensor.read result must be ScalarType";
+  INTERNAL_CHECK_SPAN(scalar_type_ptr, op->span_) << "tensor.read result must be ScalarType";
   std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
 
   std::string src = codegen.GetExprAsCode(op->args_[0]);
@@ -873,10 +875,10 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments, but got " << op->args_.size();
 
   auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
-  INTERNAL_CHECK(tensor_type_ptr) << "tensor.write first argument must be TensorType";
+  INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.write first argument must be TensorType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
-  INTERNAL_CHECK(indices_tuple) << "tensor.write second argument must be MakeTuple (indices)";
+  INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.write second argument must be MakeTuple (indices)";
 
   std::string tensor = codegen.GetExprAsCode(op->args_[0]);
   std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -923,7 +925,7 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   } else if (auto static_shape = ir::As<ir::ConstInt>(shape)) {
     shape_name = codegen.GetOrEmitConstant(static_shape->value_, DataType::INDEX);
   } else {
-    INTERNAL_CHECK(false) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
+    INTERNAL_CHECK_SPAN(false, op->span_) << "Internal error: tensor.dim shape is neither Var nor ConstInt";
   }
   auto target_var = codegen.GetCurrentResultVar();
   if (target_var != nullptr && !shape_name.empty()) {
@@ -943,7 +945,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   CHECK(op->args_.size() == 1) << "tpush_to_aiv requires 1 argument (tile), got " << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tpush_to_aiv first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tile, op->span_) << "tpush_to_aiv first argument must be a Var or IterArg";
 
   const int split = op->GetKwarg<int>("split", -1);
   CHECK(split >= 0 && split <= 2)
@@ -969,7 +971,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
 
   CHECK(op->args_.size() == 1) << "tpush_to_aic requires 1 argument (tile), got " << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tpush_to_aic first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tile, op->span_) << "tpush_to_aic first argument must be a Var or IterArg";
 
   const int split = op->GetKwarg<int>("split", -1);
   CHECK(split >= 0 && split <= 2)
@@ -1000,7 +1002,8 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
       << "tpop_from_aic requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string result_buf = codegen.GetCurrentResultTarget();
-  INTERNAL_CHECK(!result_buf.empty()) << "tpop_from_aic requires assignment target (tile_buf)";
+  INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_)
+      << "tpop_from_aic requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
@@ -1024,7 +1027,8 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
       << "tpop_from_aiv requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
   std::string result_buf = codegen.GetCurrentResultTarget();
-  INTERNAL_CHECK(!result_buf.empty()) << "tpop_from_aiv requires assignment target (tile_buf)";
+  INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_)
+      << "tpop_from_aiv requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
@@ -1044,7 +1048,7 @@ static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(op->args_.size() == 1) << "tfree_to_aic requires 1 argument (tile from tpop), got "
                                << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tfree_to_aic first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tile, op->span_) << "tfree_to_aic first argument must be a Var or IterArg";
   int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aic", "system.tfree_to_aic");
 
   std::ostringstream oss;
@@ -1061,7 +1065,7 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(op->args_.size() == 1) << "tfree_to_aiv requires 1 argument (tile from tpop), got "
                                << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
-  INTERNAL_CHECK(tile) << "tfree_to_aiv first argument must be a Var or IterArg";
+  INTERNAL_CHECK_SPAN(tile, op->span_) << "tfree_to_aiv first argument must be a Var or IterArg";
 
   int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aiv", "system.tfree_to_aiv");
 
@@ -1084,7 +1088,7 @@ static std::string GetPipeBufOperandI32SSA(codegen::PTOCodegen& codegen, const i
   if (auto c = As<ir::ConstInt>(expr)) {
     return codegen.GetOrEmitConstant(static_cast<int64_t>(static_cast<int32_t>(c->value_)), DataType::INT32);
   }
-  INTERNAL_CHECK(ExprIsI32Scalar(expr))
+  INTERNAL_CHECK_SPAN(ExprIsI32Scalar(expr), expr->span_)
       << "Initialize-pipe buffer operand must be INT32 scalar SSA or integral ConstInt placeholder";
   return codegen.GetExprAsCode(expr);
 }
@@ -1291,7 +1295,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.empty()) << "tile.get_subblock_idx takes no arguments, got " << op->args_.size();
     std::string result = codegen.GetCurrentResultTarget();
-    INTERNAL_CHECK(!result.empty()) << "tile.get_subblock_idx requires assignment target";
+    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "tile.get_subblock_idx requires assignment target";
     std::ostringstream oss;
     // No trailing `-> type`: PTOAS only accepts that form on some ops (e.g. reserve_buffer) and
     // reports "expected operation name in quotes" for get_subblock_idx. The dialect result is i64.
@@ -1536,8 +1540,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
     auto offset_tuple = ir::As<ir::MakeTuple>(op->args_[2]);
-    INTERNAL_CHECK(offset_tuple) << "tile.slice third argument must be a tuple (offset)";
-    INTERNAL_CHECK(offset_tuple->elements_.size() >= 2)
+    INTERNAL_CHECK_SPAN(offset_tuple, op->span_) << "tile.slice third argument must be a tuple (offset)";
+    INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
         << "tile.slice offset tuple must have at least 2 elements (row, col), got "
         << offset_tuple->elements_.size();
     std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);

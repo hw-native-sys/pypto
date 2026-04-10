@@ -135,7 +135,7 @@ static TypePtr DeduceTileGatherMaskType(const std::vector<ExprPtr>& args,
   //   P0001 (3)..P1000 (6) — stride 4: each row contributes cols/4 elements
   //   P1111 (7)            — no stride: all cols kept
   const auto& src_shape = src_type->shape_;
-  INTERNAL_CHECK(src_shape.size() == 2)
+  INTERNAL_CHECK_SPAN(src_shape.size() == 2, args[0]->span_)
       << "Internal error: tile.gather_mask requires 2D src shape, got rank " << src_shape.size();
 
   const ExprPtr& col_expr = src_shape[1];

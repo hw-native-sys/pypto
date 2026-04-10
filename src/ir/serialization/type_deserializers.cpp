@@ -240,7 +240,7 @@ static IRNodePtr DeserializeMemRef(const msgpack::object& fields_obj, msgpack::z
   uint64_t size = GET_FIELD(uint64_t, "size");
   // base_ is a VarPtr, serialized as a full IRNode
   auto base = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("base"), zone));
-  INTERNAL_CHECK(base) << "MemRef base deserialized to null";
+  INTERNAL_CHECK_SPAN(base, span) << "MemRef base deserialized to null";
   return std::make_shared<MemRef>(name_hint, base, byte_offset, size, span);
 }
 
@@ -251,7 +251,8 @@ static IRNodePtr DeserializeConstInt(const msgpack::object& fields_obj, msgpack:
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
   int64_t value = GET_FIELD(int64_t, "value");
   auto scalar_type = As<ScalarType>(type);
-  INTERNAL_CHECK(scalar_type) << "ConstInt is expected to have ScalarType type, but got " + type->TypeName();
+  INTERNAL_CHECK_SPAN(scalar_type, span)
+      << "ConstInt is expected to have ScalarType type, but got " + type->TypeName();
   return std::make_shared<ConstInt>(value, scalar_type->dtype_, span);
 }
 
@@ -262,8 +263,8 @@ static IRNodePtr DeserializeConstFloat(const msgpack::object& fields_obj, msgpac
   auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
   double value = GET_FIELD(double, "value");
   auto scalar_type = As<ScalarType>(type);
-  INTERNAL_CHECK(scalar_type) << "ConstFloat is expected to have ScalarType type, but got " +
-                                     type->TypeName();
+  INTERNAL_CHECK_SPAN(scalar_type, span)
+      << "ConstFloat is expected to have ScalarType type, but got " + type->TypeName();
   return std::make_shared<ConstFloat>(value, scalar_type->dtype_, span);
 }
 
@@ -305,8 +306,8 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                               \
     auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                         \
     auto scalar_type = As<ScalarType>(type);                                                              \
-    INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +          \
-                                       type->TypeName();                                                  \
+    INTERNAL_CHECK_SPAN(scalar_type, span)                                                                \
+        << #ClassName " is expected to have ScalarType type, but got " + type->TypeName();                \
     auto left = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("left"), zone));   \
     auto right = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("right"), zone)); \
     return std::make_shared<ClassName>(left, right, scalar_type->dtype_, span);                           \
@@ -343,8 +344,8 @@ DESERIALIZE_BINARY_EXPR(BitShiftRight)
     auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));                                        \
     auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);                                  \
     auto scalar_type = As<ScalarType>(type);                                                       \
-    INTERNAL_CHECK(scalar_type) << #ClassName " is expected to have ScalarType type, but got " +   \
-                                       type->TypeName();                                           \
+    INTERNAL_CHECK_SPAN(scalar_type, span)                                                         \
+        << #ClassName " is expected to have ScalarType type, but got " + type->TypeName();         \
     auto operand =                                                                                 \
         std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("operand"), zone)); \
     return std::make_shared<ClassName>(operand, scalar_type->dtype_, span);                        \

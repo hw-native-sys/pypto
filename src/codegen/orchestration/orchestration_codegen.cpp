@@ -190,7 +190,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
   int64_t GetConstIntValue(const ExprPtr& expr) const override {
     auto ci = As<ConstInt>(expr);
-    INTERNAL_CHECK(ci) << "Internal error: expected ConstInt expression";
+    INTERNAL_CHECK_SPAN(ci, expr->span_) << "Internal error: expected ConstInt expression";
     return ci->value_;
   }
   std::string GetVarName(const VarPtr& var) const override {
@@ -238,7 +238,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       const auto& iter_arg = for_stmt->iter_args_[i];
       const auto& return_var = for_stmt->return_vars_[i];
       std::string init_var_name = TryGetVarName(iter_arg->initValue_);
-      INTERNAL_CHECK(!init_var_name.empty())
+      INTERNAL_CHECK_SPAN(!init_var_name.empty(), for_stmt->span_)
           << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
       emit_name_map_[iter_arg.get()] = init_var_name;
       emit_name_map_[return_var.get()] = init_var_name;
@@ -306,8 +306,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
           GenerateTupleReturnAliases(call);
         }
       } else {
-        INTERNAL_CHECK(false) << "Misplaced builtin op '" << op_name
-                              << "' in Orchestration function (should be inside InCore block)";
+        INTERNAL_CHECK_SPAN(false, assign->span_)
+            << "Misplaced builtin op '" << op_name
+            << "' in Orchestration function (should be inside InCore block)";
       }
     } else if (As<TupleGetItemExpr>(assign->value_)) {
       // No-op: tuple elements handled via tuple_var_to_elements_
@@ -350,8 +351,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (!IsBuiltinOp(op_name)) {
         GenerateFunctionCallCode(call, "");
       } else {
-        INTERNAL_CHECK(false) << "Misplaced builtin op '" << op_name
-                              << "' in Orchestration function (should be inside InCore block)";
+        INTERNAL_CHECK_SPAN(false, eval->span_)
+            << "Misplaced builtin op '" << op_name
+            << "' in Orchestration function (should be inside InCore block)";
       }
     }
   }
@@ -423,7 +425,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         std::string ext_name = GetExternalTensorName(var_name);
 
-        INTERNAL_CHECK(arg_idx < callee_func->param_directions_.size())
+        INTERNAL_CHECK_SPAN(arg_idx < callee_func->param_directions_.size(), call->span_)
             << "arg count (" << call->args_.size() << ") exceeds param count ("
             << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
 
@@ -439,8 +441,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
             params.push_back({ParamKind::Input, ext_name});
             break;
           default:
-            INTERNAL_CHECK(false) << "Internal error: unexpected ParamDirection value "
-                                  << static_cast<int>(dir);
+            INTERNAL_CHECK_SPAN(false, call->span_)
+                << "Internal error: unexpected ParamDirection value " << static_cast<int>(dir);
         }
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
@@ -467,8 +469,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto& registry = OrchestrationOpRegistry::GetInstance();
     auto codegen_func = registry.Get(op_name);
-    INTERNAL_CHECK(codegen_func.has_value()) << "Misplaced tensor op '" << op_name
-                                             << "' in Orchestration function (should be inside InCore block)";
+    INTERNAL_CHECK_SPAN(codegen_func.has_value(), call->span_)
+        << "Misplaced tensor op '" << op_name
+        << "' in Orchestration function (should be inside InCore block)";
 
     if (op_name == "tensor.create" && assign_var &&
         (declared_var_ptrs_.count(assign_var.get()) || param_name_set_.count(GetVarName(assign_var)))) {
@@ -624,7 +627,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto& registry = OrchestrationOpRegistry::GetInstance();
     auto handler = registry.Get("tensor.create");
-    INTERNAL_CHECK(handler.has_value()) << "Internal error: tensor.create handler not registered";
+    INTERNAL_CHECK_SPAN(handler.has_value(), creates[0].call->span_)
+        << "Internal error: tensor.create handler not registered";
 
     for (size_t batch_start = 0; batch_start < creates.size(); batch_start += kMaxAllocTensorsArgs) {
       size_t batch_end = std::min(batch_start + kMaxAllocTensorsArgs, creates.size());
@@ -653,7 +657,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const std::string& callee_name = call->op_->name_;
 
     FunctionPtr callee_func = program_->GetFunction(callee_name);
-    INTERNAL_CHECK(callee_func != nullptr)
+    INTERNAL_CHECK_SPAN(callee_func != nullptr, call->span_)
         << "Internal error: function '" << callee_name << "' not found after validation.";
 
     if (callee_func->func_type_ == FunctionType::Group) {
@@ -688,16 +692,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string aic_name;
     std::string aiv_name;
     FindGroupCallees(group_func, aic_name, aiv_name);
-    INTERNAL_CHECK(!aic_name.empty())
+    INTERNAL_CHECK_SPAN(!aic_name.empty(), call->span_)
         << "Internal error: no AIC callee found in Group '" << group_name << "' body";
-    INTERNAL_CHECK(!aiv_name.empty())
+    INTERNAL_CHECK_SPAN(!aiv_name.empty(), call->span_)
         << "Internal error: no AIV callee found in Group '" << group_name << "' body";
 
     FunctionPtr aic_func = program_->GetFunction(aic_name);
     FunctionPtr aiv_func = program_->GetFunction(aiv_name);
-    INTERNAL_CHECK(aic_func != nullptr)
+    INTERNAL_CHECK_SPAN(aic_func != nullptr, call->span_)
         << "Internal error: AIC function '" << aic_name << "' not found for Group '" << group_name << "'";
-    INTERNAL_CHECK(aiv_func != nullptr)
+    INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_)
         << "Internal error: AIV function '" << aiv_name << "' not found for Group '" << group_name << "'";
 
     (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
@@ -768,11 +772,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     auto out_indices = CollectOutIndices(callee);
 
     for (const auto& elem : elements_it->second) {
-      INTERNAL_CHECK(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size())
+      INTERNAL_CHECK_SPAN(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size(),
+                          call->span_)
           << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
           << " (has " << out_indices.size() << " Out/InOut params)";
       size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
-      INTERNAL_CHECK(param_idx < callee->param_directions_.size())
+      INTERNAL_CHECK_SPAN(param_idx < callee->param_directions_.size(), call->span_)
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
           << " (has " << callee->param_directions_.size() << " params)";
       if (callee->param_directions_[param_idx] == ParamDirection::InOut) {
@@ -799,7 +804,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void HandleTensorAssembleAssign(const AssignStmtPtr& assign, const CallPtr& call) {
-    INTERNAL_CHECK(call->args_.size() == 3) << "Internal error: tensor.assemble expects 3 arguments";
+    INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
+        << "Internal error: tensor.assemble expects 3 arguments";
 
     std::string target_name = GenerateExprString(call->args_[0]);
     target_name = GetExternalTensorName(target_name);
