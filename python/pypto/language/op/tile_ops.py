@@ -111,6 +111,7 @@ __all__ = [
     "tpop_from_aiv",
     "sort32",
     "gather",
+    "mscatter",
     "MaskPattern",
     "mrgsort",
 ]
@@ -1662,6 +1663,28 @@ def gather(
         )
     call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
     return Tile(expr=call_expr)
+
+
+def mscatter(src: Tile, idx: Tile, output_tensor: Tensor) -> Tensor:
+    """Scatter-store tile elements into a tensor at per-element indices.
+
+    Semantics: ``output_tensor[idx[i, j]] = src[i, j]``
+
+    Maps to the PTOAS ``pto.mscatter`` instruction.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        idx: Index tile (INT32, same rank as src)
+        output_tensor: Output tensor to scatter into (same dtype as src)
+
+    Returns:
+        Tensor wrapping the mscatter operation
+
+    Example:
+        >>> result = pl.tile.mscatter(src_tile, idx_tile, out_tensor)
+    """
+    call_expr = _ir_ops.mscatter(src.unwrap(), idx.unwrap(), output_tensor.unwrap())
+    return Tensor(expr=call_expr)
 
 
 @overload

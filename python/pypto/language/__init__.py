@@ -133,6 +133,9 @@ from .op.tile_ops import (
     xor,
     xors,
 )
+from .op.tile_ops import (
+    mscatter as mscatter,
+)
 from .op.unified_ops import (
     add,
     cast,
