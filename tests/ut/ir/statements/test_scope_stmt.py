@@ -62,6 +62,27 @@ class TestScopeStmt:
         printed = TestProgram.as_python()
         assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
 
+    def test_scope_stmt_with_name(self):
+        """Test ScopeStmt construction with a user-provided name."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
+        var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
+        body = ir.AssignStmt(var_y, var_x, span)
+
+        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span, name="my_kernel")
+        assert scope.name == "my_kernel"
+        assert scope.scope_kind == ir.ScopeKind.InCore
+
+    def test_scope_stmt_default_name_is_empty(self):
+        """Test that default name is empty string."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
+        var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
+        body = ir.AssignStmt(var_y, var_x, span)
+
+        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+        assert scope.name == ""
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

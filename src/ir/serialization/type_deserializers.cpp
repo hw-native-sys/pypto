@@ -561,10 +561,17 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
     split = static_cast<SplitMode>(split_obj->via.u64);
   }
 
+  // Deserialize optional name (backward compatible: missing field = empty)
+  std::string name;
+  auto name_obj = GetOptionalFieldObj(fields_obj, "name", ctx);
+  if (name_obj.has_value() && name_obj->type == msgpack::type::STR) {
+    name = name_obj->as<std::string>();
+  }
+
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split);
+  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name));
 }
 
 // Deserialize SeqStmts

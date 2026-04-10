@@ -1023,6 +1023,13 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
+  // Helper: append name= kwarg when user-provided name is non-empty
+  auto append_name = [&]() {
+    if (!op->name_.empty()) {
+      stream_ << ", name=\"" << op->name_ << "\"";
+    }
+  };
+
   if (op->scope_kind_ == ScopeKind::Hierarchy) {
     // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y):
     stream_ << "with " << prefix_ << ".at(";
@@ -1035,19 +1042,28 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
       if (!first) stream_ << ", ";
       stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
     }
+    append_name();
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::InCore) {
-    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP):\n";
+    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
+    append_name();
+    stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::AutoInCore) {
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
     if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
       stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
-              << SplitModeToPythonString(op->split_.value()) << ")):\n";
+              << SplitModeToPythonString(op->split_.value()) << ")";
     } else {
-      stream_ << prefix_ << ".chunked_loop_optimizer):\n";
+      stream_ << prefix_ << ".chunked_loop_optimizer";
     }
+    append_name();
+    stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::Cluster) {
-    stream_ << "with " << prefix_ << ".cluster():\n";
+    stream_ << "with " << prefix_ << ".cluster(";
+    if (!op->name_.empty()) {
+      stream_ << "name=\"" << op->name_ << "\"";
+    }
+    stream_ << "):\n";
   } else {
     INTERNAL_CHECK(false) << "Internal error: Unknown ScopeKind in python_printer: "
                           << ScopeKindToString(op->scope_kind_);

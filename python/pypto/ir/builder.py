@@ -253,6 +253,7 @@ class IRBuilder:
         level: ir.Level | None = None,
         role: ir.Role | None = None,
         split: ir.SplitMode | None = None,
+        name: str = "",
     ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
@@ -262,6 +263,7 @@ class IRBuilder:
             level: Hierarchy level (for ScopeKind.Hierarchy)
             role: Function role (for ScopeKind.Hierarchy)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
+            name: User-provided scope name (empty = auto-generate)
 
         Yields:
             ScopeBuilder: Helper object for building the scope statement
@@ -276,7 +278,7 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_scope(scope_kind, begin_span, level, role, split)
+        self._builder.begin_scope(scope_kind, begin_span, level, role, split, name)
         builder_obj = ScopeBuilder(self)
         try:
             yield builder_obj

@@ -604,6 +604,9 @@ class IncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(InCore).
     """
 
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+
     def __enter__(self) -> None:
         """Enter the InCore scope context."""
         pass
@@ -620,8 +623,9 @@ class AutoIncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(AutoInCore).
     """
 
-    def __init__(self, split: SplitMode = SplitMode.NONE) -> None:
+    def __init__(self, split: SplitMode = SplitMode.NONE, name: str = "") -> None:
         self.split = split
+        self.name = name
 
     def __enter__(self) -> None:
         """Enter the AutoInCore scope context."""
@@ -657,11 +661,14 @@ def auto_incore(split: SplitMode = SplitMode.UP_DOWN) -> AutoIncoreContext:
     return AutoIncoreContext(split=split)
 
 
-def incore() -> IncoreContext:
+def incore(*, name: str = "") -> IncoreContext:
     """Mark a region of code as belonging to the InCore execution context.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.InCore.
+
+    Args:
+        name: Optional name for the outlined function (must be a valid identifier)
 
     Returns:
         Context manager for InCore scope
@@ -671,7 +678,7 @@ def incore() -> IncoreContext:
         ...     y = pl.ops.add(x, x)
         ...     z = pl.ops.mul(y, y)
     """
-    return IncoreContext()
+    return IncoreContext(name=name)
 
 
 class ClusterContext:
@@ -680,6 +687,9 @@ class ClusterContext:
     This is returned by pl.cluster() and used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
+
+    def __init__(self, name: str = "") -> None:
+        self.name = name
 
     def __enter__(self) -> None:
         """Enter the Cluster scope context."""
@@ -690,7 +700,7 @@ class ClusterContext:
         pass
 
 
-def cluster() -> ClusterContext:
+def cluster(*, name: str = "") -> ClusterContext:
     """Mark a region of code as belonging to a Cluster execution context.
 
     A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
@@ -705,7 +715,7 @@ def cluster() -> ClusterContext:
         ...     with pl.incore():
         ...         y = pl.add(x, x)
     """
-    return ClusterContext()
+    return ClusterContext(name=name)
 
 
 class AtContext:
@@ -724,10 +734,12 @@ class AtContext:
         role: ir.Role | None = None,
         *,
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
+        name: str = "",
     ) -> None:
         self.level = level
         self.role = role
         self.optimization = optimization
+        self.name = name
 
     def __enter__(self) -> None:
         pass
@@ -741,6 +753,7 @@ def at(
     role: ir.Role | None = None,
     *,
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
+    name: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
 
@@ -759,6 +772,7 @@ def at(
         optimization: Optional optimization hint. Use pl.chunked_loop_optimizer
             (or pl.chunked_loop_optimizer(split=...)) with level=CORE_GROUP
             to enable compiler-driven chunked loop outlining.
+        name: Optional name for the outlined function (must be a valid identifier)
 
     Returns:
         Context manager for the appropriate scope
@@ -766,6 +780,10 @@ def at(
     Examples:
         >>> # InCore scope (replaces pl.incore()):
         >>> with pl.at(level=pl.Level.CORE_GROUP):
+        ...     y = pl.ops.add(x, x)
+
+        >>> # Named InCore scope:
+        >>> with pl.at(level=pl.Level.CORE_GROUP, name="fused_matmul_add"):
         ...     y = pl.ops.add(x, x)
 
         >>> # AutoInCore scope (replaces pl.auto_incore()):
@@ -783,7 +801,7 @@ def at(
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role, optimization=optimization)
+    return AtContext(level, role, optimization=optimization, name=name)
 
 
 __all__ = [

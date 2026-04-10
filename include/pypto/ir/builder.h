@@ -300,7 +300,8 @@ class IRBuilder {
    * @throws RuntimeError if not inside a function or loop
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
-                  std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt);
+                  std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
+                  std::string name = "");
 
   /**
    * @brief End building a scope statement
@@ -669,12 +670,14 @@ class IfStmtContext : public BuildContext {
 class ScopeContext : public BuildContext {
  public:
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
-               std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt)
+               std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
+               std::string name = "")
       : BuildContext(Type::SCOPE, std::move(span)),
         scope_kind_(scope_kind),
         level_(level),
         role_(role),
-        split_(split) {}
+        split_(split),
+        name_(std::move(name)) {}
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
 
@@ -682,6 +685,7 @@ class ScopeContext : public BuildContext {
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
+  [[nodiscard]] const std::string& GetName() const { return name_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
  private:
@@ -689,6 +693,7 @@ class ScopeContext : public BuildContext {
   std::optional<Level> level_;
   std::optional<Role> role_;
   std::optional<SplitMode> split_;
+  std::string name_;
   std::vector<StmtPtr> stmts_;
 };
 
