@@ -123,6 +123,30 @@ class TestCompileProfiler:
         for s in stages:
             assert s["seconds"] > 0
 
+    def test_add_stage_record_at_root(self):
+        record = StageRecord(name="external", start=0.0, end=1.0)
+        with CompileProfiler() as prof:
+            prof.add_stage_record(record)
+
+        stages = prof.to_dict()["stages"]
+        assert len(stages) == 1
+        assert stages[0]["name"] == "external"
+        assert stages[0]["seconds"] == 1.0
+
+    def test_add_stage_record_nested(self):
+        child = StageRecord(name="worker_kernel", start=0.0, end=0.5)
+        with CompileProfiler() as prof:
+            with prof.stage("codegen"):
+                prof.add_stage_record(child)
+
+        stages = prof.to_dict()["stages"]
+        assert len(stages) == 1
+        assert stages[0]["name"] == "codegen"
+        children = stages[0]["children"]
+        assert len(children) == 1
+        assert children[0]["name"] == "worker_kernel"
+        assert children[0]["seconds"] == 0.5
+
 
 class TestSummary:
     """Human-readable summary output."""

@@ -26,7 +26,7 @@ import subprocess
 import textwrap
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -729,9 +729,8 @@ def _run_ptoas_phase(
             _collect_emit_result(result, unit, prof, result_files, errors)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_emit_unit, unit, output_dir, skip_ptoas): unit for unit in units}
-            for future in as_completed(futures):
-                unit = futures[future]
+            futures = [executor.submit(_emit_unit, unit, output_dir, skip_ptoas) for unit in units]
+            for unit, future in zip(units, futures):
                 result = future.result()  # exceptions caught inside _emit_unit
                 _collect_emit_result(result, unit, prof, result_files, errors)
 
