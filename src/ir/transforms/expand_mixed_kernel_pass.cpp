@@ -302,33 +302,15 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
   // constraint), so Left/Right/Mat destinations all use NZ at the transfer
   // boundary. The final Left/Right layout is resolved by a subsequent
   // Mat -> Left/Right move (MTE1).
-  if (backend_type == backend::BackendType::Ascend910B) {
-    switch (dest_ms) {
-      case MemorySpace::Left:
-      case MemorySpace::Right:
-      case MemorySpace::Mat:
-        result.blayout = TileLayout::col_major;
-        result.slayout = TileLayout::row_major;
-        return result;
-      case MemorySpace::Vec:
-        return original_view;
-      default:
-        INTERNAL_UNREACHABLE << "cross-core move destination must be Vec, Mat, Left, or Right, got "
-                             << static_cast<int>(dest_ms);
-    }
-  }
-
-  // Ascend950: encode the fractal layout directly at the transfer boundary.
+  // Ascend950: vec to Mat don't support ZN fractal, so use NZ for Right dest as 910B,
+  // this can also work.
   switch (dest_ms) {
     case MemorySpace::Left:
+    case MemorySpace::Right:
+    case MemorySpace::Mat:
       result.blayout = TileLayout::col_major;
       result.slayout = TileLayout::row_major;
       return result;
-    case MemorySpace::Right:
-      result.blayout = TileLayout::row_major;
-      result.slayout = TileLayout::col_major;
-      return result;
-    case MemorySpace::Mat:
     case MemorySpace::Vec:
       return original_view;
     default:
@@ -349,6 +331,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars) {
+  auto backend_type = backend::GetBackendType();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
@@ -378,8 +361,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
           // the required fractal layout before tpush.
           // On Ascend950: Left -> NZ, Right -> ZN.
-          // On Ascend910B: both Left and Right -> NZ (Mat only supports NZ).
-          if (side == CoreSide::AIV) {
+          // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
+          // directly use nd
+          if (side == CoreSide::AIV && backend_type == backend::BackendType::Ascend950) {
             auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
             INTERNAL_CHECK(push_dest_type && push_dest_type->memory_space_.has_value() &&
                            push_dest_type->tile_view_.has_value())

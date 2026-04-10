@@ -158,16 +158,15 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
 
 
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
-    """On Ascend910B, cross-core transfer uses NZ layout for both Left and Right.
+    """On Ascend910B, cross-core push needs no layout adaptation on the AIV side.
 
-    Ascend910B routes data through GM → Mat, and Mat only supports NZ
-    (col_major blayout, row_major slayout). Unlike Ascend950 where Left uses
-    NZ and Right uses ZN, on 910B both destinations use NZ at the transfer
-    boundary.
+    Ascend910B routes push/pop through ub → gm → mat. The ub → gm transfer
+    uses ND layout directly, so no tile.move is needed before tpush_to_aic.
+    The AIC tpop still lands in Mat with NZ layout (col_major blayout), and a
+    subsequent Mat → Left tile.move resolves the final layout.
 
     The expected behavior on 910B:
-      - AIV side: a `tile.move` converts the source to NZ layout (producing
-        an `_nz` variable), then `tpush_to_aic(adapted_tile)`.
+      - AIV side: `tpush_to_aic(source_tile)` directly, no NZ/ZN tmov.
       - AIC side: `tpop_from_aiv()` lands in Mat with NZ layout (col_major
         blayout), followed by a `Mat → Left` `tile.move`.
     """
@@ -209,10 +208,9 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
     aic_printed = python_print(aic_func)
     aiv_printed = python_print(aiv_func)
 
-    # AIV side: a tile.move converts the source to NZ layout before tpush.
-    # On 910B both Left and Right use NZ, so the intermediate var should be `_nz`.
+    # AIV side: push directly with no NZ/ZN layout adaptation (910B ub->gm uses ND).
     assert "pl.tile.tpush_to_aic(" in aiv_printed
-    assert "_nz" in aiv_printed
+    assert "_nz" not in aiv_printed
     assert "_zn" not in aiv_printed
 
     # AIC side: tpop lands in Mat with NZ layout (col_major blayout), and
