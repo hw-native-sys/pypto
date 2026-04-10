@@ -330,5 +330,107 @@ def test_auto_incore_deprecation_warning():
     assert any("pl.auto_incore()" in str(warning.message) for warning in w)
 
 
+# ─── InCore with split ──────────────────────────────────────────────────────
+
+
+def test_parse_pl_incore_with_split():
+    """pl.incore(split=UP_DOWN) creates ScopeStmt(InCore) with split."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.incore(split=pl.SplitMode.UP_DOWN):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert scope.split == ir.SplitMode.UP_DOWN
+
+
+def test_parse_pl_incore_with_split_left_right():
+    """pl.incore(split=LEFT_RIGHT) creates ScopeStmt(InCore) with LEFT_RIGHT split."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.incore(split=pl.SplitMode.LEFT_RIGHT):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert scope.split == ir.SplitMode.LEFT_RIGHT
+
+
+def test_parse_pl_at_core_group_with_split():
+    """pl.at(level=CORE_GROUP, split=UP_DOWN) creates ScopeStmt(InCore) with split."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert scope.split == ir.SplitMode.UP_DOWN
+
+
+def test_parse_pl_at_core_group_with_split_left_right():
+    """pl.at(level=CORE_GROUP, split=LEFT_RIGHT) creates ScopeStmt(InCore) with LEFT_RIGHT."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.LEFT_RIGHT):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert scope.split == ir.SplitMode.LEFT_RIGHT
+
+
+def test_parse_pl_at_optimization_and_split_conflict():
+    """Cannot use both optimization= and split= in pl.at()."""
+    with pytest.raises(ParserSyntaxError, match="Cannot use both"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimization=pl.chunked_loop_optimizer,
+                split=pl.SplitMode.UP_DOWN,
+            ):
+                y = pl.add(x, x)
+            return y
+
+
+def test_parse_pl_at_split_on_non_core_group_errors():
+    """split= is not supported for non-CORE_GROUP levels."""
+    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(level=pl.Level.HOST, split=pl.SplitMode.UP_DOWN):
+                y = pl.add(x, x)
+            return y
+
+
+def test_printer_incore_with_split_roundtrip():
+    """Python printer renders InCore scope with split and it can be re-parsed."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+            y = pl.add(x, x)
+        return y
+
+    printed = str(f)
+    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

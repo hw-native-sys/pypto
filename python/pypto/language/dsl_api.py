@@ -604,7 +604,8 @@ class IncoreContext:
     The parser recognizes this pattern and creates a ScopeStmt(InCore).
     """
 
-    def __init__(self, name_hint: str = "") -> None:
+    def __init__(self, split: SplitMode = SplitMode.NONE, name_hint: str = "") -> None:
+        self.split = split
         self.name_hint = name_hint
 
     def __enter__(self) -> None:
@@ -661,13 +662,16 @@ def auto_incore(split: SplitMode = SplitMode.UP_DOWN, *, name_hint: str = "") ->
     return AutoIncoreContext(split=split, name_hint=name_hint)
 
 
-def incore(*, name_hint: str = "") -> IncoreContext:
+def incore(split: SplitMode = SplitMode.NONE, *, name_hint: str = "") -> IncoreContext:
     """Mark a region of code as belonging to the InCore execution context.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.InCore.
 
     Args:
+        split: Split mode for cross-core data transfer (default: SplitMode.NONE).
+            When set, the outlined InCore function will use the specified split
+            mode for data transfer between AIC and AIV cores.
         name_hint: Optional name hint for the outlined function (must be a valid identifier)
 
     Returns:
@@ -677,8 +681,10 @@ def incore(*, name_hint: str = "") -> IncoreContext:
         >>> with pl.incore():
         ...     y = pl.ops.add(x, x)
         ...     z = pl.ops.mul(y, y)
+        >>> with pl.incore(split=pl.SplitMode.UP_DOWN):
+        ...     y = pl.ops.add(x, x)
     """
-    return IncoreContext(name_hint=name_hint)
+    return IncoreContext(split=split, name_hint=name_hint)
 
 
 class ClusterContext:
@@ -723,7 +729,8 @@ class AtContext:
 
     Returned by pl.at(level=..., role=..., optimization=...) and used with the 'with' statement.
     The parser recognizes this pattern and creates:
-    - ScopeStmt(InCore) when level=CORE_GROUP (no optimization)
+    - ScopeStmt(InCore) when level=CORE_GROUP (no optimization, no split)
+    - ScopeStmt(InCore, split=...) when level=CORE_GROUP with split=...
     - ScopeStmt(AutoInCore) when level=CORE_GROUP and optimization=pl.chunked_loop_optimizer
     - ScopeStmt(Hierarchy) for all other levels
     """
@@ -734,11 +741,13 @@ class AtContext:
         role: ir.Role | None = None,
         *,
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
+        split: SplitMode | None = None,
         name_hint: str = "",
     ) -> None:
         self.level = level
         self.role = role
         self.optimization = optimization
+        self.split = split
         self.name_hint = name_hint
 
     def __enter__(self) -> None:
@@ -753,6 +762,7 @@ def at(
     role: ir.Role | None = None,
     *,
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
+    split: SplitMode | None = None,
     name_hint: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
@@ -764,6 +774,9 @@ def at(
     ``optimization=pl.chunked_loop_optimizer``, this creates an AutoInCore scope
     (equivalent to the deprecated ``pl.auto_incore()``).
 
+    When used with ``level=pl.Level.CORE_GROUP`` and ``split=pl.SplitMode.UP_DOWN``,
+    this creates an InCore scope with explicit split mode for cross-core data transfer.
+
     For all other levels, this creates a Hierarchy scope.
 
     Args:
@@ -773,6 +786,9 @@ def at(
             (or pl.chunked_loop_optimizer(split=...)) with level=CORE_GROUP
             to enable compiler-driven chunked loop outlining.
         name_hint: Optional name hint for the outlined function (must be a valid identifier)
+        split: Split mode for cross-core data transfer. Use with level=CORE_GROUP
+            to specify how tile data is split between AIC and AIV cores.
+            Cannot be used together with optimization=.
 
     Returns:
         Context manager for the appropriate scope
@@ -780,6 +796,10 @@ def at(
     Examples:
         >>> # InCore scope (replaces pl.incore()):
         >>> with pl.at(level=pl.Level.CORE_GROUP):
+        ...     y = pl.ops.add(x, x)
+
+        >>> # InCore scope with split mode:
+        >>> with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
         ...     y = pl.ops.add(x, x)
 
         >>> # Named InCore scope:
@@ -801,7 +821,7 @@ def at(
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role, optimization=optimization, name_hint=name_hint)
+    return AtContext(level, role, optimization=optimization, split=split, name_hint=name_hint)
 
 
 __all__ = [

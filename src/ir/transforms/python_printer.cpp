@@ -1046,6 +1046,9 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::InCore) {
     stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
+    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
+      stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
+    }
     append_name_hint();
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::AutoInCore) {

@@ -218,6 +218,37 @@ def test_printer_incore_scope_unchanged():
     assert "pl.at(level=pl.Level.CORE_GROUP)" in printed
 
 
+def test_printer_incore_scope_with_split():
+    """Python printer renders InCore scope with split as pl.at(level=..., split=...)."""
+    body = _empty_body()
+    scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, _span(), split=ir.SplitMode.UP_DOWN)
+    func = ir.Function("test_fn", [], [], scope, _span())
+    printed = str(func)
+    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
+
+
+def test_scope_stmt_incore_with_split():
+    """ScopeStmt(InCore) can carry a split mode."""
+    s = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    assert s.scope_kind == ir.ScopeKind.InCore
+    assert s.split == ir.SplitMode.UP_DOWN
+
+
+def test_structural_equal_incore_with_split():
+    """structural_equal compares split on InCore ScopeStmt."""
+    s1 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    s2 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    ir.assert_structural_equal(s1, s2)
+
+
+def test_structural_equal_incore_different_split():
+    """structural_equal detects different split modes."""
+    s1 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    s2 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.LEFT_RIGHT)
+    with pytest.raises(Exception):
+        ir.assert_structural_equal(s1, s2)
+
+
 # ─── Outline pass safety ─────────────────────────────────────────────────────
 
 
