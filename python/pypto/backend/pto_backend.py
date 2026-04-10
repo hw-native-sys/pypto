@@ -24,11 +24,14 @@ import re
 import shutil
 import subprocess
 import textwrap
+import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from typing import Any
 
-from pypto.compile_profiling import CompileProfiler
+from pypto.compile_profiling import CompileProfiler, StageRecord
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
@@ -612,6 +615,127 @@ def _profiling_stage(prof: CompileProfiler | None, name: str) -> AbstractContext
     return nullcontext()
 
 
+# ---------------------------------------------------------------------------
+# Parallel ptoas helpers
+# ---------------------------------------------------------------------------
+
+_CODEGEN_MAX_WORKERS_ENV = "PYPTO_CODEGEN_MAX_WORKERS"
+
+
+def _get_max_workers() -> int | None:
+    """Determine max worker threads for parallel ptoas invocations.
+
+    Returns:
+        ``None`` to use the ``ThreadPoolExecutor`` default, or an explicit
+        thread count.  ``1`` means sequential execution (no thread pool).
+    """
+    env_val = os.environ.get(_CODEGEN_MAX_WORKERS_ENV, "").strip()
+    if not env_val:
+        return None  # ThreadPoolExecutor default
+    try:
+        n = int(env_val)
+    except ValueError:
+        logger.warning("Invalid %s='%s', using default", _CODEGEN_MAX_WORKERS_ENV, env_val)
+        return None
+    return max(1, n)
+
+
+@dataclass
+class _CodegenUnit:
+    """One kernel codegen unit prepared for ptoas emission."""
+
+    name: str
+    pto_code: str  # MLIR from PTOCodegen (Phase 1 output)
+    funcs: list[_ir_core.Function]
+    is_group: bool
+    stage_record: StageRecord  # profiling record (started in Phase 1)
+
+
+@dataclass
+class _EmitResult:
+    """Result of emitting one codegen unit (ptoas + wrapper generation)."""
+
+    name: str
+    files: dict[str, str]
+    ptoas_record: StageRecord
+    error: Exception | None = None
+
+
+def _emit_unit(
+    unit: _CodegenUnit,
+    output_dir: str,
+    skip_ptoas: bool,
+) -> _EmitResult:
+    """Run ptoas + wrapper generation for one codegen unit.
+
+    This is the Phase 2 worker — called from a thread pool or sequentially.
+    PTOCodegen has already run; ``unit.pto_code`` contains the MLIR.
+    """
+    local_files: dict[str, str] = {}
+    ptoas_record = StageRecord(name="ptoas", start=time.perf_counter())
+    try:
+        if unit.is_group:
+            _emit_group_output(local_files, unit.name, unit.funcs, unit.pto_code, output_dir, skip_ptoas)
+        else:
+            _emit_single_function_output(local_files, unit.funcs[0], unit.pto_code, output_dir, skip_ptoas)
+        ptoas_record.end = time.perf_counter()
+        return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
+    except Exception as e:
+        ptoas_record.end = time.perf_counter()
+        if unit.is_group:
+            func_names = ", ".join(m.name for m in unit.funcs)
+            logger.error("Failed to compile group '%s' [%s]: %s", unit.name, func_names, e)
+        else:
+            logger.error("Failed to compile function '%s': %s", unit.name, e)
+        return _EmitResult(name=unit.name, files={}, ptoas_record=ptoas_record, error=e)
+
+
+def _merge_stage_record(prof: CompileProfiler | None, record: StageRecord) -> None:
+    """Append a completed stage record into the profiler's current nesting level."""
+    if prof is not None:
+        prof.add_stage_record(record)
+
+
+def _collect_emit_result(
+    result: _EmitResult,
+    unit: _CodegenUnit,
+    prof: CompileProfiler | None,
+    result_files: dict[str, str],
+    errors: list[tuple[str, Exception]],
+) -> None:
+    """Finalize one emit result: merge profiling, collect files and errors."""
+    unit.stage_record.children.append(result.ptoas_record)
+    unit.stage_record.end = time.perf_counter()
+    _merge_stage_record(prof, unit.stage_record)
+    result_files.update(result.files)
+    if result.error is not None:
+        errors.append((result.name, result.error))
+
+
+def _run_ptoas_phase(
+    units: list[_CodegenUnit],
+    output_dir: str,
+    skip_ptoas: bool,
+    prof: CompileProfiler | None,
+    result_files: dict[str, str],
+    errors: list[tuple[str, Exception]],
+) -> None:
+    """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
+    max_workers = _get_max_workers()
+
+    if max_workers == 1 or len(units) <= 1:
+        for unit in units:
+            result = _emit_unit(unit, output_dir, skip_ptoas)
+            _collect_emit_result(result, unit, prof, result_files, errors)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_emit_unit, unit, output_dir, skip_ptoas): unit for unit in units}
+            for future in as_completed(futures):
+                unit = futures[future]
+                result = future.result()  # exceptions caught inside _emit_unit
+                _collect_emit_result(result, unit, prof, result_files, errors)
+
+
 def generate(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -648,20 +772,25 @@ def generate(
 
     groups, ungrouped = _build_group_mapping(transformed_program)
 
-    # Grouped functions: one MLIR module per group
+    # ── Phase 1: IR → MLIR (sequential, fast) ────────────────────────
+    # PTOCodegen converts IR to MLIR strings.  This is cheap (pure string
+    # generation) and runs sequentially so that we don't contend on the GIL.
+    units: list[_CodegenUnit] = []
+
     for group_name, members in groups.items():
         try:
             grouped_program = _ir_core.Program(members, group_name, transformed_program.span)
-            codegen_instance = _codegen_core.PTOCodegen()
-            with _profiling_stage(prof, f"kernel_codegen:{group_name}"):
-                pto_code = codegen_instance.generate(grouped_program)
-                _emit_group_output(result_files, group_name, members, pto_code, output_dir, skip_ptoas)
+            stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
+            ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
+            pto_code = _codegen_core.PTOCodegen().generate(grouped_program)
+            ir_record.end = time.perf_counter()
+            stage.children.append(ir_record)
+            units.append(_CodegenUnit(group_name, pto_code, members, is_group=True, stage_record=stage))
         except Exception as e:
             func_names = ", ".join(m.name for m in members)
             logger.error("Failed to compile group '%s' [%s]: %s", group_name, func_names, e)
             errors.append((group_name, e))
 
-    # Ungrouped functions: one MLIR module per function (existing behavior)
     for func in ungrouped:
         try:
             peer_names = _extract_peer_function_names(func)
@@ -671,13 +800,21 @@ def generate(
                 if peer_func is not None:
                     peer_funcs.append(peer_func)
             single_program = _ir_core.Program([*peer_funcs, func], func.name, transformed_program.span)
-            codegen_instance = _codegen_core.PTOCodegen()
-            with _profiling_stage(prof, f"kernel_codegen:{func.name}"):
-                pto_code = codegen_instance.generate(single_program)
-                _emit_single_function_output(result_files, func, pto_code, output_dir, skip_ptoas)
+            stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
+            ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
+            pto_code = _codegen_core.PTOCodegen().generate(single_program)
+            ir_record.end = time.perf_counter()
+            stage.children.append(ir_record)
+            units.append(_CodegenUnit(func.name, pto_code, [func], is_group=False, stage_record=stage))
         except Exception as e:
             logger.error("Failed to compile function '%s': %s", func.name, e)
             errors.append((func.name, e))
+
+    # ── Phase 2: ptoas (parallel, slow) ──────────────────────────────
+    # Each _emit_unit call runs the ptoas subprocess and generates the
+    # kernel wrapper.  These are data-independent and subprocess-heavy, so
+    # a thread pool gives real parallelism (subprocess.run releases the GIL).
+    _run_ptoas_phase(units, output_dir, skip_ptoas, prof, result_files, errors)
 
     # Orchestration + config
     if orch_func is not None:

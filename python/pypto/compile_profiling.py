@@ -124,6 +124,17 @@ class CompileProfiler:
             self._stack[-1].end = time.perf_counter()
             self._stack.pop()
 
+    def add_stage_record(self, record: StageRecord) -> None:
+        """Insert a pre-built stage record into the current nesting level.
+
+        Use this to merge timing data collected outside the profiler's
+        context-manager API (e.g. from parallel worker threads).
+        """
+        if self._stack:
+            self._stack[-1].children.append(record)
+        else:
+            self._root_stages.append(record)
+
     # ------------------------------------------------------------------
     # Output
     # ------------------------------------------------------------------
