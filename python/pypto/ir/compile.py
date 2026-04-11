@@ -12,7 +12,7 @@
 import os
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate
@@ -22,6 +22,9 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
 from .pass_manager import OptimizationStrategy, PassManager
+
+if TYPE_CHECKING:
+    from .compiled_program import CompiledProgram
 
 
 def _write_files(files: dict[str, str], output_dir: str) -> None:
@@ -35,7 +38,7 @@ def _write_files(files: dict[str, str], output_dir: str) -> None:
             f.write(content)
 
 
-def compile(
+def compile(  # noqa: PLR0913
     program: _ir_core.Program,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
@@ -46,7 +49,8 @@ def compile(
     warning_level: _passes.WarningLevel | None = None,
     disabled_warnings: _passes.WarningCheckSet | None = None,
     profiling: bool = False,
-) -> str:
+    platform: str | None = None,
+) -> "CompiledProgram":
     """Compile a Program through passes and codegen.
 
     This function provides a complete compilation pipeline that:
@@ -71,21 +75,22 @@ def compile(
             (UnusedControlFlowResult disabled).
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
+        platform: Target execution platform.  One of ``"a2a3sim"``,
+            ``"a2a3"``, ``"a5sim"``, or ``"a5"``.  Defaults to the
+            simulator for the given *backend_type*.
 
     Returns:
-        Path to the output directory containing all artifacts
+        A :class:`CompiledProgram` that wraps the output directory and can
+        be called with torch tensors.  For backward compatibility it also
+        behaves like a path string (``str(result)`` returns the output dir).
 
     Example:
         >>> from pypto import ir
-        >>> from pypto.backend import BackendType
-        >>> program = build_my_program()
-        >>> output_dir = ir.compile(
-        ...     program,
-        ...     strategy=ir.OptimizationStrategy.Default,
-        ...     dump_passes=True,
-        ...     backend_type=BackendType.Ascend910B,
-        ...     warning_level=ir.WarningLevel.BOTH,
-        ... )
+        >>> compiled = ir.compile(program)
+        >>> str(compiled)               # backward-compat: returns output dir path
+        >>> compiled(a, b, c)           # in-place style
+        >>> c = compiled(a, b)          # return style
+        >>> compiled(a, b, c, device=1) # specify device at call time
     """
     _backend_core.set_backend_type(backend_type)
 
@@ -164,4 +169,11 @@ def compile(
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
 
-    return output_dir
+    from .compiled_program import CompiledProgram  # noqa: PLC0415
+
+    return CompiledProgram(
+        program,
+        output_dir,
+        backend_type=backend_type,
+        platform=platform,
+    )

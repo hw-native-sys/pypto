@@ -38,6 +38,7 @@ Typical usage::
 import ctypes
 import functools
 import importlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -869,3 +870,140 @@ def _add_headers_to_file(cpp_file: Path) -> None:
 
     lines.insert(insert_pos, header_block)
     cpp_file.write_text("".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Compiled program execution (callable API)
+# ---------------------------------------------------------------------------
+
+
+def execute_compiled(
+    work_dir: Path,
+    tensors: list[torch.Tensor],
+    *,
+    platform: str,
+    device_id: int,
+    pto_isa_commit: str | None = None,
+) -> None:
+    """Execute a pre-compiled program with user-provided tensors.
+
+    Uses Simpler's ``ChipWorker`` API directly — no golden.py or
+    CodeRunner involved.  Output tensors in *tensors* are modified
+    in-place with device results.
+
+    Args:
+        work_dir: Root output directory from :func:`ir.compile`, containing
+            ``kernels/``, ``orchestration/``, and ``kernel_config.py``.
+        tensors: Ordered list of torch tensors matching the orchestration
+            function's parameter order.
+        platform: Target execution platform.
+        device_id: Hardware device index.
+        pto_isa_commit: Optional git commit to pin pto-isa clone.
+    """
+    work_dir = Path(work_dir)
+
+    # Ensure orchestration headers are patched (idempotent)
+    _patch_orchestration_headers(work_dir)
+
+    # Import Simpler modules
+    simpler_root = os.environ.get("SIMPLER_ROOT")
+    if not simpler_root:
+        raise RuntimeError(
+            "SIMPLER_ROOT environment variable is not set. "
+            "Set it to the Simpler repository root to enable device execution."
+        )
+    for sub in ("python", "examples/scripts"):
+        p = str(Path(simpler_root) / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    kernel_compiler_mod = importlib.import_module("kernel_compiler")
+    runtime_builder_mod = importlib.import_module("runtime_builder")
+    task_interface = importlib.import_module("task_interface")
+
+    KernelCompiler = kernel_compiler_mod.KernelCompiler
+    RuntimeBuilder = runtime_builder_mod.RuntimeBuilder
+
+    ChipWorker = task_interface.ChipWorker
+    ChipCallable = task_interface.ChipCallable
+    CoreCallable = task_interface.CoreCallable
+    ChipStorageTaskArgs = task_interface.ChipStorageTaskArgs
+    CallConfig = task_interface.CallConfig
+    make_tensor_arg = task_interface.make_tensor_arg
+
+    # Load kernel_config.py from the compiled output
+    config_path = work_dir / "kernel_config.py"
+    spec = importlib.util.spec_from_file_location("kernel_config", config_path)
+    if spec is None or spec.loader is None:
+        raise FileNotFoundError(f"kernel_config.py not found at {config_path}")
+    kernel_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kernel_config)
+
+    runtime_config = kernel_config.RUNTIME_CONFIG
+    orchestration = kernel_config.ORCHESTRATION
+    kernels = kernel_config.KERNELS
+
+    # Step 1: Build runtime + compile orchestration + compile kernels
+    _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
+
+    kernel_compiler = KernelCompiler(platform=platform)
+    builder = RuntimeBuilder(platform=platform)
+
+    # Resolve PTO ISA root for kernel compilation
+    pto_isa_setup = importlib.import_module("pto_isa_setup")
+    pto_isa_root = pto_isa_setup._ensure_pto_isa_root(
+        verbose=False, commit=pto_isa_commit, clone_protocol="https"
+    )
+
+    runtime_result = builder.get_binaries(runtime_config["runtime"], build=True)
+
+    orch_so = kernel_compiler.compile_orchestration(runtime_config["runtime"], orchestration["source"])
+
+    elf_parser = importlib.import_module("elf_parser")
+    kernel_binaries = []
+    for kernel in kernels:
+        incore_o = kernel_compiler.compile_incore(
+            kernel["source"],
+            core_type=kernel["core_type"],
+            pto_isa_root=pto_isa_root,
+        )
+        if platform.endswith("sim"):
+            kernel_bin = incore_o
+        else:
+            kernel_bin = elf_parser.extract_text_section(incore_o)
+        sig = kernel.get("signature", [])
+        callable_obj = CoreCallable.build(signature=sig, binary=kernel_bin)
+        kernel_binaries.append((kernel["func_id"], callable_obj))
+
+    # Step 2: Build ChipCallable
+    orch_sig = orchestration.get("signature", [])
+    chip_callable = ChipCallable.build(
+        signature=orch_sig,
+        func_name=orchestration["function_name"],
+        binary=orch_so,
+        children=kernel_binaries,
+    )
+
+    # Step 3: Create ChipWorker and execute
+    worker = ChipWorker()
+    worker.init(
+        device_id,
+        str(runtime_result.host_path),
+        runtime_result.aicpu_path.read_bytes(),
+        runtime_result.aicore_path.read_bytes(),
+    )
+
+    try:
+        # Build task args from user tensors
+        orch_args = ChipStorageTaskArgs()
+        for tensor in tensors:
+            tensor_contiguous = tensor.cpu().contiguous()
+            orch_args.add_tensor(make_tensor_arg(tensor_contiguous))
+
+        config = CallConfig()
+        config.block_dim = runtime_config.get("block_dim", 24)
+        config.aicpu_thread_num = runtime_config.get("aicpu_thread_num", 4)
+
+        worker.run(chip_callable, orch_args, config)
+    finally:
+        worker.reset()
