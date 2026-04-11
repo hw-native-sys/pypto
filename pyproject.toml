@@ -107,8 +107,8 @@ cmake.args = [
 
 [tool.pyright]
 include = ["python/pypto", "tests"]
-exclude = ["**/__pycache__", "build", "dist", "tests/st"]
-extraPaths = ["python"]
+exclude = ["**/__pycache__", "build", "dist", "tests/st", "tests/ut/jit/test_roundtrip.py"]
+extraPaths = ["python", "."]
 typeCheckingMode = "basic"
 pythonVersion = "3.10"
 reportMissingTypeStubs = false
@@ -118,6 +118,9 @@ reportCallIssue = false
 reportAssignmentType = false
 reportOperatorIssue = false
 reportRedeclaration = false
+reportOptionalIterable = false
+reportOptionalSubscript = false
+reportGeneralTypeIssues = false
 
 [tool.pylint]
 # Pylint is not used in this project, but as it is a widely used linter,

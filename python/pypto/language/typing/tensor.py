@@ -207,6 +207,29 @@ class Tensor(metaclass=TensorMeta):
         """Support static type checkers for Tensor[[shape], dtype] syntax."""
         return type(cls).__getitem__(cls, item)
 
+    def bind_dynamic(self, dim: int, var: Any) -> None:
+        """Mark a tensor dimension as runtime-dynamic for @pl.jit specialization.
+
+        This is a no-op at runtime.  The @pl.jit specializer reads this call
+        statically from the AST to determine which dimensions should be
+        represented as DynVar nodes (ir.Var) in the generated type annotation
+        rather than as compile-time constants.
+
+        Args:
+            dim: Zero-based dimension index to mark as dynamic.
+            var: The DynVar object (created with pl.dynamic()) to bind.
+
+        Example::
+
+            @pl.jit
+            def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                M = pl.dynamic("M")
+                a.bind_dynamic(0, M)   # dim 0 of a is runtime-dynamic
+                c.bind_dynamic(0, M)   # dim 0 of c shares the same DynVar
+                K = a.shape[1]         # dim 1 is compile-time constant
+                ...
+        """
+
     def __getitem__(self, indices: Any) -> Any:
         """Subscript syntax for tensor slicing/reading (only valid inside @pl.function)."""
         raise NotImplementedError("Tensor subscript syntax is only available inside @pl.function")

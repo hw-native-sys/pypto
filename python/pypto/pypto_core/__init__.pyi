@@ -65,6 +65,7 @@ class DataType:
             The size in bits of the data type
         """
 
+    def __hash__(self) -> int: ...
     def to_string(self) -> str:
         """
         Get a human-readable string name for this data type.

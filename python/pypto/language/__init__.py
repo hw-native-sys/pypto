@@ -38,6 +38,7 @@ Typical usage:
 """
 
 from pypto.ir import TensorView, TileView
+from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     ChunkConfig,
@@ -206,6 +207,8 @@ BOOL = DataType.BOOL
 INDEX = DataType.INDEX
 
 __all__ = [
+    "jit",
+    "JITFunction",
     "function",
     "inline",
     "program",
