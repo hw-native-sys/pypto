@@ -60,7 +60,7 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **Solution**: Analyze `tensor.assemble(parent, incore_result, offset)` patterns in orchestration. Attach the parent tensor's shape as `TensorView` strides on the InCore function's `Out` param type, so `tile.store` can use the correct memory layout.
 
-### Pattern 4: Assemble-Loop Rewrite (AssembleLoopRewriter)
+### Pattern 3: Assemble-Loop Rewrite (AssembleLoopRewriter)
 
 **Problem**: An InCore function contains a `for` loop that accumulates results via `tile.assemble` into an iter-arg, then stores the final result. The `tile.assemble` creates intermediate tile copies each iteration.
 
@@ -136,13 +136,13 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | --------- | ---- |
 | `IterArgReuseOptimizer` | Pattern 1 — merges Out params into In params for loop-carried buffers |
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
-| `AssembleLoopRewriter` | Pattern 4 — rewrites tile.assemble loops to tile.store loops |
+| `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 
 ## Scope
 
 | Function type | Action |
 | ------------- | ------ |
-| InCore | Params/body rewritten (Patterns 1, 4) |
+| InCore | Params/body rewritten (Patterns 1, 3) |
 | Orchestration / Opaque | Call sites rewritten (Patterns 1, 2) |
 | Group | Unchanged |

@@ -341,7 +341,7 @@ def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
 def optimize_orch_tensors() -> Pass:
-    """Create a pass that optimizes tensor buffer usage in orchestration functions."""
+    """Create a pass that optimizes tensor buffer usage in orchestration and InCore functions."""
 
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""

@@ -60,7 +60,7 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **方案**：分析编排函数中的 `tensor.assemble(parent, incore_result, offset)` 模式，将父张量的形状作为 `TensorView` 步长附加到 InCore 函数的 `Out` 参数类型上，使 `tile.store` 能使用正确的内存布局。
 
-### 模式 4：Assemble 循环重写（AssembleLoopRewriter）
+### 模式 3：Assemble 循环重写（AssembleLoopRewriter）
 
 **问题**：InCore 函数包含一个通过 `tile.assemble` 将结果累积到 iter-arg 的 `for` 循环，然后存储最终结果。`tile.assemble` 每次迭代都创建中间 tile 副本。
 
@@ -136,13 +136,13 @@ class After:
 | ---- | ---- |
 | `IterArgReuseOptimizer` | 模式 1 — 合并 Out 参数到 In 参数以复用循环携带缓冲区 |
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
-| `AssembleLoopRewriter` | 模式 4 — 将 tile.assemble 循环重写为 tile.store 循环 |
+| `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
 
 ## 作用范围
 
 | 函数类型 | 操作 |
 | -------- | ---- |
-| InCore | 参数/函数体重写（模式 1、4） |
+| InCore | 参数/函数体重写（模式 1、3） |
 | Orchestration / Opaque | 调用点重写（模式 1、2） |
 | Group | 不变 |
