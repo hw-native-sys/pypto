@@ -130,6 +130,7 @@ class PassManager:
             ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
             ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
             ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
+            ("OptimizeOrchTensors", lambda: passes.optimize_orch_tensors()),
         ]
         tile_pto_passes: list[PassSpec] = [
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),

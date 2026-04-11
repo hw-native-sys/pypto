@@ -340,6 +340,9 @@ def outline_hierarchy_scopes() -> Pass:
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
 
+def optimize_orch_tensors() -> Pass:
+    """Create a pass that optimizes tensor buffer usage in orchestration functions."""
+
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
@@ -452,8 +455,12 @@ __all__ = [
     "outline_cluster_scopes",
     "outline_hierarchy_scopes",
     "convert_tensor_to_tile_ops",
+    "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",
     "infer_tile_memory_space",
+    "resolve_transpose_layout",
+    "resolve_backend_op_layouts",
+    "normalize_return_order",
     "expand_mixed_kernel",
     "split_vector_kernel",
     "simplify",

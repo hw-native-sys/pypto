@@ -327,6 +327,11 @@ void BindPass(nb::module_& m) {
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
+  passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors,
+             "Create a pass that optimizes tensor buffer usage in orchestration and InCore functions\n\n"
+             "Applies three patterns: iter-arg reuse (merge Out->InOut), assemble parent\n"
+             "strides (attach TensorView to Out params), and assemble-loop rewrite\n"
+             "(convert tile.assemble loops to tile.store loops).");
   passes.def("flatten_tile_nd_to_2d", &pass::FlattenTileNdTo2D,
              "Create a pass that flattens ND tile ops to 2D in InCore functions\n\n"
              "Merges all dimensions except the last into a single dimension.\n"

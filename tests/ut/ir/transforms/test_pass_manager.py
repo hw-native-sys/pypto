@@ -23,6 +23,7 @@ TENSOR_ONLY_PASSES = [
     "OutlineIncoreScopes",
     "OutlineClusterScopes",
     "ConvertTensorToTileOps",
+    "OptimizeOrchTensors",
 ]
 
 TENSOR_OPTIMIZATION_PASSES = [

@@ -1,0 +1,1194 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_properties.h"
+#include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace ir {
+
+using transform_utils::FlattenToStmts;
+
+namespace {
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
+/// Find a function by name in a program.
+FunctionPtr FindFunction(const ProgramPtr& program, const std::string& name) {
+  for (const auto& [gvar, func] : program->functions_) {
+    if (func->name_ == name) return func;
+  }
+  return nullptr;
+}
+
+/// Get the GlobalVar name from a Call, or empty string.
+std::string GetCallFuncName(const CallPtr& call) {
+  auto gvar = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+  return gvar ? gvar->name_ : "";
+}
+
+/// Info about an InCore function's Out params and their return mappings.
+struct OutParamReturnMapping {
+  size_t param_index;   ///< Position in param list
+  size_t return_index;  ///< Which return value stores to this Out param
+  VarPtr param_var;     ///< The Out param variable
+};
+
+/// Build the mapping from Out params to return indices for an InCore function.
+/// Scans tile.store calls before the ReturnStmt to find which Out param
+/// each return value stores to.
+std::vector<OutParamReturnMapping> BuildOutParamReturnMappings(const FunctionPtr& func) {
+  // Collect Out param vars and their indices
+  std::unordered_map<const Var*, size_t> out_var_to_param_idx;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    if (i < func->param_directions_.size() && func->param_directions_[i] == ParamDirection::Out) {
+      out_var_to_param_idx[func->params_[i].get()] = i;
+    }
+  }
+  if (out_var_to_param_idx.empty()) return {};
+
+  auto body_stmts = FlattenToStmts(func->body_);
+
+  // Build var->assign map for quick lookup
+  std::unordered_map<const Var*, AssignStmtPtr> var_def;
+  for (const auto& stmt : body_stmts) {
+    if (auto assign = As<AssignStmt>(stmt)) {
+      var_def[assign->var_.get()] = assign;
+    }
+  }
+
+  // Find return statement
+  ReturnStmtPtr return_stmt;
+  for (const auto& stmt : body_stmts) {
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      return_stmt = ret;
+      break;
+    }
+  }
+  if (!return_stmt) return {};
+
+  std::vector<OutParamReturnMapping> result;
+
+  for (size_t ret_i = 0; ret_i < return_stmt->value_.size(); ++ret_i) {
+    auto ret_var = As<Var>(return_stmt->value_[ret_i]);
+    if (!ret_var) continue;
+
+    auto def_it = var_def.find(ret_var.get());
+    if (def_it == var_def.end()) continue;
+
+    auto call = As<Call>(def_it->second->value_);
+    if (!call || call->op_->name_ != "tile.store") continue;
+
+    if (call->args_.size() < 3) continue;
+    auto out_tensor = As<Var>(call->args_[2]);
+    if (!out_tensor) continue;
+
+    auto param_it = out_var_to_param_idx.find(out_tensor.get());
+    if (param_it == out_var_to_param_idx.end()) continue;
+
+    result.push_back({param_it->second, ret_i, func->params_[param_it->second]});
+  }
+
+  return result;
+}
+
+// ============================================================================
+// Pattern 1: IterArgReuseOptimizer
+//
+// Detects when a tensor.create for an InCore Out param is inside a
+// ForStmt/WhileStmt loop where the InCore result feeds back as an iter-arg,
+// and the corresponding In param receives the iter-arg value.
+//
+// Optimization: remove the tensor.create, remove the Out param from the InCore
+// function, promote the In param to InOut, redirect tile.store to the In param.
+// ============================================================================
+
+class IterArgReuseOptimizer {
+ public:
+  ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    auto reuse_results = Analyze(program, incore_names);
+
+    // Rewrite InCore functions
+    std::unordered_map<std::string, FunctionPtr> rewritten_incores;
+    for (auto& [fname, reuse] : reuse_results) {
+      auto func = FindFunction(program, fname);
+      if (!func) continue;
+      rewritten_incores[fname] = RewriteIncore(func, reuse.merges);
+    }
+
+    // Build the new function list
+    std::vector<FunctionPtr> new_functions;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (rewritten_incores.count(func->name_)) {
+        new_functions.push_back(rewritten_incores[func->name_]);
+      } else if (!incore_names.count(func->name_)) {
+        // Orchestration function: rewrite call sites
+        DeadCreateScanner scanner(reuse_results);
+        scanner.VisitStmt(func->body_);
+
+        CallSiteRewriter rewriter(reuse_results, rewritten_incores, scanner.dead_creates());
+        auto new_body = rewriter.VisitStmt(func->body_);
+        if (new_body.get() != func->body_.get()) {
+          auto new_func = MutableCopy(func);
+          new_func->body_ = new_body;
+          new_functions.push_back(new_func);
+        } else {
+          new_functions.push_back(func);
+        }
+      } else {
+        new_functions.push_back(func);
+      }
+    }
+
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  /// A single Out->In merge for an InCore function.
+  struct OutToInMerge {
+    size_t out_param_index;
+    size_t in_param_index;
+  };
+
+  /// Per-InCore-function analysis result.
+  struct AnalysisResult {
+    std::string func_name;
+    std::vector<OutToInMerge> merges;
+  };
+
+  // -- Analysis: IRVisitor that finds ForStmt/WhileStmt with iter-arg reuse --
+
+  class LoopAnalyzer : public IRVisitor {
+   public:
+    LoopAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names,
+                 const std::unordered_map<std::string, std::vector<OutParamReturnMapping>>& out_mappings)
+        : program_(program), incore_names_(incore_names), out_mappings_(out_mappings) {}
+
+    const std::unordered_map<std::string, AnalysisResult>& results() const { return results_; }
+
+   protected:
+    void VisitStmt_(const ForStmtPtr& op) override {
+      IRVisitor::VisitStmt_(op);  // Recurse into body first
+      if (!op->iter_args_.empty()) {
+        AnalyzeLoop(op->iter_args_, op->body_);
+      }
+    }
+
+    void VisitStmt_(const WhileStmtPtr& op) override {
+      IRVisitor::VisitStmt_(op);
+      if (!op->iter_args_.empty()) {
+        AnalyzeLoop(op->iter_args_, op->body_);
+      }
+    }
+
+   private:
+    void AnalyzeLoop(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body) {
+      auto loop_body_stmts = FlattenToStmts(body);
+
+      // Collect tensor.create vars and InCore call assignments
+      std::unordered_set<const Var*> tensor_create_vars;
+      std::vector<AssignStmtPtr> incore_calls;
+
+      for (const auto& stmt : loop_body_stmts) {
+        auto assign = As<AssignStmt>(stmt);
+        if (!assign) continue;
+        auto call = As<Call>(assign->value_);
+        if (!call) continue;
+
+        if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.create") {
+          tensor_create_vars.insert(assign->var_.get());
+        } else {
+          auto fname = GetCallFuncName(call);
+          if (incore_names_.count(fname)) {
+            incore_calls.push_back(assign);
+          }
+        }
+      }
+
+      // Find yield statement
+      auto yield = transform_utils::FindYieldStmt(body);
+      if (!yield) return;
+
+      // Build tuple extract map: call_result_var -> {tuple_index -> dest_var}
+      std::unordered_map<const Var*, std::unordered_map<size_t, const Var*>> tuple_extracts;
+      for (const auto& stmt : loop_body_stmts) {
+        auto assign = As<AssignStmt>(stmt);
+        if (!assign) continue;
+        auto tgi = As<TupleGetItemExpr>(assign->value_);
+        if (!tgi) continue;
+        if (auto src_var = As<Var>(tgi->tuple_)) {
+          tuple_extracts[src_var.get()][static_cast<size_t>(tgi->index_)] = assign->var_.get();
+        }
+      }
+
+      // Analyze each InCore call
+      for (const auto& call_assign : incore_calls) {
+        auto call = As<Call>(call_assign->value_);
+        auto fname = GetCallFuncName(call);
+        auto mapping_it = out_mappings_.find(fname);
+        if (mapping_it == out_mappings_.end()) continue;
+        const auto& out_param_mappings = mapping_it->second;
+
+        auto incore_func = FindFunction(program_, fname);
+        if (!incore_func) continue;
+
+        AnalysisResult reuse_result;
+        reuse_result.func_name = fname;
+
+        for (const auto& opm : out_param_mappings) {
+          if (opm.param_index >= call->args_.size()) continue;
+          auto out_arg_var = As<Var>(call->args_[opm.param_index]);
+          if (!out_arg_var || !tensor_create_vars.count(out_arg_var.get())) continue;
+
+          // Trace return[ret_i] -> yield[y_i]
+          size_t yield_index = SIZE_MAX;
+
+          if (out_param_mappings.size() == 1 && incore_func->return_types_.size() == 1) {
+            for (size_t yi = 0; yi < yield->value_.size(); ++yi) {
+              auto yv = As<Var>(yield->value_[yi]);
+              if (yv && yv.get() == call_assign->var_.get()) {
+                yield_index = yi;
+                break;
+              }
+            }
+          } else {
+            auto extract_it = tuple_extracts.find(call_assign->var_.get());
+            if (extract_it != tuple_extracts.end()) {
+              auto ret_it = extract_it->second.find(opm.return_index);
+              if (ret_it != extract_it->second.end()) {
+                for (size_t yi = 0; yi < yield->value_.size(); ++yi) {
+                  auto yv = As<Var>(yield->value_[yi]);
+                  if (yv && yv.get() == ret_it->second) {
+                    yield_index = yi;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          if (yield_index == SIZE_MAX) continue;
+
+          // Check iter_arg[yield_index] maps to an In param of the same call
+          if (yield_index >= iter_args.size()) continue;
+          const auto* iter_arg_ptr = iter_args[yield_index].get();
+
+          for (size_t arg_i = 0; arg_i < call->args_.size(); ++arg_i) {
+            const Var* raw_ptr = nullptr;
+            if (auto var = As<Var>(call->args_[arg_i])) {
+              raw_ptr = var.get();
+            } else if (auto ia = As<IterArg>(call->args_[arg_i])) {
+              raw_ptr = ia.get();
+            }
+            if (raw_ptr != iter_arg_ptr) continue;
+
+            if (arg_i < incore_func->param_directions_.size() &&
+                incore_func->param_directions_[arg_i] == ParamDirection::In) {
+              reuse_result.merges.push_back({opm.param_index, arg_i});
+            }
+            break;
+          }
+        }
+
+        if (!reuse_result.merges.empty()) {
+          if (results_.find(fname) == results_.end()) {
+            results_[fname] = std::move(reuse_result);
+          }
+        }
+      }
+    }
+
+    const ProgramPtr& program_;
+    const std::unordered_set<std::string>& incore_names_;
+    const std::unordered_map<std::string, std::vector<OutParamReturnMapping>>& out_mappings_;
+    std::unordered_map<std::string, AnalysisResult> results_;
+  };
+
+  /// Analyze orchestration functions for iter-arg reuse opportunities.
+  std::unordered_map<std::string, AnalysisResult> Analyze(
+      const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    // Pre-build Out param return mappings for all InCore functions
+    std::unordered_map<std::string, std::vector<OutParamReturnMapping>> out_mappings;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) {
+        out_mappings[func->name_] = BuildOutParamReturnMappings(func);
+      }
+    }
+
+    LoopAnalyzer analyzer(program, incore_names, out_mappings);
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) continue;
+      analyzer.VisitStmt(func->body_);
+    }
+    return analyzer.results();
+  }
+
+  // -- Pre-scan: IRVisitor that identifies dead tensor.create vars -----------
+
+  class DeadCreateScanner : public IRVisitor {
+   public:
+    explicit DeadCreateScanner(const std::unordered_map<std::string, AnalysisResult>& reuse_results)
+        : reuse_results_(reuse_results) {}
+
+    const std::unordered_set<const Var*>& dead_creates() const { return dead_creates_; }
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (!call) return;
+      auto fname = GetCallFuncName(call);
+      auto reuse_it = reuse_results_.find(fname);
+      if (reuse_it == reuse_results_.end()) return;
+      for (const auto& merge : reuse_it->second.merges) {
+        if (merge.out_param_index < call->args_.size()) {
+          if (auto create_var = As<Var>(call->args_[merge.out_param_index])) {
+            dead_creates_.insert(create_var.get());
+          }
+        }
+      }
+    }
+
+   private:
+    const std::unordered_map<std::string, AnalysisResult>& reuse_results_;
+    std::unordered_set<const Var*> dead_creates_;
+  };
+
+  // -- Mutation: IRMutator that substitutes Var references --------------------
+
+  class VarSubstitutionMutator : public IRMutator {
+   public:
+    void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) { subs_[old_ptr] = new_var; }
+
+   protected:
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = subs_.find(op.get());
+      if (it != subs_.end()) return it->second;
+      return op;
+    }
+
+   private:
+    std::unordered_map<const Var*, VarPtr> subs_;
+  };
+
+  /// Rewrite an InCore function to merge Out params into In params.
+  FunctionPtr RewriteIncore(const FunctionPtr& func, const std::vector<OutToInMerge>& merges) {
+    std::unordered_set<size_t> out_indices_to_remove;
+    VarSubstitutionMutator mutator;
+    std::unordered_set<size_t> in_indices_to_promote;
+
+    for (const auto& merge : merges) {
+      out_indices_to_remove.insert(merge.out_param_index);
+      in_indices_to_promote.insert(merge.in_param_index);
+      mutator.AddSubstitution(func->params_[merge.out_param_index].get(),
+                              func->params_[merge.in_param_index]);
+    }
+
+    std::vector<VarPtr> new_params;
+    std::vector<ParamDirection> new_directions;
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      if (out_indices_to_remove.count(i)) continue;
+      new_params.push_back(func->params_[i]);
+      if (in_indices_to_promote.count(i)) {
+        new_directions.push_back(ParamDirection::InOut);
+      } else {
+        new_directions.push_back(i < func->param_directions_.size() ? func->param_directions_[i]
+                                                                    : ParamDirection::In);
+      }
+    }
+
+    auto new_body = mutator.VisitStmt(func->body_);
+
+    return std::make_shared<Function>(func->name_, new_params, new_directions, func->return_types_, new_body,
+                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+  }
+
+  // -- Mutation: IRMutator that rewrites orch call sites ---------------------
+
+  class CallSiteRewriter : public IRMutator {
+   public:
+    CallSiteRewriter(const std::unordered_map<std::string, AnalysisResult>& reuse_results,
+                     const std::unordered_map<std::string, FunctionPtr>& rewritten_funcs,
+                     const std::unordered_set<const Var*>& dead_creates)
+        : reuse_results_(reuse_results), rewritten_funcs_(rewritten_funcs), dead_creates_(dead_creates) {}
+
+   protected:
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (!call) return IRMutator::VisitStmt_(op);
+
+      // Remove dead tensor.create
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.create") {
+        if (dead_creates_.count(op->var_.get())) {
+          return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+        }
+        return IRMutator::VisitStmt_(op);
+      }
+
+      // Rewrite calls to rewritten InCore functions
+      auto fname = GetCallFuncName(call);
+      auto reuse_it = reuse_results_.find(fname);
+      if (reuse_it == reuse_results_.end()) return IRMutator::VisitStmt_(op);
+
+      auto func_it = rewritten_funcs_.find(fname);
+      if (func_it == rewritten_funcs_.end()) return IRMutator::VisitStmt_(op);
+
+      const auto& merges = reuse_it->second.merges;
+      const auto& new_func = func_it->second;
+
+      std::unordered_set<size_t> remove_indices;
+      for (const auto& merge : merges) {
+        remove_indices.insert(merge.out_param_index);
+      }
+
+      std::vector<ExprPtr> new_args;
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (remove_indices.count(i)) continue;
+        new_args.push_back(VisitExpr(call->args_[i]));
+      }
+
+      TypePtr new_return_type;
+      if (new_func->return_types_.empty()) {
+        new_return_type = nullptr;
+      } else if (new_func->return_types_.size() == 1) {
+        new_return_type = new_func->return_types_[0];
+      } else {
+        new_return_type = std::make_shared<TupleType>(new_func->return_types_);
+      }
+
+      std::shared_ptr<Call> new_call;
+      if (new_return_type) {
+        new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, new_return_type, call->span_);
+      } else {
+        new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
+      }
+
+      auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
+      var_remap_[op->var_.get()] = new_var;
+      return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
+    }
+
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = var_remap_.find(op.get());
+      if (it != var_remap_.end()) return it->second;
+      return op;
+    }
+
+   private:
+    const std::unordered_map<std::string, AnalysisResult>& reuse_results_;
+    const std::unordered_map<std::string, FunctionPtr>& rewritten_funcs_;
+    std::unordered_set<const Var*> dead_creates_;
+    std::unordered_map<const Var*, VarPtr> var_remap_;
+  };
+};
+
+// ============================================================================
+// Pattern 2: AssembleParentStridesOptimizer
+//
+// Cross-function analysis: scans orchestration for
+//   tensor.assemble(parent, incore_result, offset)
+// where incore_result comes from an InCore call. Records the parent
+// tensor's shape. Then updates the InCore function's Out param
+// TensorType to carry parent-derived strides via TensorView.
+// ============================================================================
+
+class AssembleParentStridesOptimizer {
+ public:
+  ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    auto parent_shapes = Analyze(program, incore_names);
+    if (parent_shapes.empty()) return program;
+
+    std::vector<FunctionPtr> new_functions;
+    for (const auto& [gvar, func] : program->functions_) {
+      new_functions.push_back(func);
+    }
+
+    Apply(new_functions, incore_names, parent_shapes);
+
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  using ParentShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
+
+  // -- Analysis: IRVisitor that tracks InCore call results and finds assemble patterns --
+
+  class AssembleAnalyzer : public IRVisitor {
+   public:
+    AssembleAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
+        : program_(program), incore_names_(incore_names) {}
+
+    const ParentShapeMap& result() const { return result_; }
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (!call) {
+        // Check for TupleGetItem extracting from an InCore call result
+        auto tgi = As<TupleGetItemExpr>(op->value_);
+        if (tgi) {
+          auto src_var = AsVarLike(tgi->tuple_);
+          if (src_var) {
+            auto it = var_to_incore_return_.find(src_var.get());
+            if (it != var_to_incore_return_.end()) {
+              var_to_incore_return_[op->var_.get()] = {it->second.func_name,
+                                                       static_cast<size_t>(tgi->index_)};
+            }
+          }
+        }
+        return;
+      }
+
+      // Check if this is an InCore call
+      auto fname = GetCallFuncName(call);
+      if (incore_names_.count(fname)) {
+        auto incore_func = FindFunction(program_, fname);
+        if (incore_func && incore_func->return_types_.size() == 1) {
+          var_to_incore_return_[op->var_.get()] = {fname, 0};
+        } else if (incore_func && incore_func->return_types_.size() > 1) {
+          var_to_incore_return_[op->var_.get()] = {fname, SIZE_MAX};
+        }
+        return;
+      }
+
+      // Check if this is a tensor.assemble(parent, source, offset)
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.assemble" &&
+          call->args_.size() == 3) {
+        auto parent_var = AsVarLike(call->args_[0]);
+        auto source_var = AsVarLike(call->args_[1]);
+        if (!parent_var || !source_var) return;
+
+        auto src_it = var_to_incore_return_.find(source_var.get());
+        if (src_it == var_to_incore_return_.end()) return;
+        if (src_it->second.return_index == SIZE_MAX) return;
+
+        auto parent_tensor_type = As<TensorType>(parent_var->GetType());
+        if (!parent_tensor_type) return;
+
+        result_[src_it->second.func_name][src_it->second.return_index] = parent_tensor_type->shape_;
+      }
+    }
+
+   private:
+    struct IncoreReturnInfo {
+      std::string func_name;
+      size_t return_index;
+    };
+
+    const ProgramPtr& program_;
+    const std::unordered_set<std::string>& incore_names_;
+    std::unordered_map<const Var*, IncoreReturnInfo> var_to_incore_return_;
+    ParentShapeMap result_;
+  };
+
+  /// Analyze orchestration functions for tensor.assemble patterns.
+  ParentShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    AssembleAnalyzer analyzer(program, incore_names);
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) continue;
+      analyzer.VisitStmt(func->body_);
+    }
+    return analyzer.result();
+  }
+
+  /// Compute row-major strides from a shape: [D1*D2*...*Dn, D2*...*Dn, ..., 1].
+  static std::vector<ExprPtr> ComputeStrides(const std::vector<ExprPtr>& shape) {
+    std::vector<int64_t> dims;
+    dims.reserve(shape.size());
+    for (const auto& dim : shape) {
+      auto ci = As<ConstInt>(dim);
+      if (!ci) return {};
+      dims.push_back(ci->value_);
+    }
+
+    size_t ndim = dims.size();
+    std::vector<ExprPtr> strides(ndim);
+    int64_t product = 1;
+    for (size_t i = ndim; i > 0; --i) {
+      strides[i - 1] = std::make_shared<ConstInt>(product, DataType::INDEX, Span::unknown());
+      product *= dims[i - 1];
+    }
+    return strides;
+  }
+
+  // -- Mutation: IRMutator that propagates updated param types through tile.store --
+
+  class ParamStrideUpdateMutator : public IRMutator {
+   public:
+    void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) {
+      subs_[old_ptr] = new_var;
+      new_param_ptrs_.insert(new_var.get());
+    }
+
+   protected:
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = subs_.find(op.get());
+      if (it != subs_.end()) return it->second;
+      auto remap_it = var_remap_.find(op.get());
+      if (remap_it != var_remap_.end()) return remap_it->second;
+      return op;
+    }
+
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      auto visited = IRMutator::VisitStmt_(op);
+      auto assign = As<AssignStmt>(visited);
+      if (!assign) return visited;
+
+      auto call = As<Call>(assign->value_);
+      if (!call || call->op_->name_ != "tile.store" || call->args_.size() < 3) return assign;
+
+      auto out_var = AsVarLike(call->args_[2]);
+      if (!out_var || !new_param_ptrs_.count(out_var.get())) return assign;
+
+      auto out_type = out_var->GetType();
+      auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, out_type, call->span_);
+      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, out_type, assign->var_->span_);
+      var_remap_[op->var_.get()] = new_var;
+      return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
+    }
+
+   private:
+    std::unordered_map<const Var*, VarPtr> subs_;
+    std::unordered_set<const Var*> new_param_ptrs_;
+    std::unordered_map<const Var*, VarPtr> var_remap_;
+  };
+
+  /// Apply assemble parent strides to InCore functions.
+  void Apply(std::vector<FunctionPtr>& functions, const std::unordered_set<std::string>& incore_names,
+             const ParentShapeMap& parent_shapes) {
+    for (auto& func : functions) {
+      if (!incore_names.count(func->name_)) continue;
+
+      auto ps_it = parent_shapes.find(func->name_);
+      if (ps_it == parent_shapes.end()) continue;
+      const auto& return_idx_to_shape = ps_it->second;
+
+      auto out_mappings = BuildOutParamReturnMappings(func);
+      if (out_mappings.empty()) continue;
+
+      bool changed = false;
+      std::vector<VarPtr> new_params = func->params_;
+
+      for (const auto& opm : out_mappings) {
+        auto shape_it = return_idx_to_shape.find(opm.return_index);
+        if (shape_it == return_idx_to_shape.end()) continue;
+
+        auto strides = ComputeStrides(shape_it->second);
+        if (strides.empty()) continue;
+
+        auto tensor_type = As<TensorType>(func->params_[opm.param_index]->GetType());
+        if (!tensor_type) continue;
+
+        TensorView view(std::move(strides), TensorLayout::ND);
+        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
+                                                     tensor_type->memref_, std::move(view));
+        auto new_param = std::make_shared<Var>(func->params_[opm.param_index]->name_hint_, new_type,
+                                               func->params_[opm.param_index]->span_);
+
+        changed = true;
+        new_params[opm.param_index] = new_param;
+      }
+
+      if (!changed) continue;
+
+      ParamStrideUpdateMutator mutator;
+      for (size_t i = 0; i < func->params_.size(); ++i) {
+        if (new_params[i].get() != func->params_[i].get()) {
+          mutator.AddSubstitution(func->params_[i].get(), new_params[i]);
+        }
+      }
+      auto new_body = mutator.VisitStmt(func->body_);
+
+      func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                        new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                        func->attrs_);
+    }
+  }
+};
+
+// ============================================================================
+// Pattern 3: AssembleLoopRewriter
+//
+// InCore-local optimization: when an InCore function body has a ForStmt
+// that does tile.assemble accumulation yielding back to iter-arg, and the
+// ForStmt result feeds the final tile.store -> return, rewrite the loop
+// to use tile.store instead of tile.assemble, with the iter-arg initialized
+// from the Out param.
+// ============================================================================
+
+class AssembleLoopRewriter {
+ public:
+  ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    std::vector<FunctionPtr> new_functions;
+    bool changed = false;
+
+    for (const auto& [gvar, func] : program->functions_) {
+      if (!incore_names.count(func->name_)) {
+        new_functions.push_back(func);
+        continue;
+      }
+      bool has_out = false;
+      for (const auto& dir : func->param_directions_) {
+        if (dir == ParamDirection::Out) {
+          has_out = true;
+          break;
+        }
+      }
+      if (!has_out) {
+        new_functions.push_back(func);
+        continue;
+      }
+      auto rewritten = RewriteFunction(func);
+      if (rewritten.get() != func.get()) changed = true;
+      new_functions.push_back(rewritten);
+    }
+
+    if (!changed) return program;
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  /// Recursively check if a statement uses a given Var (by raw pointer).
+  static bool StmtUsesVar(const StmtPtr& stmt, const Var* var) {
+    if (!stmt) return false;
+
+    if (auto assign = As<AssignStmt>(stmt)) {
+      std::vector<ExprPtr> expr_worklist;
+      expr_worklist.push_back(assign->value_);
+      while (!expr_worklist.empty()) {
+        auto expr = std::move(expr_worklist.back());
+        expr_worklist.pop_back();
+        if (!expr) continue;
+        if (auto v = As<Var>(expr)) {
+          if (v.get() == var) return true;
+        }
+        if (auto ia = As<IterArg>(expr)) {
+          if (ia.get() == var) return true;
+        }
+        if (auto call = As<Call>(expr)) {
+          for (const auto& arg : call->args_) expr_worklist.push_back(arg);
+        }
+        if (auto tgi = As<TupleGetItemExpr>(expr)) {
+          expr_worklist.push_back(tgi->tuple_);
+        }
+        if (auto mt = As<MakeTuple>(expr)) {
+          for (const auto& e : mt->elements_) expr_worklist.push_back(e);
+        }
+      }
+      return false;
+    }
+
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) {
+        if (StmtUsesVar(s, var)) return true;
+      }
+      return false;
+    }
+
+    if (auto yield = As<YieldStmt>(stmt)) {
+      for (const auto& v : yield->value_) {
+        if (auto vp = As<Var>(v)) {
+          if (vp.get() == var) return true;
+        }
+      }
+      return false;
+    }
+
+    if (auto for_stmt = As<ForStmt>(stmt)) {
+      return StmtUsesVar(for_stmt->body_, var);
+    }
+
+    return false;
+  }
+
+  // -- Pre-scan: IRVisitor that collects var definitions and return statement --
+
+  class BodyScanner : public IRVisitor {
+   public:
+    const std::unordered_map<const Var*, AssignStmtPtr>& var_def() const { return var_def_; }
+    const ReturnStmtPtr& return_stmt() const { return return_stmt_; }
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override { var_def_[op->var_.get()] = op; }
+    void VisitStmt_(const ReturnStmtPtr& op) override { return_stmt_ = op; }
+
+   private:
+    std::unordered_map<const Var*, AssignStmtPtr> var_def_;
+    ReturnStmtPtr return_stmt_;
+  };
+
+  // -- Mutation: IRMutator that rewrites matching ForStmt patterns -----------
+
+  class LoopRewriteMutator : public IRMutator {
+   public:
+    struct StoreReturnInfo {
+      const Var* store_var;
+      const Var* out_param;
+      size_t return_index;
+    };
+
+    LoopRewriteMutator(const std::unordered_map<const Var*, size_t>& out_var_to_param_idx,
+                       const std::unordered_map<const Var*, const StoreReturnInfo*>& for_return_to_store,
+                       const std::unordered_set<const Var*>& dead_create_vars,
+                       const std::unordered_set<const Var*>& dead_store_vars,
+                       const std::unordered_map<const Var*, VarPtr>& return_var_remap,
+                       const FunctionPtr& func)
+        : out_var_to_param_idx_(out_var_to_param_idx),
+          for_return_to_store_(for_return_to_store),
+          dead_create_vars_(dead_create_vars),
+          dead_store_vars_(dead_store_vars),
+          return_var_remap_(return_var_remap),
+          func_(func) {}
+
+   protected:
+    StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+      if (op->iter_args_.size() != 1 || op->return_vars_.size() != 1) {
+        return IRMutator::VisitStmt_(op);
+      }
+
+      auto fret_it = for_return_to_store_.find(op->return_vars_[0].get());
+      if (fret_it == for_return_to_store_.end()) {
+        return IRMutator::VisitStmt_(op);
+      }
+      const auto& store_info = *fret_it->second;
+
+      auto loop_body_stmts = FlattenToStmts(op->body_);
+      auto yield = transform_utils::FindYieldStmt(op->body_);
+      if (!yield || yield->value_.size() != 1) {
+        return IRMutator::VisitStmt_(op);
+      }
+
+      const IterArg* iter_arg = op->iter_args_[0].get();
+
+      // Find the tile.assemble call
+      AssignStmtPtr assemble_assign;
+      for (const auto& body_stmt : loop_body_stmts) {
+        auto assign = As<AssignStmt>(body_stmt);
+        if (!assign) continue;
+        auto call = As<Call>(assign->value_);
+        if (!call || call->op_->name_ != "tile.assemble") continue;
+        if (call->args_.size() < 3) continue;
+        const Var* arg0_raw = nullptr;
+        if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();
+        if (auto ia = As<IterArg>(call->args_[0])) arg0_raw = ia.get();
+        if (arg0_raw != iter_arg) continue;
+        assemble_assign = assign;
+        break;
+      }
+
+      if (!assemble_assign) return IRMutator::VisitStmt_(op);
+
+      // --- Rewrite: tile.assemble -> tile.store ---
+
+      auto out_param_var = func_->params_[out_var_to_param_idx_.at(store_info.out_param)];
+      auto out_tensor_type = As<TensorType>(out_param_var->GetType());
+      INTERNAL_CHECK(out_tensor_type) << "Internal error: Out param should be TensorType";
+
+      auto new_iter_arg = std::make_shared<IterArg>(op->iter_args_[0]->name_hint_, out_tensor_type,
+                                                    out_param_var, op->iter_args_[0]->span_);
+
+      auto assemble_call = As<Call>(assemble_assign->value_);
+      auto& op_registry = OpRegistry::GetInstance();
+      auto store_call =
+          op_registry.Create("tile.store", {assemble_call->args_[1], assemble_call->args_[2], new_iter_arg},
+                             assemble_assign->value_->span_);
+      auto store_result_var = std::make_shared<Var>(assemble_assign->var_->name_hint_, store_call->GetType(),
+                                                    assemble_assign->span_);
+
+      std::vector<StmtPtr> new_loop_stmts;
+      for (const auto& body_stmt : loop_body_stmts) {
+        if (body_stmt.get() == assemble_assign.get()) {
+          new_loop_stmts.push_back(
+              std::make_shared<AssignStmt>(store_result_var, store_call, assemble_assign->span_));
+        } else if (auto y = As<YieldStmt>(body_stmt)) {
+          new_loop_stmts.push_back(
+              std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_result_var}, y->span_));
+        } else {
+          new_loop_stmts.push_back(body_stmt);
+        }
+      }
+
+      auto new_loop_body = SeqStmts::Flatten(std::move(new_loop_stmts), op->body_->span_);
+      auto new_return_var = return_var_remap_.at(store_info.store_var);
+
+      return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_,
+                                       std::vector<IterArgPtr>{new_iter_arg}, new_loop_body,
+                                       std::vector<VarPtr>{new_return_var}, op->span_, op->kind_,
+                                       op->chunk_config_, op->attrs_);
+    }
+
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      if (dead_create_vars_.count(op->var_.get()) || dead_store_vars_.count(op->var_.get())) {
+        return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+      }
+      return IRMutator::VisitStmt_(op);
+    }
+
+    StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+      auto visited = IRMutator::VisitStmt_(op);
+      auto seq = As<SeqStmts>(visited);
+      if (!seq) return visited;
+      // Filter out empty SeqStmts children (from deleted statements)
+      std::vector<StmtPtr> filtered;
+      for (const auto& s : seq->stmts_) {
+        if (auto child_seq = As<SeqStmts>(s)) {
+          if (child_seq->stmts_.empty()) continue;
+        }
+        filtered.push_back(s);
+      }
+      if (filtered.size() == seq->stmts_.size()) return seq;
+      return SeqStmts::Flatten(std::move(filtered), seq->span_);
+    }
+
+    StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+      if (return_var_remap_.empty()) return op;
+      std::vector<ExprPtr> new_ret_values;
+      bool remapped = false;
+      for (const auto& v : op->value_) {
+        auto var = As<Var>(v);
+        if (var) {
+          auto remap_it = return_var_remap_.find(var.get());
+          if (remap_it != return_var_remap_.end()) {
+            new_ret_values.push_back(remap_it->second);
+            remapped = true;
+            continue;
+          }
+        }
+        new_ret_values.push_back(v);
+      }
+      if (!remapped) return op;
+      return std::make_shared<ReturnStmt>(std::move(new_ret_values), op->span_);
+    }
+
+   private:
+    const std::unordered_map<const Var*, size_t>& out_var_to_param_idx_;
+    const std::unordered_map<const Var*, const StoreReturnInfo*>& for_return_to_store_;
+    const std::unordered_set<const Var*>& dead_create_vars_;
+    const std::unordered_set<const Var*>& dead_store_vars_;
+    const std::unordered_map<const Var*, VarPtr>& return_var_remap_;
+    const FunctionPtr& func_;
+  };
+
+  /// Rewrite assemble-loop pattern in an InCore function.
+  FunctionPtr RewriteFunction(const FunctionPtr& func) {
+    // Pre-scan: collect var definitions and return statement
+    BodyScanner scanner;
+    scanner.VisitStmt(func->body_);
+    const auto& var_def = scanner.var_def();
+    const auto& return_stmt = scanner.return_stmt();
+    if (!return_stmt) return func;
+
+    // Identify Out params
+    std::unordered_map<const Var*, size_t> out_var_to_param_idx;
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      if (i < func->param_directions_.size() && func->param_directions_[i] == ParamDirection::Out) {
+        out_var_to_param_idx[func->params_[i].get()] = i;
+      }
+    }
+    if (out_var_to_param_idx.empty()) return func;
+
+    // Map return values -> tile.store -> Out params
+    using StoreReturnInfo = LoopRewriteMutator::StoreReturnInfo;
+    std::vector<StoreReturnInfo> store_returns;
+
+    for (size_t ret_i = 0; ret_i < return_stmt->value_.size(); ++ret_i) {
+      auto ret_var = As<Var>(return_stmt->value_[ret_i]);
+      if (!ret_var) continue;
+      auto def_it = var_def.find(ret_var.get());
+      if (def_it == var_def.end()) continue;
+      auto call = As<Call>(def_it->second->value_);
+      if (!call || call->op_->name_ != "tile.store") continue;
+      if (call->args_.size() < 3) continue;
+      auto out_tensor = As<Var>(call->args_[2]);
+      if (!out_tensor || !out_var_to_param_idx.count(out_tensor.get())) continue;
+      store_returns.push_back({ret_var.get(), out_tensor.get(), ret_i});
+    }
+    if (store_returns.empty()) return func;
+
+    // Map ForStmt return_var -> which store_return it feeds
+    std::unordered_map<const Var*, const StoreReturnInfo*> for_return_to_store;
+    for (const auto& sr : store_returns) {
+      auto def_it = var_def.find(sr.store_var);
+      if (def_it == var_def.end()) continue;
+      auto call = As<Call>(def_it->second->value_);
+      if (!call || call->op_->name_ != "tile.store") continue;
+      auto tile_data_var = As<Var>(call->args_[0]);
+      if (!tile_data_var) continue;
+      for_return_to_store[tile_data_var.get()] = &sr;
+    }
+
+    // Pre-compute dead sets by scanning ForStmts for pattern matches.
+    // This must happen before the IRMutator pass because dead tile.create
+    // statements may appear before the ForStmt they correspond to.
+    std::unordered_set<const Var*> dead_create_vars;
+    std::unordered_set<const Var*> dead_store_vars;
+    std::unordered_map<const Var*, VarPtr> return_var_remap;
+
+    class ForStmtMatchScanner : public IRVisitor {
+     public:
+      ForStmtMatchScanner(const std::unordered_map<const Var*, const StoreReturnInfo*>& for_return_to_store,
+                          const std::unordered_map<const Var*, size_t>& out_var_to_param_idx,
+                          const FunctionPtr& func, std::unordered_set<const Var*>& dead_create_vars,
+                          std::unordered_set<const Var*>& dead_store_vars,
+                          std::unordered_map<const Var*, VarPtr>& return_var_remap)
+          : for_return_to_store_(for_return_to_store),
+            out_var_to_param_idx_(out_var_to_param_idx),
+            func_(func),
+            dead_create_vars_(dead_create_vars),
+            dead_store_vars_(dead_store_vars),
+            return_var_remap_(return_var_remap) {}
+
+      [[nodiscard]] bool matched() const { return matched_; }
+
+     protected:
+      void VisitStmt_(const ForStmtPtr& op) override {
+        IRVisitor::VisitStmt_(op);
+        if (op->iter_args_.size() != 1 || op->return_vars_.size() != 1) return;
+
+        auto fret_it = for_return_to_store_.find(op->return_vars_[0].get());
+        if (fret_it == for_return_to_store_.end()) return;
+        const auto& store_info = *fret_it->second;
+
+        auto loop_body_stmts = FlattenToStmts(op->body_);
+        auto yield = transform_utils::FindYieldStmt(op->body_);
+        if (!yield || yield->value_.size() != 1) return;
+
+        const IterArg* iter_arg = op->iter_args_[0].get();
+
+        AssignStmtPtr assemble_assign;
+        for (const auto& body_stmt : loop_body_stmts) {
+          auto assign = As<AssignStmt>(body_stmt);
+          if (!assign) continue;
+          auto call = As<Call>(assign->value_);
+          if (!call || call->op_->name_ != "tile.assemble") continue;
+          if (call->args_.size() < 3) continue;
+          const Var* arg0_raw = nullptr;
+          if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();
+          if (auto ia = As<IterArg>(call->args_[0])) arg0_raw = ia.get();
+          if (arg0_raw != iter_arg) continue;
+          assemble_assign = assign;
+          break;
+        }
+        if (!assemble_assign) return;
+
+        auto yield_var = As<Var>(yield->value_[0]);
+        if (!yield_var || yield_var.get() != assemble_assign->var_.get()) return;
+
+        bool iter_arg_used_elsewhere = false;
+        for (const auto& body_stmt : loop_body_stmts) {
+          if (body_stmt.get() == assemble_assign.get()) continue;
+          if (As<YieldStmt>(body_stmt)) continue;
+          if (StmtUsesVar(body_stmt, iter_arg)) {
+            iter_arg_used_elsewhere = true;
+            break;
+          }
+        }
+        if (iter_arg_used_elsewhere) return;
+
+        // Pattern matched — record dead sets
+        matched_ = true;
+        auto init_var = As<Var>(op->iter_args_[0]->initValue_);
+        if (init_var) dead_create_vars_.insert(init_var.get());
+        dead_store_vars_.insert(store_info.store_var);
+
+        auto out_param_var = func_->params_[out_var_to_param_idx_.at(store_info.out_param)];
+        auto out_tensor_type = As<TensorType>(out_param_var->GetType());
+        INTERNAL_CHECK(out_tensor_type) << "Internal error: Out param should be TensorType";
+        auto new_return_var = std::make_shared<Var>(op->return_vars_[0]->name_hint_, out_tensor_type,
+                                                    op->return_vars_[0]->span_);
+        return_var_remap_[store_info.store_var] = new_return_var;
+      }
+
+     private:
+      const std::unordered_map<const Var*, const StoreReturnInfo*>& for_return_to_store_;
+      const std::unordered_map<const Var*, size_t>& out_var_to_param_idx_;
+      const FunctionPtr& func_;
+      std::unordered_set<const Var*>& dead_create_vars_;
+      std::unordered_set<const Var*>& dead_store_vars_;
+      std::unordered_map<const Var*, VarPtr>& return_var_remap_;
+      bool matched_ = false;
+    };
+
+    ForStmtMatchScanner match_scanner(for_return_to_store, out_var_to_param_idx, func, dead_create_vars,
+                                      dead_store_vars, return_var_remap);
+    match_scanner.VisitStmt(func->body_);
+    if (!match_scanner.matched()) return func;
+
+    // Apply the IRMutator using pre-computed dead sets
+    LoopRewriteMutator mutator(out_var_to_param_idx, for_return_to_store, dead_create_vars, dead_store_vars,
+                               return_var_remap, func);
+    auto new_body = mutator.VisitStmt(func->body_);
+
+    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                      func->return_types_, new_body, func->span_, func->func_type_,
+                                      func->level_, func->role_, func->attrs_);
+  }
+};
+
+}  // namespace
+
+// ============================================================================
+// Pass entry point
+// ============================================================================
+
+namespace pass {
+
+Pass OptimizeOrchTensors() {
+  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    // Collect InCore function names
+    std::unordered_set<std::string> incore_names;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func->func_type_ == FunctionType::InCore) {
+        incore_names.insert(func->name_);
+      }
+    }
+    if (incore_names.empty()) return program;
+
+    // Pattern 1: Iter-arg reuse (may remove Out params)
+    auto p1 = IterArgReuseOptimizer().Run(program, incore_names);
+
+    // Pattern 2: Assemble parent strides (sees Pattern 1 results)
+    auto p2 = AssembleParentStridesOptimizer().Run(p1, incore_names);
+
+    // Pattern 3: Assemble-loop rewrite (sees Pattern 2 results)
+    return AssembleLoopRewriter().Run(p2, incore_names);
+  };
+
+  return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);
+}
+
+}  // namespace pass
+}  // namespace ir
+}  // namespace pypto
