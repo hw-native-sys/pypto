@@ -1616,48 +1616,63 @@ class ASTParser:
 
         # Parse keyword arguments
         for kw in call.keywords:
-            if kw.arg == "level":
-                if level is not None:
-                    raise ParserSyntaxError(
-                        "pl.at() got multiple values for argument 'level'",
-                    )
-                level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
-            elif kw.arg == "role":
-                if role is not None:
-                    raise ParserSyntaxError(
-                        "pl.at() got multiple values for argument 'role'",
-                    )
-                role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
-            elif kw.arg == "optimization":
-                if opt_split is not None:
-                    raise ParserSyntaxError(
-                        "pl.at() got multiple values for argument 'optimization'",
-                        span=self.span_tracker.get_span(kw),
-                    )
-                opt_split = self._parse_chunked_loop_optimizer(kw.value)
-            elif kw.arg == "name_hint":
-                name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
-            elif kw.arg == "split":
-                if direct_split is not None:
-                    raise ParserSyntaxError(
-                        "pl.at() got multiple values for argument 'split'",
-                        span=self.span_tracker.get_span(kw),
-                    )
-                direct_split = self._eval_split_mode(kw.value)
-            elif kw.arg is None:
-                raise ParserSyntaxError(
-                    "Unsupported **kwargs in pl.at()",
-                    hint="Use pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
-                )
-            else:
-                raise ParserSyntaxError(
-                    f"Unknown keyword argument '{kw.arg}' in pl.at()",
-                    hint="Supported arguments: level, role, optimization, split, name_hint",
-                )
+            level, role, opt_split, direct_split, name_hint = self._parse_at_keyword(
+                kw, level, role, opt_split, direct_split, name_hint
+            )
         if level is None:
             raise ParserSyntaxError(
                 "pl.at() requires a level argument",
                 hint="Use pl.at(pl.Level.HOST) or pl.at(level=pl.Level.HOST)",
+            )
+        return level, role, opt_split, direct_split, name_hint
+
+    def _parse_at_keyword(
+        self,
+        kw: ast.keyword,
+        level: "ir.Level | None",
+        role: "ir.Role | None",
+        opt_split: "ir.SplitMode | None",
+        direct_split: "ir.SplitMode | None",
+        name_hint: str,
+    ) -> tuple["ir.Level | None", "ir.Role | None", "ir.SplitMode | None", "ir.SplitMode | None", str]:
+        """Parse a single keyword argument from pl.at() call."""
+        if kw.arg == "level":
+            if level is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'level'",
+                )
+            level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
+        elif kw.arg == "role":
+            if role is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'role'",
+                )
+            role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
+        elif kw.arg == "optimization":
+            if opt_split is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'optimization'",
+                    span=self.span_tracker.get_span(kw),
+                )
+            opt_split = self._parse_chunked_loop_optimizer(kw.value)
+        elif kw.arg == "name_hint":
+            name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
+        elif kw.arg == "split":
+            if direct_split is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'split'",
+                    span=self.span_tracker.get_span(kw),
+                )
+            direct_split = self._eval_split_mode(kw.value)
+        elif kw.arg is None:
+            raise ParserSyntaxError(
+                "Unsupported **kwargs in pl.at()",
+                hint="Use pl.at(level=pl.Level.HOST, role=pl.Role.Worker)",
+            )
+        else:
+            raise ParserSyntaxError(
+                f"Unknown keyword argument '{kw.arg}' in pl.at()",
+                hint="Supported arguments: level, role, optimization, split, name_hint",
             )
         return level, role, opt_split, direct_split, name_hint
 
@@ -1877,9 +1892,7 @@ class ASTParser:
         elif opt_split is not None:
             self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split, name_hint=name_hint)
         else:
-            self._parse_scope_body(
-                stmt, ir.ScopeKind.InCore, span, split=direct_split, name_hint=name_hint
-            )
+            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, split=direct_split, name_hint=name_hint)
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.

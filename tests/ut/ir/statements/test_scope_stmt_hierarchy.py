@@ -151,7 +151,7 @@ def test_structural_equal_different_level():
         level=ir.Level.GLOBAL,
         role=ir.Role.Worker,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
@@ -171,7 +171,7 @@ def test_structural_equal_different_role():
         level=ir.Level.HOST,
         role=ir.Role.Orchestrator,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
@@ -245,7 +245,7 @@ def test_structural_equal_incore_different_split():
     """structural_equal detects different split modes."""
     s1 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
     s2 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.LEFT_RIGHT)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
