@@ -81,6 +81,19 @@ def _tensor_t(shape: list[int], dtype: DataType) -> ir.TensorType:
     return ir.TensorType(shape, dtype)
 
 
+def _load_call(
+    source: ir.Var, offsets: ir.MakeTuple, shapes: ir.MakeTuple, tile_type: ir.TileType
+) -> ir.Call:
+    """Build a tile.load Call with default valid_shapes=shapes, target_memory=Vec, transpose=False."""
+    return ir.Call(
+        ir.Op("tile.load"),
+        [source, offsets, shapes, shapes],
+        {"target_memory": ir.MemorySpace.Vec, "transpose": False},
+        tile_type,
+        _SPAN,
+    )
+
+
 def _build_program(build_fn):
     alloc = _MemRefAlloc()
     ib = IRBuilder()
@@ -181,7 +194,7 @@ class TestLegalSharingPreserved:
         offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
         shapes = ir.MakeTuple([_ci(32), _ci(32)], _SPAN)
 
-        load_call = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes], {}, tile1_type, _SPAN)
+        load_call = _load_call(a_var, offsets, shapes, tile1_type)
         adds_call = ir.Call(ir.Op("tile.adds"), [t1, ir.ConstFloat(1.0, _FP32, _SPAN)], {}, tile2_type, _SPAN)
         result_var = ir.Var("result", output_t, _SPAN)
         store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
@@ -230,7 +243,7 @@ class TestLegalSharingPreserved:
         offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
         shapes = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
 
-        load_call = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes], {}, load_type, _SPAN)
+        load_call = _load_call(a_var, offsets, shapes, load_type)
         fillpad_call = ir.Call(
             ir.Op("tile.fillpad"),
             [t1],
@@ -287,13 +300,7 @@ class TestAscend910BSplitLoadTpopHazard:
         offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
         tile_shape = ir.MakeTuple([_ci(8), _ci(128)], _SPAN)
 
-        load_call = ir.Call(
-            ir.Op("tile.load"),
-            [down, offsets, tile_shape, tile_shape],
-            {"target_memory": ir.MemorySpace.Vec, "transpose": False},
-            load_t,
-            _SPAN,
-        )
+        load_call = _load_call(down, offsets, tile_shape, load_t)
         tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 1}, pipe_t, _SPAN)
         add_call = ir.Call(ir.Op("tile.add"), [down_prev, pipe_chunk], {}, add_t, _SPAN)
         store_call = ir.Call(ir.Op("tile.store"), [down_next, offsets, down], down_tensor_t, _SPAN)
@@ -365,8 +372,8 @@ class TestIllegalSharingSplit:
         shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
         shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
 
-        load1 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_128], {}, tile1_type, _SPAN)
-        load2 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_64], {}, tile2_type, _SPAN)
+        load1 = _load_call(a_var, offsets, shapes_128, tile1_type)
+        load2 = _load_call(a_var, offsets, shapes_64, tile2_type)
         result_var = ir.Var("result", output_t, _SPAN)
         store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
 
@@ -423,8 +430,8 @@ class TestIllegalSharingSplit:
         shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
         shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
 
-        load1 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_128], {}, tile1_type, _SPAN)
-        load2 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_64], {}, tile2_type, _SPAN)
+        load1 = _load_call(a_var, offsets, shapes_128, tile1_type)
+        load2 = _load_call(a_var, offsets, shapes_64, tile2_type)
         fillpad = ir.Call(
             ir.Op("tile.fillpad"),
             [t2],
@@ -492,7 +499,7 @@ class TestLegalizeWithCodegen:
         offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
         shapes = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
 
-        load_call = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes], {}, load_type, _SPAN)
+        load_call = _load_call(a_var, offsets, shapes, load_type)
         fillpad_call = ir.Call(
             ir.Op("tile.fillpad"),
             [t1],
@@ -557,7 +564,7 @@ class TestLegalizeWithCodegen:
         offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
         shapes = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
 
-        load_call = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes], {}, load_type, _SPAN)
+        load_call = _load_call(a_var, offsets, shapes, load_type)
         fillpad_call = ir.Call(
             ir.Op("tile.fillpad"),
             [t1],
@@ -637,8 +644,8 @@ class TestLegalizeWithCodegen:
         shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
         shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
 
-        load1 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_128], {}, tile1_type, _SPAN)
-        load2 = ir.Call(ir.Op("tile.load"), [a_var, offsets, shapes_64], {}, tile2_type, _SPAN)
+        load1 = _load_call(a_var, offsets, shapes_128, tile1_type)
+        load2 = _load_call(a_var, offsets, shapes_64, tile2_type)
         store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
 
         body = ir.SeqStmts(

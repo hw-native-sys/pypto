@@ -288,6 +288,39 @@ class TileMemorySpaceMutator : public IRMutator {
     return registry.Create(op->op_->name_, new_args, op->kwargs_, op->span_);
   }
 
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto new_var_expr = IRMutator::VisitExpr(op->var_);
+    auto new_value = IRMutator::VisitExpr(op->value_);
+    auto new_var = As<Var>(new_var_expr);
+    if (!new_var) {
+      if (new_var_expr.get() == op->var_.get() && new_value.get() == op->value_.get()) return op;
+      return std::make_shared<AssignStmt>(As<Var>(new_var_expr), new_value, op->span_);
+    }
+
+    // Sync LHS Var type with the rebuilt Call's result type.  When VisitExpr_(CallPtr)
+    // rebuilds the Call via OpRegistry after substituting moved arguments, the deduced
+    // result type may differ from the LHS Var's original type (e.g. tile_view changes
+    // because the inputs now have different layouts).  Without this sync, the Var
+    // annotation and the Call result type disagree, which breaks roundtrip equality.
+    auto new_call = As<Call>(new_value);
+    auto old_tile_type = As<TileType>(new_var->GetType());
+    if (new_call && old_tile_type) {
+      auto new_tile_type = As<TileType>(new_call->GetType());
+      if (new_tile_type && new_tile_type.get() != old_tile_type.get()) {
+        // Preserve the Var's memory_space (set by VisitExpr_(VarPtr) based on var_memory_).
+        auto synced_type =
+            std::make_shared<TileType>(new_tile_type->shape_, new_tile_type->dtype_, new_tile_type->memref_,
+                                       new_tile_type->tile_view_, old_tile_type->memory_space_);
+        auto synced_var = std::make_shared<Var>(new_var->name_hint_, std::move(synced_type), new_var->span_);
+        var_cache_[op->var_] = synced_var;
+        new_var = synced_var;
+      }
+    }
+
+    if (new_var.get() == op->var_.get() && new_value.get() == op->value_.get()) return op;
+    return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+  }
+
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     bool changed = false;
     auto new_stmts = VisitAndInsertMoves(op->stmts_, changed);

@@ -199,6 +199,7 @@ std::string FormatShape(const std::vector<ExprPtr>& shape);
 inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const TileType>& src) {
   if (src->tile_view_.has_value()) {
     dst.blayout = src->tile_view_->blayout;
+    dst.slayout = src->tile_view_->slayout;
     dst.pad = src->tile_view_->pad;
   }
 }

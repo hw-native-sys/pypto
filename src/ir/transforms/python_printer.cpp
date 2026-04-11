@@ -553,22 +553,6 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     return;
   }
 
-  // Special handling for tile.load: always print full form to ensure roundtrip stability.
-  // IR built directly via ir.Call may have only 3 positional args (tensor, offsets, shapes)
-  // but the Python API pl.tile.load() defaults valid_shapes=shapes, target_memory=Vec,
-  // transpose=False — after reparsing those defaults are filled in, causing mismatch.
-  if (op->op_->name_ == "tile.load" && op->args_.size() == 3 && op->kwargs_.empty()) {
-    VisitExpr(op->args_[0]);  // source tensor
-    stream_ << ", ";
-    VisitExpr(op->args_[1]);  // offsets
-    stream_ << ", ";
-    VisitExpr(op->args_[2]);  // shapes
-    stream_ << ", ";
-    VisitExpr(op->args_[2]);  // valid_shapes = shapes (default)
-    stream_ << ", target_memory=" << prefix_ << ".Mem.Vec, transpose=False)";
-    return;
-  }
-
   // Print positional arguments
   for (size_t i = 0; i < op->args_.size(); ++i) {
     if (i > 0) stream_ << ", ";

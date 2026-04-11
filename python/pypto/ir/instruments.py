@@ -32,10 +32,14 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
       with SSA ``iter_args`` after ``ConvertToSSA``) have no valid Python DSL syntax.
       The instrument cannot roundtrip what it cannot print; it warns and skips.
 
-    - **UnknownType improvement**: Manually-constructed IR may use
-      ``ir.Call(ir.Op(...))`` without going through ``ir.create_op_call``, leaving
-      the call result typed as ``UnknownType``.  Parsing always infers a concrete
-      type instead — this is a type *improvement*, not a printer/parser bug.
+    - **Variable pointer mismatch**: Dynamic-shape ``Var`` nodes (e.g. ``M``
+      in ``pl.Tensor[[M, N], pl.FP32]``) appear in multiple places (params,
+      return type, body).  The original IR shares a single ``Var`` pointer
+      across all occurrences, but the parser may create separate ``Var``
+      objects for each occurrence.  ``structural_equal`` uses pointer-based
+      bijection and detects this as a mismatch.  This is a parser limitation
+      — it should reuse the same ``Var`` object for same-named dynamic-shape
+      parameters across all scopes.
 
     Returns:
         A ``CallbackInstrument`` named ``"RoundtripInstrument"``.
@@ -93,51 +97,13 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
             _ir.assert_structural_equal(program, reparsed)
         except Exception as exc:
             error_msg = str(exc)
-            # UnknownType in the original IR comes from manually-constructed IR that
-            # bypasses C++ type inference (ir.Call(ir.Op(...)) without create_op_call).
-            # Parsing always infers a concrete type in its place — this is a type
-            # improvement, not a printer/parser asymmetry.
-            if "UnknownType !=" in error_msg or "!= UnknownType" in error_msg:
-                return
-            # Variable pointer mismatch occurs when dynamic-shape Var nodes appear in
-            # return types or other positions outside the function body, where the
-            # first-encounter bijection in structural_equal cannot establish a mapping.
-            # This is a structural_equal limitation with dynamic shapes, not a
-            # printer/parser bug — the printed IR is faithfully parsed.
+            # Variable pointer mismatch: dynamic-shape Var nodes (e.g. M in
+            # Tensor[[M, N], FP32]) share a single pointer in the original IR,
+            # but the parser may create separate Var objects for each occurrence.
+            # The bijection in structural_equal detects this as a mismatch.
+            # TODO(#929): fix the parser to reuse same-named dynamic-shape Var
+            # objects across param types, return types, and body — then remove.
             if "Variable pointer mismatch" in error_msg:
-                return
-            # tensor.add(x, scalar) → tensor.adds: the Python API dispatches scalar rhs
-            # to tensor.adds, so manually-constructed tensor.add(x, scalar_const) is
-            # normalized by roundtrip.  This is an IR-level discrepancy in the original,
-            # not a printer/parser bug.
-            if "Operator name mismatch" in error_msg and (
-                "'tensor.add' != 'tensor.adds'" in error_msg or "'tensor.adds' != 'tensor.add'" in error_msg
-            ):
-                return
-            # tile.load 3-arg → 4-arg: manually-constructed tile.load via ir.Call(ir.Op(...))
-            # may have only 3 positional args (tensor, offsets, shapes).  The Python API
-            # always produces 4 args (adding valid_shapes=shapes by default), and the C++
-            # type inference requires exactly 4 args.  The printer's special case pads the
-            # 3-arg form to 4-arg when printing, so the parsed version has 4 args.
-            # This 1-arg discrepancy is a manual-construction artifact, not a printer/parser bug.
-            if "Vector size mismatch (3 items != 4 items)" in error_msg:
-                return
-            # TileType tile_view presence mismatch: some passes (e.g. InferTileMemorySpace)
-            # update the Var type without rebuilding the Call's result type, creating a
-            # Var.type != Call.type inconsistency in the original IR.  On reparse, the
-            # annotation-driven override rebuilds the Call and introduces a presence
-            # mismatch between the original (implicit TileView = None) and parsed
-            # (non-implicit TileView from annotation).  This is a pass-level design issue,
-            # not a printer/parser asymmetry.
-            if "TileType tile_view presence mismatch" in error_msg:
-                return
-            # ScopeStmt InCore split presence mismatch: interchange_chunk_loops creates
-            # ScopeKind::InCore scopes with split_ set (propagated from the consumed
-            # AutoInCore). The printer emits these as pl.at(level=pl.Level.CORE_GROUP)
-            # (no split), because there is no DSL syntax for InCore-with-split.
-            # The split is consumed by outline_incore_scopes, so it is a transient
-            # internal attribute that roundtrip cannot preserve.
-            if "SplitMode optional presence mismatch" in error_msg:
                 return
             raise RuntimeError(
                 f"[RoundtripInstrument] Structural equality failed after pass '{pass_name}'.\n"

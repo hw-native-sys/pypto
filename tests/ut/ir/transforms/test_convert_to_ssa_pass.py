@@ -1306,7 +1306,7 @@ class TestEscapingVariables:
         # Body: out = add(a, c)  — 'out' is first defined HERE, inside the loop
         out = ir.Var("out", tensor_type, span)
         add_op = ir.Op("tensor.add")
-        add_call = ir.Call(add_op, [a, c], span)
+        add_call = ir.Call(add_op, [a, c], tensor_type, span)
         body = ir.AssignStmt(out, add_call, span)
 
         # ForStmt with NO iter_args/return_vars (pre-SSA form)
@@ -1456,7 +1456,7 @@ class TestEscapingVariables:
         # else branch: out = add(x, c) — variable defined only here
         out = ir.Var("out", tensor_type, span)
         add_op = ir.Op("tensor.add")
-        add_call = ir.Call(add_op, [x, c], span)
+        add_call = ir.Call(add_op, [x, c], tensor_type, span)
         else_body = ir.AssignStmt(out, add_call, span)
 
         # then branch: pass (empty — from continue lowering)

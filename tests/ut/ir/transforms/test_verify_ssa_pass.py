@@ -71,7 +71,7 @@ def test_verify_ssa_name_shadowing():
 
         outer_i = ib.let("i", a)
 
-        loop_var = ib.var("i", ir.ScalarType(DataType.INT64))  # Shadows outer 'i'
+        loop_var = ib.var("i", ir.ScalarType(DataType.INDEX))  # Shadows outer 'i'
         with ib.for_loop(loop_var, 0, 5, 1):
             _tmp = ib.let("tmp", loop_var)
 
@@ -93,16 +93,16 @@ def test_verify_ssa_missing_yield():
     params: list[ir.Var] = [a]
     return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-    loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
     iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
     body = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)  # No yield!
     result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
 
     for_stmt = ir.ForStmt(
         loop_var,
-        ir.ConstInt(0, DataType.INT64, span),
-        ir.ConstInt(10, DataType.INT64, span),
-        ir.ConstInt(1, DataType.INT64, span),
+        ir.ConstInt(0, DataType.INDEX, span),
+        ir.ConstInt(10, DataType.INDEX, span),
+        ir.ConstInt(1, DataType.INDEX, span),
         [iter_arg],
         body,
         [result_var],
@@ -150,7 +150,7 @@ def test_verify_ssa_valid_control_flow():
     return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
     # Valid ForStmt
-    loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+    loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
     iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
     yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
     body = ir.YieldStmt([yield_value], span)
@@ -158,9 +158,9 @@ def test_verify_ssa_valid_control_flow():
 
     for_stmt = ir.ForStmt(
         loop_var,
-        ir.ConstInt(0, DataType.INT64, span),
-        ir.ConstInt(10, DataType.INT64, span),
-        ir.ConstInt(1, DataType.INT64, span),
+        ir.ConstInt(0, DataType.INDEX, span),
+        ir.ConstInt(10, DataType.INDEX, span),
+        ir.ConstInt(1, DataType.INDEX, span),
         [iter_arg],
         body,
         [result_var],
@@ -260,15 +260,15 @@ class TestScopeViolation:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         inner_var = ir.Var("inner", ir.ScalarType(DataType.INT64), span)
         body = ir.AssignStmt(inner_var, loop_var, span)
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [],
             body,
             [],
@@ -315,7 +315,7 @@ class TestScopeViolation:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
         yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
         body = ir.YieldStmt([yield_value], span)
@@ -323,9 +323,9 @@ class TestScopeViolation:
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [iter_arg],
             body,
             [result_var],
@@ -349,14 +349,14 @@ class TestScopeViolation:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         body = ir.YieldStmt([], span)
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [],
             body,
             [],
@@ -408,7 +408,7 @@ class TestCardinalityChecks:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
         body = ir.YieldStmt([iter_arg], span)
         # Two return_vars for one iter_arg — mismatch
@@ -417,9 +417,9 @@ class TestCardinalityChecks:
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [iter_arg],
             body,
             [rv1, rv2],
@@ -442,7 +442,7 @@ class TestCardinalityChecks:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg1 = ir.IterArg("acc1", ir.ScalarType(DataType.INT64), a, span)
         iter_arg2 = ir.IterArg("acc2", ir.ScalarType(DataType.INT64), a, span)
         # Only one yield value for two iter_args — mismatch
@@ -452,9 +452,9 @@ class TestCardinalityChecks:
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [iter_arg1, iter_arg2],
             body,
             [rv1, rv2],
@@ -505,7 +505,7 @@ class TestValidScopePatterns:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
         yield_value = ir.Add(iter_arg, loop_var, DataType.INT64, span)
         body = ir.YieldStmt([yield_value], span)
@@ -513,9 +513,9 @@ class TestValidScopePatterns:
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [iter_arg],
             body,
             [result_var],
@@ -561,7 +561,7 @@ class TestValidScopePatterns:
         params: list[ir.Var] = [a]
         return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
 
-        loop_var = ir.Var("i", ir.ScalarType(DataType.INT64), span)
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
         # Use 'a' (parameter) inside the loop body — should be valid
         yield_value = ir.Add(iter_arg, a, DataType.INT64, span)
@@ -570,9 +570,9 @@ class TestValidScopePatterns:
 
         for_stmt = ir.ForStmt(
             loop_var,
-            ir.ConstInt(0, DataType.INT64, span),
-            ir.ConstInt(5, DataType.INT64, span),
-            ir.ConstInt(1, DataType.INT64, span),
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(5, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
             [iter_arg],
             body,
             [result_var],
