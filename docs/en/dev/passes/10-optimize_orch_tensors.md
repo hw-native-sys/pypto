@@ -126,8 +126,8 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 
 | Property | Value |
 | -------- | ----- |
-| Required | SplitIncoreOrch |
-| Produced | SplitIncoreOrch |
+| Required | SplitIncoreOrch, IncoreTileOps |
+| Produced | SplitIncoreOrch, IncoreTileOps |
 | Invalidated | — |
 
 ## Key Components

@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -780,57 +781,13 @@ class AssembleLoopRewriter {
   }
 
  private:
-  /// Recursively check if a statement uses a given Var (by raw pointer).
+  /// Check if a statement subtree uses a given Var (by raw pointer).
+  /// Uses VarDefUseCollector which handles all statement/expression types.
   static bool StmtUsesVar(const StmtPtr& stmt, const Var* var) {
-    if (!stmt) return false;
-
-    if (auto assign = As<AssignStmt>(stmt)) {
-      std::vector<ExprPtr> expr_worklist;
-      expr_worklist.push_back(assign->value_);
-      while (!expr_worklist.empty()) {
-        auto expr = std::move(expr_worklist.back());
-        expr_worklist.pop_back();
-        if (!expr) continue;
-        if (auto v = As<Var>(expr)) {
-          if (v.get() == var) return true;
-        }
-        if (auto ia = As<IterArg>(expr)) {
-          if (ia.get() == var) return true;
-        }
-        if (auto call = As<Call>(expr)) {
-          for (const auto& arg : call->args_) expr_worklist.push_back(arg);
-        }
-        if (auto tgi = As<TupleGetItemExpr>(expr)) {
-          expr_worklist.push_back(tgi->tuple_);
-        }
-        if (auto mt = As<MakeTuple>(expr)) {
-          for (const auto& e : mt->elements_) expr_worklist.push_back(e);
-        }
-      }
-      return false;
-    }
-
-    if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) {
-        if (StmtUsesVar(s, var)) return true;
-      }
-      return false;
-    }
-
-    if (auto yield = As<YieldStmt>(stmt)) {
-      for (const auto& v : yield->value_) {
-        if (auto vp = As<Var>(v)) {
-          if (vp.get() == var) return true;
-        }
-      }
-      return false;
-    }
-
-    if (auto for_stmt = As<ForStmt>(stmt)) {
-      return StmtUsesVar(for_stmt->body_, var);
-    }
-
-    return false;
+    if (!stmt || !var) return false;
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(stmt);
+    return collector.var_uses.count(var) > 0;
   }
 
   // -- Pre-scan: IRVisitor that collects var definitions and return statement --

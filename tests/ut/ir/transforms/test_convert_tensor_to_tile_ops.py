@@ -1885,8 +1885,9 @@ class TestGmLocalTensorConversion:
     def test_gm_tensor_write_stays_tensor_write(self):
         """tensor.write to a gm_tensor (function parameter) stays as tensor.write.
 
-        Param direction inference (In→Out/InOut) is handled by OptimizeOrchTensors,
-        not by ConvertTensorToTileOps.  Here we only verify the op stays as tensor.write.
+        The tensor.write op is NOT converted (it operates on GM tensors, not tiles).
+        However, UpgradeWrittenTensorParamDirections upgrades the param direction
+        from In to Out since the param is written via tensor.write.
         """
 
         @pl.program
@@ -1909,9 +1910,28 @@ class TestGmLocalTensorConversion:
                 result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Out[pl.Tensor[[4], pl.FP32]],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                pl.tensor.write(dst, [0], val)
+                return val
+
+            @pl.function
+            def main(
+                self,
+                dst: pl.Tensor[[4], pl.FP32],
+                val: pl.Scalar[pl.FP32],
+            ) -> pl.Scalar[pl.FP32]:
+                result: pl.Scalar[pl.FP32] = self.main_incore_0(dst, val)
+                return result
+
         After = passes.convert_tensor_to_tile_ops()(Before)
-        # tensor.write stays as-is; param direction unchanged (In)
-        ir.assert_structural_equal(After, Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_local_tensor_write_to_tile_write(self):
         """tensor.write to a local_tensor (result of tensor.add) converts to tile.write."""
@@ -2246,7 +2266,7 @@ class TestAssembleParentStride:
     def test_out_param_naive_no_parent_stride(self):
         """Naive ConvertTensorToTileOps: Out param uses tile shape strides, not parent strides.
 
-        The parent-stride optimization is handled by OptimizeOrchTensors (Pattern 2, future).
+        The parent-stride optimization is handled by OptimizeOrchTensors (Pattern 2).
         After naive conversion, the Out param has shape [32, 32] with default strides.
         """
 

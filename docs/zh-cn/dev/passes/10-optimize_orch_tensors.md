@@ -126,8 +126,8 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| Required | SplitIncoreOrch |
-| Produced | SplitIncoreOrch |
+| Required | SplitIncoreOrch, IncoreTileOps |
+| Produced | SplitIncoreOrch, IncoreTileOps |
 | Invalidated | — |
 
 ## 关键组件
