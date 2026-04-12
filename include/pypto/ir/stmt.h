@@ -61,7 +61,8 @@ enum class ForKind : uint8_t {
  * Controls how iterations are distributed across chunks.
  */
 enum class ChunkPolicy : uint8_t {
-  LeadingFull = 0  ///< Full chunks first, smaller remainder at end
+  LeadingFull = 0,  ///< Full chunks first, smaller remainder at end (splits into two kernels)
+  Guarded = 1       ///< Single loop over ceil(N/C) chunks with per-iteration if-guard (default)
 };
 
 /**
@@ -71,6 +72,8 @@ inline std::string ChunkPolicyToString(ChunkPolicy policy) {
   switch (policy) {
     case ChunkPolicy::LeadingFull:
       return "LeadingFull";
+    case ChunkPolicy::Guarded:
+      return "Guarded";
     default:
       INTERNAL_CHECK(false) << "Unknown ChunkPolicy: " << static_cast<int>(policy);
       return "";  // Unreachable
@@ -84,6 +87,9 @@ inline ChunkPolicy StringToChunkPolicy(const std::string& str) {
   if (str == "LeadingFull" || str == "leading_full") {
     return ChunkPolicy::LeadingFull;
   }
+  if (str == "Guarded" || str == "guarded") {
+    return ChunkPolicy::Guarded;
+  }
   throw pypto::TypeError("Unknown ChunkPolicy: " + str);
 }
 
@@ -94,8 +100,8 @@ inline ChunkPolicy StringToChunkPolicy(const std::string& str) {
  * Only meaningful on parallel (chunked) loops.
  */
 struct ChunkConfig {
-  ExprPtr size;                                   ///< Chunk size expression
-  ChunkPolicy policy = ChunkPolicy::LeadingFull;  ///< Distribution policy
+  ExprPtr size;                               ///< Chunk size expression
+  ChunkPolicy policy = ChunkPolicy::Guarded;  ///< Distribution policy (default: Guarded)
 };
 
 /**

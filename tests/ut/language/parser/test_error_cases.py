@@ -135,7 +135,7 @@ class ChunkedLoopProgram:
         x: pl.Tensor[[16, 4], pl.FP32],
         seq_lens: pl.Tensor[[16], pl.INT32],
     ) -> pl.Tensor[[16, 4], pl.FP32]:
-        for b in pl.parallel(0, 16, 1, chunk=4):
+        for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
             _ctx_len = pl.tensor.read(seq_lens, [b])
         return x
 """

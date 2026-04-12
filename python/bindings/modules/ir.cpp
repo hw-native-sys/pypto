@@ -835,11 +835,13 @@ void BindIR(nb::module_& m) {
   // ChunkPolicy enum (must be before ForStmt which uses it)
   nb::enum_<ChunkPolicy>(ir, "ChunkPolicy", "Chunk policy for loop chunking")
       .value("LeadingFull", ChunkPolicy::LeadingFull, "Full chunks first, smaller remainder at end")
+      .value("Guarded", ChunkPolicy::Guarded,
+             "Single loop over ceil(N/C) chunks with per-iteration if-guard (default)")
       .export_values();
 
   // ChunkConfig struct (must be before ForStmt which uses it)
   nb::class_<ChunkConfig>(ir, "ChunkConfig", "Chunk configuration for parallel loop splitting")
-      .def(nb::init<ExprPtr, ChunkPolicy>(), nb::arg("size"), nb::arg("policy") = ChunkPolicy::LeadingFull,
+      .def(nb::init<ExprPtr, ChunkPolicy>(), nb::arg("size"), nb::arg("policy") = ChunkPolicy::Guarded,
            "Create a chunk configuration")
       .def_ro("size", &ChunkConfig::size, "Chunk size expression")
       .def_ro("policy", &ChunkConfig::policy, "Chunk distribution policy");
@@ -870,7 +872,7 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
       nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-      nb::arg("chunk_size") = nb::none(), nb::arg("chunk_policy") = ChunkPolicy::LeadingFull,
+      nb::arg("chunk_size") = nb::none(), nb::arg("chunk_policy") = ChunkPolicy::Guarded,
       nb::arg("attrs") = nb::none(), "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   // Custom attrs property: convert vector<pair<string, any>> to Python dict
@@ -897,7 +899,7 @@ void BindIR(nb::module_& m) {
       "chunk_policy",
       [](const ForStmtPtr& self) -> ChunkPolicy {
         if (self->chunk_config_.has_value()) return self->chunk_config_->policy;
-        return ChunkPolicy::LeadingFull;
+        return ChunkPolicy::Guarded;
       },
       "Chunk distribution policy");
 

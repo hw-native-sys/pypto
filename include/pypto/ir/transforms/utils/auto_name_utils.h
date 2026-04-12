@@ -76,6 +76,8 @@ inline std::string ChunkInnerQualifier() { return "ci"; }
 
 inline std::string ChunkRemainderQualifier() { return "cr"; }
 
+inline std::string ChunkGuardQualifier() { return "cg"; }
+
 inline std::string LoopLevelQualifier(int level) { return "l" + std::to_string(level); }
 
 inline std::string RowMajorQualifier() { return "rm"; }

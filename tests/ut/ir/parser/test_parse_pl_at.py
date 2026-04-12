@@ -222,7 +222,7 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-            for i in pl.parallel(0, 8, 1, chunk=4):
+            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
         return x
 
@@ -241,7 +241,7 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
             level=pl.Level.CORE_GROUP,
             optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT),
         ):
-            for i in pl.parallel(0, 8, 1, chunk=4):
+            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
         return x
 
@@ -283,7 +283,7 @@ def test_parse_pl_at_split_mode_none_errors():
                 level=pl.Level.CORE_GROUP,
                 optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
             ):
-                for i in pl.parallel(0, 8, 1, chunk=4):
+                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                     x = pl.add(x, x)
             return x
 
@@ -322,7 +322,7 @@ def test_auto_incore_deprecation_warning():
         @pl.function
         def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             with pl.auto_incore():
-                for i in pl.parallel(0, 8, 1, chunk=4):
+                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                     x = pl.add(x, x)
             return x
 

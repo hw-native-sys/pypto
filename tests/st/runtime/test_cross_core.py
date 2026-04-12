@@ -149,7 +149,7 @@ class C2VLRProgram:
         with pl.at(
             level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT)
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4):
+            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
@@ -201,7 +201,7 @@ class C2VUDProgram:
         with pl.at(
             level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4):
+            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 b_chunk = pl.slice(b, [K, N_BLOCK], [0, n0])
@@ -252,7 +252,7 @@ class BiDirectUDProgram:
         with pl.at(
             level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4):
+            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 a_add = pl.add(a, 1.0)
@@ -304,7 +304,7 @@ class BiDirectLRProgram:
         with pl.at(
             level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT)
         ):
-            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4):
+            for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
                 a_add = pl.add(a, 1.0)

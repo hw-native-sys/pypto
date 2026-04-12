@@ -875,7 +875,7 @@ class ASTParser:
 
         # Validate chunk arguments
         chunk_expr = range_args.get("chunk")
-        chunk_policy_str = range_args.get("chunk_policy", "leading_full")
+        chunk_policy_str = range_args.get("chunk_policy", "guarded")
         if chunk_expr is not None:
             self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
 
@@ -998,7 +998,7 @@ class ASTParser:
             result["chunk"] = self.parse_expression(keyword.value)
         elif keyword.arg == "chunk_policy":
             if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                _VALID_CHUNK_POLICIES = {"leading_full"}
+                _VALID_CHUNK_POLICIES = {"leading_full", "guarded"}
                 if keyword.value.value not in _VALID_CHUNK_POLICIES:
                     raise ParserSyntaxError(
                         f"Unsupported chunk_policy: {keyword.value.value!r}",
@@ -1059,7 +1059,7 @@ class ASTParser:
         result: dict[str, Any] = {
             "init_values": [],
             "chunk": None,
-            "chunk_policy": "leading_full",
+            "chunk_policy": "guarded",
             "attrs": {},
         }
         for keyword in call.keywords:

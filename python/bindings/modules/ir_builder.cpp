@@ -112,7 +112,7 @@ void BindIRBuilder(nb::module_& m) {
           },
           nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("span"),
           nb::arg("kind") = ForKind::Sequential, nb::arg("chunk_size") = nb::none(),
-          nb::arg("chunk_policy") = ChunkPolicy::LeadingFull, nb::arg("attrs") = nb::none(),
+          nb::arg("chunk_policy") = ChunkPolicy::Guarded, nb::arg("attrs") = nb::none(),
           "Begin building a for loop.\n\n"
           "Creates a new for loop context. Must be closed with end_for_loop().\n\n"
           "Args:\n"
@@ -123,7 +123,7 @@ void BindIRBuilder(nb::module_& m) {
           "    span: Source location for loop definition\n"
           "    kind: Loop kind (Sequential or Parallel, default: Sequential)\n"
           "    chunk_size: Optional chunk size for loop chunking\n"
-          "    chunk_policy: Chunk distribution policy (default: LeadingFull)\n"
+          "    chunk_policy: Chunk distribution policy (default: Guarded)\n"
           "    attrs: Loop-level attributes (default: empty)\n\n"
           "Raises:\n"
           "    RuntimeError: If not inside a valid context")

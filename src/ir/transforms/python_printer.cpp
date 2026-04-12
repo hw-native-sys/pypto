@@ -925,8 +925,18 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   if (op->chunk_config_.has_value()) {
     stream_ << ", chunk=";
     VisitExpr(op->chunk_config_->size);
-    if (op->chunk_config_->policy != ChunkPolicy::LeadingFull) {
-      stream_ << ", chunk_policy=\"" << ChunkPolicyToString(op->chunk_config_->policy) << "\"";
+    if (op->chunk_config_->policy != ChunkPolicy::Guarded) {
+      // Emit lowercase policy string to match DSL/parser convention.
+      stream_ << ", chunk_policy=\"";
+      switch (op->chunk_config_->policy) {
+        case ChunkPolicy::LeadingFull:
+          stream_ << "leading_full";
+          break;
+        case ChunkPolicy::Guarded:
+          stream_ << "guarded";
+          break;
+      }
+      stream_ << "\"";
     }
   }
 
