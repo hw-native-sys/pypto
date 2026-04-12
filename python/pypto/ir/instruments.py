@@ -32,15 +32,6 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
       with SSA ``iter_args`` after ``ConvertToSSA``) have no valid Python DSL syntax.
       The instrument cannot roundtrip what it cannot print; it warns and skips.
 
-    - **Variable pointer mismatch**: Dynamic-shape ``Var`` nodes (e.g. ``M``
-      in ``pl.Tensor[[M, N], pl.FP32]``) appear in multiple places (params,
-      return type, body).  The original IR shares a single ``Var`` pointer
-      across all occurrences, but the parser may create separate ``Var``
-      objects for each occurrence.  ``structural_equal`` uses pointer-based
-      bijection and detects this as a mismatch.  This is a parser limitation
-      — it should reuse the same ``Var`` object for same-named dynamic-shape
-      parameters across all scopes.
-
     Returns:
         A ``CallbackInstrument`` named ``"RoundtripInstrument"``.
     """
@@ -97,14 +88,6 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
             _ir.assert_structural_equal(program, reparsed)
         except Exception as exc:
             error_msg = str(exc)
-            # Variable pointer mismatch: dynamic-shape Var nodes (e.g. M in
-            # Tensor[[M, N], FP32]) share a single pointer in the original IR,
-            # but the parser may create separate Var objects for each occurrence.
-            # The bijection in structural_equal detects this as a mismatch.
-            # TODO(#929): fix the parser to reuse same-named dynamic-shape Var
-            # objects across param types, return types, and body — then remove.
-            if "Variable pointer mismatch" in error_msg:
-                return
             raise RuntimeError(
                 f"[RoundtripInstrument] Structural equality failed after pass '{pass_name}'.\n"
                 f"\n"
