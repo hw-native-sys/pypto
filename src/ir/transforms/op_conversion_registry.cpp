@@ -204,12 +204,14 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul → tile.load(Mat) + tile.move(L0A/L0B) + tile.matmul + tile.store
+  // tensor.matmul → tile.matmul
   //
-  // tensor.matmul(lhs, rhs, a_trans=False, b_trans=True, c_matrix_nz=False)
+  // tensor.matmul(lhs, rhs, a_trans=False, b_trans=False)
+  // Input loads into Mat space are emitted by framework auto-bridging via input_reqs
+  // (see TensorToTileMutator::BridgeInputSpaces).  Downstream tile.move(L0A/L0B) is
+  // inserted by later passes (ExpandMixedKernel), not here.
   // ────────────────────────────────────────────────────────────────────────
 
-  // Input loads are handled by framework auto-bridging via input_reqs.
   RegisterCustom(
       "tensor.matmul",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -223,12 +225,10 @@ OpConversionRegistry::OpConversionRegistry() {
   // tensor.matmul_acc → tile.matmul_acc
   //
   // tensor.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)
-  // acc is passed through (already TileType from IterArg type propagation).
-  // lhs/rhs are loaded into Mat space (same as tensor.matmul).
+  // lhs/rhs loads into Mat space are emitted by framework auto-bridging via input_reqs.
+  // acc (arg 0) has no space requirement — it passes through from IterArg type propagation.
   // ────────────────────────────────────────────────────────────────────────
 
-  // Input loads are handled by framework auto-bridging via input_reqs.
-  // acc (arg 0) has no space requirement — it passes through from IterArg type propagation.
   RegisterCustom(
       "tensor.matmul_acc",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,

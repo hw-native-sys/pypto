@@ -116,21 +116,21 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
                                  ? conv_registry_.Lookup(call->op_->name_)
                                  : nullptr;
     if (conv_entry) {
-      // Skip ops whose inputs are handled elsewhere:
-      // - Ops with input_reqs: framework auto-bridging loads their TensorType args.
-      // - Self-loading ops: their converters create loads with specific offsets/spaces.
-      // An extra Phase-1 default Vec load would be redundant or wrong for these.
-      if (!conv_entry->input_reqs.empty()) {
-        IRVisitor::VisitStmt_(op);
-        return;
-      }
+      // Skip ops whose inputs are handled by their own converter (self-loading):
+      // they create loads with specific offsets/spaces, so Phase-1 default Vec loads
+      // would be redundant or wrong.
       static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice", "tensor.assemble",
                                                                       "tensor.read", "tensor.write"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;
       }
-      for (const auto& arg : call->args_) {
+      // Per-arg exclusion: args covered by input_reqs are handled by framework auto-bridging.
+      // Other args (e.g. matmul_acc's acc, which has no input_req) still need Phase-1 loads
+      // so they reach the converter as TileType.
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (conv_entry->input_reqs.count(i)) continue;
+        const auto& arg = call->args_[i];
         if (auto iter_arg = As<IterArg>(arg)) {
           if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg.get());
         } else if (auto var = As<Var>(arg)) {
@@ -248,7 +248,7 @@ class ConsumerSpaceCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     auto call = As<Call>(op->value_);
-    if (!call) {
+    if (!call || std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
       IRVisitor::VisitStmt_(op);
       return;
     }
@@ -263,8 +263,13 @@ class ConsumerSpaceCollector : public IRVisitor {
       if (idx >= call->args_.size()) continue;
       if (auto var = As<Var>(call->args_[idx])) {
         bool transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
-        // First consumer wins; subsequent consumers will be bridged by the framework.
-        consumer_reqs_.emplace(var.get(), ConsumerSpaceReq{req.space, transpose});
+        // Prioritize non-Vec spaces: if an existing requirement is the default Vec but this
+        // consumer needs a specialized space (Mat/Left/Right/Acc/Bias), override it so the
+        // load-like producer can emit the specialized space directly.
+        auto [it, inserted] = consumer_reqs_.try_emplace(var.get(), ConsumerSpaceReq{req.space, transpose});
+        if (!inserted && it->second.space == MemorySpace::Vec && req.space != MemorySpace::Vec) {
+          it->second = ConsumerSpaceReq{req.space, transpose};
+        }
       }
     }
     IRVisitor::VisitStmt_(op);
