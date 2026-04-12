@@ -851,9 +851,20 @@ class TestDynamicChunking:
 
 
 class TestGuardedPolicy:
-    """Tests for the `guarded` chunk policy: single outer loop over ceil(T/C) chunks
-    with an internal `if idx < stop` guard instead of a separate remainder kernel.
+    """Tests for the `guarded` chunk policy.
+
+    Guarded mode emits a single outer loop over ceil(T/C) chunks and an inner
+    loop of size C, with the body wrapped in `if idx < stop` so out-of-range
+    iterations become no-ops. With iter_args, the guard becomes an IfStmt phi
+    whose else branch passes the inner iter_args through unchanged.
     """
+
+    @staticmethod
+    def _split_and_simplify(program):
+        """Prepare, split, then simplify so conditions compare cleanly."""
+        prepared = _prepare_for_split(program)
+        split = passes.split_chunked_loops()(prepared)
+        return passes.simplify()(split)
 
     def test_guarded_is_default(self):
         """Omitting chunk_policy selects Guarded."""
@@ -863,78 +874,478 @@ class TestGuardedPolicy:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i in pl.range(0, 7, 1, chunk=5):
+                    for _i in pl.range(7, chunk=5):
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_split(Input)
-        After = passes.split_chunked_loops()(Before)
-        printed = python_print(After)
-        # Guarded mode emits ceil(7/5)=2 outer chunks with an if-guard.
-        assert "if " in printed, "Guarded mode should emit an if-guard"
-        assert "ChunkRemainder" not in printed, "Guarded mode should not emit a remainder loop"
+        @pl.program
+        class InputExplicit:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(7, chunk=5, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
 
-    def test_guarded_static_no_iter_args(self):
-        """Static bound, no iter_args: emits outer/inner ForStmts + IfStmt guard."""
+        # Default and explicit "guarded" must produce identical IR.
+        After = passes.split_chunked_loops()(_prepare_for_split(Input))
+        AfterExplicit = passes.split_chunked_loops()(_prepare_for_split(InputExplicit))
+        ir.assert_structural_equal(After, AfterExplicit, enable_auto_mapping=True)
+
+    def test_guarded_divisible_iter_args(self):
+        """Static bound, trip_count divisible by chunk_size, with iter_args."""
 
         @pl.program
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i in pl.range(0, 7, 1, chunk=5, chunk_policy="guarded"):
+                    for _i in pl.range(10, chunk=5, chunk_policy="guarded"):
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_split(Input)
-        After = passes.split_chunked_loops()(Before)
-        printed = python_print(After)
-        # ceil(7/5) == 2 outer chunks, inner chunk size 5, and an if-guard.
-        assert "pl.range(2," in printed or "pl.range(2)" in printed
-        assert "pl.range(5," in printed or "pl.range(5)" in printed
-        assert "if " in printed and "< 7" in printed
-        assert "ChunkRemainder" not in printed
+        After = self._split_and_simplify(Input)
 
-    def test_guarded_with_iter_args(self):
-        """Iter_args thread through IfStmt phi with else pass-through yield."""
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            5,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if i_out * 5 + i_in < 10:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_non_divisible_iter_args(self):
+        """Static bound, trip_count NOT divisible by chunk_size: ceil(7/5)=2 outer chunks.
+
+        The guard `idx < 7` disables lanes 7..9 in the second outer chunk,
+        and the else branch threads the inner iter_args through unchanged.
+        """
 
         @pl.program
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i, (s,) in pl.range(7, init_values=(x,), chunk=5, chunk_policy="guarded"):
-                        s = pl.add(s, 1.0)
-                        s = pl.yield_(s)
-                return s
+                    for _i in pl.range(7, chunk=5, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
 
-        Before = _prepare_for_split(Input)
-        After = passes.split_chunked_loops()(Before)
-        printed = python_print(After)
-        # Outer + inner with init_values (iter_args), an if-guard, and an else branch.
-        assert "init_values=" in printed
-        assert "if " in printed and "< 7" in printed
-        assert "else:" in printed
-        assert "ChunkRemainder" not in printed
+        After = self._split_and_simplify(Input)
 
-    def test_guarded_dynamic_bound(self):
-        """Dynamic bound `n`: outer stop is ceil((n - 0) / C)."""
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            5,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if i_out * 5 + i_in < 7:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_trip_less_than_chunk(self):
+        """trip_count < chunk_size: ceil(3/5)=1 outer chunk, inner guard masks lanes >= 3."""
 
         @pl.program
         class Input:
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i in pl.range(0, n, 1, chunk=4, chunk_policy="guarded"):
+                    for _i in pl.range(3, chunk=5, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            5,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            # Simplify proves i_out is always 0 (outer range [0,1)).
+                            if i_in < 3:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_no_iter_args(self):
+        """No iter_args: IfStmt has no phi and no else branch — body runs or is skipped."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(7, chunk=5, chunk_policy="guarded"):
+                        _tmp = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out in pl.range(2, attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}):
+                        for i_in in pl.range(5, attrs={"loop_origin": pl.LoopOrigin.ChunkInner}):
+                            if i_out * 5 + i_in < 7:
+                                _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                return x_0
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_with_step(self):
+        """Non-unit step: guard compares `idx * step < stop`, idx = (out*C + in)."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(0, 20, 2, chunk=5, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            5,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if (i_out * 5 + i_in) * 2 < 20:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_parallel(self):
+        """pl.parallel: both outer and inner guarded loops are Parallel kind."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.parallel(8, chunk=4, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.parallel(
+                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.parallel(
+                            4,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if i_out * 4 + i_in < 8:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_dynamic_stop(self):
+        """Dynamic stop `n`: outer count = ceil(n/4) = (n + 3) // 4."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(n, chunk=4, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        (n_0 + 3) // 4,
+                        init_values=(x_0,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkOuter},
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            4,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if i_out * 4 + i_in < n_0:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_dynamic_start_and_stop(self):
+        """Dynamic start AND stop: outer count = ceil(max(hi-lo, 0) / 4)."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                lo: pl.Scalar[pl.INDEX],
+                hi: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(lo, hi, 1, chunk=4, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x_0: pl.Tensor[[64], pl.FP32],
+                lo_0: pl.Scalar[pl.INDEX],
+                hi_0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        (pl.max(hi_0 - lo_0, 0) + 3) // 4,
+                        init_values=(x_0,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkOuter},
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            4,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if lo_0 + (i_out * 4 + i_in) < hi_0:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_dynamic_no_iter_args(self):
+        """Dynamic bound with no iter_args: IfStmt has no phi."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(n, chunk=4, chunk_policy="guarded"):
+                        _tmp = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self, x_0: pl.Tensor[[64], pl.FP32], n_0: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out in pl.range((n_0 + 3) // 4, attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}):
+                        for i_in in pl.range(4, attrs={"loop_origin": pl.LoopOrigin.ChunkInner}):
+                            if i_out * 4 + i_in < n_0:
+                                _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                return x_0
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_nested(self):
+        """Nested guarded loops: inner guarded loop lives inside outer's then-branch.
+
+        Verifies iter_args thread correctly through both levels of IfStmt phi.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.parallel(8, chunk=4, chunk_policy="guarded"):
+                        for _j in pl.parallel(3, chunk=2, chunk_policy="guarded"):
+                            x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.parallel(
+                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.parallel(
+                            4,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if i_out * 4 + i_in < 8:
+                                for j_out, (x_j_outer,) in pl.parallel(
+                                    2,
+                                    init_values=(x_inner,),
+                                    attrs={"loop_origin": pl.LoopOrigin.ChunkOuter},
+                                ):
+                                    for j_in, (x_j_inner,) in pl.parallel(
+                                        2,
+                                        init_values=(x_j_outer,),
+                                        attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                                    ):
+                                        if j_out * 2 + j_in < 3:
+                                            x_5: pl.Tensor[[64], pl.FP32] = pl.add(x_j_inner, 1.0)
+                                            x_j_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_5)
+                                        else:
+                                            x_j_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_j_inner)
+                                        x_j_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_j_if)
+                                    x_j_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_j_inner_rv)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_j_outer_rv)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_origin_attrs(self):
+        """Guarded mode sets ChunkOuter/ChunkInner attrs and never emits ChunkRemainder."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(7, chunk=5, chunk_policy="guarded"):
                         x = pl.add(x, 1.0)
                 return x
 
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
+
+        # Navigate: [ScopeStmt, return]; ScopeStmt.body = outer_for (guarded is a single for)
+        stmts = _top_level_stmts(After)
+        scope = cast(ir.ScopeStmt, stmts[0])
+        outer_for = cast(ir.ForStmt, scope.body)
+        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
+
+        inner_for = cast(ir.ForStmt, _body_stmts(outer_for.body)[0])
+        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
+
+        # No remainder loop should exist.
         printed = python_print(After)
-        # Dynamic bound always emits the outer loop with a FloorDiv ceiling.
-        assert "// 4" in printed or "FloorDiv" in printed
         assert "ChunkRemainder" not in printed
+
+    def test_guarded_printer_omits_default(self):
+        """Printer omits `chunk_policy="guarded"` (it's the default) but prints `leading_full`."""
+
+        @pl.program
+        class Guarded:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(10, chunk=5, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        @pl.program
+        class LeadingFull:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(10, chunk=5, chunk_policy="leading_full"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        guarded_printed = python_print(Guarded)
+        leading_printed = python_print(LeadingFull)
+        assert "chunk_policy" not in guarded_printed
+        assert 'chunk_policy="leading_full"' in leading_printed
 
 
 if __name__ == "__main__":
