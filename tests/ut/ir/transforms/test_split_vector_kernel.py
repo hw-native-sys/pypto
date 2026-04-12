@@ -183,6 +183,52 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_load_preserves_singleton_broadcast_dim(self):
+        """UP_DOWN split should preserve singleton broadcast tiles like [1, N] in AIV."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INT64] = pl.tile.get_subblock_idx()
+                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
     def test_loop_iter_arg_keeps_split_tracking(self):
         """Loop iter_args seeded by halved tiles must keep split-aware store offsets."""
 
