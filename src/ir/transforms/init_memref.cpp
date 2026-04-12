@@ -170,6 +170,11 @@ class InitMemRefMutator : public IRMutator {
       auto memref = CreateMemRef(shaped_type, var, memory_space);
       new_type = CloneTypeWithMemRefAndRemapExprs(
           var_expr->GetType(), memref, [this](const ExprPtr& expr) { return VisitExpr(expr); }, memory_space);
+    } else {
+      // Non-shaped types (e.g. ScalarType for dynamic-shape dimensions like M, N)
+      // don't need MemRef initialization — return the original Var to preserve
+      // pointer identity across all type annotations that reference it.
+      return var;
     }
 
     return std::make_shared<Var>(var->name_hint_, new_type, var->span_);
