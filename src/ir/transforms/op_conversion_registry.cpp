@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -77,31 +78,6 @@ T GetKwargOr(const std::vector<std::pair<std::string, std::any>>& kwargs, const 
     }
   }
   return default_value;
-}
-
-// Load a matmul operand into Mat space if it's a TensorType.
-// If already a TileType, returns the operand as-is.
-ExprPtr LoadOperandToMat(const ExprPtr& operand, bool transpose, const std::string& var_name,
-                         std::vector<StmtPtr>& prologue, const Span& span) {
-  auto& op_reg = OpRegistry::GetInstance();
-  auto tensor_type = As<TensorType>(operand->GetType());
-  if (tensor_type) {
-    auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
-    auto shape = tensor_type->shape_;
-    auto shapes = MakeShapesTuple(shape, span);
-    std::vector<std::pair<std::string, std::any>> kw = {{"target_memory", MemorySpace::Mat},
-                                                        {"transpose", transpose}};
-    auto load = op_reg.Create("tile.load", {operand, offsets, shapes, shapes}, kw, span);
-    auto load_var = std::make_shared<Var>(var_name, load->GetType(), span);
-    prologue.push_back(std::make_shared<AssignStmt>(load_var, load, span));
-    return load_var;
-  }
-  auto tile_type = As<TileType>(operand->GetType());
-  if (tile_type) {
-    return operand;
-  }
-  INTERNAL_UNREACHABLE_SPAN(span) << "LoadOperandToMat: unexpected type: " << operand->GetType()->TypeName();
-  return nullptr;  // unreachable
 }
 
 }  // namespace
@@ -228,9 +204,12 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 
   // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul → tile.load(Mat) + tile.move(L0A/L0B) + tile.matmul + tile.store
+  // tensor.matmul → tile.matmul
   //
-  // tensor.matmul(lhs, rhs, a_trans=False, b_trans=True, c_matrix_nz=False)
+  // tensor.matmul(lhs, rhs, a_trans=False, b_trans=False)
+  // Input loads into Mat space are emitted by framework auto-bridging via input_reqs
+  // (see TensorToTileMutator::BridgeInputSpaces).  Downstream tile.move(L0A/L0B) is
+  // inserted by later passes (ExpandMixedKernel), not here.
   // ────────────────────────────────────────────────────────────────────────
 
   RegisterCustom(
@@ -238,24 +217,16 @@ OpConversionRegistry::OpConversionRegistry() {
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
         CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
-
-        bool a_trans = GetKwargOr<bool>(kwargs, "a_trans", false);
-        bool b_trans = GetKwargOr<bool>(kwargs, "b_trans", false);
-
-        std::vector<StmtPtr> prologue;
-        auto lhs_mat = LoadOperandToMat(args[0], a_trans, "lhs_mat", prologue, span);
-        auto rhs_mat = LoadOperandToMat(args[1], b_trans, "rhs_mat", prologue, span);
-
-        auto matmul_call = OpRegistry::GetInstance().Create("tile.matmul", {lhs_mat, rhs_mat}, span);
-        return ConversionResult{std::move(prologue), matmul_call};
-      });
+        return ConversionResult{OpRegistry::GetInstance().Create("tile.matmul", {args[0], args[1]}, span)};
+      },
+      {{0, {MemorySpace::Mat, "a_trans"}}, {1, {MemorySpace::Mat, "b_trans"}}});
 
   // ────────────────────────────────────────────────────────────────────────
   // tensor.matmul_acc → tile.matmul_acc
   //
   // tensor.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)
-  // acc is passed through (already TileType from IterArg type propagation).
-  // lhs/rhs are loaded into Mat space (same as tensor.matmul).
+  // lhs/rhs loads into Mat space are emitted by framework auto-bridging via input_reqs.
+  // acc (arg 0) has no space requirement — it passes through from IterArg type propagation.
   // ────────────────────────────────────────────────────────────────────────
 
   RegisterCustom(
@@ -263,18 +234,10 @@ OpConversionRegistry::OpConversionRegistry() {
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
         CHECK(args.size() == 3) << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
-
-        bool a_trans = GetKwargOr<bool>(kwargs, "a_trans", false);
-        bool b_trans = GetKwargOr<bool>(kwargs, "b_trans", false);
-
-        std::vector<StmtPtr> prologue;
-        auto lhs_mat = LoadOperandToMat(args[1], a_trans, "lhs_mat", prologue, span);
-        auto rhs_mat = LoadOperandToMat(args[2], b_trans, "rhs_mat", prologue, span);
-
-        auto matmul_acc_call =
-            OpRegistry::GetInstance().Create("tile.matmul_acc", {args[0], lhs_mat, rhs_mat}, span);
-        return ConversionResult{std::move(prologue), matmul_acc_call};
-      });
+        return ConversionResult{
+            OpRegistry::GetInstance().Create("tile.matmul_acc", {args[0], args[1], args[2]}, span)};
+      },
+      {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
 
   // ────────────────────────────────────────────────────────────────────────
   // tensor.row_max / tensor.row_sum → tile.row_max / tile.row_sum
@@ -619,11 +582,12 @@ OpConversionRegistry::OpConversionRegistry() {
       });
 }
 
-void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op) {
+void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
   // Capture to_op by value for the lambda
-  conversions_[from_op] = [to_op](const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const Span& span) -> ConversionResult {
+  ConversionFunc func = [to_op](const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const Span& span) -> ConversionResult {
     auto& reg = OpRegistry::GetInstance();
     CallPtr call;
     if (kwargs.empty()) {
@@ -633,13 +597,15 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
     }
     return ConversionResult{call};
   };
+  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
 }
 
-void OpConversionRegistry::RegisterCustom(const std::string& from_op, ConversionFunc func) {
-  conversions_[from_op] = std::move(func);
+void OpConversionRegistry::RegisterCustom(const std::string& from_op, ConversionFunc func,
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
+  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
 }
 
-const ConversionFunc* OpConversionRegistry::Lookup(const std::string& op_name) const {
+const ConversionEntry* OpConversionRegistry::Lookup(const std::string& op_name) const {
   auto it = conversions_.find(op_name);
   if (it == conversions_.end()) {
     return nullptr;

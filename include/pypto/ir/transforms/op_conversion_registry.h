@@ -13,7 +13,9 @@
 #define PYPTO_IR_TRANSFORMS_OP_CONVERSION_REGISTRY_H_
 
 #include <any>
+#include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -21,6 +23,7 @@
 
 #include "pypto/core/common.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 
@@ -59,6 +62,26 @@ using ConversionFunc = std::function<ConversionResult(
     const Span& span)>;
 
 /**
+ * @brief Per-input memory space requirement for a converter.
+ *
+ * Declares that a specific input operand must reside in a particular memory space.
+ * The framework uses this to automatically insert tile.load (for TensorType inputs)
+ * before calling the converter.
+ */
+struct InputSpaceReq {
+  MemorySpace space;                       ///< Required memory space
+  std::optional<std::string> trans_kwarg;  ///< Read transpose flag from this kwarg (if any)
+};
+
+/**
+ * @brief Full conversion entry: converter function + per-input space requirements.
+ */
+struct ConversionEntry {
+  ConversionFunc func;
+  std::unordered_map<size_t, InputSpaceReq> input_reqs;  ///< Per-input space requirements (key = arg index)
+};
+
+/**
  * @brief Registry mapping tensor op names to tile op conversion rules
  *
  * Supports two registration styles:
@@ -85,8 +108,10 @@ class OpConversionRegistry {
    *
    * @param from_op Source op name (e.g., "tensor.add")
    * @param to_op Target op name (e.g., "tile.add")
+   * @param input_reqs Per-input memory space requirements (default: none)
    */
-  void RegisterSimple(const std::string& from_op, const std::string& to_op);
+  void RegisterSimple(const std::string& from_op, const std::string& to_op,
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 
   /**
    * @brief Register a custom conversion function
@@ -95,16 +120,18 @@ class OpConversionRegistry {
    *
    * @param from_op Source op name (e.g., "tensor.matmul")
    * @param func Custom conversion function
+   * @param input_reqs Per-input memory space requirements (default: none)
    */
-  void RegisterCustom(const std::string& from_op, ConversionFunc func);
+  void RegisterCustom(const std::string& from_op, ConversionFunc func,
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 
   /**
-   * @brief Look up a conversion rule for an op
+   * @brief Look up a conversion entry for an op
    *
    * @param op_name The operator name to look up
-   * @return Pointer to the ConversionFunc, or nullptr if not registered
+   * @return Pointer to the ConversionEntry, or nullptr if not registered
    */
-  [[nodiscard]] const ConversionFunc* Lookup(const std::string& op_name) const;
+  [[nodiscard]] const ConversionEntry* Lookup(const std::string& op_name) const;
 
   /**
    * @brief Check if a conversion rule exists for an op
@@ -114,7 +141,7 @@ class OpConversionRegistry {
  private:
   OpConversionRegistry();
 
-  std::unordered_map<std::string, ConversionFunc> conversions_;
+  std::unordered_map<std::string, ConversionEntry> conversions_;
 };
 
 /**

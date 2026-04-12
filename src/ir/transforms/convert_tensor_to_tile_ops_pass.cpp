@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -26,6 +27,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -110,19 +112,25 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     auto call = As<Call>(op->value_);
-    if (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
-        conv_registry_.Lookup(call->op_->name_)) {
-      // Skip ops that manage their own data loading (they create block.load
-      // with specific offsets/memory-spaces during conversion, so an extra
-      // Phase-1 default Vec load would be redundant or wrong).
-      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice",      "tensor.matmul",
-                                                                      "tensor.matmul_acc", "tensor.assemble",
-                                                                      "tensor.read",       "tensor.write"};
+    const auto* conv_entry = (call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_))
+                                 ? conv_registry_.Lookup(call->op_->name_)
+                                 : nullptr;
+    if (conv_entry) {
+      // Skip ops whose inputs are handled by their own converter (self-loading):
+      // they create loads with specific offsets/spaces, so Phase-1 default Vec loads
+      // would be redundant or wrong.
+      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice", "tensor.assemble",
+                                                                      "tensor.read", "tensor.write"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;
       }
-      for (const auto& arg : call->args_) {
+      // Per-arg exclusion: args covered by input_reqs are handled by framework auto-bridging.
+      // Other args (e.g. matmul_acc's acc, which has no input_req) still need Phase-1 loads
+      // so they reach the converter as TileType.
+      for (size_t i = 0; i < call->args_.size(); ++i) {
+        if (conv_entry->input_reqs.count(i)) continue;
+        const auto& arg = call->args_[i];
         if (auto iter_arg = As<IterArg>(arg)) {
           if (As<TensorType>(iter_arg->GetType())) used_.insert(iter_arg.get());
         } else if (auto var = As<Var>(arg)) {
@@ -203,73 +211,73 @@ std::vector<TypePtr> FindYieldTypes(const std::vector<StmtPtr>& stmts) {
 }
 
 // ============================================================================
-// Iter-arg mapping and assemble-parent-shape cross-function analyses have been
-// moved to the OptimizeOrchTensors pass.  MatmulSlice pattern collection
-// (below) remains here because it is an InCore-local conversion-time decision.
+// Consumer-driven memory space collection.
+//
+// Pre-scans the function body to build a map from variables to the memory
+// space their downstream consumers require (as declared via InputSpaceReq
+// in OpConversionRegistry).  This lets load-like ops (tensor.slice on
+// TensorType) produce the right space directly, avoiding a redundant
+// load(Vec) + move(Mat) sequence.
 // ============================================================================
 
 /**
- * @brief Info about a tensor.slice result that feeds into a tensor.matmul/tensor.matmul_acc operand.
- *
- * When a tensor.slice result is consumed by tensor.matmul or tensor.matmul_acc, the slice conversion
- * should produce tile.load(Mat, transpose=...) instead of tile.load(Vec) so that
- * the matmul conversion can skip the load and directly use the Mat-space tile.
+ * @brief Resolved consumer memory space requirement for a variable.
  */
-struct MatmulSliceInfo {
-  bool is_rhs;     ///< true if the slice result is the rhs operand of matmul
-  bool transpose;  ///< transpose flag from matmul (b_trans for rhs, a_trans for lhs)
+struct ConsumerSpaceReq {
+  MemorySpace space;  ///< Required memory space
+  bool transpose;     ///< Resolved transpose flag from the consumer's kwargs
 };
 
 /**
- * @brief Visitor that collects tensor.slice results consumed by tensor.matmul/tensor.matmul_acc.
+ * @brief Visitor that collects consumer memory space requirements for variables.
  *
- * Scans the full function body to build a map from slice result variable pointers
- * to their matmul usage info (which side and transpose flag).
+ * For each op with declared InputSpaceReq, records which variables need which
+ * memory space.  Replaces the special-purpose MatmulSlicePatternCollector with
+ * a general mechanism driven entirely by registered converter metadata.
  */
-class MatmulSlicePatternCollector : public IRVisitor {
+class ConsumerSpaceCollector : public IRVisitor {
  public:
-  [[nodiscard]] const std::unordered_map<const Var*, MatmulSliceInfo>& GetTargets() const { return targets_; }
+  explicit ConsumerSpaceCollector(const OpConversionRegistry& registry) : registry_(registry) {}
+
+  [[nodiscard]] std::optional<ConsumerSpaceReq> GetConsumerReq(const Var* var) const {
+    auto it = consumer_reqs_.find(var);
+    return it != consumer_reqs_.end() ? std::optional{it->second} : std::nullopt;
+  }
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
     auto call = As<Call>(op->value_);
-    if (!call) {
+    if (!call || std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
       IRVisitor::VisitStmt_(op);
       return;
     }
 
-    const auto& op_name = call->op_->name_;
-    if (op_name == "tensor.slice") {
-      slice_results_.insert(op->var_.get());
-    } else if (op_name == "tensor.matmul" || op_name == "tensor.matmul_acc") {
-      CollectMatmulOperands(call, op_name == "tensor.matmul_acc");
+    const auto* entry = registry_.Lookup(call->op_->name_);
+    if (!entry || entry->input_reqs.empty()) {
+      IRVisitor::VisitStmt_(op);
+      return;
+    }
+
+    for (const auto& [idx, req] : entry->input_reqs) {
+      if (idx >= call->args_.size()) continue;
+      if (auto var = As<Var>(call->args_[idx])) {
+        bool transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
+        // Prioritize non-Vec spaces: if an existing requirement is the default Vec but this
+        // consumer needs a specialized space (Mat/Left/Right/Acc/Bias), override it so the
+        // load-like producer can emit the specialized space directly.
+        auto [it, inserted] = consumer_reqs_.try_emplace(var.get(), ConsumerSpaceReq{req.space, transpose});
+        if (!inserted && it->second.space == MemorySpace::Vec && req.space != MemorySpace::Vec) {
+          it->second = ConsumerSpaceReq{req.space, transpose};
+        }
+      }
     }
     IRVisitor::VisitStmt_(op);
   }
 
  private:
-  void CollectMatmulOperands(const CallPtr& call, bool is_acc) {
-    const size_t lhs_idx = is_acc ? 1 : 0;
-    const size_t rhs_idx = is_acc ? 2 : 1;
-    if (call->args_.size() <= rhs_idx) return;
-
-    bool a_trans = false;
-    bool b_trans = false;
-    for (const auto& [k, v] : call->kwargs_) {
-      if (k == "a_trans") a_trans = std::any_cast<bool>(v);
-      if (k == "b_trans") b_trans = std::any_cast<bool>(v);
-    }
-    if (auto lhs_var = As<Var>(call->args_[lhs_idx])) {
-      if (slice_results_.count(lhs_var.get())) targets_[lhs_var.get()] = {false, a_trans};
-    }
-    if (auto rhs_var = As<Var>(call->args_[rhs_idx])) {
-      if (slice_results_.count(rhs_var.get())) targets_[rhs_var.get()] = {true, b_trans};
-    }
-  }
-
-  std::unordered_set<const Var*> slice_results_;
-  std::unordered_map<const Var*, MatmulSliceInfo> targets_;
+  const OpConversionRegistry& registry_;
+  std::unordered_map<const Var*, ConsumerSpaceReq> consumer_reqs_;
 };
 
 // ============================================================================
@@ -436,8 +444,8 @@ class TypePropagatingMutator : public IRMutator {
 class TensorToTileMutator : public TypePropagatingMutator {
  public:
   TensorToTileMutator(const OpConversionRegistry& conv_registry, const OpRegistry& op_registry,
-                      const std::unordered_map<const Var*, MatmulSliceInfo>& matmul_targets)
-      : conv_registry_(conv_registry), op_registry_(op_registry), matmul_targets_(matmul_targets) {}
+                      const ConsumerSpaceCollector& consumer_collector)
+      : conv_registry_(conv_registry), op_registry_(op_registry), consumer_collector_(consumer_collector) {}
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -453,32 +461,45 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return HandlePassThroughAssign(op, new_value);
     }
 
-    const auto* converter = conv_registry_.Lookup(call->op_->name_);
-    if (!converter) {
+    const auto* entry = conv_registry_.Lookup(call->op_->name_);
+    if (!entry) {
       // Verify unregistered TensorOps are expected passthroughs
       if (op_registry_.IsRegistered(call->op_->name_)) {
-        const auto& entry = op_registry_.GetEntry(call->op_->name_);
+        const auto& op_entry = op_registry_.GetEntry(call->op_->name_);
         static const std::unordered_set<std::string> kPassthroughTensorOps = {"tensor.dim"};
         INTERNAL_CHECK_SPAN(
-            entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_), call->span_)
+            op_entry.GetOpCategory() != "TensorOp" || kPassthroughTensorOps.count(call->op_->name_),
+            call->span_)
             << "TensorOp \"" << call->op_->name_ << "\" has no registered tile conversion. "
             << "Add a conversion in src/ir/transforms/op_conversion_registry.cpp.";
       }
       return HandlePassThroughAssign(op, new_value);
     }
 
-    // Special: tensor.slice feeding into tensor.matmul → tile.load(Mat)
-    if (call->op_->name_ == "tensor.slice" && matmul_targets_.count(op->var_.get())) {
-      auto mat_load = HandleMatmulSlice(op, call);
-      if (mat_load) return mat_load;
+    // Consumer-driven space override for load-like ops (e.g. tensor.slice
+    // feeding into tensor.matmul → load to Mat instead of default Vec).
+    if (call->op_->name_ == "tensor.slice") {
+      auto consumer_req = consumer_collector_.GetConsumerReq(op->var_.get());
+      if (consumer_req) {
+        auto override_load = HandleConsumerDrivenLoad(op, call, *consumer_req);
+        if (override_load) return override_load;
+      }
     }
 
-    // Run the converter
-    auto conv_result = (*converter)(call->args_, call->kwargs_, call->span_);
+    // Auto-bridge: load TensorType args to the memory space required by input_reqs
+    auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
 
-    // Prologue statements may themselves contain tensor ops — recurse
+    // Run the converter with bridged args
+    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+
+    // Collect all statements: bridge prologue + converter prologue + final assignment
     std::vector<StmtPtr> stmts;
-    stmts.reserve(conv_result.prologue.size() + 1);
+    stmts.reserve(bridge_stmts.size() + conv_result.prologue.size() + 1);
+
+    // Bridge statements are fully resolved — no recursive visit needed
+    for (auto& s : bridge_stmts) stmts.push_back(std::move(s));
+
+    // Converter prologue may contain nested tensor ops — recurse
     for (auto& prologue_stmt : conv_result.prologue) {
       stmts.push_back(VisitStmt(prologue_stmt));
     }
@@ -505,12 +526,15 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto call = As<Call>(new_expr);
     if (!call || std::dynamic_pointer_cast<const GlobalVar>(call->op_)) return maybe_update();
 
-    const auto* converter = conv_registry_.Lookup(call->op_->name_);
-    if (!converter) return maybe_update();
+    const auto* entry = conv_registry_.Lookup(call->op_->name_);
+    if (!entry) return maybe_update();
 
-    auto conv_result = (*converter)(call->args_, call->kwargs_, call->span_);
+    auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
+    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+
     std::vector<StmtPtr> stmts;
-    stmts.reserve(conv_result.prologue.size() + 1);
+    stmts.reserve(bridge_stmts.size() + conv_result.prologue.size() + 1);
+    for (auto& s : bridge_stmts) stmts.push_back(std::move(s));
     for (auto& prologue_stmt : conv_result.prologue) {
       stmts.push_back(VisitStmt(prologue_stmt));
     }
@@ -520,9 +544,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
  private:
-  /// Handle tensor.slice that feeds into tensor.matmul — produce tile.load(Mat).
-  StmtPtr HandleMatmulSlice(const AssignStmtPtr& op, const CallPtr& call) {
-    const auto& info = matmul_targets_.at(op->var_.get());
+  /// Handle tensor.slice whose consumer needs a specific memory space — produce tile.load with that space.
+  StmtPtr HandleConsumerDrivenLoad(const AssignStmtPtr& op, const CallPtr& call,
+                                   const ConsumerSpaceReq& req) {
     const auto& input = call->args_[0];
     auto tensor_type = As<TensorType>(input->GetType());
     if (!tensor_type) return nullptr;
@@ -531,8 +555,8 @@ class TensorToTileMutator : public TypePropagatingMutator {
     const auto& offset_arg = call->args_[2];
     ExprPtr valid_shapes = (call->args_.size() == 4) ? call->args_[3] : shape_arg;
 
-    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Mat},
-                                                                 {"transpose", info.transpose}};
+    std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", req.space},
+                                                                 {"transpose", req.transpose}};
     auto load_call = op_registry_.Create("tile.load", {input, offset_arg, shape_arg, valid_shapes},
                                          load_kwargs, call->span_);
 
@@ -542,10 +566,58 @@ class TensorToTileMutator : public TypePropagatingMutator {
     return std::make_shared<AssignStmt>(tile_var, load_call, op->span_);
   }
 
+  /// Auto-bridge TensorType args to the memory space required by input_reqs.
+  /// Returns the (possibly modified) args and any load statements to prepend.
+  std::pair<std::vector<ExprPtr>, std::vector<StmtPtr>> BridgeInputSpaces(
+      const CallPtr& call, const std::unordered_map<size_t, InputSpaceReq>& input_reqs) {
+    if (input_reqs.empty()) return {call->args_, {}};
+
+    auto args = call->args_;
+    std::vector<StmtPtr> stmts;
+
+    // Iterate in sorted index order to produce deterministic statement ordering.
+    std::vector<size_t> sorted_indices;
+    sorted_indices.reserve(input_reqs.size());
+    for (const auto& [idx, _] : input_reqs) sorted_indices.push_back(idx);
+    std::sort(sorted_indices.begin(), sorted_indices.end());
+
+    for (size_t idx : sorted_indices) {
+      const auto& req = input_reqs.at(idx);
+      if (idx >= args.size()) continue;
+      auto tensor_type = As<TensorType>(args[idx]->GetType());
+      if (!tensor_type) continue;  // Already TileType — pass through
+
+      bool transpose = req.trans_kwarg ? call->GetKwarg<bool>(*req.trans_kwarg, false) : false;
+
+      auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), call->span_);
+      auto shapes = MakeShapeTuple(tensor_type->shape_, call->span_);
+      std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", req.space},
+                                                               {"transpose", transpose}};
+      auto load =
+          op_registry_.Create("tile.load", {args[idx], offsets, shapes, shapes}, load_kw, call->span_);
+
+      // Derive name from the arg's name hint + lowercase memory space name
+      std::string var_name;
+      if (auto var = As<Var>(args[idx])) {
+        auto space_str = MemorySpaceToString(req.space);
+        std::transform(space_str.begin(), space_str.end(), space_str.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        var_name = var->name_hint_ + "_" + space_str;
+      } else {
+        var_name = "bridged_" + std::to_string(idx);
+      }
+
+      auto load_var = std::make_shared<Var>(var_name, load->GetType(), call->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(load_var, load, call->span_));
+      args[idx] = load_var;
+    }
+
+    return {std::move(args), std::move(stmts)};
+  }
+
   const OpConversionRegistry& conv_registry_;
   const OpRegistry& op_registry_;
-  const std::unordered_map<const Var*, MatmulSliceInfo>&
-      matmul_targets_;  // owned by MatmulSlicePatternCollector — must outlive this mutator
+  const ConsumerSpaceCollector& consumer_collector_;
 };
 
 bool ExprUsesVar(const ExprPtr& expr, const Var* target) {
@@ -1113,12 +1185,13 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto& op_registry = OpRegistry::GetInstance();
   const auto& span = func->span_;
 
-  // Pre-scan for tensor.slice → tensor.matmul patterns (need Mat-space loads).
-  MatmulSlicePatternCollector matmul_collector;
-  matmul_collector.VisitStmt(func->body_);
+  // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
+  // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.
+  ConsumerSpaceCollector consumer_collector(conv_registry);
+  consumer_collector.VisitStmt(func->body_);
 
   // Create the body mutator
-  TensorToTileMutator mutator(conv_registry, op_registry, matmul_collector.GetTargets());
+  TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector);
 
   // New body statements (prefix tile.loads + mutated body)
   std::vector<StmtPtr> new_stmts;
