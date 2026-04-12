@@ -375,11 +375,11 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     if (!has_iter_args) {
-      return SplitGuarded(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr, chunk_expr,
-                          stop_expr, n_total, prev_loop_sub, sp);
+      return SplitGuarded(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr, step,
+                          chunk_expr, stop_expr, n_total, prev_loop_sub, sp);
     }
     return SplitGuardedWithIterArgs(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr,
-                                    chunk_expr, stop_expr, n_total, prev_loop_sub, prev_ia_subs, sp);
+                                    step, chunk_expr, stop_expr, n_total, prev_loop_sub, prev_ia_subs, sp);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -658,8 +658,9 @@ class ChunkedLoopSplitter : public IRMutator {
    */
   StmtPtr SplitGuarded(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
                        const std::optional<int>& loop_version, const ExprPtr& start_expr,
-                       const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& stop_expr,
-                       const ExprPtr& n_total, const SavedSubstitution& prev_loop_sub, const Span& sp) {
+                       const ExprPtr& step_expr, int64_t step, const ExprPtr& chunk_expr,
+                       const ExprPtr& stop_expr, const ExprPtr& n_total,
+                       const SavedSubstitution& prev_loop_sub, const Span& sp) {
     auto zero = MakeConstIndex(0, sp);
     auto one = MakeConstIndex(1, sp);
 
@@ -671,12 +672,13 @@ class ChunkedLoopSplitter : public IRMutator {
         std::make_shared<ScalarType>(DataType::INDEX), sp);
 
     // idx = start + (out_var * C + in_var) * step
-    ExprPtr idx_expr = MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr), in_var), step_expr));
+    ExprPtr idx_expr = MakeAdd(
+        start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr, sp), in_var, sp), step_expr, sp), sp);
     substitution_map_[loop_var_key] = idx_expr;
     auto visited_body = VisitStmt(op->body_);
 
-    // Guard: if (idx < stop) { body }
-    auto cond = MakeLt(idx_expr, stop_expr, sp);
+    // Guard: for step > 0 use `idx < stop`, for step < 0 use `idx > stop`.
+    auto cond = step > 0 ? MakeLt(idx_expr, stop_expr, sp) : MakeGt(idx_expr, stop_expr, sp);
     auto if_stmt =
         std::make_shared<IfStmt>(cond, visited_body, std::optional<StmtPtr>{}, std::vector<VarPtr>{}, sp);
 
@@ -702,7 +704,7 @@ class ChunkedLoopSplitter : public IRMutator {
    */
   StmtPtr SplitGuardedWithIterArgs(const ForStmtPtr& op, const Var* loop_var_key,
                                    const std::string& base_name, const std::optional<int>& loop_version,
-                                   const ExprPtr& start_expr, const ExprPtr& step_expr,
+                                   const ExprPtr& start_expr, const ExprPtr& step_expr, int64_t step,
                                    const ExprPtr& chunk_expr, const ExprPtr& stop_expr,
                                    const ExprPtr& n_total, const SavedSubstitution& prev_loop_sub,
                                    const std::vector<SavedSubstitution>& prev_ia_subs, const Span& sp) {
@@ -752,7 +754,8 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     // idx = start + (out_var * C + in_var) * step
-    ExprPtr idx_expr = MakeAdd(start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr), in_var), step_expr));
+    ExprPtr idx_expr = MakeAdd(
+        start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr, sp), in_var, sp), step_expr, sp), sp);
     substitution_map_[loop_var_key] = idx_expr;
     auto visited_body = VisitStmt(op->body_);
 
@@ -761,7 +764,8 @@ class ChunkedLoopSplitter : public IRMutator {
     auto else_yield = std::make_shared<YieldStmt>(std::move(else_yield_values), sp);
 
     // Guarded IfStmt with phi return_vars.
-    auto cond = MakeLt(idx_expr, stop_expr, sp);
+    // For step > 0 use `idx < stop`, for step < 0 use `idx > stop`.
+    auto cond = step > 0 ? MakeLt(idx_expr, stop_expr, sp) : MakeGt(idx_expr, stop_expr, sp);
     auto if_stmt =
         std::make_shared<IfStmt>(cond, visited_body, std::optional<StmtPtr>{else_yield}, if_return_vars, sp);
 

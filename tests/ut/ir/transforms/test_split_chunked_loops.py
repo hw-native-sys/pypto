@@ -1293,6 +1293,77 @@ class TestGuardedPolicy:
 
         ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
 
+    def test_guarded_negative_step(self):
+        """Descending chunked range: guard uses `idx > stop` since step < 0.
+
+        Regression test: the initial implementation built the guard as `idx < stop`
+        unconditionally, which made every iteration of a descending loop a no-op.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(10, 0, -1, chunk=4, chunk_policy="guarded"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        3, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            4,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            # Original guard: 10 + (i_out*4 + i_in) * -1 > 0
+                            # Simplify rearranges stop to the left-hand side.
+                            if -10 < (i_out * 4 + i_in) * -1:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
+    def test_guarded_negative_step_no_iter_args(self):
+        """Descending chunked range without iter_args: guard still uses `idx > stop`."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for _i in pl.range(10, 0, -1, chunk=4, chunk_policy="guarded"):
+                        _tmp = pl.add(x, 1.0)
+                return x
+
+        After = self._split_and_simplify(Input)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out in pl.range(3, attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}):
+                        for i_in in pl.range(4, attrs={"loop_origin": pl.LoopOrigin.ChunkInner}):
+                            if -10 < (i_out * 4 + i_in) * -1:
+                                _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
+                return x_0
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+
     def test_guarded_origin_attrs(self):
         """Guarded mode sets ChunkOuter/ChunkInner attrs and never emits ChunkRemainder."""
 
