@@ -63,12 +63,12 @@ class TestNonParallelCodeBetweenChunks:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         # Parallel chunk 1 → gets InCore after interchange
-                        for i in pl.parallel(4, chunk=2):
+                        for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                         # Non-parallel op → should ALSO get InCore
                         y: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x, 2.0)
                         # Parallel chunk 2 → gets InCore after interchange
-                        for j in pl.parallel(4, chunk=2):
+                        for j in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.add(x, y)
                 return x
 
@@ -104,13 +104,13 @@ class TestNonParallelCodeBetweenChunks:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         # Parallel chunk → gets InCore
-                        for i in pl.parallel(4, chunk=2):
+                        for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                         # Non-parallel range loop with matmul → should get InCore
                         for k in pl.range(2):
                             x = pl.tensor.matmul(x, w)
                         # Parallel chunk → gets InCore
-                        for j in pl.parallel(4, chunk=2):
+                        for j in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                 return x
 
@@ -146,11 +146,11 @@ class TestNonParallelCodeBetweenChunks:
             ) -> pl.Tensor[[8, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
-                        for i in pl.parallel(4, chunk=2):
+                        for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                         # Straight-line op between chunks
                         y: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x, 2.0)
-                        for j in pl.parallel(4, chunk=2):
+                        for j in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.add(x, y)
                 return x
 
@@ -196,11 +196,11 @@ class TestNestedForStmtRecursion:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
                         for c in pl.range(2):
-                            for i in pl.parallel(4, chunk=2):
+                            for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                                 x = pl.tensor.adds(x, 1.0)
                             # Non-parallel op deep inside nested range
                             y: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x, 3.0)
-                            for j in pl.parallel(4, chunk=2):
+                            for j in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                                 x = pl.tensor.add(x, y)
                 return x
 
@@ -233,7 +233,7 @@ class TestNestedForStmtRecursion:
             ) -> pl.Tensor[[8, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
-                        for i in pl.parallel(4, chunk=2):
+                        for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                         x = pl.tensor.muls(x, 2.0)
                 return x
@@ -264,13 +264,13 @@ class TestNestedForStmtRecursion:
             ) -> pl.Tensor[[8, 64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for b in pl.range(0, 8, 4):
-                        for i in pl.parallel(4, chunk=2):
+                        for i in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                         # Multiple non-parallel ops in sequence
                         y: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x, 2.0)
                         z: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.add(x, y)
                         x = pl.tensor.muls(z, 0.5)
-                        for j in pl.parallel(4, chunk=2):
+                        for j in pl.parallel(4, chunk=2, chunk_policy="leading_full"):
                             x = pl.tensor.adds(x, 1.0)
                 return x
 
@@ -335,7 +335,7 @@ class TestHostSideTailOps:
                     [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
                 )
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for i in pl.parallel(0, 4, 1, chunk=2):
+                    for i in pl.parallel(0, 4, 1, chunk=2, chunk_policy="leading_full"):
                         x = pl.tensor.adds(x, 1.0)
                     out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
                 return out_1

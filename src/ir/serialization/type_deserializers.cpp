@@ -473,7 +473,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   if (chunk_config_obj.has_value() && chunk_config_obj->type == msgpack::type::MAP) {
     auto size_obj = ctx.GetFieldObj(*chunk_config_obj, "size");
     auto chunk_size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(size_obj, zone));
-    ChunkPolicy chunk_policy = ChunkPolicy::LeadingFull;
+    ChunkPolicy chunk_policy = ChunkPolicy::Guarded;
     auto policy_obj = GetOptionalFieldObj(*chunk_config_obj, "policy", ctx);
     if (policy_obj.has_value()) {
       chunk_policy = static_cast<ChunkPolicy>(policy_obj->via.u64);

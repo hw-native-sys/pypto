@@ -792,7 +792,10 @@ class ChunkPolicy(enum.Enum):
     """
 
     LeadingFull = ...
-    """Full chunks first, smaller remainder at end."""
+    """Full chunks first, smaller remainder at end (splits into main + remainder kernels)."""
+
+    Guarded = ...
+    """Single loop over ceil(N/C) chunks with per-iteration if-guard (default)."""
 
 class ChunkConfig:
     """Chunk configuration for parallel loop splitting."""
@@ -803,12 +806,12 @@ class ChunkConfig:
     policy: Final[ChunkPolicy]
     """Chunk distribution policy."""
 
-    def __init__(self, size: Expr, policy: ChunkPolicy = ChunkPolicy.LeadingFull) -> None:
+    def __init__(self, size: Expr, policy: ChunkPolicy = ChunkPolicy.Guarded) -> None:
         """Create a chunk configuration.
 
         Args:
             size: Chunk size expression
-            policy: Chunk distribution policy (default: LeadingFull)
+            policy: Chunk distribution policy (default: Guarded)
         """
 
 class LoopOrigin(enum.Enum):
@@ -1702,7 +1705,7 @@ class ForStmt(Stmt):
         span: Span,
         kind: ForKind = ForKind.Sequential,
         chunk_size: Expr | None = None,
-        chunk_policy: ChunkPolicy = ChunkPolicy.LeadingFull,
+        chunk_policy: ChunkPolicy = ChunkPolicy.Guarded,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
     ) -> None:
         """Create a for loop statement.
@@ -1718,7 +1721,7 @@ class ForStmt(Stmt):
             span: Source location
             kind: Loop kind (default: Sequential)
             chunk_size: Optional chunk size for loop chunking
-            chunk_policy: Chunk distribution policy (default: LeadingFull)
+            chunk_policy: Chunk distribution policy (default: Guarded)
             attrs: Loop-level attributes (default: empty)
         """
 
@@ -2435,7 +2438,7 @@ class IRBuilder:
         span: Span,
         kind: ForKind = ForKind.Sequential,
         chunk_size: Expr | None = None,
-        chunk_policy: ChunkPolicy = ChunkPolicy.LeadingFull,
+        chunk_policy: ChunkPolicy = ChunkPolicy.Guarded,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
     ) -> None:
         """Begin building a for loop.
@@ -2448,7 +2451,7 @@ class IRBuilder:
             span: Source location for loop definition
             kind: Loop kind (default: Sequential)
             chunk_size: Optional chunk size for loop chunking
-            chunk_policy: Chunk distribution policy (default: LeadingFull)
+            chunk_policy: Chunk distribution policy (default: Guarded)
             attrs: Loop-level attributes (default: empty)
         """
 

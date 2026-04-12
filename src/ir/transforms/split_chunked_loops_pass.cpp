@@ -284,29 +284,6 @@ class ChunkedLoopSplitter : public IRMutator {
     ExprPtr start_expr = VisitExpr(op->start_);
     ExprPtr stop_expr = VisitExpr(op->stop_);
 
-    // Compute n_full and n_rem as ExprPtr.
-    // When start/stop are constants, produce ConstInt nodes directly for cleaner IR.
-    // When dynamic, produce FloorDiv/FloorMod expression trees.
-    ExprPtr n_full;
-    ExprPtr n_rem;
-    auto start_c = TryGetConstInt(start_expr);
-    auto stop_c = TryGetConstInt(stop_expr);
-    if (start_c && stop_c) {
-      int64_t tc = ComputeStaticTripCount(*start_c, *stop_c, step);
-      n_full = MakeConstIndex(tc / chunk_size, sp);
-      n_rem = MakeConstIndex(tc % chunk_size, sp);
-    } else {
-      ExprPtr trip_count = BuildTripCountExpr(start_expr, stop_expr, step, sp);
-      n_full = MakeFloorDiv(trip_count, chunk_expr, sp);
-      n_rem = MakeFloorMod(trip_count, chunk_expr, sp);
-    }
-
-    // Determine which loops to emit. Dynamic bounds always emit both.
-    auto n_full_c = TryGetConstInt(n_full);
-    auto n_rem_c = TryGetConstInt(n_rem);
-    bool emit_full = !n_full_c || *n_full_c > 0;
-    bool emit_rem = !n_rem_c || *n_rem_c > 0;
-
     const Var* loop_var_key = op->loop_var_.get();
     auto loop_name = auto_name::Parse(op->loop_var_->name_hint_);
     std::string base_name = loop_name.base_name;
@@ -318,26 +295,91 @@ class ChunkedLoopSplitter : public IRMutator {
     }
 
     bool has_iter_args = !op->iter_args_.empty();
+    ChunkPolicy policy = op->chunk_config_->policy;
 
-    if (!has_iter_args) {
-      return SplitSimple(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr, chunk_expr,
-                         n_full, n_rem, emit_full, emit_rem, prev_loop_sub, sp);
+    if (policy == ChunkPolicy::LeadingFull) {
+      // Compute n_full and n_rem as ExprPtr.
+      ExprPtr n_full;
+      ExprPtr n_rem;
+      auto start_c = TryGetConstInt(start_expr);
+      auto stop_c = TryGetConstInt(stop_expr);
+      if (start_c && stop_c) {
+        int64_t tc = ComputeStaticTripCount(*start_c, *stop_c, step);
+        n_full = MakeConstIndex(tc / chunk_size, sp);
+        n_rem = MakeConstIndex(tc % chunk_size, sp);
+      } else {
+        ExprPtr trip_count = BuildTripCountExpr(start_expr, stop_expr, step, sp);
+        n_full = MakeFloorDiv(trip_count, chunk_expr, sp);
+        n_rem = MakeFloorMod(trip_count, chunk_expr, sp);
+      }
+
+      auto n_full_c = TryGetConstInt(n_full);
+      auto n_rem_c = TryGetConstInt(n_rem);
+      bool emit_full = !n_full_c || *n_full_c > 0;
+      bool emit_rem = !n_rem_c || *n_rem_c > 0;
+
+      if (!has_iter_args) {
+        return SplitLeadingFull(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr,
+                                chunk_expr, n_full, n_rem, emit_full, emit_rem, prev_loop_sub, sp);
+      }
+
+      // Zero-trip optimization: when statically known, skip loop emission entirely
+      if (n_full_c && n_rem_c && *n_full_c == 0 && *n_rem_c == 0) {
+        INTERNAL_CHECK_SPAN(op->return_vars_.size() == op->iter_args_.size(), op->span_)
+            << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
+        for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+          substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
+        }
+        RestoreSubstitution(prev_loop_sub);
+        RestoreSubstitutions(prev_ia_subs);
+        return SeqStmts::Flatten(std::vector<StmtPtr>{}, sp);
+      }
+
+      return SplitLeadingFullWithIterArgs(op, loop_var_key, base_name, loop_name.version, start_expr,
+                                          step_expr, chunk_expr, n_full, n_rem, emit_full, emit_rem,
+                                          prev_loop_sub, prev_ia_subs, sp);
     }
 
-    // Zero-trip optimization: when statically known, skip loop emission entirely
-    if (n_full_c && n_rem_c && *n_full_c == 0 && *n_rem_c == 0) {
-      INTERNAL_CHECK_SPAN(op->return_vars_.size() == op->iter_args_.size(), op->span_)
-          << "ForStmt return_vars/iter_args size mismatch in zero-trip chunk split";
-      for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-        substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
+    INTERNAL_CHECK_SPAN(policy == ChunkPolicy::Guarded, op->span_)
+        << "Unexpected ChunkPolicy in SplitChunkedLoops: " << ChunkPolicyToString(policy);
+
+    // Compute n_total = ceil(trip_count / chunk_size).
+    ExprPtr n_total;
+    auto start_c = TryGetConstInt(start_expr);
+    auto stop_c = TryGetConstInt(stop_expr);
+    if (start_c && stop_c) {
+      int64_t tc = ComputeStaticTripCount(*start_c, *stop_c, step);
+      int64_t nt = (tc + chunk_size - 1) / chunk_size;
+      n_total = MakeConstIndex(nt, sp);
+    } else {
+      ExprPtr trip_count = BuildTripCountExpr(start_expr, stop_expr, step, sp);
+      ExprPtr numerator = MakeAdd(trip_count, MakeConstIndex(chunk_size - 1, sp), sp);
+      n_total = MakeFloorDiv(numerator, chunk_expr, sp);
+    }
+
+    auto n_total_c = TryGetConstInt(n_total);
+    bool emit = !n_total_c || *n_total_c > 0;
+
+    if (!emit) {
+      // Statically zero iterations: emit nothing and forward iter_arg initial values.
+      if (has_iter_args) {
+        INTERNAL_CHECK_SPAN(op->return_vars_.size() == op->iter_args_.size(), op->span_)
+            << "ForStmt return_vars/iter_args size mismatch in zero-trip guarded chunk split";
+        for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+          substitution_map_[op->return_vars_[i].get()] = VisitExpr(op->iter_args_[i]->initValue_);
+        }
       }
       RestoreSubstitution(prev_loop_sub);
       RestoreSubstitutions(prev_ia_subs);
       return SeqStmts::Flatten(std::vector<StmtPtr>{}, sp);
     }
 
-    return SplitWithIterArgs(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr,
-                             chunk_expr, n_full, n_rem, emit_full, emit_rem, prev_loop_sub, prev_ia_subs, sp);
+    if (!has_iter_args) {
+      return SplitGuarded(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr, step,
+                          chunk_expr, stop_expr, n_total, prev_loop_sub, sp);
+    }
+    return SplitGuardedWithIterArgs(op, loop_var_key, base_name, loop_name.version, start_expr, step_expr,
+                                    step, chunk_expr, stop_expr, n_total, prev_loop_sub, prev_ia_subs, sp);
   }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -417,11 +459,11 @@ class ChunkedLoopSplitter : public IRMutator {
    *
    * n_full and n_rem are ExprPtr — either ConstInt or dynamic expressions.
    */
-  StmtPtr SplitSimple(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
-                      const std::optional<int>& loop_version, const ExprPtr& start_expr,
-                      const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& n_full,
-                      const ExprPtr& n_rem, bool emit_full, bool emit_rem,
-                      const SavedSubstitution& prev_loop_sub, const Span& sp) {
+  StmtPtr SplitLeadingFull(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
+                           const std::optional<int>& loop_version, const ExprPtr& start_expr,
+                           const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& n_full,
+                           const ExprPtr& n_rem, bool emit_full, bool emit_rem,
+                           const SavedSubstitution& prev_loop_sub, const Span& sp) {
     auto zero = MakeConstIndex(0, sp);
     auto one = MakeConstIndex(1, sp);
     std::vector<StmtPtr> result_stmts;
@@ -479,12 +521,12 @@ class ChunkedLoopSplitter : public IRMutator {
    *
    * n_full and n_rem are ExprPtr — either ConstInt or dynamic expressions.
    */
-  StmtPtr SplitWithIterArgs(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
-                            const std::optional<int>& loop_version, const ExprPtr& start_expr,
-                            const ExprPtr& step_expr, const ExprPtr& chunk_expr, const ExprPtr& n_full,
-                            const ExprPtr& n_rem, bool emit_full, bool emit_rem,
-                            const SavedSubstitution& prev_loop_sub,
-                            const std::vector<SavedSubstitution>& prev_ia_subs, const Span& sp) {
+  StmtPtr SplitLeadingFullWithIterArgs(const ForStmtPtr& op, const Var* loop_var_key,
+                                       const std::string& base_name, const std::optional<int>& loop_version,
+                                       const ExprPtr& start_expr, const ExprPtr& step_expr,
+                                       const ExprPtr& chunk_expr, const ExprPtr& n_full, const ExprPtr& n_rem,
+                                       bool emit_full, bool emit_rem, const SavedSubstitution& prev_loop_sub,
+                                       const std::vector<SavedSubstitution>& prev_ia_subs, const Span& sp) {
     auto zero = MakeConstIndex(0, sp);
     auto one = MakeConstIndex(1, sp);
     std::vector<StmtPtr> result_stmts;
@@ -604,6 +646,156 @@ class ChunkedLoopSplitter : public IRMutator {
     RestoreSubstitutions(prev_ia_subs);
 
     return MakeResultStmt(result_stmts, sp);
+  }
+
+  /**
+   * @brief Guarded split without iter_args.
+   *
+   * Emits a single outer loop over ceil(trip_count / C) chunks and an inner loop
+   * of size C, with the body wrapped in `if (idx < stop)` so out-of-range
+   * iterations become no-ops. This preserves a single-kernel outline for dynamic
+   * bounds and loops with cross-iteration state.
+   */
+  StmtPtr SplitGuarded(const ForStmtPtr& op, const Var* loop_var_key, const std::string& base_name,
+                       const std::optional<int>& loop_version, const ExprPtr& start_expr,
+                       const ExprPtr& step_expr, int64_t step, const ExprPtr& chunk_expr,
+                       const ExprPtr& stop_expr, const ExprPtr& n_total,
+                       const SavedSubstitution& prev_loop_sub, const Span& sp) {
+    auto zero = MakeConstIndex(0, sp);
+    auto one = MakeConstIndex(1, sp);
+
+    auto out_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto in_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+    // idx = start + (out_var * C + in_var) * step
+    ExprPtr idx_expr = MakeAdd(
+        start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr, sp), in_var, sp), step_expr, sp), sp);
+    substitution_map_[loop_var_key] = idx_expr;
+    auto visited_body = VisitStmt(op->body_);
+
+    // Guard: for step > 0 use `idx < stop`, for step < 0 use `idx > stop`.
+    auto cond = step > 0 ? MakeLt(idx_expr, stop_expr, sp) : MakeGt(idx_expr, stop_expr, sp);
+    auto if_stmt =
+        std::make_shared<IfStmt>(cond, visited_body, std::optional<StmtPtr>{}, std::vector<VarPtr>{}, sp);
+
+    auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{},
+                                               if_stmt, std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
+                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+    auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_total, one, std::vector<IterArgPtr>{},
+                                               inner_for, std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
+                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+
+    RestoreSubstitution(prev_loop_sub);
+    return outer_for;
+  }
+
+  /**
+   * @brief Guarded split with iter_args (SSA propagation through IfStmt phi).
+   *
+   * Wraps the body in an IfStmt whose return_vars act as phi nodes. The then
+   * branch ends with the user body's own YieldStmt; the else branch yields the
+   * unchanged inner iter_args. The inner loop's trailing YieldStmt references
+   * the IfStmt's phi return_vars, threading loop-carried state through both
+   * guarded and skipped iterations.
+   */
+  StmtPtr SplitGuardedWithIterArgs(const ForStmtPtr& op, const Var* loop_var_key,
+                                   const std::string& base_name, const std::optional<int>& loop_version,
+                                   const ExprPtr& start_expr, const ExprPtr& step_expr, int64_t step,
+                                   const ExprPtr& chunk_expr, const ExprPtr& stop_expr,
+                                   const ExprPtr& n_total, const SavedSubstitution& prev_loop_sub,
+                                   const std::vector<SavedSubstitution>& prev_ia_subs, const Span& sp) {
+    auto zero = MakeConstIndex(0, sp);
+    auto one = MakeConstIndex(1, sp);
+
+    auto out_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkOuterQualifier(), "idx", loop_version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto in_var = std::make_shared<Var>(
+        auto_name::BuildName(base_name, auto_name::ChunkInnerQualifier(), "idx", loop_version),
+        std::make_shared<ScalarType>(DataType::INDEX), sp);
+
+    std::vector<IterArgPtr> outer_iter_args;
+    std::vector<VarPtr> outer_return_vars;
+    std::vector<IterArgPtr> inner_iter_args;
+    std::vector<VarPtr> inner_return_vars;
+    std::vector<VarPtr> if_return_vars;
+
+    for (const auto& ia : op->iter_args_) {
+      auto visited_init = VisitExpr(ia->initValue_);
+      auto ia_name = auto_name::Parse(ia->name_hint_);
+      auto outer_ia = std::make_shared<IterArg>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "iter", ia_name.version),
+          ia->GetType(), visited_init, ia->span_);
+      auto outer_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkOuterQualifier(), "rv", ia_name.version),
+          ia->GetType(), ia->span_);
+      outer_iter_args.push_back(outer_ia);
+      outer_return_vars.push_back(outer_rv);
+
+      auto inner_ia = std::make_shared<IterArg>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "iter", ia_name.version),
+          ia->GetType(), ExprPtr(outer_ia), ia->span_);
+      auto inner_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkInnerQualifier(), "rv", ia_name.version),
+          ia->GetType(), ia->span_);
+      inner_iter_args.push_back(inner_ia);
+      inner_return_vars.push_back(inner_rv);
+
+      auto if_rv = std::make_shared<Var>(
+          auto_name::BuildName(ia_name.base_name, auto_name::ChunkGuardQualifier(), "rv", ia_name.version),
+          ia->GetType(), ia->span_);
+      if_return_vars.push_back(if_rv);
+
+      substitution_map_[ia.get()] = inner_ia;
+    }
+
+    // idx = start + (out_var * C + in_var) * step
+    ExprPtr idx_expr = MakeAdd(
+        start_expr, MakeMul(MakeAdd(MakeMul(out_var, chunk_expr, sp), in_var, sp), step_expr, sp), sp);
+    substitution_map_[loop_var_key] = idx_expr;
+    auto visited_body = VisitStmt(op->body_);
+
+    // Else branch: pass through current inner iter_args unchanged.
+    std::vector<ExprPtr> else_yield_values(inner_iter_args.begin(), inner_iter_args.end());
+    auto else_yield = std::make_shared<YieldStmt>(std::move(else_yield_values), sp);
+
+    // Guarded IfStmt with phi return_vars.
+    // For step > 0 use `idx < stop`, for step < 0 use `idx > stop`.
+    auto cond = step > 0 ? MakeLt(idx_expr, stop_expr, sp) : MakeGt(idx_expr, stop_expr, sp);
+    auto if_stmt =
+        std::make_shared<IfStmt>(cond, visited_body, std::optional<StmtPtr>{else_yield}, if_return_vars, sp);
+
+    // Inner loop body: SeqStmts { IfStmt, YieldStmt(if_return_vars) }
+    auto inner_trailing_yield =
+        std::make_shared<YieldStmt>(std::vector<ExprPtr>(if_return_vars.begin(), if_return_vars.end()), sp);
+    auto inner_body = SeqStmts::Flatten(std::vector<StmtPtr>{if_stmt, inner_trailing_yield}, sp);
+
+    auto inner_for = std::make_shared<ForStmt>(in_var, zero, chunk_expr, one, inner_iter_args, inner_body,
+                                               inner_return_vars, sp, op->kind_, std::nullopt,
+                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+
+    // Outer loop body: SeqStmts { inner_for, YieldStmt(inner_return_vars) }
+    auto outer_yield = std::make_shared<YieldStmt>(
+        std::vector<ExprPtr>(inner_return_vars.begin(), inner_return_vars.end()), sp);
+    auto outer_body = SeqStmts::Flatten(std::vector<StmtPtr>{inner_for, outer_yield}, sp);
+
+    auto outer_for = std::make_shared<ForStmt>(out_var, zero, n_total, one, outer_iter_args, outer_body,
+                                               outer_return_vars, sp, op->kind_, std::nullopt,
+                                               MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+
+    INTERNAL_CHECK_SPAN(op->return_vars_.size() == outer_return_vars.size(), op->span_)
+        << "SplitChunkedLoops guarded produced mismatched return vars";
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      substitution_map_[op->return_vars_[i].get()] = outer_return_vars[i];
+    }
+
+    RestoreSubstitution(prev_loop_sub);
+    RestoreSubstitutions(prev_ia_subs);
+    return outer_for;
   }
 };
 

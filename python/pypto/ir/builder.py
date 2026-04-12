@@ -111,7 +111,7 @@ class IRBuilder:
         span: ir.Span | None = None,
         kind: ir.ForKind = ir.ForKind.Sequential,
         chunk_size: int | ir.Expr | None = None,
-        chunk_policy: str = "leading_full",
+        chunk_policy: str = "guarded",
         attrs: dict[str, object] | None = None,
     ) -> Iterator["ForLoopBuilder"]:
         """Context manager for building for loops.
@@ -124,7 +124,7 @@ class IRBuilder:
             span: Optional explicit span. If None, automatically captured.
             kind: Loop kind (default: Sequential)
             chunk_size: Optional chunk size for loop chunking
-            chunk_policy: Chunk distribution policy (default: "leading_full")
+            chunk_policy: Chunk distribution policy (default: "guarded")
             attrs: Loop-level attributes (key-value metadata, default: empty)
 
         Yields:
@@ -148,8 +148,14 @@ class IRBuilder:
         # Normalize chunk_size if provided
         chunk_size_expr = _normalize_expr(chunk_size, begin_span) if chunk_size is not None else None
 
-        if chunk_policy != "leading_full":
-            raise ValueError(f"Unsupported chunk_policy: {chunk_policy!r}, expected 'leading_full'")
+        if chunk_policy == "leading_full":
+            policy_enum = ir.ChunkPolicy.LeadingFull
+        elif chunk_policy == "guarded":
+            policy_enum = ir.ChunkPolicy.Guarded
+        else:
+            raise ValueError(
+                f"Unsupported chunk_policy: {chunk_policy!r}, expected 'leading_full' or 'guarded'"
+            )
 
         attrs_list = list((attrs or {}).items())
         self._builder.begin_for_loop(
@@ -160,7 +166,7 @@ class IRBuilder:
             begin_span,
             kind,
             chunk_size_expr,
-            ir.ChunkPolicy.LeadingFull,
+            policy_enum,
             attrs_list,
         )
         builder_obj = ForLoopBuilder(self)

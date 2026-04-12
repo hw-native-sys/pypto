@@ -98,7 +98,7 @@ def build_qwen3_scope3_program(
                         resid1_tile = pl.assemble(resid1_tile, zero_resid1, [0, o0])
 
                     # Output projection: attn_out × wo, tiled by Q_OUT_CHUNK.
-                    for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8):
+                    for ob in pl.parallel(0, Q_OUT_BLOCKS, 1, chunk=8, chunk_policy="leading_full"):
                         o0 = ob * Q_OUT_CHUNK
                         o_acc = pl.full([BATCH_TILE, Q_OUT_CHUNK], dtype=pl.FP32, value=0.0)
                         for kb in pl.range(HIDDEN_BLOCKS):
@@ -159,7 +159,7 @@ def build_qwen3_scope3_program(
                         mlp_chunk = pl.mul(pl.mul(gate_acc, sigmoid), up_acc)
                         mlp_chunk_bf16 = pl.cast(mlp_chunk, target_type=pl.BF16)
 
-                        for dob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4):
+                        for dob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                             d0 = dob * K_CHUNK
                             for doff in pl.range(0, K_CHUNK, DOWN_OUT_CHUNK):
                                 d1 = d0 + doff
@@ -169,7 +169,7 @@ def build_qwen3_scope3_program(
                                 down_proj_tile = pl.assemble(down_proj_tile, down_next, [0, d1])
 
                     # Final residual: down_proj + resid1, write to output.
-                    for ob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4):
+                    for ob in pl.parallel(0, HIDDEN_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                         o0 = ob * K_CHUNK
                         down_acc = pl.add(
                             pl.slice(down_proj_tile, [BATCH_TILE, K_CHUNK], [0, o0]),
