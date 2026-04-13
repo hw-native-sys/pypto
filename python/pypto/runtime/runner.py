@@ -667,7 +667,7 @@ def _execute_on_device(
                 sys.path.insert(0, p)
 
     CodeRunner = importlib.import_module("code_runner").CodeRunner
-    KernelCompiler = importlib.import_module("kernel_compiler").KernelCompiler
+    KernelCompiler = importlib.import_module("simpler.kernel_compiler").KernelCompiler
     RuntimeBuilder = importlib.import_module("runtime_builder").RuntimeBuilder
 
     _install_golden_inputs_patch(CodeRunner)

@@ -383,7 +383,7 @@ def prebuild_binaries(
 
     try:
         code_runner_mod = importlib.import_module("code_runner")
-        kernel_compiler_mod = importlib.import_module("kernel_compiler")
+        kernel_compiler_mod = importlib.import_module("simpler.kernel_compiler")
         runtime_builder_mod = importlib.import_module("runtime_builder")
     except ImportError:
         return 0
