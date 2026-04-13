@@ -346,19 +346,27 @@ class IterArgReuseOptimizer {
   // from that tile.load. The loop hop is what signals the In/Out are meant to
   // share storage (an accumulator); a plain load→store pair does not.
 
-  /// Check that a tile.load call reads the full tensor (all offsets zero and
-  /// load shape matches the tensor shape dimension-by-dimension).
+  /// Check that a tile.load call reads the full tensor — all offsets zero and
+  /// both `shapes` and `valid_shapes` match the tensor shape dimension-by-
+  /// dimension. `valid_shapes` differs from `shapes` for masked/padded loads,
+  /// which must NOT be treated as full loads.
   static bool IsFullTensorLoad(const CallPtr& load_call, const TensorTypePtr& tensor_type) {
-    if (!load_call || load_call->args_.size() < 3 || !tensor_type) return false;
+    if (!load_call || load_call->args_.size() < 4 || !tensor_type) return false;
     auto offsets = As<MakeTuple>(load_call->args_[1]);
     auto load_shape = As<MakeTuple>(load_call->args_[2]);
-    if (!offsets || !load_shape) return false;
+    auto valid_shape = As<MakeTuple>(load_call->args_[3]);
+    if (!offsets || !load_shape || !valid_shape) return false;
     const size_t ndim = tensor_type->shape_.size();
-    if (offsets->elements_.size() != ndim || load_shape->elements_.size() != ndim) return false;
+    if (offsets->elements_.size() != ndim || load_shape->elements_.size() != ndim ||
+        valid_shape->elements_.size() != ndim) {
+      return false;
+    }
     for (size_t i = 0; i < ndim; ++i) {
       auto want = std::dynamic_pointer_cast<const ConstInt>(tensor_type->shape_[i]);
-      auto got = std::dynamic_pointer_cast<const ConstInt>(load_shape->elements_[i]);
-      if (!want || !got || want->value_ != got->value_) return false;
+      auto got_load = std::dynamic_pointer_cast<const ConstInt>(load_shape->elements_[i]);
+      auto got_valid = std::dynamic_pointer_cast<const ConstInt>(valid_shape->elements_[i]);
+      if (!want || !got_load || !got_valid) return false;
+      if (want->value_ != got_load->value_ || want->value_ != got_valid->value_) return false;
       if (!IsConstValue(offsets->elements_[i], 0)) return false;
     }
     return true;
@@ -541,16 +549,23 @@ class IterArgReuseOptimizer {
     return c.count;
   }
 
-  /// Detects standalone InCore calls (outside any iter-arg-carrying loop)
-  /// where the Out arg is a local `tensor.create` and the In arg's only use
-  /// in the function is this call. Records matching merges into `results`.
-  class StandaloneCallAnalyzer : public IRVisitor {
+  /// Record of a standalone InCore call site. Owns references to the call's
+  /// orchestration-function context so that we can test each candidate merge
+  /// against every call site of the same callee before recording it.
+  struct StandaloneCallSite {
+    const FunctionBodyIndex* body_index;
+    AssignStmtPtr assign_stmt;
+    CallPtr call;
+  };
+
+  /// Collects standalone InCore calls (those outside any iter-arg-carrying
+  /// loop) in an orchestration function body, keyed by callee name.
+  class StandaloneCallCollector : public IRVisitor {
    public:
-    StandaloneCallAnalyzer(
-        const std::unordered_set<std::string>& incore_names,
-        const std::unordered_map<std::string, std::vector<std::pair<size_t, size_t>>>& pairings,
-        const FunctionBodyIndex& body_index, std::unordered_map<std::string, AnalysisResult>& results)
-        : incore_names_(incore_names), pairings_(pairings), body_index_(body_index), results_(results) {}
+    StandaloneCallCollector(const std::unordered_set<std::string>& incore_names,
+                            const FunctionBodyIndex& body_index,
+                            std::unordered_map<std::string, std::vector<StandaloneCallSite>>& out)
+        : incore_names_(incore_names), body_index_(body_index), out_(out) {}
 
    protected:
     void VisitStmt_(const ForStmtPtr& op) override {
@@ -566,54 +581,40 @@ class IterArgReuseOptimizer {
       inside_iter_loop_ = prev;
     }
     void VisitStmt_(const AssignStmtPtr& op) override {
-      if (!inside_iter_loop_) TryMatch(op);
+      if (!inside_iter_loop_) {
+        if (auto call = As<Call>(op->value_)) {
+          auto fname = GetCallFuncName(call);
+          if (!fname.empty() && incore_names_.count(fname)) {
+            out_[fname].push_back({&body_index_, op, call});
+          }
+        }
+      }
       IRVisitor::VisitStmt_(op);
     }
 
    private:
-    void TryMatch(const AssignStmtPtr& op) {
-      auto call = As<Call>(op->value_);
-      if (!call) return;
-      auto fname = GetCallFuncName(call);
-      if (fname.empty() || !incore_names_.count(fname)) return;
-      auto pair_it = pairings_.find(fname);
-      if (pair_it == pairings_.end() || pair_it->second.empty()) return;
-      if (results_.find(fname) != results_.end()) return;  // LoopAnalyzer already handled
-
-      AnalysisResult partial;
-      partial.func_name = fname;
-      std::unordered_set<size_t> seen_out;
-      std::unordered_set<size_t> seen_in;
-
-      for (const auto& [in_idx, out_idx] : pair_it->second) {
-        if (out_idx >= call->args_.size() || in_idx >= call->args_.size()) continue;
-        auto out_var = As<Var>(call->args_[out_idx]);
-        auto in_var = As<Var>(call->args_[in_idx]);
-        if (!out_var || !in_var) continue;
-        if (!body_index_.local_creates.count(out_var.get())) continue;
-
-        // Safety: the In arg's sole use in this function must be this call's
-        // argument. Compare the precomputed whole-function use count against
-        // the number of references within this call expression.
-        auto use_it = body_index_.use_count.find(in_var.get());
-        size_t total_refs = use_it == body_index_.use_count.end() ? 0 : use_it->second;
-        size_t self_refs = CountVarRefs(op->value_, in_var.get());
-        if (total_refs != self_refs) continue;
-
-        if (!seen_out.insert(out_idx).second) continue;
-        if (!seen_in.insert(in_idx).second) continue;
-        partial.merges.push_back({out_idx, in_idx});
-      }
-
-      if (!partial.merges.empty()) results_[fname] = std::move(partial);
-    }
-
     const std::unordered_set<std::string>& incore_names_;
-    const std::unordered_map<std::string, std::vector<std::pair<size_t, size_t>>>& pairings_;
     const FunctionBodyIndex& body_index_;
-    std::unordered_map<std::string, AnalysisResult>& results_;
+    std::unordered_map<std::string, std::vector<StandaloneCallSite>>& out_;
     bool inside_iter_loop_ = false;
   };
+
+  /// Check whether a (in_idx, out_idx) pairing is safe to apply at `site`:
+  /// the Out arg is a locally-allocated `tensor.create`, and the In arg's
+  /// sole use in the enclosing orch function is this call.
+  static bool IsPairingSafeAtCallSite(const StandaloneCallSite& site, size_t in_idx, size_t out_idx) {
+    const auto& call = site.call;
+    if (out_idx >= call->args_.size() || in_idx >= call->args_.size()) return false;
+    auto out_var = As<Var>(call->args_[out_idx]);
+    auto in_var = As<Var>(call->args_[in_idx]);
+    if (!out_var || !in_var) return false;
+    if (!site.body_index->local_creates.count(out_var.get())) return false;
+
+    auto use_it = site.body_index->use_count.find(in_var.get());
+    size_t total_refs = use_it == site.body_index->use_count.end() ? 0 : use_it->second;
+    size_t self_refs = CountVarRefs(site.assign_stmt->value_, in_var.get());
+    return total_refs == self_refs;
+  }
 
   /// Analyze orchestration functions for iter-arg reuse opportunities.
   std::unordered_map<std::string, AnalysisResult> Analyze(
@@ -633,14 +634,49 @@ class IterArgReuseOptimizer {
     }
     auto results = analyzer.results();
 
-    // Standalone calls (outside any iter-arg loop). Each callee's merges are
-    // recorded at most once; LoopAnalyzer's entries take precedence.
+    // Collect all standalone call sites (preserving body_index references per
+    // orchestration function).
+    std::vector<FunctionBodyIndex> body_indices;
+    body_indices.reserve(program->functions_.size());
+    std::unordered_map<std::string, std::vector<StandaloneCallSite>> standalone_sites;
     for (const auto& [gvar, func] : program->functions_) {
       if (incore_names.count(func->name_)) continue;
-      FunctionBodyIndex body_index;
+      body_indices.emplace_back();
+      auto& body_index = body_indices.back();
       body_index.VisitStmt(func->body_);
-      StandaloneCallAnalyzer s_analyzer(incore_names, in_out_pairings, body_index, results);
-      s_analyzer.VisitStmt(func->body_);
+      StandaloneCallCollector collector(incore_names, body_index, standalone_sites);
+      collector.VisitStmt(func->body_);
+    }
+
+    // For each callee with standalone call sites, only record a merge if
+    // EVERY standalone call site satisfies the pairing's safety preconditions.
+    // Caller-dependent safety cannot be cached per-callee otherwise: the
+    // rewrite applies globally to every call of that function.
+    for (const auto& [fname, sites] : standalone_sites) {
+      if (results.count(fname)) continue;  // LoopAnalyzer already handled
+      auto pair_it = in_out_pairings.find(fname);
+      if (pair_it == in_out_pairings.end() || pair_it->second.empty()) continue;
+
+      AnalysisResult partial;
+      partial.func_name = fname;
+      std::unordered_set<size_t> seen_out;
+      std::unordered_set<size_t> seen_in;
+
+      for (const auto& [in_idx, out_idx] : pair_it->second) {
+        bool all_safe = true;
+        for (const auto& site : sites) {
+          if (!IsPairingSafeAtCallSite(site, in_idx, out_idx)) {
+            all_safe = false;
+            break;
+          }
+        }
+        if (!all_safe) continue;
+        if (!seen_out.insert(out_idx).second) continue;
+        if (!seen_in.insert(in_idx).second) continue;
+        partial.merges.push_back({out_idx, in_idx});
+      }
+
+      if (!partial.merges.empty()) results[fname] = std::move(partial);
     }
     return results;
   }

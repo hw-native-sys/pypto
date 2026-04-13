@@ -351,6 +351,48 @@ class TestIterArgReuse:
         # corrupt it. Expected: Before is unchanged.
         ir.assert_structural_equal(After, Before)
 
+    def test_standalone_call_unsafe_sibling_blocks_merge(self):
+        """When the same callee has multiple standalone call sites, the merge
+        must only apply if EVERY site is safe. One unsafe sibling (here: the
+        second call reuses `acc` after a later call) must block the rewrite —
+        otherwise the rewrite corrupts the sibling's In arg.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc__tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                for i, (a,) in pl.range(n, init_values=(acc__tile,)):
+                    next_a: pl.Tile[[64], pl.FP32] = pl.tile.add(a, a)
+                    final = pl.yield_(next_a)
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(final, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # First call: acc is read again below → unsafe to merge.
+                ret_a: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                _first: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, n, ret_a)
+                # Second call: uses acc again (this is the "unsafe" sibling).
+                ret_b: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, n, ret_b)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        # Any rewrite here would silently corrupt at least one of the two
+        # callers, so the pass must leave Before untouched.
+        ir.assert_structural_equal(After, Before)
+
     def test_standalone_call_without_iter_arg_chain_not_merged(self):
         """A standalone call whose callee is a plain load→store (no iter_arg
         chain) is NOT merged: we require semantic evidence (an iter_arg chain)
