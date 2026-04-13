@@ -1974,7 +1974,7 @@ class TestSpmdLaunch:
     """Test SPMD launch spec generation in orchestration codegen."""
 
     def test_spmd_launch_core_num(self):
-        """spmd_launch with core_num emits launch_spec.set_core_num."""
+        """spmd_launch with core_num emits launch_spec.set_block_num on 910B."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1998,7 +1998,7 @@ class TestSpmdLaunch:
                 pl.system.spmd_launch(self.kernel, a, output, core_num=8)
 
         code = _generate_orch_code(SpmdProgram)
-        assert "launch_spec.set_core_num(8)" in code
+        assert "launch_spec.set_block_num(8)" in code
         assert "pto2_rt_submit_aiv_task" in code
 
     def test_spmd_launch_core_num_and_sync_start(self):
@@ -2026,7 +2026,7 @@ class TestSpmdLaunch:
                 pl.system.spmd_launch(self.kernel, a, output, core_num=12, sync_start=True)
 
         code = _generate_orch_code(SpmdSyncProgram)
-        assert "launch_spec.set_core_num(12)" in code
+        assert "launch_spec.set_block_num(12)" in code
         assert "launch_spec.set_require_sync_start(true)" in code
 
     def test_spmd_launch_shorthand(self):
@@ -2054,7 +2054,7 @@ class TestSpmdLaunch:
                 pl.spmd_launch(self.kernel, a, output, core_num=4)
 
         code = _generate_orch_code(SpmdShorthandProgram)
-        assert "launch_spec.set_core_num(4)" in code
+        assert "launch_spec.set_block_num(4)" in code
 
     def test_spmd_launch_no_core_num_raises(self):
         """spmd_launch without core_num raises ParserSyntaxError."""
@@ -2110,13 +2110,13 @@ class TestSpmdLaunch:
         code = _generate_orch_code(MixedCallProgram)
         assert "// Task 0: kernel" in code
         assert "// Task 1: kernel" in code
-        assert "launch_spec.set_core_num(8)" in code
+        assert "launch_spec.set_block_num(8)" in code
         lines = code.splitlines()
         task0_line = next(i for i, line in enumerate(lines) if "Task 0:" in line)
         task1_line = next(i for i, line in enumerate(lines) if "Task 1:" in line)
-        core_num_line = next(i for i, line in enumerate(lines) if "set_core_num" in line)
-        assert core_num_line > task1_line
-        assert core_num_line > task0_line
+        block_num_line = next(i for i, line in enumerate(lines) if "set_block_num" in line)
+        assert block_num_line > task1_line
+        assert block_num_line > task0_line
 
 
 class TestUnregisteredOpError:
