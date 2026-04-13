@@ -290,7 +290,13 @@ void BindPass(nb::module_& m) {
              "Shape dimension count mismatch")
       .value("SHAPE_VALUE_MISMATCH", typecheck::ErrorType::SHAPE_VALUE_MISMATCH,
              "Shape dimension value mismatch")
-      .value("SIZE_MISMATCH", typecheck::ErrorType::SIZE_MISMATCH, "Vector size mismatch in control flow");
+      .value("SIZE_MISMATCH", typecheck::ErrorType::SIZE_MISMATCH, "Vector size mismatch in control flow")
+      .value("IF_CONDITION_MUST_BE_SCALAR", typecheck::ErrorType::IF_CONDITION_MUST_BE_SCALAR,
+             "IfStmt/WhileStmt condition must be ScalarType")
+      .value("FOR_RANGE_MUST_BE_SCALAR", typecheck::ErrorType::FOR_RANGE_MUST_BE_SCALAR,
+             "ForStmt range must be ScalarType")
+      .value("CONDITION_MUST_BE_BOOL", typecheck::ErrorType::CONDITION_MUST_BE_BOOL,
+             "IfStmt/WhileStmt condition dtype must be BOOL");
 
   // Bind NestedCallErrorType enum
   nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
