@@ -210,7 +210,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 **Location**: `src/ir/op/tensor_ops/`
 **Python API**: `from pypto.ir.op import tensor`
 
-**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting)
+**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.set_validshape` (update valid-shape metadata without data movement)
 
 **Example:**
 

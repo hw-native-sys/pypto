@@ -260,5 +260,57 @@ REGISTER_OP("tensor.concat")
       return DeduceTensorConcatType(args, kwargs);
     });
 
+TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
+                                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 3)
+      << "tensor.set_validshape requires exactly 3 arguments (tensor, valid_rows, valid_cols), but got "
+      << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.set_validshape requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+  CHECK(tensor_type->shape_.size() == 2)
+      << "tensor.set_validshape requires a 2D tensor, but got rank " << tensor_type->shape_.size();
+
+  auto check_scalar_index = [](const ExprPtr& arg, const char* name) {
+    auto st = As<ScalarType>(arg->GetType());
+    CHECK(st) << "tensor.set_validshape " << name << " must be ScalarType, but got "
+              << arg->GetType()->TypeName();
+    CHECK(st->dtype_ == DataType::INT64 || st->dtype_ == DataType::UINT64 || st->dtype_ == DataType::INDEX)
+        << "tensor.set_validshape " << name << " must have dtype INT64, UINT64, or INDEX, but got "
+        << st->dtype_.ToString();
+  };
+  check_scalar_index(args[1], "valid_rows");
+  check_scalar_index(args[2], "valid_cols");
+
+  auto check_const_bound = [&](const char* name, const ExprPtr& valid, const ExprPtr& bound) {
+    if (auto c = As<ConstInt>(valid)) {
+      CHECK(c->value_ >= 0) << "tensor.set_validshape " << name << " must be >= 0, got " << c->value_;
+      if (auto b = As<ConstInt>(bound)) {
+        CHECK(c->value_ <= b->value_) << "tensor.set_validshape " << name << " (" << c->value_
+                                      << ") exceeds tensor bound " << b->value_;
+      }
+    }
+  };
+  check_const_bound("valid_rows", args[1], tensor_type->shape_[0]);
+  check_const_bound("valid_cols", args[2], tensor_type->shape_[1]);
+
+  TensorView tensor_view({}, TensorLayout::ND, {args[1], args[2]});
+
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+                                      std::make_optional(std::move(tensor_view)));
+}
+
+REGISTER_OP("tensor.set_validshape")
+    .set_op_category("TensorOp")
+    .set_description("Update valid-shape metadata of a tensor without data movement")
+    .add_argument("tensor", "Input tensor (TensorType, 2D)")
+    .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
+    .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorSetValidShapeType(args, kwargs);
+    });
+
 }  // namespace ir
 }  // namespace pypto

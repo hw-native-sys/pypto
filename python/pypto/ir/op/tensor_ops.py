@@ -879,6 +879,33 @@ def transpose(
     return _ir_core.create_op_call("tensor.transpose", args, {}, actual_span)
 
 
+def set_validshape(
+    tensor: Expr,
+    valid_rows: int | Expr,
+    valid_cols: int | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Update valid-shape metadata of a tensor without data movement.
+
+    Args:
+        tensor: Input tensor expression (must be 2D TensorType)
+        valid_rows: Number of valid rows (int or Scalar INDEX expression)
+        valid_cols: Number of valid columns (int or Scalar INDEX expression)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tensor.set_validshape
+    """
+    actual_span = _get_span_or_capture(span)
+    vr_expr = (
+        valid_rows if isinstance(valid_rows, Expr) else ConstInt(valid_rows, DataType.INDEX, actual_span)
+    )
+    vc_expr = (
+        valid_cols if isinstance(valid_cols, Expr) else ConstInt(valid_cols, DataType.INDEX, actual_span)
+    )
+    return _ir_core.create_op_call("tensor.set_validshape", [tensor, vr_expr, vc_expr], {}, actual_span)
+
+
 def scatter_update(
     input: Expr,
     *args: Expr | int,

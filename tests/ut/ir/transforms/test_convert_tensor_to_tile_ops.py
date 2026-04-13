@@ -1686,6 +1686,43 @@ class TestGmLocalTensorConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_tensor_set_validshape_converts_to_tile_set_validshape(self):
+        """tensor.set_validshape should lower to tile.set_validshape via RegisterSimple."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                y: pl.Tensor[[32, 32], pl.FP32] = pl.tensor.set_validshape(x, 16, 24)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                y: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 32], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                x_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
+                y_tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.set_validshape(x_tile, 16, 24)
+                out_0_store: pl.Tensor[[32, 32], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[32, 32], pl.FP32]) -> pl.Tensor[[32, 32], pl.FP32]:
+                out_0: pl.Tensor[[32, 32], pl.FP32] = pl.create_tensor([32, 32], dtype=pl.FP32)
+                y: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_consecutive_slice_converts_to_tile_slice(self):
         """Consecutive tensor.slice: first becomes tile.load, second becomes tile.slice."""
 

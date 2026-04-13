@@ -124,6 +124,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.reshape", "tile.reshape");
   RegisterSimple("tensor.transpose", "tile.transpose");
   RegisterSimple("tensor.concat", "tile.concat");
+  RegisterSimple("tensor.set_validshape", "tile.set_validshape");
 
   // Memory creation ops
   RegisterSimple("tensor.full", "tile.full");

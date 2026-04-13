@@ -59,6 +59,7 @@ __all__ = [
     "reshape",
     "transpose",
     "scatter_update",
+    "set_validshape",
     "alloc",
 ]
 
@@ -187,6 +188,24 @@ def fillpad(tensor: Tensor, pad_value: PadValue = PadValue.zero) -> Tensor:
         Tensor wrapping the fillpad operation
     """
     call_expr = _ir_ops.fillpad(tensor.unwrap(), pad_value=pad_value)
+    return Tensor(expr=call_expr)
+
+
+def set_validshape(tensor: Tensor, valid_rows: IntLike, valid_cols: IntLike) -> Tensor:
+    """Update valid-shape metadata of a tensor without data movement.
+
+    Args:
+        tensor: Input tensor (must be 2D)
+        valid_rows: Number of valid rows (int or Scalar[INDEX])
+        valid_cols: Number of valid columns (int or Scalar[INDEX])
+
+    Returns:
+        Tensor with updated valid_shape metadata
+    """
+    tensor_expr = tensor.unwrap()
+    vr = valid_rows.unwrap() if isinstance(valid_rows, Scalar) else valid_rows
+    vc = valid_cols.unwrap() if isinstance(valid_cols, Scalar) else valid_cols
+    call_expr = _ir_ops.set_validshape(tensor_expr, vr, vc)
     return Tensor(expr=call_expr)
 
 
