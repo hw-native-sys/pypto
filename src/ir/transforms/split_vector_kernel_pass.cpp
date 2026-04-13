@@ -123,6 +123,31 @@ std::vector<std::pair<std::string, std::any>> WithSplitAttr(const FunctionPtr& f
   return attrs;
 }
 
+bool IsSingletonDim(const ExprPtr& dim_size) {
+  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
+    return ci->value_ == 1;
+  }
+  return false;
+}
+
+bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
+  if (!call->op_) return false;
+  const auto& name = call->op_->name_;
+  if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min") {
+    return split_dim == 1;
+  }
+  if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
+    int axis = call->GetKwarg<int>("axis", -1);
+    auto tt = std::dynamic_pointer_cast<const TileType>(
+        std::dynamic_pointer_cast<const Call>(call)->args_.empty() ? nullptr : call->args_[0]->GetType());
+    if (axis < 0 && tt) {
+      axis = static_cast<int>(tt->shape_.size()) + axis;
+    }
+    return axis == split_dim;
+  }
+  return false;
+}
+
 ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
     if ((ci->value_ % 2) != 0) {
@@ -297,9 +322,17 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
     }
 
-    // AIV only: tile.load — halve result shape, halve shape/valid_shape args, adjust offset
+    // AIV only: tile.load — halve result shape, halve shape/valid_shape args, adjust offset.
+    // Singleton split-dim tiles (e.g. broadcast [1, 128] under UP_DOWN) are preserved as-is.
     if (is_aiv && op_name == "tile.load" && call->args_.size() >= 4) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
+      bool is_singleton =
+          tt && split_dim < static_cast<int>(tt->shape_.size()) && IsSingletonDim(tt->shape_[split_dim]);
+
+      if (is_singleton) {
+        return stmt;
+      }
+
       ExprPtr half_dim_size;
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
         half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
@@ -341,10 +374,21 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       }
     }
 
-    // AIV only: any other op producing TileType — halve result shape (and static shape args when present)
+    // AIV only: any other op producing TileType — halve result shape (and static shape args when present).
+    // Reject reduce ops that reduce on the split axis (partial reduction is semantically incorrect).
+    // Skip halving when the output split-dim is singleton (broadcast / degenerate tiles).
     if (is_aiv) {
+      if (IsReduceOnSplitAxis(call, split_dim)) {
+        throw pypto::ValueError("SplitVectorKernel: reduce op '" + op_name +
+                                "' reduces on the split axis (dim " + std::to_string(split_dim) +
+                                "); partial reduction in a split kernel is not supported");
+      }
+
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
+        if (IsSingletonDim(tt->shape_[split_dim])) {
+          return stmt;
+        }
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
         auto new_result_type = HalveTileShape(call->GetType(), split_dim);
         std::vector<ExprPtr> new_args = call->args_;

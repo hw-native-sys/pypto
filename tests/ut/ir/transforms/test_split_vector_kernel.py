@@ -412,6 +412,59 @@ class TestSplitVectorKernelUpDown:
 
         _assert_split_matches_expected(Before, Expected)
 
+    def test_singleton_broadcast_tile_preserved(self):
+        """Broadcast tile [1, 128] on split axis dim0 must stay unchanged under UP_DOWN."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        main_aiv = actual.get_function("main_aiv")
+        assert main_aiv is not None
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
+        assert "pl.tile.load(gamma__ssa_v0, [0, 0], [1, 128], [1, 128]" in printed
+        assert "pl.tile.col_expand_mul(" in printed
+        assert "pl.tile.store(" in printed
+
+    def test_reduce_on_split_axis_rejected(self):
+        """Reduce on split axis (dim0 under UP_DOWN) must raise ValueError."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                reduced: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.sum(prev, axis=0, keepdim=True)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(reduced, [0, 0], out_0)
+                return out_0_store
+
+        with pytest.raises(Exception, match="reduces on the split axis"):
+            _run_split_vector_kernel(Before)
+
 
 class TestSplitVectorKernelLeftRight:
     """Tests for SplitMode.LEFT_RIGHT (halve width, dim 1)."""
@@ -515,3 +568,35 @@ class TestSplitVectorKernelLeftRight:
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
+
+    def test_singleton_broadcast_tile_preserved_left_right(self):
+        """Broadcast tile [128, 1] on split axis dim1 must stay unchanged under LEFT_RIGHT."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[16, 1], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
+                return out_0_store
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        main_aiv = actual.get_function("main_aiv")
+        assert main_aiv is not None
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "pl.tile.load(data__ssa_v0, [0, 0 + subblock_idx * 64], [16, 64], [16, 64]" in printed
+        assert "pl.tile.load(gamma__ssa_v0, [0, 0], [16, 1], [16, 1]" in printed
+        assert "pl.tile.row_expand_mul(" in printed
+        assert "pl.tile.store(" in printed
