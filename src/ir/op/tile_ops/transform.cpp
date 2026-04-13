@@ -516,6 +516,18 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
       << "tile.set_validshape valid_cols must have dtype INT64, UINT64, or INDEX, but got "
       << vc_type->dtype_.ToString();
 
+  auto check_const_bound = [&](const char* name, const ExprPtr& valid, const ExprPtr& bound) {
+    if (auto c = As<ConstInt>(valid)) {
+      CHECK(c->value_ >= 0) << "tile.set_validshape " << name << " must be >= 0, got " << c->value_;
+      if (auto b = As<ConstInt>(bound)) {
+        CHECK(c->value_ <= b->value_)
+            << "tile.set_validshape " << name << " (" << c->value_ << ") exceeds tile bound " << b->value_;
+      }
+    }
+  };
+  check_const_bound("valid_rows", args[1], tile_type->shape_[0]);
+  check_const_bound("valid_cols", args[2], tile_type->shape_[1]);
+
   TileView tile_view;
   if (tile_type->tile_view_.has_value()) {
     tile_view = *tile_type->tile_view_;

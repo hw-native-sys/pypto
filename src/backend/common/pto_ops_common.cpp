@@ -1632,7 +1632,16 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       if (auto c = ir::As<ir::ConstInt>(arg)) {
         return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
       }
-      return codegen.GetExprAsCode(arg);
+      std::string ssa = codegen.GetExprAsCode(arg);
+      if (auto st = ir::As<ir::ScalarType>(arg->GetType())) {
+        if (st->dtype_ != DataType::INDEX) {
+          std::string src_type = codegen.GetTypeString(st->dtype_);
+          std::string idx = codegen.NewTemp();
+          codegen.Emit(idx + " = arith.index_cast " + ssa + " : " + src_type + " to index");
+          return idx;
+        }
+      }
+      return ssa;
     };
 
     std::string vr = emit_index_arg(op->args_[1]);

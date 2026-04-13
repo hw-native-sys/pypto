@@ -1063,6 +1063,28 @@ class TestTileSliceReshapeOps:
         assert isinstance(result_type.shape[1], ir.ConstInt)
         assert result_type.shape[1].value == 64
 
+    def test_tile_set_validshape_rejects_negative(self):
+        """Negative constant valid dimensions are rejected."""
+        span = ir.Span.unknown()
+
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim16], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        with pytest.raises(Exception, match="must be >= 0"):
+            tile.set_validshape(tile_var, -1, 8)
+
+    def test_tile_set_validshape_rejects_exceeding_bound(self):
+        """Valid dimensions exceeding physical shape are rejected."""
+        span = ir.Span.unknown()
+
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim16], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        with pytest.raises(Exception, match="exceeds tile bound"):
+            tile.set_validshape(tile_var, 32, 8)
+
     def test_transform_operators_registered(self):
         """Test that transform operators are registered."""
         assert ir.is_op_registered("tile.slice")
