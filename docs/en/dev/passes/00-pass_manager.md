@@ -76,6 +76,7 @@ struct PassProperties {
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| Simplify | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
@@ -371,6 +372,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 9. `MemoryReuse`
 10. `LegalizePTOBufferReuse`
 11. `AllocateMemoryAddr`
+12. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
