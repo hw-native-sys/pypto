@@ -2519,7 +2519,7 @@ class ASTParser:
             return self._parse_system_op(op_name, call)
 
         # pl.spmd_launch(...) — SPMD kernel launch (shorthand for pl.system.spmd_launch)
-        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "spmd_launch":
+        if len(attrs) == 2 and attrs[0] == "pl" and attrs[1] == "spmd_launch":
             return self._parse_spmd_launch(call)
 
         # pl.const(value, dtype) — typed constant literal
@@ -2969,12 +2969,13 @@ class ASTParser:
                     span=span,
                     hint=f"Valid keyword arguments: {sorted(valid_kwargs)}",
                 )
-            if not isinstance(kw.value, ast.Constant):
+            success, val = self.expr_evaluator.try_eval_expr(kw.value)
+            if not success:
                 raise ParserSyntaxError(
                     f"spmd_launch keyword '{kw.arg}' must be a compile-time constant",
                     span=span,
                 )
-            spmd_kwargs[kw.arg] = kw.value.value
+            spmd_kwargs[kw.arg] = val
 
         if "core_num" not in spmd_kwargs:
             raise ParserSyntaxError(

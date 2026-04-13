@@ -365,8 +365,9 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     return _uses_dynamic_subblock_id(func)
 
 
-def _uses_op(func: _ir_core.Function, op_name: str) -> bool:
-    """Return whether the function body contains a call to the given op."""
+def _collect_used_ops(func: _ir_core.Function) -> set[str]:
+    """Return the set of op names used in the function body (single pass)."""
+    used: set[str] = set()
     stmts = _ir_core.flatten_to_stmts(func.body)
     for stmt in stmts:
         call = None
@@ -377,18 +378,28 @@ def _uses_op(func: _ir_core.Function, op_name: str) -> bool:
         if not isinstance(call, _ir_core.Call):
             continue
         op = getattr(call, "op", None)
-        if isinstance(op, _ir_core.Op) and op.name == op_name:
-            return True
-    return False
+        if isinstance(op, _ir_core.Op):
+            used.add(op.name)
+    return used
 
 
 def _needs_block_context_bridge(func: _ir_core.Function) -> bool:
     """Return whether the kernel needs runtime block context bridge (get_block_idx/get_block_num)."""
-    return _uses_op(func, "tile.get_block_idx") or _uses_op(func, "tile.get_block_num")
+    ops = _collect_used_ops(func)
+    return "tile.get_block_idx" in ops or "tile.get_block_num" in ops
 
 
-def _generate_kernel_header(func: _ir_core.Function) -> str:
-    """Generate the wrapper header, including split lane overrides when needed."""
+def _generate_kernel_header(
+    func: _ir_core.Function,
+    *,
+    needs_block_ctx: bool | None = None,
+) -> str:
+    """Generate the wrapper header, including split lane overrides when needed.
+
+    Args:
+        needs_block_ctx: Pre-computed flag for block context bridge.
+            If ``None``, the function body is scanned automatically.
+    """
     fixed_subblock_id = _get_fixed_subblock_id(func)
     subblock_override = ""
     if fixed_subblock_id is not None:
@@ -417,7 +428,9 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
             """
         )
     block_context_override = ""
-    if _needs_block_context_bridge(func):
+    if needs_block_ctx is None:
+        needs_block_ctx = _needs_block_context_bridge(func)
+    if needs_block_ctx:
         block_context_override = textwrap.dedent(
             """\
             #if !defined(__CPU_SIM)
@@ -439,15 +452,26 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
     )
 
 
-def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
+def _generate_kernel_wrapper(
+    func: _ir_core.Function,
+    ptoas_code: str,
+    *,
+    needs_block_ctx: bool | None = None,
+) -> str:
     """Generate a complete kernel wrapper file for one InCore function.
 
     Combines:
     1. Kernel header (includes, macros)
     2. Preprocessed ptoas code (static, no duplicate includes)
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
+
+    Args:
+        needs_block_ctx: Pre-computed flag for block context bridge.
+            If ``None``, the function body is scanned automatically.
     """
-    header = _generate_kernel_header(func)
+    if needs_block_ctx is None:
+        needs_block_ctx = _needs_block_context_bridge(func)
+    header = _generate_kernel_header(func, needs_block_ctx=needs_block_ctx)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     unpacking_code, var_names = _generate_arg_unpacking(func)
     call_args = ", ".join(var_names)
@@ -461,7 +485,7 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
         )
 
     runtime_block_context_setup = ""
-    if _needs_block_context_bridge(func):
+    if needs_block_ctx:
         runtime_block_context_setup = (
             "#if !defined(__CPU_SIM)\n"
             "    // Read SPMD block context from runtime dispatch\n"
@@ -674,8 +698,11 @@ def _emit_group_output(
         return
 
     ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir)
+    group_needs_block_ctx = any(_needs_block_context_bridge(f) for f in members)
     for func in members:
-        result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(func, ptoas_cpp)
+        result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
+            func, ptoas_cpp, needs_block_ctx=group_needs_block_ctx
+        )
 
 
 def _profiling_stage(prof: CompileProfiler | None, name: str) -> AbstractContextManager[Any]:

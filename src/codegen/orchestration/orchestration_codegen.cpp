@@ -535,7 +535,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void EmitSpmdLaunchSpec(const CallPtr& call, const std::string& task_var) {
     if (call->HasKwarg("core_num")) {
       int core_num = call->GetKwarg<int>("core_num");
-      code_ << Indent() << task_var << ".launch_spec.set_core_num(" << core_num << ");\n";
+      INTERNAL_CHECK_SPAN(core_num > 0, call->span_)
+          << "spmd_launch core_num must be positive, got " << core_num;
+      std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+      code_ << Indent() << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
     }
     if (call->HasKwarg("sync_start")) {
       bool sync_start = call->GetKwarg<bool>("sync_start");

@@ -853,18 +853,18 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
       if (gv && gv->name_ == incore_name) {
         // Emit AIC call (always fire-and-forget)
-        auto aic_call =
-            std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_, stmt->span_);
+        auto aic_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_,
+                                               call->kwargs_, stmt->span_);
         new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_));
 
         // Emit AIV call: AssignStmt preserves return value, EvalStmt for void
         if (assign) {
           auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
-                                                 call->GetType(), stmt->span_);
+                                                 call->kwargs_, call->GetType(), stmt->span_);
           new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, aiv_call, stmt->span_));
         } else {
-          auto aiv_call =
-              std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_, stmt->span_);
+          auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
+                                                 call->kwargs_, stmt->span_);
           new_stmts.push_back(std::make_shared<EvalStmt>(aiv_call, stmt->span_));
         }
         continue;
@@ -1006,8 +1006,9 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
       if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
       std::vector<ExprPtr> new_args = call->args_;
       new_args.push_back(gm_param);
-      return call->GetType() ? std::make_shared<Call>(call->op_, new_args, call->GetType(), call->span_)
-                             : std::make_shared<Call>(call->op_, new_args, call->span_);
+      return call->GetType()
+                 ? std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_)
+                 : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
     };
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {

@@ -11,7 +11,8 @@ src/ir/op/
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
 └── tile_ops/                   # Tile operator implementations
-    ├── memory.cpp               # Memory operations (get_block_idx, get_block_num, load, store)
+    ├── memory.cpp               # Memory operations (load, store, move, alloc, create, full)
+    ├── spmd.cpp                 # SPMD intrinsics (get_block_idx, get_block_num, get_subblock_idx)
     ├── elementwise.cpp          # Element-wise ops (Add, Mul, Div)
     ├── reduction.cpp            # Reduction ops (Sum with keepdim)
     └── unary.cpp                # Unary ops (Sqrt)
@@ -29,7 +30,8 @@ src/ir/op/
 - `elementwise.cpp` - Element-wise binary operations (Add, Sub, Mul, Div)
 - `reduction.cpp` - Reduction operations (Sum, Max, Min, etc.)
 - `unary.cpp` - Unary operations (Sqrt, etc.)
-- `memory.cpp` - Memory operations (load/store, block index) - *tile_ops only*
+- `memory.cpp` - Memory operations (load/store/move/alloc/create/full) - *tile_ops only*
+- `spmd.cpp` - SPMD runtime intrinsics (get_block_idx, get_block_num, get_subblock_idx) - *tile_ops only*
 - `matmul.cpp` - Matrix multiplication operations - *to be added*
 - `transform.cpp` - Shape transformation operations (Reshape, Transpose, etc.) - *to be added*
 

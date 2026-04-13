@@ -262,6 +262,25 @@ static std::string MakeCmpsCodegenPTO(const std::string& pto_op_name, const Call
   return "";
 }
 
+// Emit an expression as index-typed MLIR value, inserting arith.index_cast
+// when the expression evaluates to a non-index integer type (e.g. i64 from
+// get_block_idx).  Constants already emit as index; dynamic expressions may
+// carry their native scalar type.
+static std::string EmitOffsetAsIndex(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen) {
+  if (auto const_int = ir::As<ir::ConstInt>(expr)) {
+    return codegen.GetOrEmitConstant(const_int->value_, DataType::INDEX);
+  }
+  std::string val = codegen.GetExprAsCode(expr);
+  auto scalar_type = ir::As<ScalarType>(expr->GetType());
+  if (scalar_type && scalar_type->dtype_ != DataType::INDEX && !scalar_type->dtype_.IsFloat()) {
+    std::string idx = codegen.NewTemp();
+    std::string src_type = codegen.GetTypeString(scalar_type->dtype_);
+    codegen.Emit(idx + " = arith.index_cast " + val + " : " + src_type + " to index");
+    return idx;
+  }
+  return val;
+}
+
 // Helper function for tile.assemble → pto.tinsert
 // Inserts source tile into target tile at a given row/col offset (DPS pattern).
 // pto.tinsert semantics: dst[i+row, j+col] = src[i, j]
@@ -282,8 +301,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
       << "tile.assemble offset tuple must have at least 2 elements (row, col), got "
       << offset_tuple->elements_.size();
-  std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-  std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+  std::string row_off = EmitOffsetAsIndex(offset_tuple->elements_[0], codegen);
+  std::string col_off = EmitOffsetAsIndex(offset_tuple->elements_[1], codegen);
 
   // pto.tinsert writes src into dst at (row, col) in place — dst must already
   // contain target's data.  When target and dst are different buffers (i.e.
@@ -498,25 +517,6 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   codegen.Emit(pto_op_name + " ins(" + src + " | !pto.partition_tensor_view<MxNxdtype>)");
   return "";
-}
-
-// Emit an expression as index-typed MLIR value, inserting arith.index_cast
-// when the expression evaluates to a non-index integer type (e.g. i64 from
-// get_block_idx).  Constants already emit as index; dynamic expressions may
-// carry their native scalar type.
-static std::string EmitOffsetAsIndex(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen) {
-  if (auto const_int = ir::As<ir::ConstInt>(expr)) {
-    return codegen.GetOrEmitConstant(const_int->value_, DataType::INDEX);
-  }
-  std::string val = codegen.GetExprAsCode(expr);
-  auto scalar_type = ir::As<ScalarType>(expr->GetType());
-  if (scalar_type && scalar_type->dtype_ != DataType::INDEX && !scalar_type->dtype_.IsFloat()) {
-    std::string idx = codegen.NewTemp();
-    std::string src_type = codegen.GetTypeString(scalar_type->dtype_);
-    codegen.Emit(idx + " = arith.index_cast " + val + " : " + src_type + " to index");
-    return idx;
-  }
-  return val;
 }
 
 // tile.load: emit pto.subview + pto.tload
@@ -1599,8 +1599,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     INTERNAL_CHECK_SPAN(offset_tuple->elements_.size() >= 2, op->span_)
         << "tile.slice offset tuple must have at least 2 elements (row, col), got "
         << offset_tuple->elements_.size();
-    std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
-    std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+    std::string row_off = EmitOffsetAsIndex(offset_tuple->elements_[0], codegen);
+    std::string col_off = EmitOffsetAsIndex(offset_tuple->elements_[1], codegen);
 
     std::string result_target = codegen.GetCurrentResultTarget();
     std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();

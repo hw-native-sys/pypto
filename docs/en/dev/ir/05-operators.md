@@ -383,7 +383,8 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 | -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx, get_block_num |
+| `tile_ops/memory.cpp` | TileOp: load, store, read, move, alloc, create, full |
+| `tile_ops/spmd.cpp` | TileOp: get_block_idx, get_block_num, get_subblock_idx |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
 | `tile_ops/unary.cpp` | TileOp: sqrt |
