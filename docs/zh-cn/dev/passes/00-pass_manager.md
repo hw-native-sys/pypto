@@ -76,6 +76,7 @@ struct PassProperties {
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| FuseCreateAssembleToSlice | — | — | — |
 | Simplify | — | — | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
@@ -365,14 +366,16 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 2. `InferTileMemorySpace`
 3. `ResolveTransposeLayout`
 4. `ResolveBackendOpLayouts`
-5. `ExpandMixedKernel`
-6. `SplitVectorKernel`
-7. `NormalizeReturnOrder`
-8. `InitMemRef`
-9. `MemoryReuse`
-10. `LegalizePTOBufferReuse`
-11. `AllocateMemoryAddr`
-12. `Simplify`
+5. `NormalizeStmtStructure`
+6. `ExpandMixedKernel`
+7. `SplitVectorKernel`
+8. `NormalizeReturnOrder`
+9. `InitMemRef`
+10. `MemoryReuse`
+11. `LegalizePTOBufferReuse`
+12. `AllocateMemoryAddr`
+13. `FuseCreateAssembleToSlice`
+14. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

@@ -76,6 +76,7 @@ struct PassProperties {
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| FuseCreateAssembleToSlice | — | — | — |
 | Simplify | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
@@ -365,14 +366,16 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 2. `InferTileMemorySpace`
 3. `ResolveTransposeLayout`
 4. `ResolveBackendOpLayouts`
-5. `ExpandMixedKernel`
-6. `SplitVectorKernel`
-7. `NormalizeReturnOrder`
-8. `InitMemRef`
-9. `MemoryReuse`
-10. `LegalizePTOBufferReuse`
-11. `AllocateMemoryAddr`
-12. `Simplify`
+5. `NormalizeStmtStructure`
+6. `ExpandMixedKernel`
+7. `SplitVectorKernel`
+8. `NormalizeReturnOrder`
+9. `InitMemRef`
+10. `MemoryReuse`
+11. `LegalizePTOBufferReuse`
+12. `AllocateMemoryAddr`
+13. `FuseCreateAssembleToSlice`
+14. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
