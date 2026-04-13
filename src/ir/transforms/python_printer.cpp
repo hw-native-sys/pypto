@@ -1061,6 +1061,12 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::Cluster) {
     stream_ << "with " << prefix_ << ".cluster(";
+    if (!op->name_hint_.empty()) {
+      stream_ << "name_hint=\"" << op->name_hint_ << "\"";
+    }
+    stream_ << "):\n";
+  } else if (op->scope_kind_ == ScopeKind::Spmd) {
+    stream_ << "with " << prefix_ << ".spmd(";
     bool first_kwarg = true;
     if (op->core_num_.has_value()) {
       stream_ << "core_num=" << *op->core_num_;

@@ -1773,6 +1773,9 @@ class ScopeKind(enum.Enum):
     Hierarchy = 3
     """Distributed hierarchy scope (uses level/role on ScopeStmt)."""
 
+    Spmd = 4
+    """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
+
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
 
@@ -1834,7 +1837,7 @@ class ScopeStmt(Stmt):
             role: Function role (for Hierarchy scopes)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
             name_hint: User-provided scope name hint (empty = auto-generate)
-            core_num: SPMD block count (for Cluster scopes)
+            core_num: SPMD block count (for Spmd scopes)
             sync_start: Require sync-start for SPMD dispatch
         """
 

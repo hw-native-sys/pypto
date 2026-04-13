@@ -918,6 +918,7 @@ void BindIR(nb::module_& m) {
       .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
+      .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
       .export_values();
 
   // SplitMode enum

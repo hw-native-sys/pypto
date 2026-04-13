@@ -272,8 +272,8 @@ class IRBuilder:
             role: Function role (for ScopeKind.Hierarchy)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
             name_hint: User-provided scope name hint (empty = auto-generate)
-            core_num: SPMD block count (for Cluster scopes)
-            sync_start: Require sync-start for SPMD dispatch
+            core_num: SPMD block count (for ScopeKind.Spmd scopes)
+            sync_start: Require sync-start for SPMD dispatch (for ScopeKind.Spmd scopes)
 
         Yields:
             ScopeBuilder: Helper object for building the scope statement

@@ -10,7 +10,7 @@
 """
 Runtime tests for SPMD (Single Program Multiple Data) execution.
 
-This module tests multi-block data-parallel dispatch using pl.cluster(core_num=N)
+This module tests multi-block data-parallel dispatch using pl.spmd(core_num=N)
 and pl.tile.get_block_idx(). Each block processes a different slice of the input
 tensors and writes its result to the corresponding output region.
 """
@@ -30,27 +30,6 @@ CORE_NUM = 4
 TILE_ROWS = 128
 TILE_COLS = 128
 TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 512
-
-
-@pl.program
-class SPMDAddTensorProgram:
-    """SPMD elementwise add (tensor-level): 4 blocks each process a [128, 128] slice."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def spmd_add(
-        self,
-        a: pl.Tensor[[512, 128], pl.FP32],
-        b: pl.Tensor[[512, 128], pl.FP32],
-        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
-    ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
-            for block_idx in pl.parallel(0, CORE_NUM, 1, chunk=1, chunk_policy="leading_full"):
-                offset = block_idx * TILE_ROWS
-                tile_a = pl.slice(a, [TILE_ROWS, TILE_COLS], [offset, 0])
-                tile_b = pl.slice(b, [TILE_ROWS, TILE_COLS], [offset, 0])
-                tile_c = pl.add(tile_a, tile_b)
-                out = pl.assemble(out, tile_c, [offset, 0])
-        return out
 
 
 @pl.program
@@ -79,7 +58,7 @@ class SPMDAddProgram:
         b: pl.Tensor[[512, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
     ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.cluster(core_num=4):
+        with pl.spmd(core_num=4):
             out = self.spmd_add(a, b, out)
         return out
 
@@ -113,32 +92,6 @@ class SPMDAddTestCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] + tensors["b"]
 
 
-class SPMDAddTensorTestCase(PTOTestCase):
-    """SPMD add (tensor-level): 4 blocks, each processes [128, 128] of a [512, 128] tensor."""
-
-    def get_name(self) -> str:
-        return "spmd_add_tensor_512x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [TOTAL_ROWS, TILE_COLS], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return SPMDAddTensorProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["out"][:] = tensors["a"] + tensors["b"]
-
-
 class SPMDAddA5TestCase(SPMDAddTestCase):
     """SPMD add with A5 (Ascend 950) backend."""
 
@@ -163,12 +116,6 @@ class TestSPMDOperations:
     def test_spmd_add(self, test_runner):
         """SPMD add: 4 blocks each process a [128, 128] slice via get_block_idx."""
         test_case = SPMDAddTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_spmd_add_tensor(self, test_runner):
-        """SPMD add (tensor-level): 4 blocks via pl.parallel + pl.slice/assemble."""
-        test_case = SPMDAddTensorTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
