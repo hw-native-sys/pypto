@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.printer import python_print
 
 
 @pytest.fixture(autouse=True)
@@ -518,6 +519,94 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
 
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+def test_v2c_tensor_bridge_store_load_uses_push_pop_on_a2a3():
+    """V->C tensor bridges must become tpush/tpop instead of free tile aliases."""
+
+    @pl.program
+    class MixedTensorBridge:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.FP32],
+            w: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            bridge: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+            x_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(x, [0, 0], [16, 128])
+            scaled: pl.Tile[[16, 128], pl.FP32] = pl.mul(x_tile, 0.5)
+            scaled_bf16: pl.Tile[[16, 128], pl.BF16] = pl.cast(scaled, target_type=pl.BF16)
+            bridge = pl.store(scaled_bf16, [0, 0], bridge)
+
+            lhs_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                bridge, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+            rhs_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            rhs_right = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(lhs_left, rhs_right)
+            out_0 = pl.store(acc, [0, 0], out_0)
+            return out_0
+
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(passes.convert_to_ssa()(MixedTensorBridge))
+        )
+
+    aic_func = transformed.get_function("main_incore_0_aic")
+    aiv_func = transformed.get_function("main_incore_0_aiv")
+    assert aic_func is not None
+    assert aiv_func is not None
+
+    aic_printed = python_print(aic_func)
+    aiv_printed = python_print(aiv_func)
+
+    assert "pl.tile.tpop_from_aiv(" in aic_printed
+    assert "pl.tile.tpush_to_aic(" in aiv_printed
+    assert "_nz" not in aiv_printed
+    assert "_zn" not in aiv_printed
+    assert not any("bridge" in line and "pl.tile.load(" in line for line in aic_printed.splitlines())
+    assert not any("bridge" in line and "pl.tile.store(" in line for line in aiv_printed.splitlines())
+
+
+def test_v2c_tensor_bridge_multiple_cross_core_consumers_fail_fast():
+    """Multiple cross-core loads from one bridge must fail explicitly."""
+
+    @pl.program
+    class MixedTensorBridgeMultiLoad:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.FP32],
+            w: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            bridge: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+            x_tile: pl.Tile[[16, 128], pl.FP32] = pl.load(x, [0, 0], [16, 128])
+            scaled: pl.Tile[[16, 128], pl.FP32] = pl.mul(x_tile, 0.5)
+            scaled_bf16: pl.Tile[[16, 128], pl.BF16] = pl.cast(scaled, target_type=pl.BF16)
+            bridge = pl.store(scaled_bf16, [0, 0], bridge)
+
+            lhs_mat_0: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                bridge, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            _lhs_mat_1: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                bridge, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            lhs_left = pl.move(lhs_mat_0, target_memory=pl.MemorySpace.Left)
+            rhs_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            rhs_right = pl.move(rhs_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(lhs_left, rhs_right)
+            out_0 = pl.store(acc, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(Exception, match="multiple cross-core consumers is not supported yet"):
+        _run_pipeline(MixedTensorBridgeMultiLoad)
 
 
 def test_gm_pipe_buffer_per_call_allocation():

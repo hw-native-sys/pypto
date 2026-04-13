@@ -226,6 +226,87 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
   }
 }
 
+const Var* ResolveTensorBridgeInputVar(const ExprPtr& expr) {
+  if (auto iter_arg = std::dynamic_pointer_cast<const IterArg>(expr)) {
+    return ResolveTensorBridgeInputVar(iter_arg->initValue_);
+  }
+  if (auto var = std::dynamic_pointer_cast<const Var>(expr)) {
+    return var.get();
+  }
+  return nullptr;
+}
+
+std::optional<CVDirection> GetTensorBridgeDirection(CoreAffinity producer_affinity,
+                                                    CoreAffinity consumer_affinity) {
+  if (producer_affinity == CoreAffinity::VECTOR && consumer_affinity == CoreAffinity::CUBE) {
+    return CVDirection::VECTOR_TO_CUBE;
+  }
+  if (producer_affinity == CoreAffinity::CUBE && consumer_affinity == CoreAffinity::VECTOR) {
+    return CVDirection::CUBE_TO_VECTOR;
+  }
+  return std::nullopt;
+}
+
+void CollectTensorStoreLoadBoundaries(const std::vector<StmtPtr>& stmts,
+                                      const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                                      std::map<const Stmt*, CVBoundaryMove>& push_boundaries,
+                                      std::map<const Stmt*, CVBoundaryMove>& pop_boundaries) {
+  struct StoreBridgeProducerInfo {
+    const Stmt* stmt = nullptr;
+    CoreAffinity affinity = CoreAffinity::SHARED;
+    ExprPtr source_tile;
+  };
+
+  std::vector<std::shared_ptr<const AssignStmt>> assigns;
+  dce::CollectAllAssignStmts(stmts, assigns);
+
+  // The tile.store result and the later tile.load source can be different Var
+  // nodes that share the same SSA name, so match them by name_hint_ here.
+  std::unordered_map<std::string, StoreBridgeProducerInfo> store_producers;
+  for (const auto& assign : assigns) {
+    auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    if (!call || call->op_->name_ != "tile.store" || call->args_.size() < 3) continue;
+
+    auto affinity_it = stmt_map.find(assign.get());
+    CoreAffinity affinity = (affinity_it != stmt_map.end()) ? affinity_it->second : CoreAffinity::SHARED;
+    store_producers[assign->var_->name_hint_] = {assign.get(), affinity, call->args_[0]};
+  }
+
+  std::unordered_map<const Stmt*, std::vector<std::pair<const Stmt*, CVBoundaryMove>>> candidates;
+  std::vector<const Stmt*> producer_order;
+  for (const auto& assign : assigns) {
+    auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    if (!call || call->op_->name_ != "tile.load" || call->args_.empty()) continue;
+
+    const Var* source_var = ResolveTensorBridgeInputVar(call->args_[0]);
+    auto producer_it = source_var ? store_producers.find(source_var->name_hint_) : store_producers.end();
+    if (producer_it == store_producers.end()) continue;
+
+    auto load_affinity_it = stmt_map.find(assign.get());
+    CoreAffinity consumer_affinity =
+        (load_affinity_it != stmt_map.end()) ? load_affinity_it->second : CoreAffinity::SHARED;
+    auto direction = GetTensorBridgeDirection(producer_it->second.affinity, consumer_affinity);
+    if (!direction.has_value()) continue;
+
+    auto [candidate_it, inserted] = candidates.try_emplace(producer_it->second.stmt);
+    if (inserted) {
+      producer_order.push_back(producer_it->second.stmt);
+    }
+    candidate_it->second.emplace_back(
+        assign.get(),
+        CVBoundaryMove{*direction, assign->var_, producer_it->second.source_tile, call->GetType(), nullptr});
+  }
+
+  for (const auto* producer_stmt : producer_order) {
+    const auto& producer_candidates = candidates.find(producer_stmt)->second;
+    INTERNAL_CHECK(producer_candidates.size() == 1)
+        << "tensor bridge with multiple cross-core consumers is not supported yet";
+    const auto& [consumer_stmt, boundary] = producer_candidates.front();
+    push_boundaries[producer_stmt] = boundary;
+    pop_boundaries[consumer_stmt] = boundary;
+  }
+}
+
 // ============================================================================
 // TPUSH / TPOP creation helpers
 // ============================================================================
@@ -341,6 +422,8 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
 std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+                                   const std::map<const Stmt*, CVBoundaryMove>& tensor_bridge_pushes,
+                                   const std::map<const Stmt*, CVBoundaryMove>& tensor_bridge_pops,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars) {
   auto backend_type = backend::GetBackendType();
@@ -359,7 +442,95 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
 
   std::vector<StmtPtr> result;
 
+  auto emit_push = [&](const ExprPtr& push_source, const VarPtr& consumer_dest_var, const Span& span) {
+    ExprPtr adapted_push_source = push_source;
+    // AIV V->C push: insert tile.move (tmov) to adapt the source into
+    // the required fractal layout before tpush.
+    // On Ascend950: Left -> NZ, Right -> ZN.
+    // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
+    // directly use nd
+    if (side == CoreSide::AIV && backend_type == backend::BackendType::Ascend950) {
+      auto push_dest_type = std::dynamic_pointer_cast<const TileType>(consumer_dest_var->GetType());
+      INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value() &&
+                              push_dest_type->tile_view_.has_value(),
+                          span)
+          << "Boundary push destination must have TileType, MemSpace and TileView";
+
+      // NOLINT: optional checked by INTERNAL_CHECK above
+      auto fractal_view = BuildCrossCoreTransferView(
+          push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+          push_dest_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
+
+      auto src_type = std::dynamic_pointer_cast<const TileType>(push_source->GetType());
+      INTERNAL_CHECK_SPAN(src_type, span) << "V->C tpush source must have TileType";
+      auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
+                                                  fractal_view, MemorySpace::Vec);
+      std::string src_name = "tile";
+      if (auto sv = std::dynamic_pointer_cast<const Var>(push_source)) {
+        src_name = sv->name_hint_;
+      }
+      bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+      auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, span);
+      auto tmov_call = CreateMove(push_source, MemorySpace::Vec, tmov_type, span);
+      result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, span));
+      adapted_push_source = tmov_var;
+    }
+    result.push_back(std::make_shared<EvalStmt>(CreateTpush(push_op, adapted_push_source, span), span));
+  };
+
+  auto emit_pop = [&](const VarPtr& dest_var, const Span& span,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs,
+                      const ExprPtr& remapped_source_tile) {
+    auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(dest_var->GetType());
+    INTERNAL_CHECK_SPAN(
+        dest_tile_type && dest_tile_type->memory_space_.has_value() && dest_tile_type->tile_view_.has_value(),
+        span)
+        << "Boundary pop destination must have TileType, MemSpace and TileView";
+    auto tpop_type = BuildBoundaryTpopType(side, dest_var->GetType());
+    // Build tpop result type: with fractal TileView for boundary
+    // NOLINT: optional checked by INTERNAL_CHECK above
+    auto fractal_view = BuildCrossCoreTransferView(
+        dest_tile_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
+        dest_tile_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
+    bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
+    std::string tpop_name =
+        needs_post_move ? BuildBoundaryTpopName(side, dest_var->name_hint_) : dest_var->name_hint_;
+    auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
+    auto tpop_result_type =
+        std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt, fractal_view, tt->memory_space_);
+    auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, span);
+    if (!needs_post_move) {
+      tpop_var_remap[dest_var.get()] = tpop_var;
+    }
+    if (auto source_var = std::dynamic_pointer_cast<const Var>(remapped_source_tile)) {
+      tpop_var_remap[source_var.get()] = tpop_var;
+    }
+    tpop_var_remap[tpop_var.get()] = tpop_var;
+    result.push_back(
+        std::make_shared<AssignStmt>(tpop_var, CreateTpop(pop_op, tpop_result_type, span, kwargs), span));
+    if (needs_post_move) {
+      auto target_memory = dest_tile_type->memory_space_;
+      INTERNAL_CHECK_SPAN(target_memory.has_value(), span)
+          << "Boundary pop destination must have memory_space before post-tpop move emission";
+      result.push_back(std::make_shared<AssignStmt>(
+          dest_var, CreateMove(tpop_var, *target_memory, dest_var->GetType(), span), span));
+    }
+  };
+
   for (const auto& stmt : stmts) {
+    if (auto push_it = tensor_bridge_pushes.find(stmt.get()); push_it != tensor_bridge_pushes.end()) {
+      if (push_it->second.direction == push_direction) {
+        emit_push(push_it->second.source_tile, push_it->second.dest_var, stmt->span_);
+      }
+      continue;
+    }
+    if (auto pop_it = tensor_bridge_pops.find(stmt.get()); pop_it != tensor_bridge_pops.end()) {
+      if (pop_it->second.direction != push_direction) {
+        emit_pop(pop_it->second.dest_var, stmt->span_, {}, ExprPtr{});
+      }
+      continue;
+    }
+
     auto it = stmt_map.find(stmt.get());
     CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
 
@@ -369,81 +540,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // Leaf boundary move — emit tpush/tpop
         const auto& bm = bm_it->second;
         if (bm.direction == push_direction) {
-          ExprPtr push_source = bm.source_tile;
-          // AIV V->C push: insert tile.move (tmov) to adapt the source into
-          // the required fractal layout before tpush.
-          // On Ascend950: Left -> NZ, Right -> ZN.
-          // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
-          // directly use nd
-          if (side == CoreSide::AIV && backend_type == backend::BackendType::Ascend950) {
-            auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-            INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value() &&
-                                    push_dest_type->tile_view_.has_value(),
-                                stmt->span_)
-                << "Boundary move destination must have TileType, MemSpace and TileView";
-
-            // NOLINT: optional checked by INTERNAL_CHECK above
-            auto fractal_view = BuildCrossCoreTransferView(
-                push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-                push_dest_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
-
-            auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
-            INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "V->C tpush source must have TileType";
-            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
-                                                        fractal_view, MemorySpace::Vec);
-            std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-              src_name = sv->name_hint_;
-            }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
-          }
-          result.push_back(
-              std::make_shared<EvalStmt>(CreateTpush(push_op, push_source, stmt->span_), stmt->span_));
+          emit_push(bm.source_tile, bm.dest_var, stmt->span_);
         } else {
-          auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-          INTERNAL_CHECK_SPAN(dest_tile_type && dest_tile_type->memory_space_.has_value() &&
-                                  dest_tile_type->tile_view_.has_value(),
-                              stmt->span_)
-              << "Boundary move destination must have TileType, MemSpace and TileView";
-          auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
-          // Build tpop result type: with fractal TileView for boundary
-          // NOLINT: optional checked by INTERNAL_CHECK above
-          auto fractal_view = BuildCrossCoreTransferView(
-              dest_tile_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-              dest_tile_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
-          bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
-          std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
-                                                  : bm.dest_var->name_hint_;
-          auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
-          auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
-                                                             fractal_view, tt->memory_space_);
-          auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, stmt->span_);
-          if (!needs_post_move) {
-            tpop_var_remap[bm.dest_var.get()] = tpop_var;
-          }
-          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-            tpop_var_remap[source_var.get()] = tpop_var;
-          }
-          tpop_var_remap[tpop_var.get()] = tpop_var;
           // Propagate kwargs from the original tpop (e.g., split=1) if available
           std::vector<std::pair<std::string, std::any>> kwargs;
           if (bm.source_tpop_call) {
             kwargs = bm.source_tpop_call->kwargs_;
           }
-          result.push_back(std::make_shared<AssignStmt>(
-              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, kwargs), stmt->span_));
-          if (needs_post_move) {
-            auto target_memory = dest_tile_type->memory_space_;
-            INTERNAL_CHECK_SPAN(target_memory.has_value(), stmt->span_)
-                << "Boundary move destination must have memory_space before post-tpop move emission";
-            result.push_back(std::make_shared<AssignStmt>(
-                bm.dest_var, CreateMove(tpop_var, *target_memory, bm.dest_var->GetType(), stmt->span_),
-                stmt->span_));
-          }
+          emit_pop(bm.dest_var, stmt->span_, kwargs, bm.source_tile);
         }
         continue;
       }
@@ -463,19 +567,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tensor_bridge_pushes,
+                          tensor_bridge_pops, tpop_var_remap, superseded_tpop_vars);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
+                          tensor_bridge_pushes, tensor_bridge_pops, tpop_var_remap, superseded_tpop_vars);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
-          auto new_else_stmts = BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves,
-                                              tpop_var_remap, superseded_tpop_vars);
+          auto new_else_stmts =
+              BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tensor_bridge_pushes,
+                            tensor_bridge_pops, tpop_var_remap, superseded_tpop_vars);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -483,8 +590,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
+                          tensor_bridge_pushes, tensor_bridge_pops, tpop_var_remap, superseded_tpop_vars);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -550,6 +658,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   collect_var_to_tpop(stmts, collect_var_to_tpop);
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, var_to_tpop);
+  std::map<const Stmt*, CVBoundaryMove> tensor_bridge_pushes;
+  std::map<const Stmt*, CVBoundaryMove> tensor_bridge_pops;
+  CollectTensorStoreLoadBoundaries(stmts, stmt_map, tensor_bridge_pushes, tensor_bridge_pops);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
@@ -560,18 +671,36 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // the original tpop statement appears before the boundary tile.move in
   // program order — computing it lazily inside the loop would be too late.
   std::unordered_set<const Var*> superseded_tpop_vars;
-  for (const auto& [stmt_ptr, bm] : boundary_moves) {
-    if (bm.source_tpop_call) {
-      if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-        superseded_tpop_vars.insert(source_var.get());
+  std::function<void(const std::vector<StmtPtr>&)> collect_superseded_tpop_vars;
+  collect_superseded_tpop_vars = [&](const std::vector<StmtPtr>& body) {
+    for (const auto& stmt : body) {
+      if (auto bm_it = boundary_moves.find(stmt.get()); bm_it != boundary_moves.end()) {
+        const auto& bm = bm_it->second;
+        if (bm.source_tpop_call) {
+          if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+            superseded_tpop_vars.insert(source_var.get());
+          }
+        }
+      }
+
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        collect_superseded_tpop_vars(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        collect_superseded_tpop_vars(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) {
+          collect_superseded_tpop_vars(FlattenBody(if_stmt->else_body_.value()));
+        }
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        collect_superseded_tpop_vars(FlattenBody(while_stmt->body_));
       }
     }
-  }
+  };
+  collect_superseded_tpop_vars(stmts);
 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts =
-      BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap, superseded_tpop_vars);
+  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, tensor_bridge_pushes,
+                                 tensor_bridge_pops, aic_tpop_remap, superseded_tpop_vars);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -585,8 +714,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts =
-      BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars);
+  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, tensor_bridge_pushes,
+                                 tensor_bridge_pops, aiv_tpop_remap, superseded_tpop_vars);
   auto aiv_final =
       NormalizeTpopChains(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
 
