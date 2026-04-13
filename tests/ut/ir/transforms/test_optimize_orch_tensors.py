@@ -235,6 +235,150 @@ class TestIterArgReuse:
         After = passes.optimize_orch_tensors()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_standalone_call_merges_in_out(self):
+        """Standalone InCore call with an iter_arg chain (remainder-kernel shape):
+        In + tensor.create Out pair merges to InOut even without an enclosing loop.
+
+        Regression for #928: pl.parallel remainder kernel lost inout accumulation
+        because Pattern 1 only matched calls inside an iter-arg loop.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc__tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                x__tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                for i, (a,) in pl.range(n, init_values=(acc__tile,)):
+                    new_a__tile: pl.Tile[[64], pl.FP32] = pl.tile.add(a, x__tile)
+                    final = pl.yield_(new_a__tile)
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(final, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, x, n, ret0__out)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.InOut[pl.Tensor[[64], pl.FP32]],
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc__tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                x__tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                for i, (a,) in pl.range(n, init_values=(acc__tile,)):
+                    new_a__tile: pl.Tile[[64], pl.FP32] = pl.tile.add(a, x__tile)
+                    final = pl.yield_(new_a__tile)
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(final, [0], acc)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, x, n)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_standalone_call_in_arg_reused_not_merged(self):
+        """Safety: when the In arg is read again after the call, do NOT merge.
+
+        Merging would clobber the original value the later use expects.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc__tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                for i, (a,) in pl.range(n, init_values=(acc__tile,)):
+                    next_a: pl.Tile[[64], pl.FP32] = pl.tile.add(a, a)
+                    final = pl.yield_(next_a)
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(final, [0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def reader(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                acc__tile: pl.Tile[[64], pl.FP32] = pl.load(acc, [0], [64])
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(acc__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self,
+                acc: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INT64],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                _unused: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, n, ret0__out)
+                ret1__out: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.reader(acc, ret1__out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        # acc is read again by reader — merging main_incore_0's In/Out would
+        # corrupt it. Expected: Before is unchanged.
+        ir.assert_structural_equal(After, Before)
+
+    def test_standalone_call_without_iter_arg_chain_not_merged(self):
+        """A standalone call whose callee is a plain load→store (no iter_arg
+        chain) is NOT merged: we require semantic evidence (an iter_arg chain)
+        that the In/Out were intended to alias.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_copy(
+                self,
+                src: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(src, [0], [64])
+                ret0__store: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, src: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.kernel_copy(src, ret0__out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        # kernel_copy has no iter_arg loop → no merge expected.
+        ir.assert_structural_equal(After, Before)
+
     def test_no_iter_arg_no_change(self):
         """InCore call not in iter-arg loop: no optimization, Out params remain."""
 

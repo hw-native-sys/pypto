@@ -338,15 +338,292 @@ class IterArgReuseOptimizer {
     std::unordered_map<std::string, AnalysisResult> results_;
   };
 
+  // -- Analysis: InCore internal In↔Out param pairings ----------------------
+  //
+  // A callee's In param and Out param are aliasing-compatible when the callee
+  // reads the In fully via `tile.load` and writes the Out fully via `tile.store`
+  // of a value that flows through at least one loop iter_arg chain starting
+  // from that tile.load. The loop hop is what signals the In/Out are meant to
+  // share storage (an accumulator); a plain load→store pair does not.
+
+  /// Check that a tile.load call reads the full tensor (all offsets zero and
+  /// load shape matches the tensor shape dimension-by-dimension).
+  static bool IsFullTensorLoad(const CallPtr& load_call, const TensorTypePtr& tensor_type) {
+    if (!load_call || load_call->args_.size() < 3 || !tensor_type) return false;
+    auto offsets = As<MakeTuple>(load_call->args_[1]);
+    auto load_shape = As<MakeTuple>(load_call->args_[2]);
+    if (!offsets || !load_shape) return false;
+    const size_t ndim = tensor_type->shape_.size();
+    if (offsets->elements_.size() != ndim || load_shape->elements_.size() != ndim) return false;
+    for (size_t i = 0; i < ndim; ++i) {
+      auto want = std::dynamic_pointer_cast<const ConstInt>(tensor_type->shape_[i]);
+      auto got = std::dynamic_pointer_cast<const ConstInt>(load_shape->elements_[i]);
+      if (!want || !got || want->value_ != got->value_) return false;
+      if (!IsConstValue(offsets->elements_[i], 0)) return false;
+    }
+    return true;
+  }
+
+  /// Compare two TensorTypes for compatible constant shape + dtype.
+  static bool TensorTypesMatch(const TypePtr& a, const TypePtr& b) {
+    auto ta = As<TensorType>(a);
+    auto tb = As<TensorType>(b);
+    if (!ta || !tb || ta->dtype_ != tb->dtype_) return false;
+    if (ta->shape_.size() != tb->shape_.size()) return false;
+    for (size_t i = 0; i < ta->shape_.size(); ++i) {
+      auto ca = std::dynamic_pointer_cast<const ConstInt>(ta->shape_[i]);
+      auto cb = std::dynamic_pointer_cast<const ConstInt>(tb->shape_[i]);
+      if (!ca || !cb || ca->value_ != cb->value_) return false;
+    }
+    return true;
+  }
+
+  /// Walk body collecting: AssignStmt var_def map, ForStmt/WhileStmt
+  /// return_var → iter_arg init value map, and the top-level ReturnStmt.
+  class IterChainCollector : public IRVisitor {
+   public:
+    std::unordered_map<const Var*, AssignStmtPtr> var_def;
+    std::unordered_map<const Var*, ExprPtr> return_var_to_init;
+    ReturnStmtPtr return_stmt;
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      var_def[op->var_.get()] = op;
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const ReturnStmtPtr& op) override {
+      if (!return_stmt) return_stmt = op;
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const ForStmtPtr& op) override {
+      for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
+        return_var_to_init[op->return_vars_[i].get()] = op->iter_args_[i]->initValue_;
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const WhileStmtPtr& op) override {
+      for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
+        return_var_to_init[op->return_vars_[i].get()] = op->iter_args_[i]->initValue_;
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+  };
+
+  /// For each Out param, trace `tile.store` source back through loop iter_arg
+  /// chains to a `tile.load` of an In param. Returns (in_idx, out_idx) pairs
+  /// where the chain exists, types match, and the load covers the full tensor.
+  static std::vector<std::pair<size_t, size_t>> BuildInOutParamPairings(const FunctionPtr& func) {
+    std::vector<std::pair<size_t, size_t>> pairings;
+
+    std::unordered_map<const Var*, size_t> in_param_idx;
+    for (size_t i = 0; i < func->params_.size() && i < func->param_directions_.size(); ++i) {
+      if (func->param_directions_[i] != ParamDirection::In) continue;
+      if (!As<TensorType>(func->params_[i]->GetType())) continue;
+      in_param_idx[func->params_[i].get()] = i;
+    }
+    auto out_mappings = BuildOutParamReturnMappings(func);
+    if (in_param_idx.empty() || out_mappings.empty()) return pairings;
+
+    IterChainCollector collector;
+    collector.VisitStmt(func->body_);
+    if (!collector.return_stmt) return pairings;
+
+    std::unordered_set<size_t> used_in_indices;
+    for (const auto& opm : out_mappings) {
+      if (opm.return_index >= collector.return_stmt->value_.size()) continue;
+      auto ret_var = As<Var>(collector.return_stmt->value_[opm.return_index]);
+      if (!ret_var) continue;
+      auto ret_def = collector.var_def.find(ret_var.get());
+      if (ret_def == collector.var_def.end()) continue;
+      auto store_call = As<Call>(ret_def->second->value_);
+      if (!store_call || store_call->op_->name_ != "tile.store" || store_call->args_.empty()) continue;
+
+      // Trace backward through iter_arg chains. Require at least one loop hop:
+      // a bare tile.load → tile.store without an accumulator has no semantic
+      // indication that In and Out were intended to alias.
+      const Var* current = nullptr;
+      if (auto src_var = As<Var>(store_call->args_[0])) current = src_var.get();
+      int loop_hops = 0;
+      for (int hops = 0; hops < 16 && current; ++hops) {
+        auto it = collector.return_var_to_init.find(current);
+        if (it == collector.return_var_to_init.end()) break;
+        auto init_var = As<Var>(it->second);
+        if (!init_var) {
+          current = nullptr;
+          break;
+        }
+        current = init_var.get();
+        ++loop_hops;
+      }
+      if (!current || loop_hops == 0) continue;
+
+      auto load_def = collector.var_def.find(current);
+      if (load_def == collector.var_def.end()) continue;
+      auto load_call = As<Call>(load_def->second->value_);
+      if (!load_call || load_call->op_->name_ != "tile.load" || load_call->args_.empty()) continue;
+      auto load_src = As<Var>(load_call->args_[0]);
+      if (!load_src) continue;
+      auto in_it = in_param_idx.find(load_src.get());
+      if (in_it == in_param_idx.end()) continue;
+
+      auto tensor_type = As<TensorType>(func->params_[in_it->second]->GetType());
+      if (!TensorTypesMatch(tensor_type, opm.param_var->GetType())) continue;
+      if (!IsFullTensorLoad(load_call, tensor_type)) continue;
+
+      if (!used_in_indices.insert(in_it->second).second) continue;
+      pairings.emplace_back(in_it->second, opm.param_index);
+    }
+    return pairings;
+  }
+
+  // -- Analysis: standalone (non-looped) InCore calls whose In/Out can merge -
+
+  /// One-shot visitor that collects everything the standalone analyzer needs
+  /// from an orchestration function body: per-Var use counts, the set of Vars
+  /// assigned by `tensor.create`, and the expression AST of each AssignStmt.
+  /// Keeping it all in a single walk keeps per-function analysis O(N).
+  ///
+  /// Counts exclude definitional occurrences (AssignStmt LHS, loop_var,
+  /// return_vars, iter_arg self-refs) so `use_count[v]` is the number of
+  /// real reads of `v` in expressions.
+  class FunctionBodyIndex : public IRVisitor {
+   public:
+    std::unordered_map<const Var*, size_t> use_count;
+    std::unordered_set<const Var*> local_creates;
+
+   protected:
+    void VisitExpr_(const VarPtr& op) override { ++use_count[op.get()]; }
+    void VisitExpr_(const IterArgPtr& op) override { ++use_count[op.get()]; }
+
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      // Skip LHS (a def); visit only the RHS value.
+      VisitExpr(op->value_);
+      if (auto call = As<Call>(op->value_); call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
+                                            call->op_->name_ == "tensor.create") {
+        local_creates.insert(op->var_.get());
+      }
+    }
+
+    void VisitStmt_(const ForStmtPtr& op) override {
+      VisitExpr(op->start_);
+      VisitExpr(op->stop_);
+      VisitExpr(op->step_);
+      for (const auto& ia : op->iter_args_) {
+        if (ia->initValue_) VisitExpr(ia->initValue_);
+      }
+      VisitStmt(op->body_);
+    }
+
+    void VisitStmt_(const WhileStmtPtr& op) override {
+      VisitExpr(op->condition_);
+      for (const auto& ia : op->iter_args_) {
+        if (ia->initValue_) VisitExpr(ia->initValue_);
+      }
+      VisitStmt(op->body_);
+    }
+  };
+
+  /// Count references to `target` within a single expression tree.
+  static size_t CountVarRefs(const ExprPtr& expr, const Var* target) {
+    class Counter : public IRVisitor {
+     public:
+      const Var* target;
+      size_t count = 0;
+      void VisitExpr_(const VarPtr& op) override {
+        if (op.get() == target) ++count;
+      }
+      void VisitExpr_(const IterArgPtr& op) override {
+        if (op.get() == target) ++count;
+      }
+    } c;
+    c.target = target;
+    c.VisitExpr(expr);
+    return c.count;
+  }
+
+  /// Detects standalone InCore calls (outside any iter-arg-carrying loop)
+  /// where the Out arg is a local `tensor.create` and the In arg's only use
+  /// in the function is this call. Records matching merges into `results`.
+  class StandaloneCallAnalyzer : public IRVisitor {
+   public:
+    StandaloneCallAnalyzer(
+        const std::unordered_set<std::string>& incore_names,
+        const std::unordered_map<std::string, std::vector<std::pair<size_t, size_t>>>& pairings,
+        const FunctionBodyIndex& body_index, std::unordered_map<std::string, AnalysisResult>& results)
+        : incore_names_(incore_names), pairings_(pairings), body_index_(body_index), results_(results) {}
+
+   protected:
+    void VisitStmt_(const ForStmtPtr& op) override {
+      bool prev = inside_iter_loop_;
+      if (!op->iter_args_.empty()) inside_iter_loop_ = true;
+      IRVisitor::VisitStmt_(op);
+      inside_iter_loop_ = prev;
+    }
+    void VisitStmt_(const WhileStmtPtr& op) override {
+      bool prev = inside_iter_loop_;
+      if (!op->iter_args_.empty()) inside_iter_loop_ = true;
+      IRVisitor::VisitStmt_(op);
+      inside_iter_loop_ = prev;
+    }
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (!inside_iter_loop_) TryMatch(op);
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    void TryMatch(const AssignStmtPtr& op) {
+      auto call = As<Call>(op->value_);
+      if (!call) return;
+      auto fname = GetCallFuncName(call);
+      if (fname.empty() || !incore_names_.count(fname)) return;
+      auto pair_it = pairings_.find(fname);
+      if (pair_it == pairings_.end() || pair_it->second.empty()) return;
+      if (results_.find(fname) != results_.end()) return;  // LoopAnalyzer already handled
+
+      AnalysisResult partial;
+      partial.func_name = fname;
+      std::unordered_set<size_t> seen_out;
+      std::unordered_set<size_t> seen_in;
+
+      for (const auto& [in_idx, out_idx] : pair_it->second) {
+        if (out_idx >= call->args_.size() || in_idx >= call->args_.size()) continue;
+        auto out_var = As<Var>(call->args_[out_idx]);
+        auto in_var = As<Var>(call->args_[in_idx]);
+        if (!out_var || !in_var) continue;
+        if (!body_index_.local_creates.count(out_var.get())) continue;
+
+        // Safety: the In arg's sole use in this function must be this call's
+        // argument. Compare the precomputed whole-function use count against
+        // the number of references within this call expression.
+        auto use_it = body_index_.use_count.find(in_var.get());
+        size_t total_refs = use_it == body_index_.use_count.end() ? 0 : use_it->second;
+        size_t self_refs = CountVarRefs(op->value_, in_var.get());
+        if (total_refs != self_refs) continue;
+
+        if (!seen_out.insert(out_idx).second) continue;
+        if (!seen_in.insert(in_idx).second) continue;
+        partial.merges.push_back({out_idx, in_idx});
+      }
+
+      if (!partial.merges.empty()) results_[fname] = std::move(partial);
+    }
+
+    const std::unordered_set<std::string>& incore_names_;
+    const std::unordered_map<std::string, std::vector<std::pair<size_t, size_t>>>& pairings_;
+    const FunctionBodyIndex& body_index_;
+    std::unordered_map<std::string, AnalysisResult>& results_;
+    bool inside_iter_loop_ = false;
+  };
+
   /// Analyze orchestration functions for iter-arg reuse opportunities.
   std::unordered_map<std::string, AnalysisResult> Analyze(
       const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
-    // Pre-build Out param return mappings for all InCore functions
     std::unordered_map<std::string, std::vector<OutParamReturnMapping>> out_mappings;
+    std::unordered_map<std::string, std::vector<std::pair<size_t, size_t>>> in_out_pairings;
     for (const auto& [gvar, func] : program->functions_) {
-      if (incore_names.count(func->name_)) {
-        out_mappings[func->name_] = BuildOutParamReturnMappings(func);
-      }
+      if (!incore_names.count(func->name_)) continue;
+      out_mappings[func->name_] = BuildOutParamReturnMappings(func);
+      in_out_pairings[func->name_] = BuildInOutParamPairings(func);
     }
 
     LoopAnalyzer analyzer(program, incore_names, out_mappings);
@@ -354,7 +631,18 @@ class IterArgReuseOptimizer {
       if (incore_names.count(func->name_)) continue;
       analyzer.VisitStmt(func->body_);
     }
-    return analyzer.results();
+    auto results = analyzer.results();
+
+    // Standalone calls (outside any iter-arg loop). Each callee's merges are
+    // recorded at most once; LoopAnalyzer's entries take precedence.
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) continue;
+      FunctionBodyIndex body_index;
+      body_index.VisitStmt(func->body_);
+      StandaloneCallAnalyzer s_analyzer(incore_names, in_out_pairings, body_index, results);
+      s_analyzer.VisitStmt(func->body_);
+    }
+    return results;
   }
 
   // -- Pre-scan: IRVisitor that identifies dead tensor.create vars -----------
