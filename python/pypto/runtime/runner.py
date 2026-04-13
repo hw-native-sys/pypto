@@ -36,8 +36,6 @@ Typical usage::
 """
 
 import ctypes
-import functools
-import importlib
 import os
 import subprocess
 import sys
@@ -61,43 +59,7 @@ from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 from .golden_writer import write_golden
 from .tensor_spec import TensorSpec
 
-# ---------------------------------------------------------------------------
-# Golden inputs pre-generation cache
-# ---------------------------------------------------------------------------
-# .pt files written by pregenerate_golden_inputs() (see test_runner.py) are
-# the persistent cache.  These flags prevent re-patching CodeRunner in
-# the same process.
-_code_runner_patched: list[bool] = [False]
-_binary_cache_patched: list[bool] = [False]
 _OUTPUTS_DIR = Path("outputs")
-
-
-@functools.lru_cache(maxsize=1)
-def _get_simpler_stamp() -> str:
-    """Return Simpler's current git commit (short hash) as a cache-key stamp.
-
-    The stamp is used to namespace the global runtime binary cache so that
-    stale binaries from an older Simpler version are never reused after an
-    update.  Falls back to ``"unknown"`` when git is unavailable or
-    ``SIMPLER_ROOT`` is not set.
-
-    The value is computed once and cached in-process.
-    """
-    simpler_root = os.environ.get("SIMPLER_ROOT", "")
-    if not simpler_root:
-        return "unknown"
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            cwd=simpler_root,
-            timeout=5,
-        )
-        return r.stdout.strip() if r.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -201,24 +163,6 @@ def _load_golden(path: Path) -> dict | None:
         return None
     try:
         return torch.load(path, weights_only=False)
-    except Exception:
-        return None
-
-
-def _save_binary(data: bytes, path: Path) -> None:
-    """Save compiled binary bytes to *path* atomically."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
-def _load_binary(path: Path) -> bytes | None:
-    """Load compiled binary bytes from *path*. Returns ``None`` on miss."""
-    if not path.exists():
-        return None
-    try:
-        return path.read_bytes()
     except Exception:
         return None
 
@@ -389,8 +333,9 @@ def run(
 
     1. Call :func:`ir.compile` to generate CCE C++ kernel and orchestration files.
     2. Patch the orchestration file with the required ``runtime.h`` header.
-    3. Write a ``golden.py`` file from *tensor_specs* and *golden*.
-    4. Invoke Simpler's ``CodeRunner`` to compile, load, execute, and validate.
+    3. If *codegen_only*, return immediately.
+    4. Compile kernels + orchestration to binaries, assemble ``ChipCallable``.
+    5. Build tensor arguments, compute golden, execute on device, validate.
 
     Args:
         program: A ``@pl.program`` decorated class or an ``ir.Program`` object.
@@ -451,7 +396,7 @@ def run(
                 profiling=config.compile_profiling,
             )
 
-        # 3. Write golden.py
+        # 3. Write golden.py (still used for test harness compatibility)
         golden_path = work_dir / "golden.py"
         with _stage("golden_write"):
             write_golden(
@@ -463,16 +408,59 @@ def run(
                 data_dir=config.golden_data_dir,
             )
 
-        # 4. Execute via Simpler's CodeRunner
-        with _stage("device_execution"):
-            _execute_on_device(
-                work_dir,
-                golden_path,
-                config.platform,
-                config.device_id,
-                config.pto_isa_commit,
-                config.runtime_profiling,
+        # 4. If codegen_only, stop here — no binary compilation or device execution
+        if config.codegen_only:
+            profile_data = prof.to_dict() if prof is not None else None
+            return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
+
+        # 5. Compile C++ → binaries + assemble ChipCallable
+        from .device_runner import (  # noqa: PLC0415
+            compile_and_assemble,
+            execute_on_device,
+            validate_golden,
+        )
+        from .task_interface import (  # noqa: PLC0415
+            ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+            make_tensor_arg,
+        )
+
+        with _stage("binary_compilation"):
+            chip_callable, binaries = compile_and_assemble(
+                work_dir, config.platform, pto_isa_commit=config.pto_isa_commit
             )
+
+        # 6. Build tensor arguments
+        orch_args = ChipStorageTaskArgs()
+        all_tensors: dict[str, Any] = {}
+        inputs: dict[str, torch.Tensor] = {}
+        outputs: dict[str, torch.Tensor] = {}
+
+        for spec in tensor_specs:
+            tensor = spec.create_tensor().cpu().contiguous()
+            orch_args.add_tensor(make_tensor_arg(tensor))
+            all_tensors[spec.name] = tensor
+            if spec.is_output:
+                outputs[spec.name] = tensor
+            else:
+                inputs[spec.name] = tensor
+
+        # 7. Compute golden
+        golden_outputs = {k: v.clone() for k, v in outputs.items()}
+        golden_with_inputs = {**inputs, **golden_outputs}
+        golden(golden_with_inputs, {})
+
+        # 8. Execute on device
+        with _stage("device_execution"):
+            execute_on_device(
+                chip_callable,
+                orch_args,
+                binaries,
+                config.device_id,
+                enable_profiling=config.runtime_profiling,
+            )
+
+        # 9. Validate
+        validate_golden(outputs, golden_outputs, rtol=config.rtol, atol=config.atol)
 
         profile_data = prof.to_dict() if prof is not None else None
         return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
@@ -498,157 +486,6 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _install_golden_inputs_patch(CodeRunner) -> None:
-    """Monkey-patch CodeRunner.__init__ to serve generate_inputs and compute_golden from disk cache.
-
-    Idempotent — safe to call multiple times.  For each new CodeRunner instance:
-
-    - ``generate_inputs``: loads ``cache/{case}_inputs.pt`` when available,
-      falls through to the original on a cache miss.
-    - ``compute_golden``: copies cached output tensors from
-      ``cache/{case}_golden.pt`` into the tensors dict when available,
-      falls through to the original on a cache miss.
-
-    Each ``torch.load`` produces fresh tensors, so no cloning is needed.
-    """
-    if _code_runner_patched[0]:
-        return
-
-    orig_init = CodeRunner.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        orig_init(self, *args, **kwargs)
-        golden_path = self.golden_path  # Path, already resolved
-
-        # --- patch generate_inputs -------------------------------------------
-        orig_gen = self._golden_module.generate_inputs
-
-        def _cached_gen(params):
-            case_name = params.get("name", "Default")
-            result = _load_inputs(_inputs_cache_file(golden_path, case_name))
-            return result if result is not None else orig_gen(params)
-
-        self._golden_module.generate_inputs = _cached_gen
-
-        # --- patch compute_golden --------------------------------------------
-        orig_compute = self._golden_module.compute_golden
-
-        def _cached_compute(tensors, params):
-            case_name = params.get("name", "Default")
-            cached = _load_golden(_golden_cache_file(golden_path, case_name))
-            if cached is not None:
-                for name, val in cached.items():
-                    if name in tensors:
-                        tensors[name].copy_(val)
-                return
-            orig_compute(tensors, params)
-
-        self._golden_module.compute_golden = _cached_compute
-
-    CodeRunner.__init__ = _patched_init
-    _code_runner_patched[0] = True
-
-
-# Persistent runtime binary cache — shared across test cases and sessions.
-# Root directory for persistent runtime binary cache.  Actual files live under
-# a Simpler-version subdirectory (see _get_simpler_stamp()) so that stale
-# binaries are automatically bypassed after a Simpler update.
-_BINARY_RUNTIME_CACHE = (
-    Path(__file__).parent.parent.parent.parent / "build_output" / "binary_cache" / "runtimes"
-)
-
-
-def _install_binary_cache_patch(KernelCompiler, RuntimeBuilder) -> None:
-    """Monkey-patch KernelCompiler and RuntimeBuilder to serve compiled binaries from disk.
-
-    Patches three methods with write-through caches:
-
-    - ``KernelCompiler.compile_incore``: caches at
-      ``work_dir/cache/incore_{core_type}_{stem}.bin``
-      (derived from the kernel source path structure
-      ``work_dir/kernels/{core_type}/{name}.cpp``).
-    - ``KernelCompiler.compile_orchestration``: caches at
-      ``work_dir/cache/orch_{stem}.bin``
-      (derived from ``work_dir/orchestration/{name}.cpp``).
-    - ``RuntimeBuilder.get_binaries``: caches at
-      ``build_output/binary_cache/runtimes/{name}_{platform}_{host|aicpu|aicore}.bin``
-      (global, shared across all test cases).
-
-    Idempotent — safe to call multiple times. Cache miss triggers compilation
-    and saves the result; subsequent calls serve from disk.
-    """
-    if _binary_cache_patched[0]:
-        return
-
-    RuntimeBinaries = getattr(sys.modules[RuntimeBuilder.__module__], "RuntimeBinaries")
-
-    # --- KernelCompiler.compile_incore ---
-    orig_incore = KernelCompiler.compile_incore
-
-    def _patched_incore(
-        self, source_path, core_type="aiv", pto_isa_root=None, extra_include_dirs=None, build_dir=None
-    ):
-        source = Path(source_path)
-        # Only cache for the expected structure: work_dir/kernels/{core_type}/{name}.cpp
-        if source.parent.parent.name == "kernels":
-            cache_file = source.parent.parent.parent / "cache" / f"incore_{core_type}_{source.stem}.bin"
-            cached = _load_binary(cache_file)
-            if cached is not None:
-                return cached
-            result = orig_incore(self, source_path, core_type, pto_isa_root, extra_include_dirs, build_dir)
-            _save_binary(result, cache_file)
-            return result
-        return orig_incore(self, source_path, core_type, pto_isa_root, extra_include_dirs, build_dir)
-
-    KernelCompiler.compile_incore = _patched_incore
-
-    # --- KernelCompiler.compile_orchestration ---
-    orig_orch = KernelCompiler.compile_orchestration
-
-    def _patched_orch(self, runtime_name, source_path, extra_include_dirs=None, build_dir=None):
-        source = Path(source_path)
-        # Only cache for the expected structure: work_dir/orchestration/{name}.cpp
-        if source.parent.name == "orchestration":
-            cache_file = source.parent.parent / "cache" / f"orch_{source.stem}.bin"
-            cached = _load_binary(cache_file)
-            if cached is not None:
-                return cached
-            result = orig_orch(self, runtime_name, source_path, extra_include_dirs, build_dir)
-            _save_binary(result, cache_file)
-            return result
-        return orig_orch(self, runtime_name, source_path, extra_include_dirs, build_dir)
-
-    KernelCompiler.compile_orchestration = _patched_orch
-
-    # --- RuntimeBuilder.get_binaries ---
-    orig_get_binaries = RuntimeBuilder.get_binaries
-
-    def _patched_get_binaries(self, name, build=False):
-        cache_dir = _BINARY_RUNTIME_CACHE / _get_simpler_stamp()
-        host_file = cache_dir / f"{name}_{self.platform}_host.bin"
-        aicpu_file = cache_dir / f"{name}_{self.platform}_aicpu.bin"
-        aicore_file = cache_dir / f"{name}_{self.platform}_aicore.bin"
-        if host_file.exists() and aicpu_file.exists() and aicore_file.exists():
-            # sim_context_path is a shared per-platform SO (not per-runtime-name),
-            # so resolve it from the builder rather than caching as bytes.
-            resolver = getattr(self, "_resolve_sim_context_path", None)
-            sim_context_path = resolver() if resolver is not None else None
-            return RuntimeBinaries(
-                host_path=host_file,
-                aicpu_path=aicpu_file,
-                aicore_path=aicore_file,
-                sim_context_path=sim_context_path,
-            )
-        result = orig_get_binaries(self, name, build=build)
-        _save_binary(result.host_path.read_bytes(), host_file)
-        _save_binary(result.aicpu_path.read_bytes(), aicpu_file)
-        _save_binary(result.aicore_path.read_bytes(), aicore_file)
-        return result
-
-    RuntimeBuilder.get_binaries = _patched_get_binaries
-    _binary_cache_patched[0] = True
-
-
 def _execute_on_device(
     work_dir: Path,
     golden_path: Path,
@@ -657,86 +494,87 @@ def _execute_on_device(
     pto_isa_commit: str | None = None,
     runtime_profiling: bool = False,
 ) -> None:
-    """Invoke Simpler's CodeRunner to compile, load, execute, and validate.
+    """Compile, load, execute, and validate via PyPTO's device runner.
 
-    Automatically adds SIMPLER_ROOT sub-paths to ``sys.path`` when the
-    ``SIMPLER_ROOT`` environment variable is set (mirrors conftest.py behaviour).
+    This function is used by the test harness (test_runner.py) to execute
+    pre-compiled test cases. For direct use, prefer :func:`run`.
 
     Args:
-        work_dir: Root output directory produced by :func:`compile_program`,
-            containing ``kernels/`` and ``orchestration/``.
+        work_dir: Root output directory containing ``kernels/`` and ``orchestration/``.
         golden_path: Path to the generated ``golden.py`` file.
-        platform: Target execution platform (``"a2a3sim"``, ``"a2a3"``,
-            ``"a5sim"``, or ``"a5"``).
+        platform: Target execution platform.
         device_id: Hardware device index.
-        pto_isa_commit: If set, pin the pto-isa clone to this specific git
-            commit (hash or tag).
-        runtime_profiling: If ``True``, enable runtime profiling
-            and generate ``swimlane.json`` after execution.
+        pto_isa_commit: If set, pin the pto-isa clone to this specific commit.
+        runtime_profiling: If ``True``, enable runtime profiling.
     """
-    simpler_root = os.environ.get("SIMPLER_ROOT")
-    if simpler_root:
-        for sub in ("examples/scripts", "python"):
-            p = str(Path(simpler_root) / sub)
-            if p not in sys.path:
-                sys.path.insert(0, p)
+    from .device_runner import compile_and_assemble, execute_on_device  # noqa: PLC0415
 
-    CodeRunner = importlib.import_module("code_runner").CodeRunner
-    KernelCompiler = importlib.import_module("simpler.kernel_compiler").KernelCompiler
-    RuntimeBuilder = importlib.import_module("runtime_builder").RuntimeBuilder
+    chip_callable, binaries = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
 
-    _install_golden_inputs_patch(CodeRunner)
-    _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
+    # Load golden.py to get generate_inputs and compute_golden
+    import importlib.util  # noqa: PLC0415
 
-    # Snapshot existing device logs before run so we can identify the new one
-    # (CANN writes device logs asynchronously after execution).
-    # Device logs are only available on real hardware, not on simulators.
-    pre_run_logs: set[Path] = set()
-    device_log_dir: Path | None = None
-    if runtime_profiling and not platform.endswith("sim"):
-        device_log_dir = _get_device_log_dir(device_id)
-        if device_log_dir.exists():
-            pre_run_logs = set(device_log_dir.glob("*.log"))
+    spec = importlib.util.spec_from_file_location("_golden", str(golden_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load golden.py from {golden_path}")
+    golden_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(golden_module)
 
-    # Snapshot existing perf_swimlane files so we can identify the new one
-    # produced by CodeRunner (written to _OUTPUTS_DIR).
-    pre_run_perf_files: set[Path] = set()
-    if runtime_profiling:
-        _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        pre_run_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json"))
+    # Load golden input cache if available
+    params: dict = {"name": "Default"}
+    result = _load_inputs(_inputs_cache_file(golden_path, "Default"))
+    if result is None:
+        result = golden_module.generate_inputs(params)
 
-    CodeRunner(
-        kernels_dir=str(work_dir),
-        golden_path=str(golden_path),
-        platform=platform,
-        device_id=device_id,
-        clone_protocol="https",
-        pto_isa_commit=pto_isa_commit,
+    from .task_interface import (  # noqa: PLC0415
+        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+        make_tensor_arg,
+        scalar_to_uint64,
+    )
+
+    orch_args = ChipStorageTaskArgs()
+    all_tensors: dict = {}
+    inputs: dict = {}
+    outputs: dict = {}
+    output_names = set(getattr(golden_module, "__outputs__", []))
+
+    for name, val in result:
+        if isinstance(val, torch.Tensor):
+            val = val.cpu().contiguous()
+            orch_args.add_tensor(make_tensor_arg(val))
+            all_tensors[name] = val
+            if name in output_names or name.startswith("out"):
+                outputs[name] = val
+            else:
+                inputs[name] = val
+        elif isinstance(val, ctypes._SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(val))
+            all_tensors[name] = val.value
+
+    # Compute golden
+    golden_cache = _load_golden(_golden_cache_file(golden_path, "Default"))
+    if golden_cache is not None:
+        golden_out = golden_cache
+    else:
+        golden_out = {k: v.clone() for k, v in outputs.items()}
+        golden_with_inputs = {**inputs, **golden_out}
+        golden_module.compute_golden(golden_with_inputs, params)
+
+    # Execute
+    execute_on_device(
+        chip_callable,
+        orch_args,
+        binaries,
+        device_id,
         enable_profiling=runtime_profiling,
-    ).run()
+    )
 
-    if runtime_profiling:
-        swimlane_dir = work_dir / "swimlane_data"
-        swimlane_dir.mkdir(parents=True, exist_ok=True)
+    # Validate
+    from .device_runner import validate_golden  # noqa: PLC0415
 
-        # Move the newly created perf_swimlane_*.json into swimlane_data/.
-        new_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json")) - pre_run_perf_files
-        perf_file: Path | None = None
-        if new_perf_files:
-            perf_file = max(new_perf_files, key=lambda p: p.stat().st_mtime)
-            dest = swimlane_dir / perf_file.name
-            perf_file.rename(dest)
-            perf_file = dest
-            # Remove outputs/ if it is now empty (it is only a staging area).
-            try:
-                _OUTPUTS_DIR.rmdir()
-            except OSError:
-                pass
-
-        if not platform.endswith("sim"):
-            _generate_swimlane(
-                work_dir, device_id, device_log_dir, pre_run_logs, simpler_root, swimlane_dir, perf_file
-            )
+    rtol = getattr(golden_module, "RTOL", 1e-5)
+    atol = getattr(golden_module, "ATOL", 1e-5)
+    validate_golden(outputs, golden_out, rtol=rtol, atol=atol)
 
 
 def _get_device_log_dir(device_id: int) -> Path:

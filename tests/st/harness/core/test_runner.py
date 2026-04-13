@@ -23,7 +23,6 @@ import importlib.util
 import logging
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import time
@@ -35,21 +34,24 @@ import pytest
 import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
+from pypto.runtime.device_runner import (
+    _load_binary,
+    _save_binary,
+    ensure_pto_isa_root,
+)
 from pypto.runtime.golden_writer import (
     _extract_compute_golden,
     _materialize_tensors,
     _save_data_files,
     generate_golden_source,
 )
+from pypto.runtime.kernel_compiler import KernelCompiler
 from pypto.runtime.runner import (
-    _BINARY_RUNTIME_CACHE,
     RunConfig,
     RunResult,
     _execute_on_device,
-    _get_simpler_stamp,
     _golden_cache_file,
     _inputs_cache_file,
-    _install_binary_cache_patch,
     _save_golden,
     _save_inputs,
 )
@@ -381,10 +383,9 @@ def prebuild_binaries(
     """Phase 2: pre-compile binary artifacts for all test cases in parallel.
 
     Must be called AFTER :func:`precompile_test_cases` so kernel/orchestration
-    C++ sources exist under ``work_dir``. Imports KernelCompiler/RuntimeBuilder
-    from Simpler and compiles incore kernels, the orchestration ``.so``, and
-    runtime binaries, saving results via the write-through binary cache patch
-    in :mod:`pypto.runtime.runner`.
+    C++ sources exist under ``work_dir``. Uses PyPTO's local KernelCompiler
+    to compile incore kernels and orchestration ``.so`` files, with binary
+    caching integrated into :mod:`pypto.runtime.device_runner`.
 
     Args:
         test_cases: Test case instances (deduplicated by cache key).
@@ -401,25 +402,8 @@ def prebuild_binaries(
     simpler_root = os.environ.get("SIMPLER_ROOT", "")
     if not simpler_root:
         return 0
-    for sub in ("examples/scripts", "python"):
-        p = str(Path(simpler_root) / sub)
-        if p not in sys.path:
-            sys.path.insert(0, p)
 
-    try:
-        code_runner_mod = importlib.import_module("code_runner")
-        kernel_compiler_mod = importlib.import_module("simpler.kernel_compiler")
-        runtime_builder_mod = importlib.import_module("runtime_builder")
-    except ImportError:
-        return 0
-
-    _ensure_pto_isa_root = code_runner_mod._ensure_pto_isa_root
-    KernelCompiler = kernel_compiler_mod.KernelCompiler
-    RuntimeBuilder = runtime_builder_mod.RuntimeBuilder
-
-    _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
-
-    pto_isa_root = _ensure_pto_isa_root(verbose=False, clone_protocol="https", commit=pto_isa_commit)
+    pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
     if pto_isa_root is None:
         return 0
 
@@ -433,11 +417,7 @@ def prebuild_binaries(
         return mod
 
     # ── Collect configs for all valid test cases ──────────────────────────────
-    # Load each kernel_config.py once in the main thread (not thread-safe to do
-    # it concurrently via importlib).
-    case_configs: list[tuple] = []  # (tc, compiler, runtime_name, kernels, orch_source)
-    seen_runtimes: set[tuple[str, str]] = set()
-
+    case_configs: list[tuple] = []
     for tc in test_cases:
         key = _cache_key(tc)
         if key not in _precompile_cache or _precompile_cache[key][1] is not None:
@@ -448,62 +428,84 @@ def prebuild_binaries(
             continue
         tc_platform = _resolve_platform(platform, tc.get_backend_type())
         runtime_name = getattr(mod, "RUNTIME_CONFIG", {}).get("runtime", "host_build_graph")
-        seen_runtimes.add((tc_platform, runtime_name))
         compiler = KernelCompiler(platform=tc_platform)
-        case_configs.append((tc, compiler, runtime_name, mod.KERNELS, mod.ORCHESTRATION["source"]))
+        case_configs.append(
+            (tc, compiler, tc_platform, runtime_name, mod.KERNELS, mod.ORCHESTRATION["source"])
+        )
 
     if not case_configs:
         return 0
 
     # ── Submit ALL tasks to a single flat pool ────────────────────────────────
-    # - One task per incore kernel (kernels across all test cases run in parallel)
-    # - One task per orchestration .so
-    # - One task per unique (platform, runtime_name) build
-    # This way runtime compilation overlaps with kernel/orch compilation, and
-    # with a single test case (common case) all kernels still run in parallel.
-    def _compile_incore_task(compiler, kernel, runtime_includes):
-        compiler.compile_incore(
-            kernel["source"],
-            core_type=kernel["core_type"],
-            pto_isa_root=pto_isa_root,
-            extra_include_dirs=runtime_includes,
-        )
+    def _compile_incore_task(compiler, tc_platform, kernel, runtime_includes):
+        source = Path(kernel["source"])
+        core_type = kernel["core_type"]
+        ext = ".so" if tc_platform.endswith("sim") else ".o"
+        output_file = source.with_suffix(ext)
+
+        # 1. Compile → save .o/.so alongside source
+        cached = _load_binary(output_file)
+        if cached is not None:
+            incore_o = cached
+        else:
+            incore_o = compiler.compile_incore(
+                kernel["source"],
+                core_type=core_type,
+                pto_isa_root=pto_isa_root,
+                extra_include_dirs=runtime_includes,
+            )
+            _save_binary(incore_o, output_file)
+
+        # 2. Extract stripped binary → save to cache/ for fast assembly later
+        from pypto.runtime.elf_parser import extract_text_section  # noqa: PLC0415
+
+        if tc_platform.endswith("sim"):
+            kernel_bin = incore_o
+        else:
+            kernel_bin = extract_text_section(incore_o)
+
+        cache_dir = source.parent.parent.parent / "cache"
+        cache_file = cache_dir / f"incore_{core_type}_{source.stem}.bin"
+        _save_binary(kernel_bin, cache_file)
 
     def _compile_orch_task(compiler, runtime_name, orch_source):
-        compiler.compile_orchestration(runtime_name, orch_source)
+        source = Path(orch_source)
+        output_file = source.with_suffix(".so")
 
-    def _build_runtime_task(tc_platform, runtime_name):
-        host_file = _BINARY_RUNTIME_CACHE / _get_simpler_stamp() / f"{runtime_name}_{tc_platform}_host.bin"
-        if not host_file.exists():
-            RuntimeBuilder(platform=tc_platform).build(runtime_name)
+        # 1. Compile → save .so alongside source
+        cached = _load_binary(output_file)
+        if cached is not None:
+            orch_bin = cached
+        else:
+            orch_bin = compiler.compile_orchestration(runtime_name, orch_source)
+            _save_binary(orch_bin, output_file)
+
+        # 2. Also save to cache/ for fast assembly later
+        cache_dir = source.parent.parent / "cache"
+        cache_file = cache_dir / f"orch_{source.stem}.bin"
+        _save_binary(orch_bin, cache_file)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         all_futs: list = []
 
-        # Runtime builds (independent of test-case kernels)
-        for tc_platform, runtime_name in seen_runtimes:
-            all_futs.append(pool.submit(_build_runtime_task, tc_platform, runtime_name))
-
         # Per-test-case: each kernel and orchestration as independent tasks
         tc_kernel_futs: list[tuple[list, concurrent.futures.Future]] = []
-        for tc, compiler, runtime_name, kernels, orch_source in case_configs:
+        for tc, compiler, tc_platform, runtime_name, kernels, orch_source in case_configs:
             runtime_includes = compiler.get_orchestration_include_dirs(runtime_name)[:2]
-            kfuts = [pool.submit(_compile_incore_task, compiler, k, runtime_includes) for k in kernels]
+            kfuts = [
+                pool.submit(_compile_incore_task, compiler, tc_platform, k, runtime_includes) for k in kernels
+            ]
             ofut = pool.submit(_compile_orch_task, compiler, runtime_name, orch_source)
             tc_kernel_futs.append((kfuts, ofut))
             all_futs.extend(kfuts)
             all_futs.append(ofut)
 
-        # Wait for everything; individual failures are logged but non-fatal:
-        # the write-through patch simply won't cache on failure and the test
-        # falls back to live compilation.
         for fut in concurrent.futures.as_completed(all_futs):
             try:
                 fut.result()
             except Exception as e:
                 _log.debug("Pre-build task failed (will fall back to live compilation): %s", e)
 
-    # Count test cases where all kernels AND orchestration succeeded
     n_ok = sum(
         1
         for kfuts, ofut in tc_kernel_futs
