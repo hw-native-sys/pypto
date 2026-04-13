@@ -700,7 +700,7 @@ class TestMemRefStandaloneSerialization:
         data = ir.serialize(program)
         restored = ir.deserialize(data)
 
-        ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(program, restored)
 
 
 class TestMemRefStructuralComparison:
@@ -1796,7 +1796,7 @@ class TestMemRefRoundTrip:
         assert 'pl.MemRef("mem_vec_0", 0, 16384)' in printed
         assert "pl.Mem.Vec" in printed
         reparsed = pl.parse(printed)
-        ir.assert_structural_equal(program, reparsed, enable_auto_mapping=True)
+        ir.assert_structural_equal(program, reparsed)
 
     def test_parse_tensor_layout_and_memref(self):
         """Parse 4-arg: pl.Tensor[[64], pl.FP32, pl.NZ, pl.MemRef(...)]."""
@@ -1836,7 +1836,7 @@ class TestMemRefRoundTrip:
         parsed1 = pl.parse(code)
         printed = parsed1.as_python()
         parsed2 = pl.parse(printed)
-        ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
+        ir.assert_structural_equal(parsed1, parsed2)
 
     def test_roundtrip_tensor_memref(self):
         """Parse → print → parse → assert_structural_equal for tensor with memref."""
@@ -1851,7 +1851,7 @@ class TestMemRefRoundTrip:
         parsed1 = pl.parse(code)
         printed = parsed1.as_python()
         parsed2 = pl.parse(printed)
-        ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
+        ir.assert_structural_equal(parsed1, parsed2)
 
     def test_all_memory_spaces(self):
         """Test all supported tile memory spaces round-trip through as_python()."""
@@ -1878,7 +1878,7 @@ class TestMemRefRoundTrip:
                 f"Expected pl.Mem.{space_name} in printed output, got: {printed}"
             )
             parsed2 = pl.parse(printed)
-            ir.assert_structural_equal(parsed1, parsed2, enable_auto_mapping=True)
+            ir.assert_structural_equal(parsed1, parsed2)
 
     def test_backwards_compat_two_args(self):
         """Existing 2-arg [shape, dtype] still works."""

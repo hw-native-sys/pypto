@@ -85,7 +85,7 @@ class TestBasicChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_non_divisible_chunk(self):
         """Chunk a loop where trip_count is NOT divisible by chunk_size."""
@@ -131,7 +131,7 @@ class TestBasicChunking:
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3_f)
                 return x_iter_1_rem_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_single_chunk(self):
         """Chunk a loop where trip_count equals chunk_size."""
@@ -168,7 +168,7 @@ class TestBasicChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestChunkingWithStep:
@@ -209,7 +209,7 @@ class TestChunkingWithStep:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_chunk_all_remainder(self):
         """Chunk where trip_count < chunk_size -> only remainder loop."""
@@ -238,7 +238,7 @@ class TestChunkingWithStep:
                         x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                 return x_iter_1_rem_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestChunkingWithKind:
@@ -279,7 +279,7 @@ class TestChunkingWithKind:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     @pytest.mark.filterwarnings("ignore:.*RoundtripInstrument.*IR not printable:UserWarning")
     def test_unroll_chunk(self):
@@ -574,7 +574,7 @@ class TestNestedChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_nested_both_divisible(self):
         """Nested chunks: both outer and inner divisible."""
@@ -628,7 +628,7 @@ class TestNestedChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_nested_both_remainder(self):
         """Nested chunks: both outer and inner have remainders.
@@ -712,7 +712,7 @@ class TestDynamicChunking:
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_dynamic_start_and_stop(self):
         """Both start and stop are dynamic."""
@@ -767,7 +767,7 @@ class TestDynamicChunking:
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_dynamic_stop_parallel(self):
         """Dynamic stop with pl.parallel should also work."""
@@ -810,7 +810,7 @@ class TestDynamicChunking:
                         x_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_4)
                 return x_rem_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_static_still_works(self):
         """Regression: static bounds should continue to produce same IR as before."""
@@ -847,7 +847,7 @@ class TestDynamicChunking:
                         x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
                 return x_iter_1_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestGuardedPolicy:
@@ -890,7 +890,7 @@ class TestGuardedPolicy:
         # Default and explicit "guarded" must produce identical IR.
         After = passes.split_chunked_loops()(_prepare_for_split(Input))
         AfterExplicit = passes.split_chunked_loops()(_prepare_for_split(InputExplicit))
-        ir.assert_structural_equal(After, AfterExplicit, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, AfterExplicit)
 
     def test_guarded_divisible_iter_args(self):
         """Static bound, trip_count divisible by chunk_size, with iter_args."""
@@ -928,7 +928,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_non_divisible_iter_args(self):
         """Static bound, trip_count NOT divisible by chunk_size: ceil(7/5)=2 outer chunks.
@@ -970,7 +970,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_trip_less_than_chunk(self):
         """trip_count < chunk_size: ceil(3/5)=1 outer chunk, inner guard masks lanes >= 3."""
@@ -1009,7 +1009,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_no_iter_args(self):
         """No iter_args: IfStmt has no phi and no else branch — body runs or is skipped."""
@@ -1036,7 +1036,7 @@ class TestGuardedPolicy:
                                 _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
                 return x_0
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_with_step(self):
         """Non-unit step: guard compares `idx * step < stop`, idx = (out*C + in)."""
@@ -1074,7 +1074,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_parallel(self):
         """pl.parallel: both outer and inner guarded loops are Parallel kind."""
@@ -1112,7 +1112,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_dynamic_stop(self):
         """Dynamic stop `n`: outer count = ceil(n/4) = (n + 3) // 4."""
@@ -1154,7 +1154,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_dynamic_start_and_stop(self):
         """Dynamic start AND stop: outer count = ceil(max(hi-lo, 0) / 4)."""
@@ -1204,7 +1204,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_dynamic_no_iter_args(self):
         """Dynamic bound with no iter_args: IfStmt has no phi."""
@@ -1233,7 +1233,7 @@ class TestGuardedPolicy:
                                 _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
                 return x_0
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_nested(self):
         """Nested guarded loops: inner guarded loop lives inside outer's then-branch.
@@ -1291,7 +1291,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_negative_step(self):
         """Descending chunked range: guard uses `idx > stop` since step < 0.
@@ -1335,7 +1335,7 @@ class TestGuardedPolicy:
                         x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
                 return x_outer_rv
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_negative_step_no_iter_args(self):
         """Descending chunked range without iter_args: guard still uses `idx > stop`."""
@@ -1362,7 +1362,7 @@ class TestGuardedPolicy:
                                 _tmp: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 1.0)
                 return x_0
 
-        ir.assert_structural_equal(After, _normalize_expected(Expected), enable_auto_mapping=True)
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_origin_attrs(self):
         """Guarded mode sets ChunkOuter/ChunkInner attrs and never emits ChunkRemainder."""

@@ -81,7 +81,7 @@ def test_normalize_simple_function():
 
     # Apply pass and compare
     After = passes.normalize_stmt_structure()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_normalize_seqstmts_with_bare_assigns():
@@ -167,7 +167,7 @@ def test_normalize_seqstmts_with_bare_assigns():
 
     # Apply pass and compare
     After = passes.normalize_stmt_structure()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_idempotence():
@@ -229,11 +229,11 @@ def test_idempotence():
 
     # Apply pass once and compare
     After = passes.normalize_stmt_structure()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
     # Apply pass again and verify idempotence
     After2 = passes.normalize_stmt_structure()(After)
-    ir.assert_structural_equal(After2, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After2, Expected)
 
 
 if __name__ == "__main__":

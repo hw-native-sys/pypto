@@ -156,7 +156,7 @@ class TestDeepCloneWithExpandMixedKernel:
         After2 = passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(Before))
 
         # Whole-program structural equality should work now that DeepClone is used
-        ir.assert_structural_equal(After, After2, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, After2)
 
 
 if __name__ == "__main__":

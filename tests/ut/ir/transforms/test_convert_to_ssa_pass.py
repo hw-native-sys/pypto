@@ -10,7 +10,9 @@
 """Unit tests for ConvertToSSA pass.
 
 Tests use the Before/Expected pattern with @pl.program decorator.
-Uses assert_structural_equal with enable_auto_mapping=True to compare.
+Uses assert_structural_equal to compare. Both Before and Expected are complete
+self-contained programs, so the default strict-identity mode (with DefField
+auto-mapping at def sites) is sufficient.
 """
 
 import pypto.language as pl
@@ -1422,7 +1424,7 @@ class TestEscapingVariables:
                 return result_0
 
         After = passes.convert_to_ssa()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_single_branch_escaping_var_gets_phi(self):
         """Variable defined only in one if-branch inside a loop must still escape.

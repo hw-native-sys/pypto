@@ -554,7 +554,7 @@ class TestFunctionStructuralEqual:
         func1 = ir.Function("f", [(x1, ir.ParamDirection.InOut)], [], assign1, span)
         func2 = ir.Function("f", [(x2, ir.ParamDirection.InOut)], [], assign2, span)
 
-        ir.assert_structural_equal(func1, func2, enable_auto_mapping=True)
+        ir.assert_structural_equal(func1, func2)
 
     def test_function_different_directions_not_equal(self):
         """Test Function nodes with different param directions are not equal."""
@@ -587,7 +587,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = cast(ir.Function, ir.deserialize(data))
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
         assert len(restored.param_directions) == 2
         assert restored.param_directions[0] == ir.ParamDirection.In
         assert restored.param_directions[1] == ir.ParamDirection.In
@@ -603,7 +603,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = cast(ir.Function, ir.deserialize(data))
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
         assert restored.param_directions[0] == ir.ParamDirection.Out
 
     def test_serialize_function_with_inout_direction(self):
@@ -617,7 +617,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = cast(ir.Function, ir.deserialize(data))
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
         assert restored.param_directions[0] == ir.ParamDirection.InOut
 
     def test_serialize_function_mixed_directions(self):
@@ -640,7 +640,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = cast(ir.Function, ir.deserialize(data))
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
         assert restored.param_directions[0] == ir.ParamDirection.In
         assert restored.param_directions[1] == ir.ParamDirection.InOut
         assert restored.param_directions[2] == ir.ParamDirection.Out

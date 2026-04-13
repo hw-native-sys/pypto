@@ -119,7 +119,7 @@ def test_insert_sync_cross_pipe():
     backend.set_backend_type(BackendType.Ascend910B)
     After = passes.insert_sync()(Before)
 
-    # Build Expected IR (reuse vars from Before since auto_mapping handles mapping)
+    # Build Expected IR (reuse vars from Before so def/use identity is preserved)
     expected_body = ir.SeqStmts(
         [
             ir.AssignStmt(tile_a, tile.load(input_a, offsets=[0, 0], shapes=[64, 64]), span),
@@ -143,7 +143,7 @@ def test_insert_sync_cross_pipe():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_insert_sync_intra_pipe():
@@ -214,7 +214,7 @@ def test_insert_sync_intra_pipe():
     expected_func = ir.Function("test_intra_pipe_sync", [t_a, t_b], [t_d.type], expected_body, span)
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_insert_sync_cube_pipe():
@@ -336,7 +336,7 @@ def test_insert_sync_cube_pipe():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_if_both_branches():
@@ -438,7 +438,7 @@ def test_if_both_branches():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_if_one_branch():
@@ -520,7 +520,7 @@ def test_if_one_branch():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_branch_merge():
@@ -634,7 +634,7 @@ def test_branch_merge():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_for_loop():
@@ -736,7 +736,7 @@ def test_for_loop():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_for_cross_iteration():
@@ -822,7 +822,7 @@ def test_for_cross_iteration():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_for_cross_iteration_wait_moves_past_scalar_stmt():
@@ -896,7 +896,7 @@ def test_for_cross_iteration_wait_moves_past_scalar_stmt():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_for_cross_iteration_mte3_to_mte2():
@@ -994,7 +994,7 @@ def test_for_cross_iteration_mte3_to_mte2():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_for_with_if_branches():
@@ -1127,7 +1127,7 @@ def test_for_with_if_branches():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_if_scope_crossing_dedup():
@@ -1230,7 +1230,7 @@ def test_if_scope_crossing_dedup():
     )
     Expected = ir.Program([expected_func], "test_program", span)
 
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

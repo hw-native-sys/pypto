@@ -312,7 +312,7 @@ class TestStatementSerialization:
         data = ir.serialize(for_stmt)
         restored = ir.deserialize(data)
 
-        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored)
 
     def test_serialize_for_stmt_with_iter_args(self):
         """Test serialization of ForStmt with iter_args."""
@@ -338,7 +338,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_for_stmt = cast(ir.ForStmt, restored)
 
-        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored)
         assert len(restored_for_stmt.iter_args) == 2
         assert restored_for_stmt.iter_args[0].name_hint == "arg1"
         assert restored_for_stmt.iter_args[1].name_hint == "arg2"
@@ -362,7 +362,7 @@ class TestStatementSerialization:
         restored = ir.deserialize(data)
         restored_for_stmt = cast(ir.ForStmt, restored)
 
-        ir.assert_structural_equal(for_stmt, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt, restored)
         assert len(restored_for_stmt.iter_args) == 0
 
     def test_serialize_yield_stmt(self):
@@ -465,7 +465,7 @@ class TestStatementSerialization:
         data = ir.serialize(seq)
         restored = ir.deserialize(data)
 
-        ir.assert_structural_equal(seq, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(seq, restored)
 
 
 class TestFunctionSerialization:
@@ -497,7 +497,7 @@ class TestFunctionSerialization:
         data = ir.serialize(func)
         restored = ir.deserialize(data)
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
 
     def test_serialize_function_with_return_stmt(self):
         """Test serialization of Function with ReturnStmt."""
@@ -520,7 +520,7 @@ class TestFunctionSerialization:
         restored = ir.deserialize(data)
         restored_func = cast(ir.Function, restored)
 
-        ir.assert_structural_equal(func, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(func, restored)
         assert isinstance(restored_func.body, ir.ReturnStmt)
         assert len(cast(ir.ReturnStmt, restored_func.body).value) == 1
 
@@ -539,7 +539,7 @@ class TestFunctionSerialization:
         data = ir.serialize(program)
         restored = ir.deserialize(data)
 
-        ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(program, restored)
 
 
 class TestSpanSerialization:
@@ -669,7 +669,7 @@ class TestEdgeCases:
         for_stmt_empty = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
         data = ir.serialize(for_stmt_empty)
         restored = ir.deserialize(data)
-        ir.assert_structural_equal(for_stmt_empty, restored, enable_auto_mapping=True)
+        ir.assert_structural_equal(for_stmt_empty, restored)
 
     def test_serialize_global_var(self):
         """Test serialization of GlobalVar in Call."""
