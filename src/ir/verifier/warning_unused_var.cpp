@@ -18,9 +18,11 @@
 
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 #include "pypto/ir/verifier/warning_verifier_registry.h"
 
@@ -47,8 +49,14 @@ class UseCollector : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
-    if (op) {
-      used_vars.insert(op.get());
+    if (!op) return;
+    used_vars.insert(op.get());
+    // A shaped-type MemRef annotation references the allocation Ptr via base_
+    // — a real data-flow use (e.g., `tile: Tile[..., MemRef(mem_vec, 0, 64)]`).
+    if (auto shaped_type = As<ShapedType>(op->GetType()); shaped_type && shaped_type->memref_.has_value()) {
+      const auto& memref = *shaped_type->memref_;
+      if (memref->base_) used_vars.insert(memref->base_.get());
+      if (memref->byte_offset_) VisitExpr(memref->byte_offset_);
     }
     // Don't recurse into type shape expressions — they aren't data-flow uses.
   }

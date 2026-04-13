@@ -9,6 +9,7 @@
 
 """Unit tests for the unused variable warning verifier."""
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
 from pypto.ir import builder
@@ -86,6 +87,31 @@ def test_no_warning_loop_var():
     # 'dummy' IS unused but 'i' should not be warned about
     names = _warning_names(_run_unused_var_check(program))
     assert "i" not in names
+
+
+def test_no_warning_ptr_used_in_memref_annotation():
+    """A Ptr var referenced only inside a shaped type's MemRef annotation is used."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(x, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(tile_b, [0, 0], out)
+            return result
+
+    # After init_mem_ref, tile.alloc Ptr vars are referenced only via MemRef
+    # annotations in the types of subsequent tile vars.
+    after = passes.init_mem_ref()(Prog)
+    names = _warning_names(_run_unused_var_check(after))
+    assert not any(n.startswith("mem_") for n in names), (
+        f"mem_vec_* Ptr vars incorrectly flagged as unused: {names}"
+    )
 
 
 def test_no_warning_var_used_in_rhs():
