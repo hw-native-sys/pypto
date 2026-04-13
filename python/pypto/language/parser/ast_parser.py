@@ -1809,15 +1809,44 @@ class ASTParser:
                     span=self.span_tracker.get_span(stmt),
                     hint=f"Use 'with pl.{func_attr}():'",
                 )
+            core_num = None
+            sync_start = None
             for kw in context_expr.keywords:
                 if kw.arg == "name_hint":
                     name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
+                elif kw.arg == "core_num":
+                    if not isinstance(kw.value, ast.Constant) or not isinstance(
+                        kw.value.value, int
+                    ):
+                        raise ParserSyntaxError(
+                            "core_num must be an integer literal",
+                            span=self.span_tracker.get_span(stmt),
+                            hint="Use 'with pl.cluster(core_num=8):'",
+                        )
+                    core_num = kw.value.value
+                elif kw.arg == "sync_start":
+                    if not isinstance(kw.value, ast.Constant) or not isinstance(
+                        kw.value.value, bool
+                    ):
+                        raise ParserSyntaxError(
+                            "sync_start must be a boolean literal (True/False)",
+                            span=self.span_tracker.get_span(stmt),
+                            hint="Use 'with pl.cluster(sync_start=True):'",
+                        )
+                    sync_start = kw.value.value
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keywords: 'name_hint'",
+                        hint="Supported keywords: 'name_hint', 'core_num', 'sync_start'",
                     )
+            scope_kind = scope_kind_map[func_attr]
+            span = self.span_tracker.get_span(stmt)
+            self._parse_scope_body(
+                stmt, scope_kind, span, name_hint=name_hint,
+                core_num=core_num, sync_start=sync_start,
+            )
+            return
         elif context_expr.args or context_expr.keywords:
             raise ParserSyntaxError(
                 f"pl.{func_attr}() does not accept arguments",
@@ -1838,9 +1867,14 @@ class ASTParser:
         role: "ir.Role | None" = None,
         split: "ir.SplitMode | None" = None,
         name_hint: str = "",
+        core_num: int | None = None,
+        sync_start: bool | None = None,
     ) -> None:
         """Build a scope statement from a with-statement body."""
-        with self.builder.scope(scope_kind, span, level=level, role=role, split=split, name_hint=name_hint):
+        with self.builder.scope(
+            scope_kind, span, level=level, role=role, split=split,
+            name_hint=name_hint, core_num=core_num, sync_start=sync_start,
+        ):
             with self._scope_kind_context(scope_kind):
                 self.scope_manager.enter_scope("scope")
                 for body_stmt in stmt.body:

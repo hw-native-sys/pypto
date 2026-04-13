@@ -1061,7 +1061,18 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
     stream_ << "):\n";
   } else if (op->scope_kind_ == ScopeKind::Cluster) {
     stream_ << "with " << prefix_ << ".cluster(";
+    bool first_kwarg = true;
+    if (op->core_num_.has_value()) {
+      stream_ << "core_num=" << *op->core_num_;
+      first_kwarg = false;
+    }
+    if (op->sync_start_.has_value() && *op->sync_start_) {
+      if (!first_kwarg) stream_ << ", ";
+      stream_ << "sync_start=True";
+      first_kwarg = false;
+    }
     if (!op->name_hint_.empty()) {
+      if (!first_kwarg) stream_ << ", ";
       stream_ << "name_hint=\"" << op->name_hint_ << "\"";
     }
     stream_ << "):\n";
@@ -1209,11 +1220,11 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    // NOTE: Currently only the "split" attr is printed. Other attrs in func->attrs_
-    // will be silently dropped during printing. Extend here when new attrs are added.
     auto func_split_mode = func->GetSplitMode();
     bool has_split = func_split_mode.has_value();
-    if (has_type || has_level || has_role || has_split) {
+    bool has_core_num = func->HasAttr("core_num");
+    bool has_sync_start = func->HasAttr("sync_start") && func->GetAttr<bool>("sync_start", false);
+    if (has_type || has_level || has_role || has_split || has_core_num || has_sync_start) {
       stream_ << "(";
       bool first = true;
       if (has_type) {
@@ -1230,10 +1241,25 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "role=" << prefix_ << ".Role." << RoleToString(*func->role_);
         first = false;
       }
-      if (has_split) {
+      if (has_split || has_core_num || has_sync_start) {
         if (!first) stream_ << ", ";
-        stream_ << "attrs={\"split\": " << prefix_ << ".SplitMode."
-                << SplitModeToPythonString(*func_split_mode) << "}";
+        stream_ << "attrs={";
+        bool first_attr = true;
+        if (has_split) {
+          stream_ << "\"split\": " << prefix_ << ".SplitMode."
+                  << SplitModeToPythonString(*func_split_mode);
+          first_attr = false;
+        }
+        if (has_core_num) {
+          if (!first_attr) stream_ << ", ";
+          stream_ << "\"core_num\": " << func->GetAttr<int>("core_num", 0);
+          first_attr = false;
+        }
+        if (has_sync_start) {
+          if (!first_attr) stream_ << ", ";
+          stream_ << "\"sync_start\": True";
+        }
+        stream_ << "}";
       }
       stream_ << ")";
     }

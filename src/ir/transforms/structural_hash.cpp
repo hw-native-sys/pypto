@@ -239,6 +239,20 @@ class StructuralHasher {
     return static_cast<result_type>(0);
   }
 
+  result_type VisitLeafField(const std::optional<int>& field) {
+    if (field.has_value()) {
+      return hash_combine(1, static_cast<result_type>(std::hash<int>{}(*field)));
+    }
+    return static_cast<result_type>(0);
+  }
+
+  result_type VisitLeafField(const std::optional<bool>& field) {
+    if (field.has_value()) {
+      return hash_combine(1, static_cast<result_type>(std::hash<bool>{}(*field)));
+    }
+    return static_cast<result_type>(0);
+  }
+
   result_type VisitLeafField(const ParamDirection& field) {
     return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
   }

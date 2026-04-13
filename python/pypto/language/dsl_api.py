@@ -694,7 +694,9 @@ class ClusterContext:
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
 
-    def __init__(self, name_hint: str = "") -> None:
+    def __init__(self, core_num: int | None = None, sync_start: bool = False, name_hint: str = "") -> None:
+        self.core_num = core_num
+        self.sync_start = sync_start
         self.name_hint = name_hint
 
     def __enter__(self) -> None:
@@ -706,12 +708,17 @@ class ClusterContext:
         pass
 
 
-def cluster(*, name_hint: str = "") -> ClusterContext:
+def cluster(core_num: int | None = None, sync_start: bool = False, *, name_hint: str = "") -> ClusterContext:
     """Mark a region of code as belonging to a Cluster execution context.
 
     A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
     share the same physical cluster resources. The OutlineClusterScopes pass
     extracts Cluster scopes into separate Group-typed functions.
+
+    Args:
+        core_num: Number of blocks for SPMD dispatch (default: None = single block).
+            Must be a positive integer.
+        sync_start: If True, all blocks start execution simultaneously (default: False).
 
     Returns:
         Context manager for Cluster scope
@@ -720,8 +727,15 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
         >>> with pl.cluster():
         ...     with pl.incore():
         ...         y = pl.add(x, x)
+        >>> with pl.cluster(core_num=8, sync_start=True):
+        ...     with pl.incore():
+        ...         block_idx = pl.tile.get_block_idx()
+        ...         block_num = pl.tile.get_block_num()
     """
-    return ClusterContext(name_hint=name_hint)
+    if core_num is not None:
+        if not isinstance(core_num, int) or isinstance(core_num, bool) or core_num <= 0:
+            raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
+    return ClusterContext(core_num=core_num, sync_start=sync_start, name_hint=name_hint)
 
 
 class AtContext:
