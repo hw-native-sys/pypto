@@ -681,6 +681,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
 
+    // Emit SPMD launch_spec if core_num is set on the callee function
+    int core_num = callee_func->GetAttr<int>("core_num", 0);
+    bool sync_start = callee_func->GetAttr<bool>("sync_start", false);
+    if (core_num > 0) {
+      std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+      code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+    }
+    if (sync_start) {
+      code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";
+    }
+
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr);
@@ -692,6 +703,45 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string aic_name;
     std::string aiv_name;
     FindGroupCallees(group_func, aic_name, aiv_name);
+
+    // AIV-only Group: pure vector SPMD kernel (no AIC callee).
+    // Dispatch as a single AIV task with core_num/sync_start from the Group.
+    // Use pto2_rt_submit_aiv_task which dispatches across independent AIV cores,
+    // unlike pto2_rt_submit_task (MixedKernels) which dispatches full clusters.
+    if (aic_name.empty() && !aiv_name.empty()) {
+      FunctionPtr aiv_func = program_->GetFunction(aiv_name);
+      INTERNAL_CHECK(aiv_func != nullptr)
+          << "Internal error: AIV function '" << aiv_name << "' not found for Group '" << group_name << "'";
+
+      (*func_name_to_core_type_)[aiv_name] = CoreType::VECTOR;
+      int aiv_id = GetOrCreateFuncId(aiv_name, func_name_to_id_, next_func_id_);
+      auto params = BuildTaskParams(call, aiv_func);
+
+      std::string ind = Indent();
+      std::string task_var = "params_t" + std::to_string(task_counter_);
+      code_ << "\n";
+      code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
+      code_ << ind << "Arg " << task_var << ";\n";
+      for (const auto& p : params) {
+        code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+      }
+
+      int core_num = group_func->GetAttr<int>("core_num", 0);
+      bool sync_start = group_func->GetAttr<bool>("sync_start", false);
+      if (core_num > 0) {
+        std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+        code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+      }
+      if (sync_start) {
+        code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";
+      }
+
+      std::string submit_expr =
+          CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
+      EmitTaskSubmitAndBind(submit_expr);
+      return;
+    }
+
     INTERNAL_CHECK_SPAN(!aic_name.empty(), call->span_)
         << "Internal error: no AIC callee found in Group '" << group_name << "' body";
     INTERNAL_CHECK_SPAN(!aiv_name.empty(), call->span_)
@@ -726,6 +776,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string third_id = RequiresDualAivDispatch(aiv_func) ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
           << third_id << "};\n";
+
+    // Emit SPMD launch_spec if core_num is set on the Group function
+    int core_num = group_func->GetAttr<int>("core_num", 0);
+    bool sync_start = group_func->GetAttr<bool>("sync_start", false);
+    if (core_num > 0) {
+      std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+      code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+    }
+    if (sync_start) {
+      code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";
+    }
 
     std::string submit_expr =
         "pto2_rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";

@@ -36,6 +36,7 @@ __all__ = [
     "fillpad_inplace",
     "get_block_idx",
     "get_subblock_idx",
+    "get_block_num",
     "add",
     "sub",
     "mul",
@@ -468,6 +469,23 @@ def get_subblock_idx() -> Scalar:
         Scalar wrapping the get_subblock_idx operation (INT64 type)
     """
     call_expr = _ir_ops.get_subblock_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_block_num() -> Scalar:
+    """Get the total number of blocks in the current SPMD task.
+
+    This operation returns the total count of blocks dispatched for the current
+    task. Used with get_block_idx() for SPMD work partitioning.
+
+    Returns:
+        Scalar wrapping the get_block_num operation (UINT64 type)
+
+    Example:
+        >>> block_idx = pl.tile.get_block_idx()
+        >>> block_num = pl.tile.get_block_num()
+    """
+    call_expr = _ir_ops.get_block_num()
     return Scalar(expr=call_expr)
 
 

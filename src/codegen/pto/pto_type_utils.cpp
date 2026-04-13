@@ -43,6 +43,8 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "index";
   } else if (dtype == DataType::INT64) {
     return "i64";
+  } else if (dtype == DataType::UINT64) {
+    return "i64";
   } else if (dtype == DataType::INT8) {
     return "i8";
   } else if (dtype == DataType::UINT8) {

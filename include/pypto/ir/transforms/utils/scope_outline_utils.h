@@ -535,10 +535,16 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function (propagate level/role from ScopeStmt, convert split to attrs)
+    // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)
     std::vector<std::pair<std::string, std::any>> outlined_attrs;
     if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
       outlined_attrs.emplace_back("split", static_cast<int>(op->split_.value()));
+    }
+    if (op->core_num_.has_value()) {
+      outlined_attrs.emplace_back("core_num", *op->core_num_);
+    }
+    if (op->sync_start_.has_value() && *op->sync_start_) {
+      outlined_attrs.emplace_back("sync_start", true);
     }
     auto outlined_func = std::make_shared<Function>(
         outlined_func_name, input_params, input_param_directions, return_types, outlined_body, op->span_,

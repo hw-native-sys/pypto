@@ -58,8 +58,18 @@ TypePtr DeduceTileGetBlockIdxType(const std::vector<ExprPtr>& args,
                                   const std::string& op_name) {
   CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
 
-  // get_block_idx returns UINT64 scalar
-  return std::make_shared<ScalarType>(DataType::UINT64);
+  // get_block_idx returns INDEX scalar (maps to index type in PTO codegen,
+  // consistent with offset arithmetic used in tile.load/tile.store)
+  return std::make_shared<ScalarType>(DataType::INDEX);
+}
+
+TypePtr DeduceTileGetBlockNumType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const std::string& op_name) {
+  CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
+
+  // get_block_num returns INDEX scalar (same type as get_block_idx)
+  return std::make_shared<ScalarType>(DataType::INDEX);
 }
 
 TypePtr DeduceTileGetSubblockIdxType(const std::vector<ExprPtr>& args,
@@ -67,8 +77,8 @@ TypePtr DeduceTileGetSubblockIdxType(const std::vector<ExprPtr>& args,
                                      const std::string& op_name) {
   CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
 
-  // get_subblock_idx returns INT64 (matches PTO get_subblock_idx / i64 and signed index math)
-  return std::make_shared<ScalarType>(DataType::INT64);
+  // get_subblock_idx returns INDEX scalar (maps to index type in PTO codegen)
+  return std::make_shared<ScalarType>(DataType::INDEX);
 }
 
 TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
@@ -474,6 +484,16 @@ REGISTER_OP("tile.get_subblock_idx")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGetSubblockIdxType(args, kwargs, "tile.get_subblock_idx");
+    });
+
+REGISTER_OP("tile.get_block_num")
+    .set_op_category("TileOp")
+    .set_description("Get the total number of blocks in the current SPMD task")
+    .no_argument()
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGetBlockNumType(args, kwargs, "tile.get_block_num");
     });
 
 REGISTER_OP("tile.read")

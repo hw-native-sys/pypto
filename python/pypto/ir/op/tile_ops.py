@@ -414,6 +414,19 @@ def get_subblock_idx(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.get_subblock_idx", [], {}, actual_span)
 
 
+def get_block_num(span: Span | None = None) -> Call:
+    """Get the total number of blocks in the current SPMD task.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a UINT64 scalar representing the total block count
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.get_block_num", [], {}, actual_span)
+
+
 def full(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,

@@ -1295,12 +1295,33 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.empty()) << "tile.get_subblock_idx takes no arguments, got " << op->args_.size();
     std::string result = codegen.GetCurrentResultTarget();
-    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "tile.get_subblock_idx requires assignment target";
-    std::ostringstream oss;
-    // No trailing `-> type`: PTOAS only accepts that form on some ops (e.g. reserve_buffer) and
-    // reports "expected operation name in quotes" for get_subblock_idx. The dialect result is i64.
-    oss << result << " = pto.get_subblock_idx";
-    codegen.Emit(oss.str());
+    INTERNAL_CHECK(!result.empty()) << "tile.get_subblock_idx requires assignment target";
+    // pto.get_subblock_idx returns i64; cast to index so offset arithmetic stays in index type
+    std::string i64_tmp = codegen.NewTemp();
+    codegen.Emit(i64_tmp + " = pto.get_subblock_idx");
+    codegen.Emit(result + " = arith.index_cast " + i64_tmp + " : i64 to index");
+    return std::string("");
+  });
+  reg("tile.get_block_num", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.empty()) << "tile.get_block_num takes no arguments, got " << op->args_.size();
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK(!result.empty()) << "tile.get_block_num requires assignment target";
+    // pto.get_block_num returns i64; cast to index so offset arithmetic stays in index type
+    std::string i64_tmp = codegen.NewTemp();
+    codegen.Emit(i64_tmp + " = pto.get_block_num");
+    codegen.Emit(result + " = arith.index_cast " + i64_tmp + " : i64 to index");
+    return std::string("");
+  });
+  reg("tile.get_block_idx", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.empty()) << "tile.get_block_idx takes no arguments, got " << op->args_.size();
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK(!result.empty()) << "tile.get_block_idx requires assignment target";
+    // pto.get_block_idx returns i64; cast to index so offset arithmetic stays in index type
+    std::string i64_tmp = codegen.NewTemp();
+    codegen.Emit(i64_tmp + " = pto.get_block_idx");
+    codegen.Emit(result + " = arith.index_cast " + i64_tmp + " : i64 to index");
     return std::string("");
   });
   reg("tile.read", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

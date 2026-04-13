@@ -569,10 +569,24 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
     name_hint = name_hint_obj->as<std::string>();
   }
 
+  // Deserialize optional core_num
+  std::optional<int> core_num = std::nullopt;
+  auto core_num_obj = GetOptionalFieldObj(fields_obj, "core_num", ctx);
+  if (core_num_obj.has_value() && core_num_obj->type != msgpack::type::NIL) {
+    core_num = static_cast<int>(core_num_obj->via.i64);
+  }
+
+  // Deserialize optional sync_start
+  std::optional<bool> sync_start = std::nullopt;
+  auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
+  if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
+    sync_start = sync_start_obj->via.boolean;
+  }
+
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint));
+  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint), core_num, sync_start);
 }
 
 // Deserialize SeqStmts
