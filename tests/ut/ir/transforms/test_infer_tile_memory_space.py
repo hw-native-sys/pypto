@@ -18,7 +18,21 @@ Test strategy:
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, ir, passes
+
+
+@pytest.fixture(autouse=True)
+def _reset_backend():
+    """Ensure no backend is configured so TileView inference is deterministic.
+
+    InferTileMemorySpace consults backend-specific layout specs when a backend
+    is configured. Tests in other files set Ascend and may share an xdist
+    worker; resetting before each test guarantees the no-backend defaults
+    assumed by the Expected programs.
+    """
+    backend.reset_for_testing()
+    yield
+    backend.reset_for_testing()
 
 
 class TestInferTileMemorySpaceKwargOps:
