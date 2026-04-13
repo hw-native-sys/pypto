@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
@@ -44,7 +45,8 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
    protected:
     StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
       if (op->scope_kind_ == ScopeKind::Spmd) {
-        CHECK(!core_num.has_value()) << "Only one pl.spmd() block is allowed per cluster scope";
+        CHECK(!core_num.has_value())  // NOLINT(misc-include-cleaner)
+            << "Only one pl.spmd() block is allowed per cluster scope";
         core_num = op->core_num_;
         sync_start = op->sync_start_;
         return op->body_;

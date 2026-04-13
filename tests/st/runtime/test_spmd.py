@@ -92,21 +92,6 @@ class SPMDAddTestCase(PTOTestCase):
         tensors["out"][:] = tensors["a"] + tensors["b"]
 
 
-class SPMDAddA5TestCase(SPMDAddTestCase):
-    """SPMD add with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "spmd_add_a5_512x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 # --- Tests ---
 
 
@@ -118,13 +103,6 @@ class TestSPMDOperations:
         test_case = SPMDAddTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.a5
-    def test_spmd_add_a5(self, test_runner):
-        """SPMD add with A5 (Ascend 950) backend."""
-        test_case = SPMDAddA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

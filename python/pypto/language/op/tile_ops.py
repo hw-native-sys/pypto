@@ -466,7 +466,7 @@ def get_subblock_idx() -> Scalar:
     Core 0 returns 0, core 1 returns 1.
 
     Returns:
-        Scalar wrapping the get_subblock_idx operation (INT64 type)
+        Scalar wrapping the get_subblock_idx operation (INDEX type)
     """
     call_expr = _ir_ops.get_subblock_idx()
     return Scalar(expr=call_expr)

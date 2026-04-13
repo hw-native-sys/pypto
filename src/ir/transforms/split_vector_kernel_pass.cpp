@@ -612,7 +612,7 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   }
 
   if (is_aiv) {
-    auto idx_type = std::make_shared<ScalarType>(DataType::INT64);
+    auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
     std::unordered_set<std::string> used_subblock_names;
     for (const auto& p : func->params_) {
       used_subblock_names.insert(p->name_hint_);

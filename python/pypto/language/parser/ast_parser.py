@@ -1904,8 +1904,10 @@ class ASTParser:
                 hint=spmd_hint,
             )
         body_stmt = stmt.body[0]
-        is_call = (isinstance(body_stmt, ast.Assign) and isinstance(body_stmt.value, ast.Call)) or (
-            isinstance(body_stmt, ast.Expr) and isinstance(body_stmt.value, ast.Call)
+        is_call = (
+            (isinstance(body_stmt, ast.Assign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.AnnAssign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.Expr) and isinstance(body_stmt.value, ast.Call))
         )
         if not is_call:
             raise ParserSyntaxError(
