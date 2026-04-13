@@ -239,7 +239,8 @@ with ib.function("tensor_example") as f:
 
 | 分类 | 操作 | 描述 |
 | ---- | ---- | ---- |
-| **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
+| **内存** | `tile.get_block_idx` | 获取 block 索引（返回 INT64 标量） |
+| - | `tile.get_block_num` | 获取 SPMD 启动的总 block 数（返回 INT64 标量） |
 | - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
 | - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
@@ -382,7 +383,7 @@ class CrossCoreExample:
 | --------- | ---- |
 | `src/ir/op/type_inference.cpp` | 共享的类型推断工具 |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
+| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx, get_block_num |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls 等 |
 | `tile_ops/reduction.cpp` | TileOp: sum（含 axis, keepdim） |
 | `tile_ops/unary.cpp` | TileOp: sqrt |

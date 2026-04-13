@@ -1109,9 +1109,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     new_args.push_back(gm_var);
     CallPtr new_call;
     if (auto call_type = call->GetType()) {
-      new_call = std::make_shared<Call>(call->op_, new_args, call_type, call->span_);
+      new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call_type, call->span_);
     } else {
-      new_call = std::make_shared<Call>(call->op_, new_args, call->span_);
+      new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
     }
     StmtPtr create_stmt_ptr = create_stmt;
     return std::make_pair(create_stmt_ptr, new_call);

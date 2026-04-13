@@ -11,7 +11,7 @@
 
 /**
  * @file memory.cpp
- * @brief Memory tile operations (get_block_idx, load, store)
+ * @brief Memory tile operations (load, store, move, alloc, create, read, write, full)
  *
  * This file implements memory operations for tile-level programming.
  * These operations handle data movement between tensors and unified buffers (tiles).
@@ -51,24 +51,6 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
     return *default_value;
   }
   throw ValueError("Missing kwarg: " + key);
-}
-
-TypePtr DeduceTileGetBlockIdxType(const std::vector<ExprPtr>& args,
-                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                  const std::string& op_name) {
-  CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
-
-  // get_block_idx returns UINT64 scalar
-  return std::make_shared<ScalarType>(DataType::UINT64);
-}
-
-TypePtr DeduceTileGetSubblockIdxType(const std::vector<ExprPtr>& args,
-                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                     const std::string& op_name) {
-  CHECK(args.size() == 0) << "The operator " << op_name << " requires no arguments, but got " << args.size();
-
-  // get_subblock_idx returns INT64 (matches PTO get_subblock_idx / i64 and signed index math)
-  return std::make_shared<ScalarType>(DataType::INT64);
 }
 
 TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
@@ -450,30 +432,6 @@ REGISTER_OP("tile.write")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileWriteType(args, kwargs, "tile.write");
-    });
-
-// ============================================================================
-// Registration Function for Block Memory Operations
-// ============================================================================
-
-REGISTER_OP("tile.get_block_idx")
-    .set_op_category("TileOp")
-    .set_description("Get the current block index")
-    .no_argument()
-    .no_memory_spec()
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileGetBlockIdxType(args, kwargs, "tile.get_block_idx");
-    });
-
-REGISTER_OP("tile.get_subblock_idx")
-    .set_op_category("TileOp")
-    .set_description("Get the current sub-block (vector core) index")
-    .no_argument()
-    .no_memory_spec()
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileGetSubblockIdxType(args, kwargs, "tile.get_subblock_idx");
     });
 
 REGISTER_OP("tile.read")

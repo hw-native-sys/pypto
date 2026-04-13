@@ -82,6 +82,7 @@ from .op.system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    spmd_launch,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -328,6 +329,7 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
+    "spmd_launch",
     # Promoted tensor-only
     "create_tensor",
     "assemble",

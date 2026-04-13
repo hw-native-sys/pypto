@@ -11,7 +11,7 @@ src/ir/op/
 ├── tensor_ops/                  # Tensor operator implementations
 │   └── elementwise.cpp          # Element-wise ops (Add, Sub, Mul, Div)
 └── tile_ops/                   # Tile operator implementations
-    ├── memory.cpp               # Memory operations (get_block_idx, load, store)
+    ├── memory.cpp               # Memory operations (get_block_idx, get_block_num, load, store)
     ├── elementwise.cpp          # Element-wise ops (Add, Mul, Div)
     ├── reduction.cpp            # Reduction ops (Sum with keepdim)
     └── unary.cpp                # Unary ops (Sqrt)
@@ -127,7 +127,8 @@ Tile operations are designed for hardware-optimized tile-level programming,
 working with tiles and supporting scalar broadcasting.
 
 - **Memory** (`tile_ops/memory.cpp`):
-  - `tile.get_block_idx` - Get the current hardware block index (returns UINT64 scalar)
+  - `tile.get_block_idx` - Get the current hardware block index (returns INT64 scalar)
+  - `tile.get_block_num` - Get total block count in SPMD launch (returns INT64 scalar)
   - `tile.load` - Copy data from tensor to unified buffer (tile)
   - `tile.store` - Copy data from unified buffer (tile) to tensor
 

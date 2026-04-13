@@ -216,7 +216,7 @@ _KERNEL_HEADER = """\
 #define __aicore__ [aicore]
 #endif
 
-{subblock_override}#include <pto/pto-inst.hpp>
+{subblock_override}{block_context_override}#include <pto/pto-inst.hpp>
 #include "tensor.h"
 
 using namespace pto;
@@ -365,6 +365,28 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     return _uses_dynamic_subblock_id(func)
 
 
+def _uses_op(func: _ir_core.Function, op_name: str) -> bool:
+    """Return whether the function body contains a call to the given op."""
+    stmts = _ir_core.flatten_to_stmts(func.body)
+    for stmt in stmts:
+        call = None
+        if isinstance(stmt, _ir_core.EvalStmt):
+            call = stmt.expr
+        elif isinstance(stmt, _ir_core.AssignStmt):
+            call = stmt.value
+        if not isinstance(call, _ir_core.Call):
+            continue
+        op = getattr(call, "op", None)
+        if isinstance(op, _ir_core.Op) and op.name == op_name:
+            return True
+    return False
+
+
+def _needs_block_context_bridge(func: _ir_core.Function) -> bool:
+    """Return whether the kernel needs runtime block context bridge (get_block_idx/get_block_num)."""
+    return _uses_op(func, "tile.get_block_idx") or _uses_op(func, "tile.get_block_num")
+
+
 def _generate_kernel_header(func: _ir_core.Function) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
@@ -394,7 +416,27 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
 
             """
         )
-    return _KERNEL_HEADER.format(func_name=func.name, subblock_override=subblock_override)
+    block_context_override = ""
+    if _needs_block_context_bridge(func):
+        block_context_override = textwrap.dedent(
+            """\
+            #if !defined(__CPU_SIM)
+            #include "intrinsic.h"
+
+            // SPMD block context: bridge runtime block_idx/block_num into PTO-ISA builtins.
+            [[block_local]] static int64_t pypto_runtime_block_idx;
+            [[block_local]] static int64_t pypto_runtime_block_num;
+            #define get_blockidx() pypto_runtime_block_idx
+            #define get_blocknum() pypto_runtime_block_num
+            #endif
+
+            """
+        )
+    return _KERNEL_HEADER.format(
+        func_name=func.name,
+        subblock_override=subblock_override,
+        block_context_override=block_context_override,
+    )
 
 
 def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
@@ -418,12 +460,23 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
             "#endif\n\n"
         )
 
+    runtime_block_context_setup = ""
+    if _needs_block_context_bridge(func):
+        runtime_block_context_setup = (
+            "#if !defined(__CPU_SIM)\n"
+            "    // Read SPMD block context from runtime dispatch\n"
+            "    pypto_runtime_block_idx = static_cast<int64_t>(get_block_idx(args));\n"
+            "    pypto_runtime_block_num = static_cast<int64_t>(get_block_num(args));\n"
+            "#endif\n\n"
+        )
+
     wrapper_func = (
         "// --- Kernel entry point ---\n"
         'extern "C" __aicore__ __attribute__((always_inline)) '
         "void kernel_entry(__gm__ int64_t* args)\n"
         "{\n"
         f"{runtime_subblock_setup}"
+        f"{runtime_block_context_setup}"
         f"{unpacking_code}\n"
         f"    // Forward to ptoas-generated function\n"
         f"    {func.name}({call_args});\n"

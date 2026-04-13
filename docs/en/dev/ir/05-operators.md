@@ -239,7 +239,8 @@ with ib.function("tensor_example") as f:
 
 | Category | Operations | Description |
 | -------- | ---------- | ----------- |
-| **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
+| **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::INT64)) |
+| - | `tile.get_block_num` | Get total block count in SPMD launch (→ ScalarType(DataType::INT64)) |
 | - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
 | - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
@@ -382,7 +383,7 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 | -------------- | -------- |
 | `src/ir/op/type_inference.cpp` | Shared type inference utilities |
 | `tensor_ops/elementwise.cpp` | TensorOp: add, sub, mul, div |
-| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx |
+| `tile_ops/memory.cpp` | TileOp: load, store, read, get_block_idx, get_block_num |
 | `tile_ops/elementwise.cpp` | TileOp: add, mul, div, adds, muls, etc. |
 | `tile_ops/reduction.cpp` | TileOp: sum (with axis, keepdim) |
 | `tile_ops/unary.cpp` | TileOp: sqrt |

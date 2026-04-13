@@ -294,6 +294,7 @@ def _register_ops() -> None:
     m["tile.read"] = lambda a, _kw: f"{a[0]}[{a[1]}]"
     m["tile.write"] = lambda a, _kw: f"_write_and_return({a[0]}, {a[1]}, {a[2]})"
     m["tile.get_block_idx"] = lambda _a, _kw: "0"
+    m["tile.get_block_num"] = lambda _a, _kw: "1"
 
     # tile log / relu
     m["tile.log"] = _torch_fn("log")

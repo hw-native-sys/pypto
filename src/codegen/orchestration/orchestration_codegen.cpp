@@ -532,6 +532,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
     aiv_name = std::move(finder.aiv_name);
   }
 
+  void EmitSpmdLaunchSpec(const CallPtr& call, const std::string& task_var) {
+    if (call->HasKwarg("core_num")) {
+      int core_num = call->GetKwarg<int>("core_num");
+      code_ << Indent() << task_var << ".launch_spec.set_core_num(" << core_num << ");\n";
+    }
+    if (call->HasKwarg("sync_start")) {
+      bool sync_start = call->GetKwarg<bool>("sync_start");
+      code_ << Indent() << task_var << ".launch_spec.set_require_sync_start("
+            << (sync_start ? "true" : "false") << ");\n";
+    }
+  }
+
   void EmitTaskSubmitAndBind(const std::string& submit_expr) {
     code_ << Indent() << submit_expr << ";\n";
     task_counter_++;
@@ -680,6 +692,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
+    EmitSpmdLaunchSpec(call, task_var);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -721,6 +734,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
     }
+    EmitSpmdLaunchSpec(call, task_var);
     // Split AIV groups dispatch the same kernel on both vector lanes. The
     // kernel body uses tile.get_subblock_idx() to select its lane-local slice.
     std::string third_id = RequiresDualAivDispatch(aiv_func) ? std::to_string(aiv_id) : "INVALID_KERNEL_ID";

@@ -75,7 +75,8 @@ Transfer data between memory hierarchy levels.
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; tensor inputs lower to tile fillpad in InCore code |
-| `get_block_idx` | `() -> Scalar` | Get current hardware block index (UINT64) |
+| `get_block_idx` | `() -> Scalar` | Get current hardware block index (INT64) |
+| `get_block_num` | `() -> Scalar` | Get total block count in SPMD launch (INT64) |
 
 ## Tile Arithmetic (`pl.tile.*`)
 

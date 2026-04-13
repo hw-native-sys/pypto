@@ -1970,6 +1970,155 @@ class TestTensorReadWriteOffsetCodegen:
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
 
+class TestSpmdLaunch:
+    """Test SPMD launch spec generation in orchestration codegen."""
+
+    def test_spmd_launch_core_num(self):
+        """spmd_launch with core_num emits launch_spec.set_core_num."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                pl.store(tile_a, [0, 0], output)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                pl.system.spmd_launch(self.kernel, a, output, core_num=8)
+
+        code = _generate_orch_code(SpmdProgram)
+        assert "launch_spec.set_core_num(8)" in code
+        assert "pto2_rt_submit_aiv_task" in code
+
+    def test_spmd_launch_core_num_and_sync_start(self):
+        """spmd_launch with both core_num and sync_start emits both launch_spec calls."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdSyncProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                pl.store(tile_a, [0, 0], output)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                pl.system.spmd_launch(self.kernel, a, output, core_num=12, sync_start=True)
+
+        code = _generate_orch_code(SpmdSyncProgram)
+        assert "launch_spec.set_core_num(12)" in code
+        assert "launch_spec.set_require_sync_start(true)" in code
+
+    def test_spmd_launch_shorthand(self):
+        """pl.spmd_launch shorthand works the same as pl.system.spmd_launch."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdShorthandProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                pl.store(tile_a, [0, 0], output)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                pl.spmd_launch(self.kernel, a, output, core_num=4)
+
+        code = _generate_orch_code(SpmdShorthandProgram)
+        assert "launch_spec.set_core_num(4)" in code
+
+    def test_spmd_launch_no_core_num_raises(self):
+        """spmd_launch without core_num raises ParserSyntaxError."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        with pytest.raises(Exception, match="core_num"):
+
+            @pl.program
+            class BadSpmdProgram:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[16, 16], pl.FP32],
+                    output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                ):
+                    tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                    pl.store(tile_a, [0, 0], output)
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[16, 16], pl.FP32],
+                    output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                ):
+                    pl.system.spmd_launch(self.kernel, a, output)
+
+    def test_normal_and_spmd_calls_coexist(self):
+        """Normal and SPMD calls can coexist in the same orchestration function."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class MixedCallProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                pl.store(tile_a, [0, 0], output)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                self.kernel(a, output)
+                pl.system.spmd_launch(self.kernel, a, output, core_num=8)
+
+        code = _generate_orch_code(MixedCallProgram)
+        assert "// Task 0: kernel" in code
+        assert "// Task 1: kernel" in code
+        assert "launch_spec.set_core_num(8)" in code
+        lines = code.splitlines()
+        task0_line = next(i for i, line in enumerate(lines) if "Task 0:" in line)
+        task1_line = next(i for i, line in enumerate(lines) if "Task 1:" in line)
+        core_num_line = next(i for i, line in enumerate(lines) if "set_core_num" in line)
+        assert core_num_line > task1_line
+        assert core_num_line > task0_line
+
+
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
 

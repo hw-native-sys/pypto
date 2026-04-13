@@ -14,6 +14,8 @@ tpush ops wrap the IR-level functions, unwrapping Tile to Expr.
 tpop ops accept optional shape/dtype kwargs to create typed results.
 """
 
+from typing import Any
+
 from pypto.ir.op import system_ops as _ir_ops
 from pypto.ir.op.system_ops import (
     AUTO,
@@ -47,6 +49,7 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
+    "spmd_launch",
 ]
 
 
@@ -139,3 +142,18 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
     return Scalar(DataType.INT32, call)
+
+
+def spmd_launch(func: Any, *args: Any, core_num: int, sync_start: bool = False) -> Any:
+    """Launch a kernel with SPMD (Single Program Multiple Data) dispatch.
+
+    This function is intercepted by the DSL parser and never called at
+    runtime.  It exists only to provide a type-checkable API surface.
+
+    Args:
+        func: ``self.<kernel>`` reference to the kernel function to launch.
+        *args: Tensor arguments forwarded to the kernel.
+        core_num: Number of blocks (cores) to launch.
+        sync_start: If ``True``, all blocks start execution atomically.
+    """
+    raise RuntimeError("spmd_launch is a DSL-only construct and cannot be called outside @pl.program")

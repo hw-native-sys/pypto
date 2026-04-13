@@ -752,6 +752,7 @@ class TestRegistryInfrastructure:
         "op_name",
         [
             "tile.get_block_idx",
+            "tile.get_block_num",
             "tile.alloc",
         ],
     )

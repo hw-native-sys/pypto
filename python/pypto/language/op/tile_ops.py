@@ -445,7 +445,7 @@ def get_block_idx() -> Scalar:
     used in tile-level programming to identify which block of data is being processed.
 
     Returns:
-        Scalar wrapping the get_block_idx operation (UINT64 type)
+        Scalar wrapping the get_block_idx operation (INT64 type)
 
     Example:
         >>> block_idx = pl.tile.get_block_idx()
@@ -454,6 +454,25 @@ def get_block_idx() -> Scalar:
         >>>     ...
     """
     call_expr = _ir_ops.get_block_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_block_num() -> Scalar:
+    """Get the total number of blocks in the current SPMD launch.
+
+    Returns the block count for the current task dispatch. When no SPMD launch
+    is configured, returns 1 (single-block default).
+
+    Returns:
+        Scalar wrapping the get_block_num operation (INT64 type)
+
+    Example:
+        >>> block_num = pl.tile.get_block_num()
+        >>> block_idx = pl.tile.get_block_idx()
+        >>> # Each block processes a portion of data
+        >>> chunk_size = total_size // block_num
+    """
+    call_expr = _ir_ops.get_block_num()
     return Scalar(expr=call_expr)
 
 

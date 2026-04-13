@@ -2518,6 +2518,10 @@ class ASTParser:
             op_name = attrs[2]
             return self._parse_system_op(op_name, call)
 
+        # pl.spmd_launch(...) — SPMD kernel launch (shorthand for pl.system.spmd_launch)
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "spmd_launch":
+            return self._parse_spmd_launch(call)
+
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
             return self._parse_typed_constant(call)
@@ -2908,7 +2912,90 @@ class ASTParser:
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
+        if op_name == "spmd_launch":
+            return self._parse_spmd_launch(call)
         return self._dispatch_op(ir_op.system, "system", op_name, call)
+
+    def _parse_spmd_launch(self, call: ast.Call) -> ir.Expr:
+        """Parse pl.system.spmd_launch(self.kernel, arg1, arg2, ..., core_num=N, sync_start=True).
+
+        Produces a Call(GlobalVar("kernel"), [arg1, arg2, ...], kwargs={"core_num": N, ...}).
+        """
+        span = self.span_tracker.get_span(call)
+
+        if not call.args:
+            raise ParserSyntaxError(
+                "spmd_launch requires at least a function reference as the first argument",
+                span=span,
+                hint="Usage: pl.system.spmd_launch(self.kernel, arg1, ..., core_num=N)",
+            )
+
+        # First argument must be self.method_name
+        func_ref = call.args[0]
+        if not (
+            isinstance(func_ref, ast.Attribute)
+            and isinstance(func_ref.value, ast.Name)
+            and func_ref.value.id == "self"
+        ):
+            raise ParserSyntaxError(
+                "First argument to spmd_launch must be a self.method_name reference",
+                span=span,
+                hint="Usage: pl.system.spmd_launch(self.kernel, arg1, ..., core_num=N)",
+            )
+
+        method_name = func_ref.attr
+        if method_name not in self.global_vars:
+            raise UndefinedVariableError(
+                f"Function '{method_name}' not defined in program",
+                span=span,
+                hint=f"Available functions: {list(self.global_vars.keys())}",
+            )
+        gvar = self.global_vars[method_name]
+        func_obj = self.gvar_to_func.get(gvar)
+
+        # Parse remaining positional arguments as kernel arguments
+        kernel_args = [self.parse_expression(arg) for arg in call.args[1:]]
+
+        if func_obj is not None:
+            self._validate_call_arg_count(method_name, func_obj, len(kernel_args), span)
+
+        # Parse SPMD kwargs (core_num, sync_start)
+        spmd_kwargs: dict[str, Any] = {}
+        valid_kwargs = {"core_num", "sync_start"}
+        for kw in call.keywords:
+            if kw.arg not in valid_kwargs:
+                raise ParserSyntaxError(
+                    f"Unknown spmd_launch keyword argument: '{kw.arg}'",
+                    span=span,
+                    hint=f"Valid keyword arguments: {sorted(valid_kwargs)}",
+                )
+            if not isinstance(kw.value, ast.Constant):
+                raise ParserSyntaxError(
+                    f"spmd_launch keyword '{kw.arg}' must be a compile-time constant",
+                    span=span,
+                )
+            spmd_kwargs[kw.arg] = kw.value.value
+
+        if "core_num" not in spmd_kwargs:
+            raise ParserSyntaxError(
+                "spmd_launch requires 'core_num' keyword argument",
+                span=span,
+                hint="Usage: pl.system.spmd_launch(self.kernel, arg1, ..., core_num=N)",
+            )
+
+        # Build Call with SPMD kwargs
+        return_types = func_obj.return_types if func_obj else []
+        if func_obj is not None and return_types:
+            return_types = ir.deduce_call_return_type(
+                list(func_obj.params),
+                kernel_args,
+                return_types,
+            )
+        if not return_types:
+            return ir.Call(gvar, kernel_args, spmd_kwargs, span)
+        if len(return_types) == 1:
+            return ir.Call(gvar, kernel_args, spmd_kwargs, return_types[0], span)
+        return ir.Call(gvar, kernel_args, spmd_kwargs, ir.TupleType(return_types), span)
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {

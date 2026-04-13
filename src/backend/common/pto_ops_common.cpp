@@ -500,6 +500,25 @@ static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const Cal
   return "";
 }
 
+// Emit an expression as index-typed MLIR value, inserting arith.index_cast
+// when the expression evaluates to a non-index integer type (e.g. i64 from
+// get_block_idx).  Constants already emit as index; dynamic expressions may
+// carry their native scalar type.
+static std::string EmitOffsetAsIndex(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen) {
+  if (auto const_int = ir::As<ir::ConstInt>(expr)) {
+    return codegen.GetOrEmitConstant(const_int->value_, DataType::INDEX);
+  }
+  std::string val = codegen.GetExprAsCode(expr);
+  auto scalar_type = ir::As<ScalarType>(expr->GetType());
+  if (scalar_type && scalar_type->dtype_ != DataType::INDEX && !scalar_type->dtype_.IsFloat()) {
+    std::string idx = codegen.NewTemp();
+    std::string src_type = codegen.GetTypeString(scalar_type->dtype_);
+    codegen.Emit(idx + " = arith.index_cast " + val + " : " + src_type + " to index");
+    return idx;
+  }
+  return val;
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -554,10 +573,19 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
   }
 
+  // Evaluate offset expressions before building the partition_view line,
+  // because non-constant offsets (e.g. block_idx * 16) may need an
+  // arith.index_cast emitted *before* the partition_view instruction.
+  std::vector<std::string> offset_ssa;
+  offset_ssa.reserve(offset_elems.size());
+  for (const auto& elem : offset_elems) {
+    offset_ssa.push_back(EmitOffsetAsIndex(elem, codegen));
+  }
+
   partition_line << ", offsets = [";
-  for (size_t i = 0; i < offset_elems.size(); ++i) {
+  for (size_t i = 0; i < offset_ssa.size(); ++i) {
     if (i > 0) partition_line << ", ";
-    partition_line << codegen.GetExprAsCode(offset_elems[i]);
+    partition_line << offset_ssa[i];
   }
   partition_line << "]";
   partition_line << ", sizes = [";
@@ -648,14 +676,21 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
+  // Evaluate offset expressions before building the partition_view line,
+  // because non-constant offsets may need an arith.index_cast emitted first.
+  std::vector<std::string> offset_ssa;
+  offset_ssa.reserve(offsets_tuple->elements_.size());
+  for (const auto& elem : offsets_tuple->elements_) {
+    offset_ssa.push_back(EmitOffsetAsIndex(elem, codegen));
+  }
+
   std::string partition_view = codegen.NewNamedTemp(output_tensor->name_hint_ + "_pview");
   std::ostringstream partition_line;
   partition_line << partition_view << " = pto.partition_view " << tensor_view;
-  // Use all offsets elements to match tensor_view rank (handles ND tensors)
   partition_line << ", offsets = [";
-  for (size_t i = 0; i < offsets_tuple->elements_.size(); ++i) {
+  for (size_t i = 0; i < offset_ssa.size(); ++i) {
     if (i > 0) partition_line << ", ";
-    partition_line << codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+    partition_line << offset_ssa[i];
   }
   partition_line << "]";
   partition_line << ", sizes = [";
@@ -1291,6 +1326,26 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
+  reg("tile.get_block_idx", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.empty()) << "tile.get_block_idx takes no arguments, got " << op->args_.size();
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "tile.get_block_idx requires assignment target";
+    std::ostringstream oss;
+    oss << result << " = pto.get_block_idx";
+    codegen.Emit(oss.str());
+    return std::string("");
+  });
+  reg("tile.get_block_num", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.empty()) << "tile.get_block_num takes no arguments, got " << op->args_.size();
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "tile.get_block_num requires assignment target";
+    std::ostringstream oss;
+    oss << result << " = pto.get_block_num";
+    codegen.Emit(oss.str());
+    return std::string("");
+  });
   reg("tile.get_subblock_idx", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.empty()) << "tile.get_subblock_idx takes no arguments, got " << op->args_.size();
