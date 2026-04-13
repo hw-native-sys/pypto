@@ -13,6 +13,8 @@ jobs:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       SIMPLER_ROOT: ${{ github.workspace }}/simpler
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_VERSION: v0.25
+      PTOAS_SHA256: 66dee5d9ebbd713db7934570bb95eb7870895a49905c248ca95da9289cd4a1aa
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -36,14 +38,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
+      - name: Cache ptoas binary
+        id: cache-ptoas
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ptoas-bin
+          key: ptoas-aarch64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+
       - name: Install ptoas
+        if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
-          PTOAS_VERSION=v0.24
-          PTOAS_SHA256=31a1f14767f23f0e530faeea0b0dea481ec22c09f9bee5045287b444df00b5bd
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+            https://github.com/zhangstevenunity/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
              -o /tmp/ptoas-bin-aarch64.tar.gz
-          echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
+          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin
           tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
@@ -81,3 +89,54 @@ jobs:
             python "$f" -p a2a3 -d $DEVICE_ID
             echo "::endgroup::"
           done
+
+  a5-system-tests:
+    runs-on: [self-hosted, a5]
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      SIMPLER_ROOT: ${{ github.workspace }}/simpler
+      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_VERSION: v0.25
+      PTOAS_SHA256: 66dee5d9ebbd713db7934570bb95eb7870895a49905c248ca95da9289cd4a1aa
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install project and dependencies
+        run: |
+          pip install -v .[dev]
+
+      - name: Cache ptoas binary
+        id: cache-ptoas
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ptoas-bin
+          key: ptoas-aarch64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+
+      - name: Install ptoas
+        if: steps.cache-ptoas.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/zhangstevenunity/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
+             -o /tmp/ptoas-bin-aarch64.tar.gz
+          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
+          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+          tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+
+      - name: Clone pto-isa repository
+        run: git clone --depth 1 https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+
+      - name: Install simpler (stable)
+        run: |
+          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
+          cd $GITHUB_WORKSPACE/simpler
+          pip install -v .
+
+      - name: Run A5 system tests
+        run: |
+          task-submit --timeout 1800 --max-time 1800 --device 1 \
+            --run "pytest tests/st/ -v --forked --platform=a5 --device=1 --pto-isa-commit=d96c8784 -m a5 \
+              -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min)'"
