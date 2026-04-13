@@ -10,6 +10,7 @@
  */
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,8 +44,7 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
    protected:
     StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
       if (op->scope_kind_ == ScopeKind::Spmd) {
-        INTERNAL_CHECK(!core_num.has_value())
-            << "Internal error: multiple nested Spmd scopes in a single Group function";
+        CHECK(!core_num.has_value()) << "Only one pl.spmd() block is allowed per cluster scope";
         core_num = op->core_num_;
         sync_start = op->sync_start_;
         return op->body_;
@@ -126,9 +126,9 @@ Pass OutlineClusterScopes() {
       }
       refreshed_collector.VisitStmt(body_after_cluster);
 
-      outline_utils::ScopeOutliner spmd_outliner(func->name_, refreshed_collector.var_types,
-                                                  refreshed_collector.var_objects, refreshed_collector.known_names,
-                                                  ScopeKind::Spmd, FunctionType::Group, "_spmd_");
+      outline_utils::ScopeOutliner spmd_outliner(
+          func->name_, refreshed_collector.var_types, refreshed_collector.var_objects,
+          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Group, "_spmd_");
       auto body_after_spmd = spmd_outliner.VisitStmt(body_after_cluster);
 
       const auto& spmd_outlined = spmd_outliner.GetOutlinedFunctions();

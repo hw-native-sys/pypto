@@ -1072,9 +1072,9 @@ void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
       stream_ << "core_num=" << *op->core_num_;
       first_kwarg = false;
     }
-    if (op->sync_start_.has_value() && *op->sync_start_) {
+    if (op->sync_start_.has_value()) {
       if (!first_kwarg) stream_ << ", ";
-      stream_ << "sync_start=True";
+      stream_ << "sync_start=" << (*op->sync_start_ ? "True" : "False");
       first_kwarg = false;
     }
     if (!op->name_hint_.empty()) {
@@ -1252,8 +1252,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "attrs={";
         bool first_attr = true;
         if (has_split) {
-          stream_ << "\"split\": " << prefix_ << ".SplitMode."
-                  << SplitModeToPythonString(*func_split_mode);
+          stream_ << "\"split\": " << prefix_ << ".SplitMode." << SplitModeToPythonString(*func_split_mode);
           first_attr = false;
         }
         if (has_core_num) {

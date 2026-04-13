@@ -364,17 +364,26 @@ def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     read from the dispatch payload via ``get_block_idx(args)`` / ``get_block_num(args)``
     (defined in ``intrinsic.h``), so the wrapper needs a macro bridge.
     """
+
+    def _expr_contains_spmd_op(expr: _ir_core.Expr) -> bool:
+        """Recursively check if an expression tree contains SPMD block ops."""
+        if isinstance(expr, _ir_core.Call):
+            op = getattr(expr, "op", None)
+            if isinstance(op, _ir_core.Op) and op.name in _SPMD_BLOCK_OPS:
+                return True
+            for arg in expr.args:
+                if _expr_contains_spmd_op(arg):
+                    return True
+        return False
+
     stmts = _ir_core.flatten_to_stmts(func.body)
     for stmt in stmts:
-        call = None
+        expr = None
         if isinstance(stmt, _ir_core.EvalStmt):
-            call = stmt.expr
+            expr = stmt.expr
         elif isinstance(stmt, _ir_core.AssignStmt):
-            call = stmt.value
-        if not isinstance(call, _ir_core.Call):
-            continue
-        op = getattr(call, "op", None)
-        if isinstance(op, _ir_core.Op) and op.name in _SPMD_BLOCK_OPS:
+            expr = stmt.value
+        if expr is not None and _expr_contains_spmd_op(expr):
             return True
     return False
 
@@ -478,14 +487,14 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
         spmd_args_setup = (
             "#if !defined(__CPU_SIM)\n"
             "    // Read logical SPMD block identity from runtime dispatch payload\n"
-            "    #pragma push_macro(\"get_block_idx\")\n"
-            "    #pragma push_macro(\"get_block_num\")\n"
+            '    #pragma push_macro("get_block_idx")\n'
+            '    #pragma push_macro("get_block_num")\n'
             "    #undef get_block_idx\n"
             "    #undef get_block_num\n"
             "    __pypto_spmd_block_idx = get_block_idx(args);\n"
             "    __pypto_spmd_block_num = get_block_num(args);\n"
-            "    #pragma pop_macro(\"get_block_idx\")\n"
-            "    #pragma pop_macro(\"get_block_num\")\n"
+            '    #pragma pop_macro("get_block_idx")\n'
+            '    #pragma pop_macro("get_block_num")\n'
             "#endif\n\n"
         )
 

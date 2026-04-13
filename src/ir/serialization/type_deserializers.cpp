@@ -11,6 +11,7 @@
 
 #include <any>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -573,7 +574,10 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
   std::optional<int> core_num = std::nullopt;
   auto core_num_obj = GetOptionalFieldObj(fields_obj, "core_num", ctx);
   if (core_num_obj.has_value() && core_num_obj->type != msgpack::type::NIL) {
-    core_num = static_cast<int>(core_num_obj->via.i64);
+    auto raw = core_num_obj->via.i64;
+    CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
+        << "core_num must be a positive integer that fits in int, got " << raw;
+    core_num = static_cast<int>(raw);
   }
 
   // Deserialize optional sync_start
@@ -586,7 +590,8 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint), core_num, sync_start);
+  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint),
+                                     core_num, sync_start);
 }
 
 // Deserialize SeqStmts

@@ -931,14 +931,12 @@ void BindIR(nb::module_& m) {
   // ScopeStmt - const shared_ptr
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
-  scope_stmt_class.def(nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>,
-                                std::optional<Role>, std::optional<SplitMode>, std::string,
-                                std::optional<int>, std::optional<bool>>(),
-                       nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
-                       nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
-                       nb::arg("name_hint") = "",
-                       nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(),
-                       "Create a scope statement");
+  scope_stmt_class.def(
+      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>,
+               std::optional<SplitMode>, std::string, std::optional<int>, std::optional<bool>>(),
+      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
+      nb::arg("role") = nb::none(), nb::arg("split") = nb::none(), nb::arg("name_hint") = "",
+      nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(), "Create a scope statement");
   BindFields<ScopeStmt>(scope_stmt_class);
 
   // SeqStmts - const shared_ptr

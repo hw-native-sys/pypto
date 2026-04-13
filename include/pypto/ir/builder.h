@@ -301,8 +301,8 @@ class IRBuilder {
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
                   std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-                  std::string name_hint = "",
-                  std::optional<int> core_num = std::nullopt, std::optional<bool> sync_start = std::nullopt);
+                  std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+                  std::optional<bool> sync_start = std::nullopt);
 
   /**
    * @brief End building a scope statement
@@ -672,8 +672,8 @@ class ScopeContext : public BuildContext {
  public:
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
                std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-               std::string name_hint = "",
-               std::optional<int> core_num = std::nullopt, std::optional<bool> sync_start = std::nullopt)
+               std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+               std::optional<bool> sync_start = std::nullopt)
       : BuildContext(Type::SCOPE, std::move(span)),
         scope_kind_(scope_kind),
         level_(level),

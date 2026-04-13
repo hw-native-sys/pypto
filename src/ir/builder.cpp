@@ -288,15 +288,14 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 // ========== Scope Building ==========
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
-                           std::optional<Role> role, std::optional<SplitMode> split,
-                           std::string name_hint,
+                           std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint,
                            std::optional<int> core_num, std::optional<bool> sync_start) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
-  context_stack_.push_back(
-      std::make_unique<ScopeContext>(scope_kind, span, level, role, split, std::move(name_hint), core_num, sync_start));
+  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split,
+                                                          std::move(name_hint), core_num, sync_start));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -314,14 +313,19 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
                      end_span.begin_line_, end_span.begin_column_);
 
-  // Create scope statement
-  auto scope_stmt =
-      std::make_shared<ScopeStmt>(scope_ctx->GetScopeKind(), body, combined_span, scope_ctx->GetLevel(),
-                                  scope_ctx->GetRole(), scope_ctx->GetSplit(), scope_ctx->GetNameHint(),
-                                  scope_ctx->GetCoreNum(), scope_ctx->GetSyncStart());
-
-  // Pop context
+  // Pop context before ScopeStmt construction (which may throw on validation)
+  auto scope_kind = scope_ctx->GetScopeKind();
+  auto level = scope_ctx->GetLevel();
+  auto role = scope_ctx->GetRole();
+  auto split = scope_ctx->GetSplit();
+  auto name_hint = scope_ctx->GetNameHint();
+  auto core_num = scope_ctx->GetCoreNum();
+  auto sync_start = scope_ctx->GetSyncStart();
   context_stack_.pop_back();
+
+  // Create scope statement
+  auto scope_stmt = std::make_shared<ScopeStmt>(scope_kind, body, combined_span, level, role, split,
+                                                std::move(name_hint), core_num, sync_start);
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {

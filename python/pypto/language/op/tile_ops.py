@@ -447,7 +447,7 @@ def get_block_idx() -> Scalar:
     used in tile-level programming to identify which block of data is being processed.
 
     Returns:
-        Scalar wrapping the get_block_idx operation (UINT64 type)
+        Scalar wrapping the get_block_idx operation (INDEX type)
 
     Example:
         >>> block_idx = pl.tile.get_block_idx()
@@ -479,7 +479,7 @@ def get_block_num() -> Scalar:
     task. Used with get_block_idx() for SPMD work partitioning.
 
     Returns:
-        Scalar wrapping the get_block_num operation (UINT64 type)
+        Scalar wrapping the get_block_num operation (INDEX type)
 
     Example:
         >>> block_idx = pl.tile.get_block_idx()

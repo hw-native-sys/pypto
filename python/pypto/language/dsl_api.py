@@ -751,9 +751,9 @@ class SpmdContext:
 
 
 def spmd(
+    *,
     core_num: int,
     sync_start: bool = False,
-    *,
     name_hint: str = "",
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.

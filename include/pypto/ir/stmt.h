@@ -731,8 +731,8 @@ class ScopeStmt : public Stmt {
    */
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
             std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-            std::string name_hint = "",
-            std::optional<int> core_num = std::nullopt, std::optional<bool> sync_start = std::nullopt)
+            std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+            std::optional<bool> sync_start = std::nullopt)
       : Stmt(std::move(span)),
         scope_kind_(scope_kind),
         body_(std::move(body)),
@@ -743,10 +743,9 @@ class ScopeStmt : public Stmt {
         core_num_(core_num),
         sync_start_(sync_start) {
     CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
-    if (core_num_.has_value() || (sync_start_.has_value() && *sync_start_)) {
+    if (core_num_.has_value() || sync_start_.has_value()) {
       CHECK(scope_kind == ScopeKind::Spmd)
-          << "core_num/sync_start are only valid on Spmd scopes, got "
-          << ScopeKindToString(scope_kind);
+          << "core_num/sync_start are only valid on Spmd scopes, got " << ScopeKindToString(scope_kind);
     }
     if (core_num_.has_value()) {
       CHECK(*core_num_ > 0) << "core_num must be positive, got " << *core_num_;
@@ -779,8 +778,8 @@ class ScopeStmt : public Stmt {
   std::optional<Role> role_;        // Function role (nullopt for non-Hierarchy scopes)
   std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
   std::string name_hint_;           // User-provided scope name hint (empty = auto-generate)
-  std::optional<int> core_num_;        // SPMD block count (for Cluster scopes)
-  std::optional<bool> sync_start_;     // Require sync-start for SPMD dispatch
+  std::optional<int> core_num_;     // SPMD block count (for Spmd scopes)
+  std::optional<bool> sync_start_;  // Require sync-start for SPMD dispatch
   StmtPtr body_;                    // The nested statements
 };
 

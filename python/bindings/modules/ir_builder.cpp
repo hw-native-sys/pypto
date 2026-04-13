@@ -242,8 +242,7 @@ void BindIRBuilder(nb::module_& m) {
       // Scope building
       .def("begin_scope", &IRBuilder::BeginScope, nb::arg("scope_kind"), nb::arg("span"),
            nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
-           nb::arg("name_hint") = "",
-           nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(),
+           nb::arg("name_hint") = "", nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(),
            "Begin building a scope statement.\n\n"
            "Creates a new scope context. Must be closed with end_scope().\n\n"
            "Args:\n"
