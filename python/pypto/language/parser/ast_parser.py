@@ -1455,6 +1455,11 @@ class ASTParser:
             for var_name in loop_output_vars:
                 loop.return_var(var_name)
 
+            # Enforce Bool-typed condition after iter_args and return_vars are both
+            # set up, so that the while_loop context manager's __exit__ validation
+            # does not mask this error with an arity mismatch.
+            self._check_condition_is_bool(condition, "while", self.span_tracker.get_span(stmt.body[0]))
+
             self.scope_manager.exit_scope(leak_vars=False)
             self._loop_kind_stack.pop()
             self.in_for_loop = prev_in_for_loop
@@ -3545,8 +3550,8 @@ class ASTParser:
         """Check that an if/while condition is a scalar BOOL expression.
 
         Raises ParserTypeError if the condition is not Bool-typed. No auto-coercion:
-        users must write `if x != 0:` or `if bool(x):` instead of `if x:` when x is
-        not already a bool.
+        users must write an explicit comparison such as `if x != 0:` or `if x > 0:`
+        instead of `if x:` when x is not already a bool.
 
         Args:
             condition: Parsed condition expression (ir.Expr)
@@ -3555,7 +3560,7 @@ class ASTParser:
         """
         cond_type = condition.type
         if not isinstance(cond_type, ir.ScalarType) or cond_type.dtype != DataType.BOOL:
-            type_str = python_print(cond_type) if hasattr(cond_type, "dtype") else str(cond_type)
+            type_str = python_print(cond_type) if isinstance(cond_type, ir.Type) else str(cond_type)
             raise ParserTypeError(
                 f"{kind} condition must be a Bool-typed scalar expression, got {type_str}",
                 span=span,

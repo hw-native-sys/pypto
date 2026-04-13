@@ -99,7 +99,7 @@
 | 103 | `SHAPE_DIMENSION_MISMATCH` | 形状维度数不匹配 |
 | 104 | `SHAPE_VALUE_MISMATCH` | 形状维度值不匹配 |
 | 105 | `SIZE_MISMATCH` | 控制流分支中向量大小不匹配 |
-| 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt 条件必须是 ScalarType |
+| 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt/WhileStmt 条件必须是 ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt 范围必须是 ScalarType |
 | 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt 条件 dtype 必须是 BOOL |
 

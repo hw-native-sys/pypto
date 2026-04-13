@@ -382,6 +382,18 @@ class TestConditionMustBeBool:
 
         assert isinstance(ok_cmp, pypto.ir.Function)
 
+    def test_pl_cond_with_int_literal_rejected(self):
+        """Test that `pl.cond(1)` inside `pl.while_()` is rejected (same check as natural while)."""
+        with pytest.raises(ParserTypeError, match="while condition must be a Bool-typed scalar"):
+
+            @pl.function
+            def bad_pl_while(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for (x_iter,) in pl.while_(init_values=(x,)):
+                    pl.cond(1)  # type: ignore  # non-bool
+                    y = pl.yield_(x_iter + 1)  # noqa: F841
+                return y  # noqa: F821
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
