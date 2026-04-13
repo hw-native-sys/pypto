@@ -1058,6 +1058,35 @@ def test_tensor_set_validshape_rejects_exceeding_bound():
         ir.op.tensor.set_validshape(tensor_var, 16, 64)
 
 
+def test_tensor_set_validshape_preserves_existing_view():
+    """Test tensor.set_validshape preserves existing TensorView stride and layout."""
+    span = ir.Span.unknown()
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    existing_view = ir.TensorView(
+        stride=[ir.ConstInt(64, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+        layout=ir.TensorLayout.ND,
+        valid_shape=[dim32, dim32],
+    )
+    tensor_type = ir.TensorType([dim32, dim32], DataType.FP32, None, existing_view)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.set_validshape(tensor_var, 16, 24)
+
+    assert isinstance(call, ir.Call)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    assert len(result_type.tensor_view.stride) == 2
+    stride_0 = result_type.tensor_view.stride[0]
+    stride_1 = result_type.tensor_view.stride[1]
+    assert isinstance(stride_0, ir.ConstInt)
+    assert isinstance(stride_1, ir.ConstInt)
+    assert stride_0.value == 64
+    assert stride_1.value == 1
+    assert len(result_type.tensor_view.valid_shape) == 2
+
+
 def test_tensor_reshape_with_valid_shape():
     """Test tensor.reshape with valid_shape parameter."""
     span = ir.Span.unknown()

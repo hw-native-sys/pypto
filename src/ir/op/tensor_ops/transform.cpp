@@ -276,9 +276,9 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
     auto st = As<ScalarType>(arg->GetType());
     CHECK(st) << "tensor.set_validshape " << name << " must be ScalarType, but got "
               << arg->GetType()->TypeName();
-    CHECK(st->dtype_ == DataType::INT64 || st->dtype_ == DataType::UINT64 || st->dtype_ == DataType::INDEX)
-        << "tensor.set_validshape " << name << " must have dtype INT64, UINT64, or INDEX, but got "
-        << st->dtype_.ToString();
+    CHECK(st->dtype_.IsIndexLike()) << "tensor.set_validshape " << name
+                                    << " must have dtype INT64, UINT64, or INDEX, but got "
+                                    << st->dtype_.ToString();
   };
   check_scalar_index(args[1], "valid_rows");
   check_scalar_index(args[2], "valid_cols");
@@ -295,9 +295,13 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
   check_const_bound("valid_rows", args[1], tensor_type->shape_[0]);
   check_const_bound("valid_cols", args[2], tensor_type->shape_[1]);
 
-  TensorView tensor_view({}, TensorLayout::ND, {args[1], args[2]});
+  TensorView tensor_view;
+  if (tensor_type->tensor_view_.has_value()) {
+    tensor_view = *tensor_type->tensor_view_;
+  }
+  tensor_view.valid_shape = {args[1], args[2]};
 
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, std::nullopt,
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
                                       std::make_optional(std::move(tensor_view)));
 }
 

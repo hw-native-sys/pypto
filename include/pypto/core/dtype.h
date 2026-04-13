@@ -299,6 +299,15 @@ class DataType {
   [[nodiscard]] bool IsInt() const { return IsSignedInt() || IsUnsignedInt(); }
 
   /**
+   * @brief Check if this data type is suitable for indexing (INT64, UINT64, or INDEX)
+   *
+   * @return true if this type can represent index values
+   */
+  [[nodiscard]] bool IsIndexLike() const {
+    return *this == DataType::INT64 || *this == DataType::UINT64 || *this == DataType::INDEX;
+  }
+
+  /**
    * @brief Equality comparison operator
    *
    * @param other The other DataType to compare with
