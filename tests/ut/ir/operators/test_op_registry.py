@@ -495,6 +495,7 @@ class TestOpMemorySpecRegistry:
             "tile.slice",
             "tile.transpose",
             "tile.assemble",
+            "tile.set_validshape",
         ],
     )
     def test_view_ops_inherit_from_input(self, op_name):
@@ -725,6 +726,7 @@ class TestRegistryInfrastructure:
             "tile.reshape",
             "tile.transpose",
             "tile.assemble",
+            "tile.set_validshape",
             "tile.add",
             "tile.sub",
             "tile.mul",

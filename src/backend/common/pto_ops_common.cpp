@@ -1615,6 +1615,32 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     codegen.Emit(oss.str());
     return std::string("");
   });
+  reg("tile.set_validshape", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 3)
+        << "tile.set_validshape requires 3 arguments (tile, valid_rows, valid_cols), but got "
+        << op->args_.size();
+
+    std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
+    std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+    auto emit_index_arg = [&](const ir::ExprPtr& arg) -> std::string {
+      if (auto var = ir::As<ir::Var>(arg)) {
+        std::string mlir_name = codegen.GetVarName(var);
+        return codegen.EmitCastToIndex(var, mlir_name);
+      }
+      if (auto c = ir::As<ir::ConstInt>(arg)) {
+        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+      }
+      return codegen.GetExprAsCode(arg);
+    };
+
+    std::string vr = emit_index_arg(op->args_[1]);
+    std::string vc = emit_index_arg(op->args_[2]);
+
+    codegen.Emit("pto.set_validshape " + tile_buf + ", " + vr + ", " + vc + " : " + tile_buf_type);
+    return std::string("");
+  });
 }
 
 }  // namespace backend

@@ -245,6 +245,10 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
+| **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
+| - | `tile.reshape` | 重塑 tile 维度（元素总数须一致） |
+| - | `tile.transpose` | 交换 tile 的两个轴 |
+| - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
 | **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`

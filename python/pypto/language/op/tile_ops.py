@@ -82,6 +82,7 @@ __all__ = [
     "slice",
     "reshape",
     "transpose",
+    "set_validshape",
     "rem",
     "rems",
     "and_",
@@ -1180,6 +1181,24 @@ def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
     """
     tile_expr = tile.unwrap()
     call_expr = _ir_ops.transpose(tile_expr, axis1, axis2)
+    return Tile(expr=call_expr)
+
+
+def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile:
+    """Update valid-shape metadata of a tile without data movement.
+
+    Args:
+        tile: Input tile (must be 2D)
+        valid_rows: Number of valid rows (int or Scalar[INDEX])
+        valid_cols: Number of valid columns (int or Scalar[INDEX])
+
+    Returns:
+        Tile with updated valid_shape metadata
+    """
+    tile_expr = tile.unwrap()
+    vr = valid_rows.unwrap() if isinstance(valid_rows, Scalar) else valid_rows
+    vc = valid_cols.unwrap() if isinstance(valid_cols, Scalar) else valid_cols
+    call_expr = _ir_ops.set_validshape(tile_expr, vr, vc)
     return Tile(expr=call_expr)
 
 

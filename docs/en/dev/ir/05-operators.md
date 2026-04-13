@@ -245,6 +245,10 @@ with ib.function("tensor_example") as f:
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations |
 | **Unary** | `tile.sqrt` | Element-wise square root |
+| **Transform** | `tile.slice` | Extract a sub-tile with static shape and optional dynamic valid_shape |
+| - | `tile.reshape` | Reshape tile to new dimensions (element count must match) |
+| - | `tile.transpose` | Swap two axes of a tile |
+| - | `tile.set_validshape` | Update valid-shape metadata without data movement |
 | **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`

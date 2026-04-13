@@ -779,6 +779,47 @@ class TestTileSliceCodegen:
             )
 
 
+class TestSetValidShapeCodegen:
+    """Tests for tile.set_validshape PTO code generation."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_set_validshape_codegen(self):
+        """tile.set_validshape should generate pto.set_validshape."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                narrowed: pl.Tile[[32, 32], pl.FP32] = pl.tile.set_validshape(
+                    src_tile, valid_rows, valid_cols
+                )
+                return pl.store(narrowed, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.set_validshape" in mlir, (
+            f"tile.set_validshape should generate pto.set_validshape, got:\n{mlir}"
+        )
+
+
 class TestMrgSortCodegen:
     """Tests for mrgsort format1 code generation with constant and variable block_len."""
 

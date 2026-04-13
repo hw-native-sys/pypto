@@ -1007,11 +1007,68 @@ class TestTileSliceReshapeOps:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
+    def test_tile_set_validshape(self):
+        """Test tile.set_validshape with constant valid dimensions."""
+        span = ir.Span.unknown()
+
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim32, dim32], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        call = tile.set_validshape(tile_var, 16, 24)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.set_validshape"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+        assert result_type.tile_view is not None
+        assert len(result_type.tile_view.valid_shape) == 2
+
+    def test_tile_set_validshape_dynamic(self):
+        """Test tile.set_validshape with dynamic Scalar[INDEX] dimensions."""
+        span = ir.Span.unknown()
+
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim32, dim32], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+        valid_rows = ir.Var("vr", ir.ScalarType(DataType.INDEX), span)
+        valid_cols = ir.Var("vc", ir.ScalarType(DataType.INDEX), span)
+
+        call = tile.set_validshape(tile_var, valid_rows, valid_cols)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.set_validshape"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.valid_shape[0] is valid_rows
+        assert result_type.tile_view.valid_shape[1] is valid_cols
+
+    def test_tile_set_validshape_preserves_physical_shape(self):
+        """Physical shape is unchanged; only valid_shape metadata is updated."""
+        span = ir.Span.unknown()
+
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim64 = ir.ConstInt(64, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim64], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        call = tile.set_validshape(tile_var, 8, 32)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert isinstance(result_type.shape[0], ir.ConstInt)
+        assert result_type.shape[0].value == 16
+        assert isinstance(result_type.shape[1], ir.ConstInt)
+        assert result_type.shape[1].value == 64
+
     def test_transform_operators_registered(self):
         """Test that transform operators are registered."""
         assert ir.is_op_registered("tile.slice")
         assert ir.is_op_registered("tile.reshape")
         assert ir.is_op_registered("tile.transpose")
+        assert ir.is_op_registered("tile.set_validshape")
 
 
 class TestTileBatchMatMulOps:
