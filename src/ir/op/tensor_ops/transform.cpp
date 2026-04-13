@@ -301,9 +301,10 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
                                       std::make_optional(std::move(tensor_view)));
 }
 
+// NOTE: Internal op for compiler-generated code only; should not be exposed to end users in future releases.
 REGISTER_OP("tensor.set_validshape")
     .set_op_category("TensorOp")
-    .set_description("Update valid-shape metadata of a tensor without data movement")
+    .set_description("Update valid-shape metadata of a tensor without data movement (internal)")
     .add_argument("tensor", "Input tensor (TensorType, 2D)")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")

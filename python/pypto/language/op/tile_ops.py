@@ -1187,6 +1187,10 @@ def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
 def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile:
     """Update valid-shape metadata of a tile without data movement.
 
+    .. note::
+        Internal API — this op is intended for compiler-generated code only
+        and should not be exposed to end users in future releases.
+
     Args:
         tile: Input tile (must be 2D)
         valid_rows: Number of valid rows (int or Scalar[INDEX])

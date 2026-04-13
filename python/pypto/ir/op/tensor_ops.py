@@ -887,6 +887,10 @@ def set_validshape(
 ) -> Call:
     """Update valid-shape metadata of a tensor without data movement.
 
+    .. note::
+        Internal API — this op is intended for compiler-generated code only
+        and should not be exposed to end users in future releases.
+
     Args:
         tensor: Input tensor expression (must be 2D TensorType)
         valid_rows: Number of valid rows (int or Scalar INDEX expression)

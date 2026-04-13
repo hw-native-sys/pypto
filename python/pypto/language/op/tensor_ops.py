@@ -194,6 +194,10 @@ def fillpad(tensor: Tensor, pad_value: PadValue = PadValue.zero) -> Tensor:
 def set_validshape(tensor: Tensor, valid_rows: IntLike, valid_cols: IntLike) -> Tensor:
     """Update valid-shape metadata of a tensor without data movement.
 
+    .. note::
+        Internal API — this op is intended for compiler-generated code only
+        and should not be exposed to end users in future releases.
+
     Args:
         tensor: Input tensor (must be 2D)
         valid_rows: Number of valid rows (int or Scalar[INDEX])
