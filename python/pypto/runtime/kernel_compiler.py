@@ -123,6 +123,44 @@ class KernelCompiler:
         common_dir = str(self.runtime_root / "src" / "common" / "task_interface")
         return [runtime_dir, common_dir] + self.get_platform_include_dirs()
 
+    def get_kernel_include_dirs(self, runtime_name: str) -> list[str]:
+        """Get include directories needed for incore kernel compilation.
+
+        Reads ``build_config.py`` from the runtime directory to discover
+        ``aicore`` include paths. Falls back to ``runtime/`` if no config
+        exists. Always appends ``common/task_interface``.
+
+        Args:
+            runtime_name: Name of the runtime (e.g., ``"host_build_graph"``).
+
+        Returns:
+            List of absolute include directory paths.
+        """
+        if self.platform in ("a2a3", "a2a3sim"):
+            arch = "a2a3"
+        elif self.platform in ("a5", "a5sim"):
+            arch = "a5"
+        else:
+            arch = "a2a3"
+
+        runtime_base_dir = self.runtime_root / "src" / arch / "runtime" / runtime_name
+        include_dirs: list[str] = []
+
+        build_config_path = runtime_base_dir / "build_config.py"
+        if build_config_path.is_file():
+            spec = importlib.util.spec_from_file_location("build_config", str(build_config_path))
+            if spec is not None and spec.loader is not None:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                aicore_cfg = mod.BUILD_CONFIG.get("aicore", {})
+                for p in aicore_cfg.get("include_dirs", []):
+                    include_dirs.append(str(runtime_base_dir / p))
+        else:
+            include_dirs.append(str(runtime_base_dir / "runtime"))
+        include_dirs.append(str(self.runtime_root / "src" / "common" / "task_interface"))
+
+        return include_dirs
+
     def _get_orchestration_config(self, runtime_name: str) -> tuple[list[str], list[str]]:
         """Load the optional "orchestration" section from a runtime's build_config.py.
 
@@ -229,6 +267,7 @@ class KernelCompiler:
         source_path: str,
         core_type: str = "aiv",
         pto_isa_root: str | None = None,
+        runtime_name: str | None = None,
         extra_include_dirs: list[str] | None = None,
         build_dir: str | None = None,
     ) -> bytes:
@@ -242,12 +281,20 @@ class KernelCompiler:
             source_path: Path to kernel source file (.cpp).
             core_type: Core type: ``"aic"`` (cube) or ``"aiv"`` (vector).
             pto_isa_root: Path to PTO-ISA root directory.
+            runtime_name: Name of the runtime (e.g., ``"host_build_graph"``).
+                When provided, runtime include directories are resolved via
+                :meth:`get_kernel_include_dirs` and prepended to includes.
             extra_include_dirs: Additional include directories.
             build_dir: Optional build directory for output files.
 
         Returns:
             Binary contents of the compiled .o file.
         """
+        all_include_dirs: list[str] = []
+        if runtime_name is not None:
+            all_include_dirs.extend(self.get_kernel_include_dirs(runtime_name))
+        if extra_include_dirs:
+            all_include_dirs.extend(extra_include_dirs)
         incore_toolchain = self._get_toolchain(
             {
                 "a2a3": ToolchainType.CCEC,
@@ -262,7 +309,7 @@ class KernelCompiler:
                 source_path,
                 core_type=core_type,
                 pto_isa_root=pto_isa_root,
-                extra_include_dirs=extra_include_dirs,
+                extra_include_dirs=all_include_dirs or None,
                 build_dir=build_dir,
             )
 
@@ -284,8 +331,8 @@ class KernelCompiler:
         cmd = [self.ccec.cxx_path] + self.ccec.get_compile_flags(core_type=core_type)
         cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
 
-        if extra_include_dirs:
-            for inc_dir in extra_include_dirs:
+        if all_include_dirs:
+            for inc_dir in all_include_dirs:
                 cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
         cmd.extend(["-o", output_path, source_path])

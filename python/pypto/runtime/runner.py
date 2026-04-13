@@ -415,13 +415,10 @@ def run(
 
         # 5. Compile C++ → binaries + assemble ChipCallable
         from .device_runner import (  # noqa: PLC0415
+            build_orch_args,
             compile_and_assemble,
             execute_on_device,
             validate_golden,
-        )
-        from .task_interface import (  # noqa: PLC0415
-            ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-            make_tensor_arg,
         )
 
         with _stage("binary_compilation"):
@@ -430,19 +427,7 @@ def run(
             )
 
         # 6. Build tensor arguments
-        orch_args = ChipStorageTaskArgs()
-        all_tensors: dict[str, Any] = {}
-        inputs: dict[str, torch.Tensor] = {}
-        outputs: dict[str, torch.Tensor] = {}
-
-        for spec in tensor_specs:
-            tensor = spec.create_tensor().cpu().contiguous()
-            orch_args.add_tensor(make_tensor_arg(tensor))
-            all_tensors[spec.name] = tensor
-            if spec.is_output:
-                outputs[spec.name] = tensor
-            else:
-                inputs[spec.name] = tensor
+        orch_args, all_tensors, inputs, outputs = build_orch_args(tensor_specs)
 
         # 7. Compute golden
         golden_outputs = {k: v.clone() for k, v in outputs.items()}
@@ -450,6 +435,11 @@ def run(
         golden(golden_with_inputs, {})
 
         # 8. Execute on device
+        if config.runtime_profiling:
+            pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(
+                config.platform, config.device_id
+            )
+
         with _stage("device_execution"):
             execute_on_device(
                 chip_callable,
@@ -457,6 +447,16 @@ def run(
                 binaries,
                 config.device_id,
                 enable_profiling=config.runtime_profiling,
+            )
+
+        if config.runtime_profiling:
+            _collect_swimlane_data(
+                work_dir,
+                config.platform,
+                config.device_id,
+                pre_run_logs,
+                device_log_dir,
+                pre_run_perf_files,
             )
 
         # 9. Validate
@@ -507,7 +507,12 @@ def _execute_on_device(
         pto_isa_commit: If set, pin the pto-isa clone to this specific commit.
         runtime_profiling: If ``True``, enable runtime profiling.
     """
-    from .device_runner import compile_and_assemble, execute_on_device  # noqa: PLC0415
+    from .device_runner import (  # noqa: PLC0415
+        build_orch_args_from_inputs,
+        compile_and_assemble,
+        execute_on_device,
+        validate_golden,
+    )
 
     chip_callable, binaries = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
 
@@ -526,30 +531,8 @@ def _execute_on_device(
     if result is None:
         result = golden_module.generate_inputs(params)
 
-    from .task_interface import (  # noqa: PLC0415
-        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-        make_tensor_arg,
-        scalar_to_uint64,
-    )
-
-    orch_args = ChipStorageTaskArgs()
-    all_tensors: dict = {}
-    inputs: dict = {}
-    outputs: dict = {}
     output_names = set(getattr(golden_module, "__outputs__", []))
-
-    for name, val in result:
-        if isinstance(val, torch.Tensor):
-            val = val.cpu().contiguous()
-            orch_args.add_tensor(make_tensor_arg(val))
-            all_tensors[name] = val
-            if name in output_names or name.startswith("out"):
-                outputs[name] = val
-            else:
-                inputs[name] = val
-        elif isinstance(val, ctypes._SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(val))
-            all_tensors[name] = val.value
+    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
 
     # Compute golden
     golden_cache = _load_golden(_golden_cache_file(golden_path, "Default"))
@@ -561,6 +544,9 @@ def _execute_on_device(
         golden_module.compute_golden(golden_with_inputs, params)
 
     # Execute
+    if runtime_profiling:
+        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+
     execute_on_device(
         chip_callable,
         orch_args,
@@ -569,12 +555,85 @@ def _execute_on_device(
         enable_profiling=runtime_profiling,
     )
 
-    # Validate
-    from .device_runner import validate_golden  # noqa: PLC0415
+    if runtime_profiling:
+        _collect_swimlane_data(
+            work_dir,
+            platform,
+            device_id,
+            pre_run_logs,
+            device_log_dir,
+            pre_run_perf_files,
+        )
 
+    # Validate
     rtol = getattr(golden_module, "RTOL", 1e-5)
     atol = getattr(golden_module, "ATOL", 1e-5)
     validate_golden(outputs, golden_out, rtol=rtol, atol=atol)
+
+
+# ---------------------------------------------------------------------------
+# Swimlane profiling helpers
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path], Path | None, set[Path]]:
+    """Snapshot device logs and perf files before a profiled execution.
+
+    Returns:
+        ``(pre_run_logs, device_log_dir, pre_run_perf_files)``
+    """
+    pre_run_logs: set[Path] = set()
+    device_log_dir: Path | None = None
+    if not platform.endswith("sim"):
+        device_log_dir = _get_device_log_dir(device_id)
+        if device_log_dir.exists():
+            pre_run_logs = set(device_log_dir.glob("*.log"))
+
+    _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    pre_run_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json"))
+
+    return pre_run_logs, device_log_dir, pre_run_perf_files
+
+
+def _collect_swimlane_data(
+    work_dir: Path,
+    platform: str,
+    device_id: int,
+    pre_run_logs: set[Path],
+    device_log_dir: Path | None,
+    pre_run_perf_files: set[Path],
+) -> None:
+    """Collect swimlane profiling data after a profiled device execution.
+
+    Moves ``perf_swimlane_*.json`` into ``work_dir/swimlane_data/`` and runs
+    Simpler's ``swimlane_converter.py`` (if available) to produce merged JSON.
+    """
+    simpler_root = os.environ.get("SIMPLER_ROOT")
+    swimlane_dir = work_dir / "swimlane_data"
+    swimlane_dir.mkdir(parents=True, exist_ok=True)
+
+    new_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json")) - pre_run_perf_files
+    perf_file: Path | None = None
+    if new_perf_files:
+        perf_file = max(new_perf_files, key=lambda p: p.stat().st_mtime)
+        dest = swimlane_dir / perf_file.name
+        perf_file.rename(dest)
+        perf_file = dest
+        try:
+            _OUTPUTS_DIR.rmdir()
+        except OSError:
+            pass
+
+    if not platform.endswith("sim"):
+        _generate_swimlane(
+            work_dir,
+            device_id,
+            device_log_dir,
+            pre_run_logs,
+            simpler_root,
+            swimlane_dir,
+            perf_file,
+        )
 
 
 def _get_device_log_dir(device_id: int) -> Path:

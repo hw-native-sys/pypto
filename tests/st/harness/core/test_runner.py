@@ -35,8 +35,8 @@ import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
 from pypto.runtime.device_runner import (
-    _load_binary,
-    _save_binary,
+    compile_single_kernel,
+    compile_single_orchestration,
     ensure_pto_isa_root,
 )
 from pypto.runtime.golden_writer import (
@@ -437,53 +437,27 @@ def prebuild_binaries(
         return 0
 
     # ── Submit ALL tasks to a single flat pool ────────────────────────────────
-    def _compile_incore_task(compiler, tc_platform, kernel, runtime_includes):
+    def _compile_incore_task(compiler, tc_platform, kernel, runtime_name):
         source = Path(kernel["source"])
-        core_type = kernel["core_type"]
-        ext = ".so" if tc_platform.endswith("sim") else ".o"
-        output_file = source.with_suffix(ext)
-
-        # 1. Compile → save .o/.so alongside source
-        cached = _load_binary(output_file)
-        if cached is not None:
-            incore_o = cached
-        else:
-            incore_o = compiler.compile_incore(
-                kernel["source"],
-                core_type=core_type,
-                pto_isa_root=pto_isa_root,
-                extra_include_dirs=runtime_includes,
-            )
-            _save_binary(incore_o, output_file)
-
-        # 2. Extract stripped binary → save to cache/ for fast assembly later
-        from pypto.runtime.elf_parser import extract_text_section  # noqa: PLC0415
-
-        if tc_platform.endswith("sim"):
-            kernel_bin = incore_o
-        else:
-            kernel_bin = extract_text_section(incore_o)
-
-        cache_dir = source.parent.parent.parent / "cache"
-        cache_file = cache_dir / f"incore_{core_type}_{source.stem}.bin"
-        _save_binary(kernel_bin, cache_file)
+        prebuild_cache = source.parent.parent.parent / "cache"
+        compile_single_kernel(
+            kernel,
+            compiler,
+            tc_platform,
+            pto_isa_root,
+            runtime_name,
+            cache_dir=prebuild_cache,
+        )
 
     def _compile_orch_task(compiler, runtime_name, orch_source):
         source = Path(orch_source)
-        output_file = source.with_suffix(".so")
-
-        # 1. Compile → save .so alongside source
-        cached = _load_binary(output_file)
-        if cached is not None:
-            orch_bin = cached
-        else:
-            orch_bin = compiler.compile_orchestration(runtime_name, orch_source)
-            _save_binary(orch_bin, output_file)
-
-        # 2. Also save to cache/ for fast assembly later
-        cache_dir = source.parent.parent / "cache"
-        cache_file = cache_dir / f"orch_{source.stem}.bin"
-        _save_binary(orch_bin, cache_file)
+        prebuild_cache = source.parent.parent / "cache"
+        compile_single_orchestration(
+            orch_source,
+            compiler,
+            runtime_name,
+            cache_dir=prebuild_cache,
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         all_futs: list = []
@@ -491,9 +465,8 @@ def prebuild_binaries(
         # Per-test-case: each kernel and orchestration as independent tasks
         tc_kernel_futs: list[tuple[list, concurrent.futures.Future]] = []
         for tc, compiler, tc_platform, runtime_name, kernels, orch_source in case_configs:
-            runtime_includes = compiler.get_orchestration_include_dirs(runtime_name)[:2]
             kfuts = [
-                pool.submit(_compile_incore_task, compiler, tc_platform, k, runtime_includes) for k in kernels
+                pool.submit(_compile_incore_task, compiler, tc_platform, k, runtime_name) for k in kernels
             ]
             ofut = pool.submit(_compile_orch_task, compiler, runtime_name, orch_source)
             tc_kernel_futs.append((kfuts, ofut))

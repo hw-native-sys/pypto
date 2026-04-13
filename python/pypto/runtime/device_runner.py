@@ -27,15 +27,18 @@ Simpler dependency remaining is:
 
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import importlib.util
 import logging
 import os
 import subprocess
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -50,6 +53,7 @@ from .task_interface import (
     make_tensor_arg,
     scalar_to_uint64,
 )
+from .tensor_spec import ScalarSpec, TensorSpec
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +322,109 @@ def _kernel_config_runtime_env(kernel_config_module, kernels_dir: Path) -> dict[
 
 
 # ---------------------------------------------------------------------------
+# Shared compilation functions
+# ---------------------------------------------------------------------------
+
+
+def compile_single_kernel(
+    kernel: dict,
+    compiler: KernelCompiler,
+    platform: str,
+    pto_isa_root: str,
+    runtime_name: str,
+    cache_dir: Path | None = None,
+) -> tuple[bytes, bytes]:
+    """Compile a single incore kernel with binary caching.
+
+    Checks for a cached ``.o``/``.so`` alongside the source file. On miss,
+    compiles via *compiler* and saves the result. For hardware platforms,
+    extracts the ``.text`` section to produce the final kernel binary.
+
+    When *cache_dir* is provided, the final (possibly stripped) binary is
+    additionally written to ``cache_dir/incore_{core_type}_{stem}.bin``.
+    This is the pre-build cache that :func:`compile_and_assemble` checks
+    before calling this function.
+
+    Args:
+        kernel: Kernel descriptor dict with keys ``"source"``, ``"core_type"``,
+            and optionally ``"signature"``, ``"func_id"``.
+        compiler: Configured :class:`KernelCompiler` instance.
+        platform: Target execution platform.
+        pto_isa_root: Resolved PTO-ISA root directory.
+        runtime_name: Runtime name (e.g. ``"host_build_graph"``).  Passed to
+            :meth:`KernelCompiler.compile_incore` for include-dir resolution.
+        cache_dir: Optional directory to write the final kernel binary for
+            pre-build caching.
+
+    Returns:
+        ``(raw_binary, kernel_binary)`` where *raw_binary* is the compiled
+        ``.o``/``.so`` and *kernel_binary* is the final binary (possibly
+        ``.text``-extracted) ready for ``CoreCallable.build()``.
+    """
+    source = Path(kernel["source"])
+    core_type = kernel["core_type"]
+
+    ext = ".so" if platform.endswith("sim") else ".o"
+    output_file = source.with_suffix(ext)
+
+    raw = _load_binary(output_file)
+    if raw is None:
+        raw = compiler.compile_incore(
+            kernel["source"],
+            core_type=core_type,
+            pto_isa_root=pto_isa_root,
+            runtime_name=runtime_name,
+        )
+        _save_binary(raw, output_file)
+
+    kernel_bin = raw if platform.endswith("sim") else extract_text_section(raw)
+
+    if cache_dir is not None:
+        cache_file = cache_dir / f"incore_{core_type}_{source.stem}.bin"
+        _save_binary(kernel_bin, cache_file)
+
+    return raw, kernel_bin
+
+
+def compile_single_orchestration(
+    source: str | Path,
+    compiler: KernelCompiler,
+    runtime_name: str,
+    cache_dir: Path | None = None,
+) -> bytes:
+    """Compile orchestration source to a shared library with binary caching.
+
+    Checks for a cached ``.so`` alongside the source file. On miss, compiles
+    via *compiler* and saves the result.
+
+    When *cache_dir* is provided, the binary is additionally written to
+    ``cache_dir/orch_{stem}.bin`` for the pre-build cache.
+
+    Args:
+        source: Path to the orchestration C++ source file.
+        compiler: Configured :class:`KernelCompiler` instance.
+        runtime_name: Runtime name (e.g. ``"host_build_graph"``).
+        cache_dir: Optional directory to write the binary for pre-build caching.
+
+    Returns:
+        Orchestration ``.so`` binary bytes.
+    """
+    source_path = Path(source)
+    output_file = source_path.with_suffix(".so")
+
+    raw = _load_binary(output_file)
+    if raw is None:
+        raw = compiler.compile_orchestration(runtime_name, str(source))
+        _save_binary(raw, output_file)
+
+    if cache_dir is not None:
+        cache_file = cache_dir / f"orch_{source_path.stem}.bin"
+        _save_binary(raw, cache_file)
+
+    return raw
+
+
+# ---------------------------------------------------------------------------
 # compile_and_assemble
 # ---------------------------------------------------------------------------
 
@@ -372,25 +479,6 @@ def compile_and_assemble(
     # Create compiler
     compiler = KernelCompiler(platform=platform)
 
-    # Resolve runtime include dirs for kernel compilation
-    simpler_root = Path(os.environ["SIMPLER_ROOT"])
-    arch = "a5" if platform.startswith("a5") else "a2a3"
-    runtime_base_dir = simpler_root / "src" / arch / "runtime" / runtime_name
-    runtime_include_dirs: list[str] = []
-
-    build_config_path = runtime_base_dir / "build_config.py"
-    if build_config_path.is_file():
-        bc_spec = importlib.util.spec_from_file_location("build_config", str(build_config_path))
-        if bc_spec is not None and bc_spec.loader is not None:
-            bc_module = importlib.util.module_from_spec(bc_spec)
-            bc_spec.loader.exec_module(bc_module)
-            aicore_cfg = bc_module.BUILD_CONFIG.get("aicore", {})
-            for p in aicore_cfg.get("include_dirs", []):
-                runtime_include_dirs.append(str(runtime_base_dir / p))
-    else:
-        runtime_include_dirs.append(str(runtime_base_dir / "runtime"))
-    runtime_include_dirs.append(str(simpler_root / "src" / "common" / "task_interface"))
-
     # --- Parallel compilation ---
 
     def _compile_one_kernel(kernel: dict) -> tuple[int, CoreCallable]:
@@ -399,28 +487,15 @@ def compile_and_assemble(
         core_type = kernel["core_type"]
 
         # Check cache/ for pre-stripped binary (written by prebuild_binaries)
-        cache_dir = work_dir / "cache"
-        cache_file = cache_dir / f"incore_{core_type}_{source.stem}.bin"
+        prebuild_cache = work_dir / "cache"
+        cache_file = prebuild_cache / f"incore_{core_type}_{source.stem}.bin"
         cached_bin = _load_binary(cache_file)
         if cached_bin is not None:
             sig = kernel.get("signature", [])
             return (func_id, CoreCallable.build(signature=sig, binary=cached_bin))
 
-        # Compile → save .o/.so alongside source
-        ext = ".so" if platform.endswith("sim") else ".o"
-        output_file = source.with_suffix(ext)
-
-        raw = _load_binary(output_file)
-        if raw is None:
-            raw = compiler.compile_incore(
-                kernel["source"],
-                core_type=core_type,
-                pto_isa_root=pto_isa_root,
-                extra_include_dirs=runtime_include_dirs,
-            )
-            _save_binary(raw, output_file)
-
-        kernel_bin = raw if platform.endswith("sim") else extract_text_section(raw)
+        # Compile via shared function; skip secondary prebuild cache write
+        _, kernel_bin = compile_single_kernel(kernel, compiler, platform, pto_isa_root, runtime_name)
 
         sig = kernel.get("signature", [])
         return (func_id, CoreCallable.build(signature=sig, binary=kernel_bin))
@@ -429,20 +504,14 @@ def compile_and_assemble(
         source = Path(orchestration["source"])
 
         # Check cache/ for pre-built binary (written by prebuild_binaries)
-        cache_dir = work_dir / "cache"
-        cache_file = cache_dir / f"orch_{source.stem}.bin"
+        prebuild_cache = work_dir / "cache"
+        cache_file = prebuild_cache / f"orch_{source.stem}.bin"
         cached_bin = _load_binary(cache_file)
         if cached_bin is not None:
             return cached_bin
 
-        # Compile → save .so alongside source
-        output_file = source.with_suffix(".so")
-
-        raw = _load_binary(output_file)
-        if raw is None:
-            raw = compiler.compile_orchestration(runtime_name, orchestration["source"])
-            _save_binary(raw, output_file)
-        return raw
+        # Compile via shared function; skip secondary prebuild cache write
+        return compile_single_orchestration(orchestration["source"], compiler, runtime_name)
 
     max_workers = 1 + len(kernels)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -640,20 +709,59 @@ def validate_golden(
 # Tensor argument construction
 # ---------------------------------------------------------------------------
 
+# Return type shared by build_orch_args / build_orch_args_from_inputs.
+_OrchArgsTuple = tuple[ChipStorageTaskArgs, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+
+def _collect_orch_args(
+    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
+    is_output: Callable[[str], bool],
+) -> _OrchArgsTuple:
+    """Shared logic for building ``ChipStorageTaskArgs`` from ``(name, value)`` pairs.
+
+    Args:
+        items: Ordered ``(name, value)`` pairs.  Each value is either a
+            ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
+        is_output: Predicate that returns ``True`` if the named tensor is an
+            output to be validated.
+
+    Returns:
+        ``(orch_args, all_tensors, inputs, outputs)``.
+    """
+    orch_args = ChipStorageTaskArgs()
+    all_tensors: dict[str, Any] = {}
+    inputs: dict[str, torch.Tensor] = {}
+    outputs: dict[str, torch.Tensor] = {}
+
+    for name, val in items:
+        if isinstance(val, torch.Tensor):
+            val = val.cpu().contiguous()
+            orch_args.add_tensor(make_tensor_arg(val))
+            all_tensors[name] = val
+            if is_output(name):
+                outputs[name] = val
+            else:
+                inputs[name] = val
+        elif isinstance(val, ctypes._SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(val))
+            all_tensors[name] = val.value
+
+    return orch_args, all_tensors, inputs, outputs
+
 
 def build_orch_args(
-    tensor_specs: list,
-    golden_func,
-) -> tuple[ChipStorageTaskArgs, dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Build ``ChipStorageTaskArgs`` from tensor specs and compute golden.
+    tensor_specs: list[TensorSpec],
+    scalar_specs: list[ScalarSpec] | None = None,
+) -> _OrchArgsTuple:
+    """Build ``ChipStorageTaskArgs`` from tensor and scalar specs.
 
     Creates tensors from *tensor_specs*, adds them to a ``ChipStorageTaskArgs``,
-    calls *golden_func* to compute expected outputs.
+    then appends any scalar arguments from *scalar_specs*.
 
     Args:
         tensor_specs: List of ``TensorSpec`` objects.
-        golden_func: ``golden(tensors, params)`` function that computes expected
-            outputs in-place.
+        scalar_specs: Optional list of ``ScalarSpec`` objects for scalar TaskArg
+            parameters.
 
     Returns:
         ``(orch_args, all_tensors, inputs, outputs)`` where:
@@ -662,26 +770,38 @@ def build_orch_args(
         - *inputs*: Non-output tensors.
         - *outputs*: Output tensors.
     """
-    orch_args = ChipStorageTaskArgs()
-    all_tensors: dict[str, torch.Tensor] = {}
-    inputs: dict[str, torch.Tensor] = {}
-    outputs: dict[str, torch.Tensor] = {}
+    output_names = {spec.name for spec in tensor_specs if spec.is_output}
 
-    for spec in tensor_specs:
-        tensor = spec.create_tensor()
-        tensor = tensor.cpu().contiguous()
-        orch_args.add_tensor(make_tensor_arg(tensor))
-        all_tensors[spec.name] = tensor
+    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]] = [
+        (spec.name, spec.create_tensor()) for spec in tensor_specs
+    ]
+    if scalar_specs:
+        for scalar_spec in scalar_specs:
+            ctype_cls = getattr(ctypes, f"c_{scalar_spec.ctype}")
+            items.append((scalar_spec.name, ctype_cls(scalar_spec.value)))
 
-        if spec.is_output:
-            outputs[spec.name] = tensor
-        else:
-            inputs[spec.name] = tensor
+    return _collect_orch_args(items, lambda name: name in output_names)
 
-    # Add scalar arguments from tensor specs
-    for spec in tensor_specs:
-        for scalar_name, scalar_val in spec.get_scalars():
-            orch_args.add_scalar(scalar_to_uint64(scalar_val))
-            all_tensors[scalar_name] = scalar_val
 
-    return orch_args, all_tensors, inputs, outputs
+def build_orch_args_from_inputs(
+    inputs_result: list[tuple[str, Any]],
+    output_names: set[str],
+) -> _OrchArgsTuple:
+    """Build ``ChipStorageTaskArgs`` from pre-generated ``(name, value)`` tuples.
+
+    This variant is used by the test harness path where inputs come from
+    ``golden.py``'s ``generate_inputs()`` function rather than ``TensorSpec``.
+
+    Args:
+        inputs_result: List of ``(name, value)`` tuples where each value is
+            either a ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
+        output_names: Set of tensor names that are outputs.
+
+    Returns:
+        ``(orch_args, all_tensors, inputs, outputs)`` — same layout as
+        :func:`build_orch_args`.
+    """
+    return _collect_orch_args(
+        inputs_result,
+        lambda name: name in output_names or name.startswith("out"),
+    )
