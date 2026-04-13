@@ -560,7 +560,7 @@ class TestDynamicValidShape:
         phi_var = ir.Var("result_phi", tile_type, span)
 
         # IfStmt: if flag == 0 then yield seed else yield updated
-        condition = ir.Eq(flag, ir.ConstInt(0, idx, span), idx, span)
+        condition = ir.Eq(flag, ir.ConstInt(0, idx, span), ir.DataType.BOOL, span)
         if_stmt = ir.IfStmt(
             condition,
             ir.YieldStmt([seed], span),

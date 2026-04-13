@@ -327,5 +327,61 @@ class TestScalarTypeErrors:
                 return x
 
 
+class TestConditionMustBeBool:
+    """Tests for if/while conditions requiring BOOL dtype (RFC #993)."""
+
+    def test_if_with_int_literal_rejected(self):
+        """Test that `if 1:` is rejected — integer literal is not BOOL."""
+        with pytest.raises(ParserTypeError, match="if condition must be a Bool-typed scalar"):
+
+            @pl.function
+            def bad_if(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                if 1:
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+                else:
+                    result: pl.Tensor[[64], pl.FP32] = x
+                return result
+
+    def test_while_with_int_literal_rejected(self):
+        """Test that `while 1:` is rejected — integer literal is not BOOL."""
+        with pytest.raises(ParserTypeError, match="while condition must be a Bool-typed scalar"):
+
+            @pl.function
+            def bad_while(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                while 1:
+                    x = pl.mul(x, 2.0)
+                return x
+
+    def test_if_with_bool_literal_accepted(self):
+        """Test that `if True:` is accepted."""
+
+        @pl.function
+        def ok_if(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            if True:
+                result: pl.Tensor[[64], pl.FP32] = pl.mul(x, 2.0)
+            else:
+                result: pl.Tensor[[64], pl.FP32] = x
+            return result
+
+        assert isinstance(ok_if, pypto.ir.Function)
+
+    def test_if_with_comparison_accepted(self):
+        """Test that comparison condition (BOOL-typed) is accepted."""
+
+        @pl.function
+        def ok_cmp(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            init: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+            for i, (acc,) in pl.range(5, init_values=(init,)):
+                if i > 0:
+                    new_val: pl.Tensor[[64], pl.FP32] = pl.mul(acc, 2.0)
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(new_val)
+                else:
+                    val: pl.Tensor[[64], pl.FP32] = pl.yield_(acc)
+                result = pl.yield_(val)
+            return result
+
+        assert isinstance(ok_cmp, pypto.ir.Function)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

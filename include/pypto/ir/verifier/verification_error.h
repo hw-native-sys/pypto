@@ -56,7 +56,8 @@ enum class ErrorType : int {
   SHAPE_VALUE_MISMATCH = 104,         // Shape dimension value mismatch
   SIZE_MISMATCH = 105,                // Vector size mismatch in control flow
   IF_CONDITION_MUST_BE_SCALAR = 106,  // IfStmt condition must be ScalarType
-  FOR_RANGE_MUST_BE_SCALAR = 107      // ForStmt range must be ScalarType
+  FOR_RANGE_MUST_BE_SCALAR = 107,     // ForStmt range must be ScalarType
+  CONDITION_MUST_BE_BOOL = 108        // IfStmt/WhileStmt condition dtype must be BOOL
 };
 
 /**

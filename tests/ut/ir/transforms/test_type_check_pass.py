@@ -220,5 +220,70 @@ def test_type_check_valid_types():
     assert result_program is not None
 
 
+def test_type_check_if_condition_must_be_bool():
+    """Test type checking rejects non-BOOL IfStmt condition."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = []
+
+    # Condition is INT64 ConstInt — must fail BOOL check
+    condition = ir.ConstInt(1, DataType.INT64, span)
+    then_body = ir.SeqStmts([], span)
+    if_stmt = ir.IfStmt(condition, then_body, None, [], span)
+
+    func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([], span)], span)
+    func = ir.Function("test_if_non_bool", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    with pytest.raises(Exception, match="IfStmt condition dtype must be BOOL"):
+        verify_pass(program)
+
+
+def test_type_check_while_condition_must_be_bool():
+    """Test type checking rejects non-BOOL WhileStmt condition."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = []
+
+    condition = ir.ConstInt(1, DataType.INDEX, span)
+    body = ir.SeqStmts([], span)
+    while_stmt = ir.WhileStmt(condition, [], body, [], span)
+
+    func_body = ir.SeqStmts([while_stmt, ir.ReturnStmt([], span)], span)
+    func = ir.Function("test_while_non_bool", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    with pytest.raises(Exception, match="WhileStmt condition dtype must be BOOL"):
+        verify_pass(program)
+
+
+def test_type_check_bool_condition_passes():
+    """Test that BOOL-typed conditions pass verification."""
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = []
+
+    # BOOL-typed comparison condition
+    condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+    then_body = ir.SeqStmts([], span)
+    if_stmt = ir.IfStmt(condition, then_body, None, [], span)
+
+    func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([], span)], span)
+    func = ir.Function("test_bool_cond", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    result_program = verify_pass(program)
+    assert result_program is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1478,6 +1478,7 @@ class ASTParser:
         # Parse natural while syntax: while condition:
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
+        self._check_condition_is_bool(condition, "while", span)
         prev_loop_builder = self.current_loop_builder
         prev_in_for_loop = self.in_for_loop
         prev_in_while_loop = self.in_while_loop
@@ -1512,6 +1513,7 @@ class ASTParser:
         # Parse condition
         condition = self.parse_expression(stmt.test)
         span = self.span_tracker.get_span(stmt)
+        self._check_condition_is_bool(condition, "if", span)
 
         # Track yield output variable names from both branches
         then_yield_vars = []
@@ -3538,6 +3540,27 @@ class ASTParser:
             return ir.TupleType(resolved)
         # Single type
         return resolved
+
+    def _check_condition_is_bool(self, condition: Any, kind: str, span: Any) -> None:
+        """Check that an if/while condition is a scalar BOOL expression.
+
+        Raises ParserTypeError if the condition is not Bool-typed. No auto-coercion:
+        users must write `if x != 0:` or `if bool(x):` instead of `if x:` when x is
+        not already a bool.
+
+        Args:
+            condition: Parsed condition expression (ir.Expr)
+            kind: "if" or "while" (used in error message)
+            span: Span for error reporting
+        """
+        cond_type = condition.type
+        if not isinstance(cond_type, ir.ScalarType) or cond_type.dtype != DataType.BOOL:
+            type_str = python_print(cond_type) if hasattr(cond_type, "dtype") else str(cond_type)
+            raise ParserTypeError(
+                f"{kind} condition must be a Bool-typed scalar expression, got {type_str}",
+                span=span,
+                hint=f"Use an explicit boolean comparison, e.g. `{kind} x != 0:` or `{kind} x > 0:`",
+            )
 
     def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, ast.expr | None]]:
         """Scan statements for yield assignments to determine output variable names and types.

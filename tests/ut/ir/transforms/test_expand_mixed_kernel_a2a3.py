@@ -209,7 +209,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-            if 1:
+            if True:
                 pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
             tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
             pl.tpush_to_aic(tile_a, split=0)
@@ -221,7 +221,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-            if 1:
+            if True:
                 pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
             received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
             pl.tfree_to_aiv(received)

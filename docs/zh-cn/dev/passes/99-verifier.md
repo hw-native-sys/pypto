@@ -101,6 +101,7 @@
 | 105 | `SIZE_MISMATCH` | 控制流分支中向量大小不匹配 |
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt 条件必须是 ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt 范围必须是 ScalarType |
+| 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt 条件 dtype 必须是 BOOL |
 
 ### NoNestedCall
 

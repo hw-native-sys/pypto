@@ -49,6 +49,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "IF_CONDITION_MUST_BE_SCALAR";
     case ErrorType::FOR_RANGE_MUST_BE_SCALAR:
       return "FOR_RANGE_MUST_BE_SCALAR";
+    case ErrorType::CONDITION_MUST_BE_BOOL:
+      return "CONDITION_MUST_BE_BOOL";
     default:
       return "UNKNOWN";
   }
@@ -99,6 +101,11 @@ class TypeChecker : public IRVisitor {
    * @brief Check if expression type is ScalarType
    */
   void CheckIsScalarType(const ExprPtr& expr, const std::string& context, const Span& span);
+
+  /**
+   * @brief Check if expression is a ScalarType with BOOL dtype (for if/while conditions)
+   */
+  void CheckIsBoolCondition(const ExprPtr& expr, const std::string& context, const Span& span);
 };
 
 // TypeChecker implementation
@@ -365,6 +372,19 @@ void TypeChecker::CheckIsScalarType(const ExprPtr& expr, const std::string& cont
   }
 }
 
+void TypeChecker::CheckIsBoolCondition(const ExprPtr& expr, const std::string& context, const Span& span) {
+  if (!expr || !expr->GetType()) return;
+
+  auto scalar = As<ScalarType>(expr->GetType());
+  if (!scalar) return;  // Already reported by CheckIsScalarType
+
+  if (scalar->dtype_ != DataType::BOOL) {
+    std::ostringstream msg;
+    msg << context << " dtype must be BOOL, but got " << scalar->dtype_.ToString();
+    RecordError(typecheck::ErrorType::CONDITION_MUST_BE_BOOL, msg.str(), span);
+  }
+}
+
 void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
   if (!op) return;
 
@@ -434,9 +454,10 @@ void TypeChecker::VisitStmt_(const ForStmtPtr& op) {
 void TypeChecker::VisitStmt_(const WhileStmtPtr& op) {
   if (!op) return;
 
-  // Check condition must be ScalarType (bool)
+  // Check condition must be ScalarType with BOOL dtype
   if (op->condition_ && op->condition_->GetType()) {
     CheckIsScalarType(op->condition_, "WhileStmt condition", op->span_);
+    CheckIsBoolCondition(op->condition_, "WhileStmt condition", op->span_);
   }
 
   // Check type consistency between iter_args initValue, yield values, and return_vars
@@ -495,9 +516,10 @@ void TypeChecker::VisitStmt_(const WhileStmtPtr& op) {
 void TypeChecker::VisitStmt_(const IfStmtPtr& op) {
   if (!op) return;
 
-  // Check condition must be ScalarType
+  // Check condition must be ScalarType with BOOL dtype
   if (op->condition_ && op->condition_->GetType()) {
     CheckIsScalarType(op->condition_, "IfStmt condition", op->span_);
+    CheckIsBoolCondition(op->condition_, "IfStmt condition", op->span_);
   }
 
   // Check type consistency only if return_vars is not empty

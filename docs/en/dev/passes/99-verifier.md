@@ -101,6 +101,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 105 | `SIZE_MISMATCH` | Vector size mismatch in control flow |
 | 106 | `IF_CONDITION_MUST_BE_SCALAR` | IfStmt condition must be ScalarType |
 | 107 | `FOR_RANGE_MUST_BE_SCALAR` | ForStmt range must be ScalarType |
+| 108 | `CONDITION_MUST_BE_BOOL` | IfStmt/WhileStmt condition dtype must be BOOL |
 
 ### NoNestedCall
 
