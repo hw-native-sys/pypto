@@ -462,7 +462,7 @@ class TestSplitVectorKernelUpDown:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(reduced, [0, 0], out_0)
                 return out_0_store
 
-        with pytest.raises(Exception, match="reduces on the split axis"):
+        with pytest.raises(ValueError, match="reduces on the split axis"):
             _run_split_vector_kernel(Before)
 
 

@@ -133,13 +133,20 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
 bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   if (!call->op_) return false;
   const auto& name = call->op_->name_;
+
+  auto input_tile_type = [&]() -> std::shared_ptr<const TileType> {
+    if (call->args_.empty()) return nullptr;
+    return std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+  };
+
   if (name == "tile.row_sum" || name == "tile.row_max" || name == "tile.row_min") {
-    return split_dim == 1;
+    auto tt = input_tile_type();
+    int last_axis = tt ? static_cast<int>(tt->shape_.size()) - 1 : 1;
+    return split_dim == last_axis;
   }
   if (name == "tile.sum" || name == "tile.max" || name == "tile.min") {
     int axis = call->GetKwarg<int>("axis", -1);
-    auto tt = std::dynamic_pointer_cast<const TileType>(
-        std::dynamic_pointer_cast<const Call>(call)->args_.empty() ? nullptr : call->args_[0]->GetType());
+    auto tt = input_tile_type();
     if (axis < 0 && tt) {
       axis = static_cast<int>(tt->shape_.size()) + axis;
     }
