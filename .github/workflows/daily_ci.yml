@@ -76,7 +76,7 @@ jobs:
             examples/models/qwen3/qwen3_32b_decode_scope1.py \
             examples/models/qwen3/qwen3_32b_decode_scope2.py \
             examples/models/qwen3/qwen3_32b_decode_scope3.py \
-            examples/models/qwen3/qwen3_32b_decode_scope12.py; do
+            examples/models/qwen3/qwen3_32b_decode.py; do
             echo "::group::$f"
             python "$f" -p a2a3 -d $DEVICE_ID
             echo "::endgroup::"
