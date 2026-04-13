@@ -74,8 +74,16 @@ ignore = [
 fixable = ["ALL"]
 
 [tool.ruff.lint.per-file-ignores]
-# DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length
+# DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length;
+# F841 suppressed where DSL assignments intentionally create IR nodes whose
+# Python binding is unused but structurally required by the pass output.
 "tests/ut/ir/transforms/test_expand_mixed_kernel.py" = ["E501"]
+"tests/ut/ir/transforms/test_init_memref.py" = ["E501"]
+"tests/ut/ir/transforms/test_memory_reuse.py" = ["E501"]
+"tests/ut/ir/transforms/test_infer_tile_memory_space.py" = ["E501"]
+"tests/ut/ir/transforms/test_interchange_chunk_loops.py" = ["E501", "F841"]
+"tests/ut/ir/transforms/test_outline_incore_interleaved_ops.py" = ["E501"]
+"tests/ut/ir/transforms/test_legalize_pto_buffer_reuse.py" = ["E501", "F841"]
 # IR dumps are formatted at 200-col for readability — suppress line-length lint
 "build_output/**" = ["E501"]
 

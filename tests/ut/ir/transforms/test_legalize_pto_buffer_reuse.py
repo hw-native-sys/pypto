@@ -13,14 +13,24 @@ Verifies that the pass correctly splits MemRefs when multiple tile
 variables sharing the same MemRef have incompatible root TileBufSignatures
 (different shape/dtype/layout), while preserving legal sharing for
 view-like operations (fillpad, reshape).
+
+Test strategy:
+- IR-level tests use the Before/Expected pattern with
+  ``ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)``.
+  ``enable_auto_mapping`` makes structural comparison sensitive to MemRef
+  identity sharing — two tiles that share a MemRef before vs. two tiles
+  with separate MemRefs after the split is visible structurally.
+- TestLegalizeWithCodegen retains the IRBuilder-based construction and MLIR
+  string assertions, since those tests verify codegen output (alloc counts,
+  addresses, dynamic-shape rendering) rather than IR shape.
 """
 
 import math
 
+import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
-from pypto.ir.builder import IRBuilder
 from pypto.pypto_core import DataType
 
 _SPAN = ir.Span.unknown()
@@ -36,6 +46,297 @@ def _setup_backend():
     backend.set_backend_type(BackendType.Ascend910B)
     yield
     backend.reset_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Tests: identical signatures keep shared MemRef
+# ---------------------------------------------------------------------------
+
+
+class TestLegalSharingPreserved:
+    """Same-shape same-dtype tiles sharing a MemRef should keep sharing."""
+
+    def test_same_signature_keeps_shared(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                t1: pl.Tile[[32, 32], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                t2: pl.Tile[[32, 32], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = pl.tile.adds(
+                    t1, 1.0
+                )
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.tile.store(t2, [0, 0], b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                t1: pl.Tile[[32, 32], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                t2: pl.Tile[[32, 32], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = pl.tile.adds(
+                    t1, 1.0
+                )
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.tile.store(t2, [0, 0], b)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_fillpad_view_keeps_shared(self):
+        """fillpad changes pad but keeps same shape -> legal view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                loaded: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                padded: pl.Tile[
+                    [128, 128],
+                    pl.FP32,
+                    pl.MemRef("mem_vec_0", -1, 65536),
+                    pl.Mem.Vec,
+                    pl.TileView(pad=pl.PadValue.max),
+                ] = pl.tile.fillpad(loaded, pad_value=pl.PadValue.max)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(padded, [0, 0], b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                loaded: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                padded: pl.Tile[
+                    [128, 128],
+                    pl.FP32,
+                    pl.MemRef("mem_vec_0", -1, 65536),
+                    pl.Mem.Vec,
+                    pl.TileView(pad=pl.PadValue.max),
+                ] = pl.tile.fillpad(loaded, pad_value=pl.PadValue.max)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(padded, [0, 0], b)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+class TestAscend910BSplitLoadTpopHazard:
+    """Ascend910B split AIV kernels should split load+tpop writer reuse."""
+
+    def test_ascend910b_split_aiv_splits_load_plus_tpop_reuse(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_1", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_chunk)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 4096)
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_1", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef(mem_vec_2, 0, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_chunk)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_ascend950_keeps_compatible_share(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_1", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_chunk)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main(self, down: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                down_prev: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.load(down, [0, 0], [8, 128], [8, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                pipe_chunk: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_1", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.tpop_from_aic(split=1)
+                )
+                down_next: pl.Tile[[8, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 4096), pl.Mem.Vec] = (
+                    pl.tile.add(down_prev, pipe_chunk)
+                )
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(down_next, [0, 0], down)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+# ---------------------------------------------------------------------------
+# Tests: incompatible signatures cause split
+# ---------------------------------------------------------------------------
+
+
+class TestIllegalSharingSplit:
+    """Tiles with incompatible root signatures should be split."""
+
+    def test_different_shape_same_memref_splits(self):
+        """Two writers with different shapes -> must split."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(t2, [0, 0], b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 65536)
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_1, 0, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.tile.store(t2, [0, 0], b)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_split_propagates_through_view_chain(self):
+        """A split writer's legal views should follow the new MemRef."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                t3: pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.MemRef("mem_vec_0", -1, 65536),
+                    pl.Mem.Vec,
+                    pl.TileView(pad=pl.PadValue.max),
+                ] = pl.tile.fillpad(t2, pad_value=pl.PadValue.max)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(t3, [0, 0], b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 65536)
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_1, 0, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                t3: pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.MemRef(mem_vec_1, 0, 65536),
+                    pl.Mem.Vec,
+                    pl.TileView(pad=pl.PadValue.max),
+                ] = pl.tile.fillpad(t2, pad_value=pl.PadValue.max)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(t3, [0, 0], b)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: legalize + codegen
+#
+# These tests verify codegen output (alloc counts, addresses, dynamic-shape
+# rendering in MLIR text), so they keep IRBuilder construction and MLIR
+# string assertions rather than the structural-equality pattern. The
+# pass-level IR shape is already covered by TestLegalSharingPreserved /
+# TestIllegalSharingSplit above.
+# ---------------------------------------------------------------------------
 
 
 def _ci(val: int) -> ir.ConstInt:
@@ -94,21 +395,6 @@ def _load_call(
     )
 
 
-def _build_program(build_fn):
-    alloc = _MemRefAlloc()
-    ib = IRBuilder()
-    with ib.program("Test") as prog:
-        with ib.function("main") as f:
-            build_fn(ib, f, alloc)
-        prog.add_function(f.get_result())
-    return prog.get_result()
-
-
-def _run_legalize(program: ir.Program) -> ir.Function:
-    after = passes.legalize_pto_buffer_reuse()(program)
-    return next(iter(after.functions.values()))
-
-
 def _get_mlir_code(result: str | dict[str, str]) -> str:
     """Normalize generate() output to a single MLIR string."""
     return result if isinstance(result, str) else "".join(result.values())
@@ -130,348 +416,6 @@ def _get_alloc_addrs(alloc_lines: list[str]) -> list[str]:
     for line in alloc_lines:
         assert "addr =" in line, f"Expected addr attribute in alloc_tile: {line}"
     return [line.split("addr = ")[1].split()[0] for line in alloc_lines]
-
-
-def _iter_all_assign_stmts(stmt):
-    if isinstance(stmt, ir.AssignStmt):
-        yield stmt
-    elif isinstance(stmt, ir.SeqStmts):
-        for child in stmt.stmts:
-            yield from _iter_all_assign_stmts(child)
-    elif isinstance(stmt, ir.ForStmt):
-        yield from _iter_all_assign_stmts(stmt.body)
-    elif isinstance(stmt, ir.IfStmt):
-        yield from _iter_all_assign_stmts(stmt.then_body)
-        if stmt.else_body is not None:
-            yield from _iter_all_assign_stmts(stmt.else_body)
-
-
-def _get_var_type(func, var_name):
-    for stmt in _iter_all_assign_stmts(func.body):
-        if stmt.var.name_hint == var_name:
-            if isinstance(stmt.var.type, ir.ShapedType):
-                return stmt.var.type
-    return None
-
-
-def _assert_shares_memref(func, var_a, var_b):
-    ta = _get_var_type(func, var_a)
-    tb = _get_var_type(func, var_b)
-    assert ta is not None, f"Variable '{var_a}' not found"
-    assert tb is not None, f"Variable '{var_b}' not found"
-    assert ta.memref is tb.memref, f"'{var_a}' and '{var_b}' should share the same MemRef"
-
-
-def _assert_different_memref(func, var_a, var_b):
-    ta = _get_var_type(func, var_a)
-    tb = _get_var_type(func, var_b)
-    assert ta is not None, f"Variable '{var_a}' not found"
-    assert tb is not None, f"Variable '{var_b}' not found"
-    assert ta.memref is not tb.memref, f"'{var_a}' and '{var_b}' should have different MemRefs"
-
-
-# ---------------------------------------------------------------------------
-# Tests: identical signatures keep shared MemRef
-# ---------------------------------------------------------------------------
-
-
-class TestLegalSharingPreserved:
-    """Same-shape same-dtype tiles sharing a MemRef should keep sharing."""
-
-    def test_same_signature_keeps_shared(self):
-        shared = _MemRefAlloc().vec([32, 32], _FP32)
-
-        input_t = _tensor_t([32, 32], _FP32)
-        output_t = _tensor_t([32, 32], _FP32)
-        tile1_type = _tile_t([32, 32], _FP32, shared)
-        tile2_type = _tile_t([32, 32], _FP32, shared)
-
-        a_var = ir.Var("a", input_t, _SPAN)
-        b_var = ir.Var("b", output_t, _SPAN)
-        t1 = ir.Var("t1", tile1_type, _SPAN)
-        t2 = ir.Var("t2", tile2_type, _SPAN)
-
-        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
-        shapes = ir.MakeTuple([_ci(32), _ci(32)], _SPAN)
-
-        load_call = _load_call(a_var, offsets, shapes, tile1_type)
-        adds_call = ir.Call(ir.Op("tile.adds"), [t1, ir.ConstFloat(1.0, _FP32, _SPAN)], {}, tile2_type, _SPAN)
-        result_var = ir.Var("result", output_t, _SPAN)
-        store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(t1, load_call, _SPAN),
-                ir.AssignStmt(t2, adds_call, _SPAN),
-                ir.AssignStmt(result_var, store_call, _SPAN),
-                ir.ReturnStmt([result_var], _SPAN),
-            ],
-            _SPAN,
-        )
-
-        func = ir.Function(
-            "main",
-            [(a_var, ir.ParamDirection.In), (b_var, ir.ParamDirection.Out)],
-            [output_t],
-            body,
-            _SPAN,
-            ir.FunctionType.InCore,
-        )
-        program = ir.Program([func], "Test", _SPAN)
-
-        result_func = _run_legalize(program)
-        _assert_shares_memref(result_func, "t1", "t2")
-
-    def test_fillpad_view_keeps_shared(self):
-        """fillpad changes pad but keeps same shape → legal view."""
-        shared = _MemRefAlloc().vec([128, 128], _FP32)
-
-        input_t = _tensor_t([128, 128], _FP32)
-        output_t = _tensor_t([128, 128], _FP32)
-        load_type = _tile_t([128, 128], _FP32, shared)
-
-        padded_view = ir.TileView()
-        padded_view.valid_shape = [_ci(128), _ci(128)]
-        padded_view.pad = ir.PadValue.max
-        padded_type = _tile_t_with_view([128, 128], _FP32, shared, padded_view)
-
-        a_var = ir.Var("a", input_t, _SPAN)
-        b_var = ir.Var("b", output_t, _SPAN)
-        t1 = ir.Var("loaded", load_type, _SPAN)
-        t2 = ir.Var("padded", padded_type, _SPAN)
-
-        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
-        shapes = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
-
-        load_call = _load_call(a_var, offsets, shapes, load_type)
-        fillpad_call = ir.Call(
-            ir.Op("tile.fillpad"),
-            [t1],
-            {"pad_value": ir.PadValue.max},
-            padded_type,
-            _SPAN,
-        )
-        result_var = ir.Var("result", output_t, _SPAN)
-        store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(t1, load_call, _SPAN),
-                ir.AssignStmt(t2, fillpad_call, _SPAN),
-                ir.AssignStmt(result_var, store_call, _SPAN),
-                ir.ReturnStmt([result_var], _SPAN),
-            ],
-            _SPAN,
-        )
-
-        func = ir.Function(
-            "main",
-            [(a_var, ir.ParamDirection.In), (b_var, ir.ParamDirection.Out)],
-            [output_t],
-            body,
-            _SPAN,
-            ir.FunctionType.InCore,
-        )
-        program = ir.Program([func], "Test", _SPAN)
-
-        result_func = _run_legalize(program)
-        _assert_shares_memref(result_func, "loaded", "padded")
-
-
-class TestAscend910BSplitLoadTpopHazard:
-    """Ascend910B split AIV kernels should split load+tpop writer reuse."""
-
-    def _build_split_aiv_program(self) -> ir.Program:
-        alloc = _MemRefAlloc()
-        shared = alloc.vec([8, 128], _FP32)
-        pipe = alloc.vec([8, 128], _FP32)
-
-        down_tensor_t = _tensor_t([16, 128], _FP32)
-        load_t = _tile_t([8, 128], _FP32, shared)
-        add_t = _tile_t([8, 128], _FP32, shared)
-        pipe_t = _tile_t([8, 128], _FP32, pipe)
-
-        down = ir.Var("down", down_tensor_t, _SPAN)
-        down_prev = ir.Var("down_prev", load_t, _SPAN)
-        pipe_chunk = ir.Var("pipe_chunk", pipe_t, _SPAN)
-        down_next = ir.Var("down_next", add_t, _SPAN)
-        result = ir.Var("result", down_tensor_t, _SPAN)
-
-        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
-        tile_shape = ir.MakeTuple([_ci(8), _ci(128)], _SPAN)
-
-        load_call = _load_call(down, offsets, tile_shape, load_t)
-        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 1}, pipe_t, _SPAN)
-        add_call = ir.Call(ir.Op("tile.add"), [down_prev, pipe_chunk], {}, add_t, _SPAN)
-        store_call = ir.Call(ir.Op("tile.store"), [down_next, offsets, down], down_tensor_t, _SPAN)
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(down_prev, load_call, _SPAN),
-                ir.AssignStmt(pipe_chunk, tpop_call, _SPAN),
-                ir.AssignStmt(down_next, add_call, _SPAN),
-                ir.AssignStmt(result, store_call, _SPAN),
-                ir.ReturnStmt([result], _SPAN),
-            ],
-            _SPAN,
-        )
-
-        func = ir.Function(
-            "main",
-            [(down, ir.ParamDirection.InOut)],
-            [down_tensor_t],
-            body,
-            _SPAN,
-            type=ir.FunctionType.AIV,
-            attrs={"split": ir.SplitMode.UP_DOWN},
-        )
-        return ir.Program([func], "Test", _SPAN)
-
-    def test_ascend910b_split_aiv_splits_load_plus_tpop_reuse(self):
-        result_func = _run_legalize(self._build_split_aiv_program())
-        _assert_different_memref(result_func, "down_prev", "down_next")
-
-    def test_ascend950_keeps_compatible_share(self):
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend950)
-
-        result_func = _run_legalize(self._build_split_aiv_program())
-        _assert_shares_memref(result_func, "down_prev", "down_next")
-
-
-# ---------------------------------------------------------------------------
-# Tests: incompatible signatures cause split
-# ---------------------------------------------------------------------------
-
-
-class TestIllegalSharingSplit:
-    """Tiles with incompatible root signatures should be split."""
-
-    def test_different_shape_same_memref_splits(self):
-        """Two writers with different shapes → must split."""
-        alloc = _MemRefAlloc()
-        shared = alloc.vec([128, 128], _FP32)
-
-        input_t = _tensor_t([128, 128], _FP32)
-        output_t = _tensor_t([128, 128], _FP32)
-
-        view_128 = ir.TileView()
-        view_128.valid_shape = [_ci(128), _ci(128)]
-        view_64 = ir.TileView()
-        view_64.valid_shape = [_ci(64), _ci(64)]
-
-        tile1_type = _tile_t_with_view([128, 128], _FP32, shared, view_128)
-        tile2_type = _tile_t_with_view([64, 64], _FP32, shared, view_64)
-
-        a_var = ir.Var("a", input_t, _SPAN)
-        b_var = ir.Var("b", output_t, _SPAN)
-        t1 = ir.Var("t1", tile1_type, _SPAN)
-        t2 = ir.Var("t2", tile2_type, _SPAN)
-
-        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
-        shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
-        shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
-
-        load1 = _load_call(a_var, offsets, shapes_128, tile1_type)
-        load2 = _load_call(a_var, offsets, shapes_64, tile2_type)
-        result_var = ir.Var("result", output_t, _SPAN)
-        store_call = ir.Call(ir.Op("tile.store"), [t2, offsets, b_var], result_var.type, _SPAN)
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(t1, load1, _SPAN),
-                ir.AssignStmt(t2, load2, _SPAN),
-                ir.AssignStmt(result_var, store_call, _SPAN),
-                ir.ReturnStmt([result_var], _SPAN),
-            ],
-            _SPAN,
-        )
-
-        func = ir.Function(
-            "main",
-            [(a_var, ir.ParamDirection.In), (b_var, ir.ParamDirection.Out)],
-            [output_t],
-            body,
-            _SPAN,
-            ir.FunctionType.InCore,
-        )
-        program = ir.Program([func], "Test", _SPAN)
-
-        result_func = _run_legalize(program)
-        _assert_different_memref(result_func, "t1", "t2")
-
-    def test_split_propagates_through_view_chain(self):
-        """A split writer's legal views should follow the new MemRef."""
-        alloc = _MemRefAlloc()
-        shared = alloc.vec([128, 128], _FP32)
-
-        input_t = _tensor_t([128, 128], _FP32)
-        output_t = _tensor_t([64, 64], _FP32)
-
-        view_128 = ir.TileView()
-        view_128.valid_shape = [_ci(128), _ci(128)]
-        view_64 = ir.TileView()
-        view_64.valid_shape = [_ci(64), _ci(64)]
-        padded_view = ir.TileView()
-        padded_view.valid_shape = [_ci(64), _ci(64)]
-        padded_view.pad = ir.PadValue.max
-
-        tile1_type = _tile_t_with_view([128, 128], _FP32, shared, view_128)
-        tile2_type = _tile_t_with_view([64, 64], _FP32, shared, view_64)
-        tile3_type = _tile_t_with_view([64, 64], _FP32, shared, padded_view)
-
-        a_var = ir.Var("a", input_t, _SPAN)
-        b_var = ir.Var("b", output_t, _SPAN)
-        t1 = ir.Var("t1", tile1_type, _SPAN)
-        t2 = ir.Var("t2", tile2_type, _SPAN)
-        t3 = ir.Var("t3", tile3_type, _SPAN)
-
-        offsets = ir.MakeTuple([_ci(0), _ci(0)], _SPAN)
-        shapes_128 = ir.MakeTuple([_ci(128), _ci(128)], _SPAN)
-        shapes_64 = ir.MakeTuple([_ci(64), _ci(64)], _SPAN)
-
-        load1 = _load_call(a_var, offsets, shapes_128, tile1_type)
-        load2 = _load_call(a_var, offsets, shapes_64, tile2_type)
-        fillpad = ir.Call(
-            ir.Op("tile.fillpad"),
-            [t2],
-            {"pad_value": ir.PadValue.max},
-            tile3_type,
-            _SPAN,
-        )
-        result_var = ir.Var("result", output_t, _SPAN)
-        store_call = ir.Call(ir.Op("tile.store"), [t3, offsets, b_var], result_var.type, _SPAN)
-
-        body = ir.SeqStmts(
-            [
-                ir.AssignStmt(t1, load1, _SPAN),
-                ir.AssignStmt(t2, load2, _SPAN),
-                ir.AssignStmt(t3, fillpad, _SPAN),
-                ir.AssignStmt(result_var, store_call, _SPAN),
-                ir.ReturnStmt([result_var], _SPAN),
-            ],
-            _SPAN,
-        )
-
-        func = ir.Function(
-            "main",
-            [(a_var, ir.ParamDirection.In), (b_var, ir.ParamDirection.Out)],
-            [output_t],
-            body,
-            _SPAN,
-            ir.FunctionType.InCore,
-        )
-        program = ir.Program([func], "Test", _SPAN)
-
-        result_func = _run_legalize(program)
-        _assert_different_memref(result_func, "t1", "t2")
-        _assert_shares_memref(result_func, "t2", "t3")
-        _assert_different_memref(result_func, "t1", "t3")
-
-
-# ---------------------------------------------------------------------------
-# Integration test: legalize + codegen
-# ---------------------------------------------------------------------------
 
 
 class TestLegalizeWithCodegen:
@@ -678,3 +622,7 @@ class TestLegalizeWithCodegen:
         sizes_64 = [line for line in alloc_lines if "rows=64" in line and "cols=64" in line]
         assert len(sizes_128) == 1, f"Expected one 128x128 alloc: {alloc_lines}"
         assert len(sizes_64) == 1, f"Expected one 64x64 alloc: {alloc_lines}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

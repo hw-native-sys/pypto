@@ -15,105 +15,8 @@ from pypto import ir, passes
 from pypto.backend import is_backend_configured, reset_for_testing
 
 
-def _iter_all_stmts(func):
-    """Iterate all AssignStmt/EvalStmt in function body (handles SeqStmts)."""
-    if not isinstance(func.body, ir.SeqStmts):
-        return
-    for child in func.body.stmts:
-        if isinstance(child, ir.SeqStmts):
-            yield from child.stmts
-        elif isinstance(child, (ir.AssignStmt, ir.EvalStmt)):
-            yield child
-
-
-def count_alloc_operations(func):
-    """Count the number of tile.alloc operations in a function."""
-    count = 0
-    for stmt in _iter_all_stmts(func):
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "tile.alloc":
-                count += 1
-    return count
-
-
-def get_alloc_addresses(func):
-    """Get addresses from all tile.alloc operations in a function.
-
-    Returns:
-        List of (var_name, addr) tuples in the order they appear
-    """
-    addrs = []
-    for stmt in _iter_all_stmts(func):
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "tile.alloc" and len(stmt.value.args) >= 2:
-                addr_expr = stmt.value.args[1]
-                if isinstance(addr_expr, ir.ConstInt):
-                    addrs.append((stmt.var.name_hint, addr_expr.value))
-    return addrs
-
-
-def get_memref_addresses_from_tiles(func):
-    """Get MemRef addresses from TileType variables in the function body.
-
-    Returns:
-        Dict mapping variable name to MemRef address
-    """
-    memref_addrs = {}
-    for stmt in _iter_all_stmts(func):
-        if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tile.alloc":
-                continue
-            var_type = stmt.var.type
-            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
-                memref = var_type.memref
-                if isinstance(memref.byte_offset_, ir.ConstInt):
-                    memref_addrs[stmt.var.name_hint] = memref.byte_offset_.value
-    return memref_addrs
-
-
-def get_reserve_buffer_bases(func):
-    """Get resolved base values from reserve_buffer calls in a function."""
-    bases = {}
-    for stmt in _iter_all_stmts(func):
-        call = None
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            call = stmt.value
-        elif isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
-            call = stmt.expr
-        if call is not None and call.op.name == "system.reserve_buffer":
-            bases[call.kwargs["name"]] = call.kwargs["base"]
-    return bases
-
-
-def _prepare_and_run_allocate_memory_addr(program):
-    """Prepare IR with memrefs and alloc ops, then run the address allocation pass.
-
-    init_mem_ref() creates MemRefs and alloc ops with addr=-1.
-    allocate_memory_addr() assigns real addresses.
-    """
-    program = passes.init_mem_ref()(program)
-    program = passes.allocate_memory_addr()(program)
-    return program
-
-
-def _prepare_and_run_full_memory_pipeline(program):
-    """Run the full tile memory pipeline through address allocation."""
-
-    program = passes.infer_tile_memory_space()(program)
-    program = passes.init_mem_ref()(program)
-    program = passes.memory_reuse()(program)
-    program = passes.allocate_memory_addr()(program)
-    return program
-
-
 def test_allocate_memory_addr_simple():
-    """Test AllocateMemoryAddr with a simple function containing TileType variables.
-
-    Verifies that:
-    1. Alloc operations exist with real addresses
-    2. Addresses are 32-byte aligned
-    3. MemRef addr_ fields are updated with allocated addresses
-    """
+    """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
 
     @pl.program
     class Before:
@@ -128,36 +31,34 @@ def test_allocate_memory_addr_simple():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
-    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_b, [0, 0], output
+            )
+            return result
 
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count > 0, "Should create at least one alloc operation"
-
-    alloc_addrs = get_alloc_addresses(optimized_func)
-    assert len(alloc_addrs) > 0, "Should have alloc addresses"
-
-    for var_name, addr in alloc_addrs:
-        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
-
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    assert len(memref_addrs) > 0, "Should have MemRef addresses in TileType variables"
-
-    expected_addrs = {"tile_a": 0, "tile_b": 16384}
-    for var_name, expected_addr in expected_addrs.items():
-        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
-        actual_addr = memref_addrs[var_name]
-        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_multiple_tiles():
-    """Test AllocateMemoryAddr with multiple TileType variables.
-
-    Verifies that:
-    1. Each unique MemRef gets its own alloc operation
-    2. Multiple alloc operations are created for multiple tiles
-    3. Addresses are 32-byte aligned
-    """
+    """Three tiles each get their own MemRef at 32-byte aligned offsets 0, 16384, 32768."""
 
     @pl.program
     class Before:
@@ -173,24 +74,34 @@ def test_allocate_memory_addr_multiple_tiles():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
             return result
 
-    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 32768, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_b, tile_b
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_c, [0, 0], output
+            )
+            return result
 
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count == 3, f"Expected 3 alloc operations for 3 tiles, but got {alloc_count}"
-
-    alloc_addrs = get_alloc_addresses(optimized_func)
-    assert len(alloc_addrs) == 3, f"Expected 3 alloc addresses, got {len(alloc_addrs)}"
-
-    for var_name, addr in alloc_addrs:
-        assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned"
-
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    expected_addrs = {"tile_a": 0, "tile_b": 16384, "tile_c": 32768}
-    for var_name, expected_addr in expected_addrs.items():
-        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
-        actual_addr = memref_addrs[var_name]
-        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
@@ -210,19 +121,31 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
-    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 4096, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 20480, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_b, [0, 0], output
+            )
+            return result
 
-    reserve_bases = get_reserve_buffer_bases(optimized_func)
-    assert reserve_bases == {"c2v_slot_buffer": 0}
-
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    assert memref_addrs["tile_a"] == 4096
-    assert memref_addrs["tile_b"] == 20480
-
-    alloc_addrs = get_alloc_addresses(optimized_func)
-    for _, addr in alloc_addrs:
-        assert addr % 32 == 0, f"Address {addr} should remain 32-byte aligned after reserve_buffer"
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -238,7 +161,8 @@ def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
     with pytest.raises(
         Exception, match=re.escape("AllocateMemoryAddr found overlapping reserve_buffer ranges")
     ):
-        _prepare_and_run_allocate_memory_addr(Before)
+        program = passes.init_mem_ref()(Before)
+        passes.allocate_memory_addr()(program)
 
 
 def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
@@ -268,20 +192,61 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
             result: pl.Tensor[[4, 64], pl.FP32] = pl.store(acc1, [0, 0], out_0)
             return result
 
-    optimized_program = _prepare_and_run_full_memory_pipeline(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tensor[[4, 128], pl.BF16, pl.MemRef("mem_ddr_0", 0, 1024)],
+            rhs0: pl.Tensor[[128, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 16384)],
+            rhs1: pl.Tensor[[128, 64], pl.BF16, pl.MemRef("mem_ddr_2", 0, 16384)],
+            out_0: pl.Out[pl.Tensor[[4, 64], pl.FP32, pl.MemRef("mem_ddr_3", 0, 1024)]],
+        ) -> pl.Tensor[[4, 64], pl.FP32]:
+            mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+            mem_mat_5: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 16384)
+            mem_mat_6: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 16384)
+            mem_left_7: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 1024)
+            mem_right_8: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 16384)
+            mem_acc_9: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 1024)
+            lhs_tile: pl.Tile[[4, 128], pl.BF16, pl.MemRef(mem_mat_4, 0, 1024), pl.Mem.Mat] = pl.tile.load(
+                lhs, [0, 0], [4, 128], [4, 128], target_memory=pl.Mem.Mat, transpose=False
+            )
+            rhs0_tile: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_mat_5, 1024, 16384), pl.Mem.Mat] = (
+                pl.tile.load(rhs0, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False)
+            )
+            rhs1_tile: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_mat_6, 17408, 16384), pl.Mem.Mat] = (
+                pl.tile.load(rhs1, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False)
+            )
+            lhs_tile_Left: pl.Tile[[4, 128], pl.BF16, pl.MemRef(mem_left_7, 0, 1024), pl.Mem.Left] = (
+                pl.tile.move(lhs_tile, target_memory=pl.Mem.Left)
+            )
+            # Both rhs*_tile_Right share mem_right_8 at offset 0 (memory reuse).
+            rhs0_tile_Right: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_right_8, 0, 16384), pl.Mem.Right] = (
+                pl.tile.move(rhs0_tile, target_memory=pl.Mem.Right)
+            )
+            _acc0: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 1024), pl.Mem.Acc] = pl.tile.matmul(
+                lhs_tile_Left, rhs0_tile_Right
+            )
+            rhs1_tile_Right: pl.Tile[[128, 64], pl.BF16, pl.MemRef(mem_right_8, 0, 16384), pl.Mem.Right] = (
+                pl.tile.move(rhs1_tile, target_memory=pl.Mem.Right)
+            )
+            acc1: pl.Tile[[4, 64], pl.FP32, pl.MemRef(mem_acc_9, 0, 1024), pl.Mem.Acc] = pl.tile.matmul(
+                lhs_tile_Left, rhs1_tile_Right
+            )
+            result: pl.Tensor[[4, 64], pl.FP32, pl.MemRef("mem_ddr_3", 0, 1024)] = pl.tile.store(
+                acc1, [0, 0], out_0
+            )
+            return result
 
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    assert memref_addrs["rhs0_tile_Right"] == memref_addrs["rhs1_tile_Right"]
+    After = passes.infer_tile_memory_space()(Before)
+    After = passes.init_mem_ref()(After)
+    After = passes.memory_reuse()(After)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_empty_function():
-    """Test AllocateMemoryAddr with a function that has no TileType variables.
-
-    Verifies that:
-    1. The pass handles functions with no tiles gracefully
-    2. No alloc operations are created for non-TileType variables
-    """
+    """Functions with no TileType variables: pass is a no-op."""
 
     @pl.program
     class Before:
@@ -289,23 +254,18 @@ def test_allocate_memory_addr_empty_function():
         def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
             return output
 
-    optimized_program = passes.allocate_memory_addr()(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
+            return output
 
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count == 0, "Should not create alloc operations for non-TileType variables"
-
-    assert optimized_func is not None
-    assert optimized_func.name == "main"
+    After = passes.allocate_memory_addr()(Before)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_allocs_are_prepended_to_body():
-    """Test that alloc operations are prepended directly to the function body.
-
-    Verifies that:
-    1. Alloc statements are direct children of the top-level SeqStmts
-    2. Alloc statements come before other statements in that SeqStmts
-    """
+    """Alloc statements are prepended as direct children of the top-level SeqStmts before tile ops."""
 
     @pl.program
     class Before:
@@ -320,28 +280,35 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
-    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            # Allocs are prepended before all tile ops.
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_b, [0, 0], output
+            )
+            return result
 
-    assert isinstance(optimized_func.body, ir.SeqStmts)
-
-    # Alloc statements should come first in the top-level SeqStmts
-    found_non_alloc = False
-    for stmt in optimized_func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "tile.alloc":
-                assert not found_non_alloc, "Alloc statements should precede non-alloc statements"
-                continue
-        found_non_alloc = True
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocate_memory_addr_raw_pointer_uniqueness():
-    """Test that only unique MemRef objects get alloc operations.
-
-    Verifies that:
-    1. Only one alloc is created for the same shared_ptr MemRef
-    2. Different shared_ptr objects result in different alloc operations
-    """
+    """Each unique MemRef gets its own alloc with distinct addresses (no reuse)."""
 
     @pl.program
     class Before:
@@ -357,27 +324,39 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
             return result
 
-    optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-    optimized_func = list(optimized_program.functions.values())[0]
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            # Three distinct allocs for three distinct MemRefs, at three distinct offsets.
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 32768, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_b, tile_b
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_c, [0, 0], output
+            )
+            return result
 
-    alloc_count = count_alloc_operations(optimized_func)
-    assert alloc_count == 3, f"Expected 3 unique MemRef objects, but got {alloc_count} allocs"
-
-    memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-    expected_addrs = {"tile_a": 0, "tile_b": 16384, "tile_c": 32768}
-    for var_name, expected_addr in expected_addrs.items():
-        assert var_name in memref_addrs, f"Variable {var_name} not found in MemRef addresses"
-        actual_addr = memref_addrs[var_name]
-        assert actual_addr == expected_addr, f"{var_name}: expected addr={expected_addr}, got {actual_addr}"
-        assert actual_addr % 32 == 0, f"Address {actual_addr} for {var_name} should be 32-byte aligned"
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_allocated_memory_addr_verifier_passes_after_add_alloc():
-    """Test that AllocatedMemoryAddr verifier passes on a correctly allocated program.
-
-    After running init_mem_ref + add_alloc, all non-DDR memrefs should have
-    valid (non-negative) addresses.
-    """
+    """After init_mem_ref + allocate_memory_addr, non-DDR memrefs have valid (non-negative) addresses."""
 
     @pl.program
     class Before:
@@ -392,23 +371,40 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
             result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
             return result
 
-    program = passes.init_mem_ref()(Before)
-    program = passes.allocate_memory_addr()(program)
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            # Non-DDR memrefs are allocated at non-negative byte offsets (0, 16384).
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_b, [0, 0], output
+            )
+            return result
 
-    func = list(program.functions.values())[0]
-    memref_addrs = get_memref_addresses_from_tiles(func)
-
-    for var_name, addr in memref_addrs.items():
-        assert addr >= 0, (
-            f"MemRef address for '{var_name}' should be non-negative after AllocateMemoryAddr, got {addr}"
-        )
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 def test_memrefs_before_allocate_have_unallocated_addr():
-    """Test that before AllocateMemoryAddr, MemRef addresses are -1 (unallocated).
+    """Before AllocateMemoryAddr (only init_mem_ref), MemRef byte_offsets are 0 (uninitialized).
 
-    After init_mem_ref only (without allocate_memory_addr), all non-DDR
-    MemRefs have addr=-1. The AllocatedMemoryAddr verifier would flag these.
+    This is a precondition check on init_mem_ref — not a test of allocate_memory_addr.
+    It's kept here (rather than in test_init_memref.py) to document the contract this
+    pass depends on. Kept in non-declarative form because it asserts a specific field
+    value after a different pass.
     """
 
     @pl.program
@@ -425,9 +421,18 @@ def test_memrefs_before_allocate_have_unallocated_addr():
             return result
 
     program = passes.init_mem_ref()(Before)
-    func = list(program.functions.values())[0]
+    func = next(iter(program.functions.values()))
 
-    memref_addrs = get_memref_addresses_from_tiles(func)
+    memref_addrs = {}
+    assert isinstance(func.body, ir.SeqStmts)
+    for stmt in func.body.stmts:
+        if isinstance(stmt, ir.AssignStmt):
+            var_type = stmt.var.type
+            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                memref = var_type.memref
+                if isinstance(memref.byte_offset_, ir.ConstInt):
+                    memref_addrs[stmt.var.name_hint] = memref.byte_offset_.value
+
     assert len(memref_addrs) > 0, "Should have MemRef addresses after init_mem_ref"
     for var_name, addr in memref_addrs.items():
         assert addr == 0, (
@@ -490,19 +495,39 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
-        optimized_program = _prepare_and_run_allocate_memory_addr(Before)
-        optimized_func = next(iter(optimized_program.functions.values()))
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_a,
+                    [0, 0],
+                    [64, 64],
+                    [64, 64],
+                    target_memory=pl.Mem.Vec,
+                    transpose=False,
+                )
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = (
+                    pl.tile.add(tile_a, tile_a)
+                )
+                tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 32768, 16384), pl.Mem.Vec] = (
+                    pl.tile.add(tile_b, tile_b)
+                )
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    tile_c, [0, 0], output
+                )
+                return result
 
-        memref_addrs = get_memref_addresses_from_tiles(optimized_func)
-        assert len(memref_addrs) == 3, f"Expected 3 MemRef addresses, got {len(memref_addrs)}"
-
-        for var_name, addr in memref_addrs.items():
-            assert addr >= 0, f"MemRef address for '{var_name}' should be non-negative"
-            assert addr % 32 == 0, f"Address {addr} for {var_name} should be 32-byte aligned (default policy)"
-
-        sorted_addrs = sorted(memref_addrs.values())
-        for i in range(1, len(sorted_addrs)):
-            assert sorted_addrs[i] > sorted_addrs[i - 1], "Addresses should be strictly increasing"
+        After = passes.init_mem_ref()(Before)
+        After = passes.allocate_memory_addr()(After)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
     finally:
         if was_configured:
             reset_for_testing()

@@ -7,10 +7,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for InterchangeChunkLoops pass."""
+"""Unit tests for InterchangeChunkLoops pass.
+
+Test strategy:
+  Build a `Before` program, run prerequisite passes + InterchangeChunkLoops,
+  and compare to an explicitly-constructed `Expected` program using
+  `ir.assert_structural_equal(..., enable_auto_mapping=True)`.
+"""
 
 import re
-from typing import cast
 
 import pypto.language as pl
 import pytest
@@ -27,17 +32,6 @@ def _prepare_for_interchange(program):
     return program
 
 
-def _top_level_stmts(program: ir.Program) -> list[ir.Stmt]:
-    """Return the first function's top-level statements."""
-    func = list(program.functions.values())[0]
-    return list(cast(ir.SeqStmts, func.body).stmts)
-
-
-def _body_stmts(stmt: ir.Stmt) -> list[ir.Stmt]:
-    """Return child statements from a SeqStmts body."""
-    return list(cast(ir.SeqStmts, stmt).stmts)
-
-
 class TestSingleParallelChunk:
     """Tests for single parallel chunked loop (1 outer + 1 inner, InCore wrapping only)."""
 
@@ -45,7 +39,7 @@ class TestSingleParallelChunk:
         """Single parallel chunked loop: outer wraps InCore around inner."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -53,25 +47,24 @@ class TestSingleParallelChunk:
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                return x5
 
-        # Verify structure: outer → InCore { inner → body }
-        stmts = _top_level_stmts(After)
-
-        outer_for = cast(ir.ForStmt, stmts[0])
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        assert outer_for.kind == ir.ForKind.Parallel
-
-        # Outer body = SeqStmts [InCore, yield]
-        outer_body_stmts = _body_stmts(outer_for.body)
-        scope_stmt = cast(ir.ScopeStmt, outer_body_stmts[0])
-        assert scope_stmt.scope_kind == ir.ScopeKind.InCore
-
-        # InCore body = inner ForStmt
-        inner_for = cast(ir.ForStmt, scope_stmt.body)
-        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-        assert inner_for.kind == ir.ForKind.Parallel
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestNestedParallelChunks:
@@ -81,7 +74,7 @@ class TestNestedParallelChunks:
         """Two nested parallel chunked loops, divisible: full interchange + InCore."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -89,45 +82,44 @@ class TestNestedParallelChunks:
                         for j in pl.parallel(0, 12, 1, chunk=4, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
                 return x
-
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-
-        # Verify structure: i_out → j_out → InCore { i_in → j_in → body }
-        stmts = _top_level_stmts(After)
-
-        # i_out
-        i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        assert i_out.kind == ir.ForKind.Parallel
-
-        # j_out inside i_out body
-        i_out_body = _body_stmts(i_out.body)
-        j_out = cast(ir.ForStmt, i_out_body[0])
-        assert j_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        assert j_out.kind == ir.ForKind.Parallel
-
-        # InCore inside j_out body
-        j_out_body = _body_stmts(j_out.body)
-        scope = cast(ir.ScopeStmt, j_out_body[0])
-        assert scope.scope_kind == ir.ScopeKind.InCore
-
-        # i_in inside InCore
-        i_in = cast(ir.ForStmt, scope.body)
-        assert i_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-        assert i_in.kind == ir.ForKind.Parallel
-
-        # j_in inside i_in body
-        i_in_body = _body_stmts(i_in.body)
-        j_in = cast(ir.ForStmt, i_in_body[0])
-        assert j_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-        assert j_in.kind == ir.ForKind.Parallel
-
-    def test_two_nested_parallel_with_iter_args(self):
-        """Two nested parallel chunked loops with iter_args: verify SSA threading."""
 
         @pl.program
-        class Input:
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    for j0, (x2,) in pl.parallel(
+                        3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                            for i1, (x3,) in pl.parallel(
+                                4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                            ):
+                                for j1, (x4,) in pl.parallel(
+                                    4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x4, 1.0)
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                                x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                        x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                    x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                return x9
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_two_nested_parallel_with_iter_args(self):
+        """Two nested parallel chunked loops with iter_args: verify SSA threading.
+
+        Same Before as ``test_two_nested_parallel_divisible`` — this test also
+        structurally confirms that iter_args thread correctly through every
+        level of the interchanged nest.
+        """
+
+        @pl.program
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -136,45 +128,43 @@ class TestNestedParallelChunks:
                             x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    for j0, (x2,) in pl.parallel(
+                        3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                            for i1, (x3,) in pl.parallel(
+                                4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                            ):
+                                for j1, (x4,) in pl.parallel(
+                                    4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x4, 1.0)
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                                x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                        x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                    x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                return x9
 
-        # Verify iter_args are correctly threaded
-        stmts = _top_level_stmts(After)
-        i_out = cast(ir.ForStmt, stmts[0])
-
-        # i_out should have iter_args (from x)
-        assert len(i_out.iter_args) == 1
-        assert len(i_out.return_vars) == 1
-
-        # j_out should have iter_args chained from i_out
-        i_out_body = _body_stmts(i_out.body)
-        j_out = cast(ir.ForStmt, i_out_body[0])
-        assert len(j_out.iter_args) == 1
-        assert len(j_out.return_vars) == 1
-
-        # InCore → i_in → j_in all with iter_args
-        j_out_body = _body_stmts(j_out.body)
-        scope = cast(ir.ScopeStmt, j_out_body[0])
-        i_in = cast(ir.ForStmt, scope.body)
-        assert len(i_in.iter_args) == 1
-        assert len(i_in.return_vars) == 1
-
-        i_in_body = _body_stmts(i_in.body)
-        j_in = cast(ir.ForStmt, i_in_body[0])
-        assert len(j_in.iter_args) == 1
-        assert len(j_in.return_vars) == 1
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestNestedChunkChainsInitSubstitution:
     """Tests that nested chunk chains correctly substitute init_values from parent chain."""
 
     def test_nested_chains_init_values_substituted(self):
-        """Nested parallel chunk chains: inner chain init_values must reference parent's
+        """Nested parallel chunk chains: inner chain init_values reference parent's
         rewritten iter_args, not the original pre-interchange names."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(
                 self,
@@ -187,18 +177,36 @@ class TestNestedChunkChainsInitSubstitution:
                             x = pl.add(x, y)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x0: pl.Tensor[[64], pl.FP32],
+                y0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for b0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    for h0, (x2,) in pl.parallel(
+                        3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                            for b1, (x3,) in pl.parallel(
+                                4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                            ):
+                                for h1, (x4,) in pl.parallel(
+                                    4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x5: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x4, y0)
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                                x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                        x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                    x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                return x9
 
-        # SplitChunkedLoops introduces `ci` qualifiers for inner-loop
-        # index vars. After InterchangeChunkLoops, init_values should reference
-        # rewritten loop-threaded iter args, not the pre-interchange chunk-inner
-        # iter names.
-        lines = after_str.split("\n")
-        for line in lines:
-            if "init_values" in line:
-                assert "__ci_iter_" not in line, f"Dangling chunk-inner iter in init_values: {line.strip()}"
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_nested_chains_outline_no_crash(self):
         """Nested parallel chunk chains followed by OutlineIncoreScopes must not crash.
@@ -278,12 +286,53 @@ class TestNestedChunksWithInterveningStatements:
 
     def test_no_nested_incore_with_intervening_stmt(self):
         """Nested chunks with intervening add: single InCore, no nesting."""
-        Before = _prepare_for_interchange(self._make_input())
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
 
-        # Exactly 1 InCore scope (no nesting)
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") == 1
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
+                        x = pl.add(x, y)
+                        for h in pl.parallel(0, 8, 1, chunk=2, chunk_policy="leading_full"):
+                            x = pl.add(x, y)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                x0: pl.Tensor[[64], pl.FP32],
+                y0: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for b0, (x1,) in pl.parallel(
+                    4, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for b1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x2, y0)
+                            for h0, (x4,) in pl.parallel(
+                                4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                            ):
+                                for h1, (x5,) in pl.parallel(
+                                    2, init_values=(x4,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x5, y0)
+                                    x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                                x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                            x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                    x10: pl.Tensor[[64], pl.FP32] = pl.yield_(x9)
+                return x10
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_outline_no_crash_with_intervening_stmt(self):
         """Nested chunks with intervening stmt: outline must not crash."""
@@ -303,7 +352,7 @@ class TestChunkWithRemainderInChain:
         """Chunk chain with trailing remainder: iter_args thread through inner, remainder preserved."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -311,35 +360,39 @@ class TestChunkWithRemainderInChain:
                         for j in pl.parallel(0, 1, 1, chunk=2, chunk_policy="leading_full"):
                             x = pl.add(x, 1.0)
                 return x
-
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-
-        stmts = _top_level_stmts(After)
-
-        # i_out (ChunkOuter, Parallel — preserves original kind from pl.parallel)
-        i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        assert i_out.kind == ir.ForKind.Parallel
-        assert len(i_out.iter_args) == 1
-
-        # InCore { i_in → body with remainder }
-        i_out_body = _body_stmts(i_out.body)
-        scope = cast(ir.ScopeStmt, i_out_body[0])
-        assert scope.scope_kind == ir.ScopeKind.InCore
-
-        i_in = cast(ir.ForStmt, scope.body)
-        assert i_in.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-        assert len(i_in.iter_args) == 1
-
-        # i_in's iter_arg should chain from i_out's iter_arg (not from original init)
-        assert cast(ir.Var, i_in.iter_args[0].initValue).name_hint == i_out.iter_args[0].name_hint
-
-    def test_chunk_with_remainder_body_contains_remainder_loop(self):
-        """Remainder loop inside chain body must be preserved after interchange."""
 
         @pl.program
-        class Input:
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            for j0, (x3,) in pl.parallel(
+                                1, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                            ):
+                                x4: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x3, 1.0)
+                                x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                            x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                    x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                return x7
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_chunk_with_remainder_body_contains_remainder_loop(self):
+        """Remainder loop inside chain body is preserved after interchange.
+
+        Same Before as ``test_chunk_outer_inner_with_remainder_preserves_iter_args``
+        — the matching Expected confirms the remainder loop structurally survives.
+        """
+
+        @pl.program
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -348,13 +401,28 @@ class TestChunkWithRemainderInChain:
                             x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            for j0, (x3,) in pl.parallel(
+                                1, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                            ):
+                                x4: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x3, 1.0)
+                                x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                            x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                    x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                return x7
 
-        # The remainder loop variable should still appear in the output
-        # (it must not be dropped during interchange)
-        assert "rem" in after_str or "j_" in after_str or "parallel(1" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestRemainderLoops:
@@ -364,7 +432,7 @@ class TestRemainderLoops:
         """Non-divisible with remainder: main chunk gets interchange, remainder gets InCore."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -373,31 +441,57 @@ class TestRemainderLoops:
                             x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    1, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            for j0, (x3,) in pl.parallel(
+                                3, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                            ):
+                                for j1, (x4,) in pl.parallel(
+                                    4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x4, 1.0)
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                                x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                            for j2, (x8,) in pl.parallel(
+                                2, init_values=(x7,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                            ):
+                                x9: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x8, 1.0)
+                                x10: pl.Tensor[[64], pl.FP32] = pl.yield_(x9)
+                            x11: pl.Tensor[[64], pl.FP32] = pl.yield_(x10)
+                    x12: pl.Tensor[[64], pl.FP32] = pl.yield_(x11)
+                for i2, (x13,) in pl.parallel(
+                    2, init_values=(x12,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                ):
+                    for j3, (x14,) in pl.parallel(
+                        3, init_values=(x13,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                            for j4, (x15,) in pl.parallel(
+                                4, init_values=(x14,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                            ):
+                                x16: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x15, 1.0)
+                                x17: pl.Tensor[[64], pl.FP32] = pl.yield_(x16)
+                        x18: pl.Tensor[[64], pl.FP32] = pl.yield_(x17)
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for j5, (x19,) in pl.parallel(
+                            2, init_values=(x18,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                        ):
+                            x20: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x19, 1.0)
+                            x21: pl.Tensor[[64], pl.FP32] = pl.yield_(x20)
+                    x22: pl.Tensor[[64], pl.FP32] = pl.yield_(x21)
+                return x22
 
-        stmts = _top_level_stmts(After)
-
-        # Main chunk pair: i_out → j_out → InCore { i_in → j_in → body }
-        i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        # Remainder: i_rem contains j_out→InCore{j_in} + InCore{j_rem}
-        i_rem = cast(ir.ForStmt, stmts[1])
-        assert i_rem.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
-
-        # Inside i_rem body, look for InCore scopes
-        i_rem_body = _body_stmts(i_rem.body)
-
-        # j_out should have InCore wrapping j_in inside its body
-        j_out_in_rem = cast(ir.ForStmt, i_rem_body[0])
-        assert j_out_in_rem.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        j_out_body = _body_stmts(j_out_in_rem.body)
-        assert cast(ir.ScopeStmt, j_out_body[0]).scope_kind == ir.ScopeKind.InCore
-
-        # j_rem should be wrapped in InCore
-        j_rem_incore = cast(ir.ScopeStmt, i_rem_body[1])
-        assert j_rem_incore.scope_kind == ir.ScopeKind.InCore
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestNonChunkedLoops:
@@ -407,19 +501,24 @@ class TestNonChunkedLoops:
         """Regular (non-chunked) loops pass through untouched."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.range(0, 10, 1):
                     x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        before_str = python_print(Before)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.range(10, init_values=(x0,)):
+                    x2: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x1, 1.0)
+                    x3: pl.Tensor[[64], pl.FP32] = pl.yield_(x2)
+                return x3
 
-        assert before_str == after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestSequentialChunks:
@@ -429,7 +528,7 @@ class TestSequentialChunks:
         """Sequential chunked loop inside auto_incore: gets InCore wrapping."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -437,20 +536,30 @@ class TestSequentialChunks:
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    for i0, (x1,) in pl.range(
+                        2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i1, (x2,) in pl.range(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                        x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                return x5
 
-        # AutoInCore is consumed, sequential chunks fail interchange guard
-        # but get InCore wrapping from the non-chunk statement handler
-        assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_nested_sequential_chunks_get_incore(self):
         """Nested sequential chunked loops: no interchange, but get InCore wrapping."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -459,23 +568,42 @@ class TestSequentialChunks:
                             x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    for i0, (x1,) in pl.range(
+                        2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i1, (x2,) in pl.range(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            for j0, (x3,) in pl.range(
+                                3, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                            ):
+                                for j1, (x4,) in pl.range(
+                                    4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                                ):
+                                    x5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x4, 1.0)
+                                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                                x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                            x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                        x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                return x9
 
-        # AutoInCore consumed, sequential loops not interchanged but wrapped in InCore
-        assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestExistingInCore:
-    """Tests for loops with existing InCore scope (should skip)."""
+    """Tests for loops with existing InCore scope (should skip interchange)."""
 
     def test_existing_incore_skip(self):
-        """Body already has ScopeStmt(InCore): pass through unchanged."""
+        """Body already has ScopeStmt(InCore): pass through unchanged by interchange."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -484,22 +612,39 @@ class TestExistingInCore:
                             x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    for i1, (x2,) in pl.parallel(
+                        4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                        x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                return x5
 
-        # AutoInCore is consumed but existing InCore prevents interchange
-        assert "auto_incore" not in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestAutoIncoreConsumed:
     """Tests that auto_incore scope is consumed by InterchangeChunkLoops."""
 
     def test_auto_incore_consumed(self):
-        """AutoInCore scope should be removed after InterchangeChunkLoops."""
+        """AutoInCore scope should be removed after InterchangeChunkLoops.
+
+        Same Before as ``TestSingleParallelChunk::test_single_parallel_chunk_gets_incore``
+        — the Expected has no ``chunked_loop_optimizer`` marker, structurally
+        asserting the AutoInCore scope was consumed.
+        """
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -507,11 +652,24 @@ class TestAutoIncoreConsumed:
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                return x5
 
-        assert "auto_incore" not in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestPassProperties:
@@ -599,25 +757,29 @@ class TestNonChunkStatementsWrapping:
         """Standalone tensor op inside auto_incore gets wrapped in InCore."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    x1: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x0, 1.0)
+                return x1
 
-        assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_standalone_op_before_parallel_chunk(self):
         """Standalone op before parallel chunk: op wrapped separately, chunk interchanged."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -626,24 +788,32 @@ class TestNonChunkStatementsWrapping:
                         x = pl.add(x, 2.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    x1: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x0, 1.0)
+                for i0, (x2,) in pl.parallel(
+                    2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x3,) in pl.parallel(
+                            4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x4: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x3, 2.0)
+                            x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                    x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                return x6
 
-        stmts = _top_level_stmts(After)
-
-        # First stmt should be InCore wrapping the standalone op
-        incore_scope = cast(ir.ScopeStmt, stmts[0])
-        assert incore_scope.scope_kind == ir.ScopeKind.InCore
-
-        # Second stmt should be ChunkOuter (interchanged)
-        outer_for = cast(ir.ForStmt, stmts[1])
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_standalone_op_after_parallel_chunk(self):
         """Standalone op after parallel chunk: chunk interchanged, op wrapped separately."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -652,27 +822,32 @@ class TestNonChunkStatementsWrapping:
                     x = pl.mul(x, 3.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 2.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    x6: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(x5, 3.0)
+                return x6
 
-        stmts = _top_level_stmts(After)
-
-        # First stmt should be ChunkOuter (interchanged)
-        outer_for = cast(ir.ForStmt, stmts[0])
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        # There should be an InCore wrapping the standalone mul op
-        after_str = python_print(After)
-        assert "auto_incore" not in after_str
-        # Count incore occurrences: one for the chunk's inner, one for the standalone op
-        incore_count = after_str.count("pl.at(level=pl.Level.CORE_GROUP")
-        assert incore_count >= 2
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_host_side_assemble_after_parallel_chunk_not_wrapped(self):
-        """Host-side tail assemble after a chunk should stay outside InCore."""
+        """Host-side tail assemble after a chunk stays outside InCore."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
                 out_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
@@ -684,19 +859,34 @@ class TestNonChunkStatementsWrapping:
                     out_1: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0, x, [0])
                 return out_1
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                out_0_0: pl.Tensor[[8], pl.FP32] = pl.tensor.create(
+                    [8], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[4], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[4], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[4], pl.FP32] = pl.yield_(x4)
+                out_1_0: pl.Tensor[[8], pl.FP32] = pl.tensor.assemble(out_0_0, x5, [0])
+                return out_1_0
 
-        after_str = python_print(After)
-        # Only the interchanged chunk body should be in InCore.
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") == 1
-        assert "pl.tensor.assemble(" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_multiple_parallel_chunks_no_regression(self):
         """Multiple parallel chunks with no standalone ops: all interchanged, no extra wrapping."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -706,25 +896,40 @@ class TestNonChunkStatementsWrapping:
                         x = pl.mul(x, 2.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                for j0, (x6,) in pl.parallel(
+                    3, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for j1, (x7,) in pl.parallel(
+                            4, init_values=(x6,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x8: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(x7, 2.0)
+                            x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                    x10: pl.Tensor[[64], pl.FP32] = pl.yield_(x9)
+                return x10
 
-        stmts = _top_level_stmts(After)
-
-        # Both should be ChunkOuter loops (interchanged)
-        i_out = cast(ir.ForStmt, stmts[0])
-        assert i_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-        j_out = cast(ir.ForStmt, stmts[1])
-        assert j_out.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        # No extra InCore wrapping around the outers themselves
-        assert "auto_incore" not in python_print(After)
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_non_chunked_loop_inside_auto_incore_wrapped(self):
         """Non-chunked loop with tensor ops inside auto_incore gets wrapped in InCore."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -732,18 +937,24 @@ class TestNonChunkStatementsWrapping:
                         x = pl.add(x, 1.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    for i0, (x1,) in pl.range(10, init_values=(x0,)):
+                        x2: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x1, 1.0)
+                        x3: pl.Tensor[[64], pl.FP32] = pl.yield_(x2)
+                return x3
 
-        assert "auto_incore" not in after_str
-        assert "pl.at(level=pl.Level.CORE_GROUP" in after_str
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_mixed_parallel_and_sequential_chunks(self):
         """Mixed parallel chunk + sequential chunk: parallel interchanged, sequential wrapped."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -753,29 +964,44 @@ class TestNonChunkStatementsWrapping:
                         x = pl.mul(x, 2.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i0, (x1,) in pl.parallel(
+                    2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        for i1, (x2,) in pl.parallel(
+                            4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
+                            x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
+                    x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
+                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    for j0, (x6,) in pl.range(
+                        3, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for j1, (x7,) in pl.range(
+                            4, init_values=(x6,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                        ):
+                            x8: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(x7, 2.0)
+                            x9: pl.Tensor[[64], pl.FP32] = pl.yield_(x8)
+                        x10: pl.Tensor[[64], pl.FP32] = pl.yield_(x9)
+                return x10
 
-        stmts = _top_level_stmts(After)
-
-        # First stmt: ChunkOuter from parallel chunk (interchanged)
-        assert cast(ir.ForStmt, stmts[0]).attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        # Sequential chunk should be wrapped in InCore
-        after_str = python_print(After)
-        assert "auto_incore" not in after_str
-        # Both the interchanged chunk's inner and sequential chunk should have incore
-        assert after_str.count("pl.at(level=pl.Level.CORE_GROUP") >= 2
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestScalarAssignmentNotWrapped:
     """Tests that pure scalar assignments stay outside InCore scopes."""
 
     def test_scalar_assign_adjacent_to_compute_not_wrapped(self):
-        """Scalar assignment adjacent to tensor compute ops should stay in orchestration."""
+        """Scalar assignment adjacent to tensor compute ops stays in orchestration."""
 
         @pl.program
-        class Input:
+        class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
@@ -786,27 +1012,29 @@ class TestScalarAssignmentNotWrapped:
                             x = pl.add(x, 2.0)
                 return x
 
-        Before = _prepare_for_interchange(Input)
-        After = passes.interchange_chunk_loops()(Before)
-        after_str = python_print(After)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for ob0, (x1,) in pl.range(8, init_values=(x0,)):
+                    offset0: pl.Scalar[pl.INDEX] = ob0 * 4
+                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        x2: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x1, 1.0)
+                    for i0, (x3,) in pl.parallel(
+                        2, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                            for i1, (x4,) in pl.parallel(
+                                4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                            ):
+                                x5: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x4, 2.0)
+                                x6: pl.Tensor[[64], pl.FP32] = pl.yield_(x5)
+                        x7: pl.Tensor[[64], pl.FP32] = pl.yield_(x6)
+                    x8: pl.Tensor[[64], pl.FP32] = pl.yield_(x7)
+                return x8
 
-        # The scalar assignment should NOT be inside any pl.at(level=pl.Level.CORE_GROUP) scope.
-        scalar_assign_re = re.compile(r"offset\S*\s*:.*=.*\*\s*4")
-        lines = after_str.split("\n")
-        in_incore = False
-        incore_depth = 0
-        for line in lines:
-            stripped = line.strip()
-            if "pl.at(level=pl.Level.CORE_GROUP" in stripped:
-                in_incore = True
-                incore_depth = len(line) - len(line.lstrip())
-            elif in_incore and stripped and (len(line) - len(line.lstrip())) <= incore_depth:
-                if not stripped.startswith("#"):
-                    in_incore = False
-            if in_incore:
-                assert not scalar_assign_re.search(stripped), (
-                    f"Pure scalar assignment found inside InCore scope: {stripped}"
-                )
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_scalar_assign_not_wrapped_outline_no_crash(self):
         """Scalar assignment stays in orchestration after outline — no undefined variable."""

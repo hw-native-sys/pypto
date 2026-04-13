@@ -516,7 +516,7 @@ class TestFlattenPreservesFuncType:
     """Tests that flatten_call_expr preserves func_type_ on functions."""
 
     def test_preserve_orchestration_func_type(self):
-        """Test that func_type is preserved after flattening for Orchestration functions."""
+        """func_type=Orchestration is preserved after flattening."""
 
         @pl.program
         class Before:
@@ -525,14 +525,19 @@ class TestFlattenPreservesFuncType:
                 result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
                 return result
 
-        After = passes.flatten_call_expr()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                tmp0: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(tmp0, 2.0)
+                return result
 
-        after_func = After.get_function("main")
-        assert after_func is not None
-        assert after_func.func_type == pl.FunctionType.Orchestration
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_preserve_incore_func_type(self):
-        """Test that func_type is preserved after flattening for InCore functions."""
+        """func_type=InCore is preserved after flattening."""
 
         @pl.program
         class Before:
@@ -541,11 +546,16 @@ class TestFlattenPreservesFuncType:
                 result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
                 return result
 
-        After = passes.flatten_call_expr()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                tmp0: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x, 1.0)
+                result: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(tmp0, 2.0)
+                return result
 
-        after_func = After.get_function("main")
-        assert after_func is not None
-        assert after_func.func_type == pl.FunctionType.InCore
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
 class TestFlattenCallInScopeStmt:
