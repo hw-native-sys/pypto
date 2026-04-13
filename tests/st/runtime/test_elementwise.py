@@ -11,8 +11,9 @@
 Runtime tests for tile-based elementwise operations using the PyPTO frontend.
 
 This module defines integration tests for elementwise add and multiply
-kernels implemented with the internal PTOTestCase harness, including
-variants for different shapes and optimization strategies.
+kernels implemented with the internal PTOTestCase harness.  Each test case
+accepts an optional ``backend_type`` parameter so a single class can run
+on multiple platforms via ``@pytest.mark.parametrize``.
 """
 
 from typing import Any
@@ -25,260 +26,87 @@ from examples.kernels.elementwise import (
     TileMul64Program,
     TileMul128Program,
 )
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TileAddTestCase(PTOTestCase):
-    """Test case for tile element-wise addition (128x128)."""
+    """Test case for tile element-wise addition."""
+
+    __test__ = False
+
+    def __init__(self, size: int = 128, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+        self.size = size
 
     def get_name(self) -> str:
-        return "tile_add_128x128"
+        return f"tile_add_{self.size}x{self.size}"
 
     def define_tensors(self) -> list[TensorSpec]:
+        s = self.size
         return [
-            TensorSpec("a", [128, 128], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [128, 128], DataType.FP32, is_output=True),
+            TensorSpec("a", [s, s], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [s, s], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [s, s], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return TileAdd128Program
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = tensors["a"] + tensors["b"]
-
-
-class TileAdd64x64TestCase(PTOTestCase):
-    """Test case for tile element-wise addition (64x64)."""
-
-    def get_name(self) -> str:
-        return "tile_add_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileAdd64Program
+        return TileAdd128Program if self.size == 128 else TileAdd64Program
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
 
 class TileMulTestCase(PTOTestCase):
-    """Test case for tile element-wise multiplication (128x128)."""
+    """Test case for tile element-wise multiplication."""
+
+    __test__ = False
+
+    def __init__(self, size: int = 128, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+        self.size = size
 
     def get_name(self) -> str:
-        return "tile_mul_128x128"
+        return f"tile_mul_{self.size}x{self.size}"
 
     def define_tensors(self) -> list[TensorSpec]:
+        s = self.size
         return [
-            TensorSpec(
-                "a",
-                [128, 128],
-                DataType.FP32,
-                init_value=torch.randn,
-            ),
-            TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [128, 128], DataType.FP32, is_output=True),
+            TensorSpec("a", [s, s], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [s, s], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [s, s], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        return TileMul128Program
+        return TileMul128Program if self.size == 128 else TileMul64Program
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] * tensors["b"]
-
-
-class TileMul64x64TestCase(PTOTestCase):
-    """Test case for tile element-wise multiplication (64x64)."""
-
-    def get_name(self) -> str:
-        return "tile_mul_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec(
-                "a",
-                [64, 64],
-                DataType.FP32,
-                init_value=torch.randn,
-            ),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileMul64Program
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = tensors["a"] * tensors["b"]
-
-
-class TileAddPTOASTestCase(TileAddTestCase):
-    """Test case for tile add with PTO backend and PTOAS optimization strategy."""
-
-    def get_name(self) -> str:
-        return "tile_add_ptoas_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TileMulPTOASTestCase(TileMulTestCase):
-    """Test case for tile mul with PTO backend and PTOAS optimization strategy."""
-
-    def get_name(self) -> str:
-        return "tile_mul_ptoas_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TileAddA5TestCase(TileAddTestCase):
-    """Test case for tile add with A5 (Ascend 950) backend (128x128)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_add_a5_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TileAdd64x64A5TestCase(TileAdd64x64TestCase):
-    """Test case for tile add with A5 (Ascend 950) backend (64x64)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_add_a5_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TileMulA5TestCase(TileMulTestCase):
-    """Test case for tile mul with A5 (Ascend 950) backend (128x128)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_mul_a5_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TileMul64x64A5TestCase(TileMul64x64TestCase):
-    """Test case for tile mul with A5 (Ascend 950) backend (64x64)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_mul_a5_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
 
 # =============================================================================
 # pytest test functions
 # =============================================================================
 
+_SIZES = [64, 128]
+
 
 class TestElementwiseOperations:
-    """Test suite for elementwise operations."""
+    """Test suite for elementwise operations across all platforms."""
 
-    def test_tile_add_64x64(self, test_runner):
-        """Test tile addition with 64x64 shape."""
-        test_case = TileAdd64x64TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for 64x64: {result.error}"
-
-    def test_tile_add_128x128(self, test_runner):
-        """Test tile addition with 128x128 shape."""
-        test_case = TileAddTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for 128x128: {result.error}"
-
-    def test_tile_mul_64x64(self, test_runner):
-        """Test tile multiplication with 64x64 shape."""
-        test_case = TileMul64x64TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for 64x64: {result.error}"
-
-    def test_tile_mul_128x128(self, test_runner):
-        """Test tile multiplication with 128x128 shape."""
-        test_case = TileMulTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for 128x128: {result.error}"
-
-    def test_tile_add_ptoas_strategy(self, test_runner):
-        """Test tile addition with PTO backend and PTOAS optimization."""
-        test_case = TileAddPTOASTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("size", _SIZES)
+    def test_tile_add(self, test_runner, backend, size):
+        """Test tile addition with configurable shape and platform."""
+        result = test_runner.run(TileAddTestCase(size=size, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_mul_ptoas_strategy(self, test_runner):
-        """Test tile multiplication with PTO backend and PTOAS optimization."""
-        test_case = TileMulPTOASTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("size", _SIZES)
+    def test_tile_mul(self, test_runner, backend, size):
+        """Test tile multiplication with configurable shape and platform."""
+        result = test_runner.run(TileMulTestCase(size=size, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    def test_tile_add_64x64_a5(self, test_runner):
-        """Test tile addition with 64x64 shape on A5 (Ascend 950)."""
-        test_case = TileAdd64x64A5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_add_128x128_a5(self, test_runner):
-        """Test tile addition with 128x128 shape on A5 (Ascend 950)."""
-        test_case = TileAddA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_mul_64x64_a5(self, test_runner):
-        """Test tile multiplication with 64x64 shape on A5 (Ascend 950)."""
-        test_case = TileMul64x64A5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_mul_128x128_a5(self, test_runner):
-        """Test tile multiplication with 128x128 shape on A5 (Ascend 950)."""
-        test_case = TileMulA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

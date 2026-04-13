@@ -20,9 +20,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Programs (partial coverage) ---
 
@@ -42,10 +41,8 @@ class Tile4DMulPartialProgram:
         a: pl.Tensor[[4, 3, 8, 64], pl.FP32],
         out: pl.Out[pl.Tensor[[4, 3, 8, 64], pl.FP32]],
     ) -> pl.Tensor[[4, 3, 8, 64], pl.FP32]:
-        # Load first half of outer dim: [0:2, 0:3, 0:8, 0:64]
         a_tile = pl.load(a, [0, 0, 0, 0], [2, 3, 8, 64])
         c_tile = pl.tile.mul(a_tile, a_tile)
-        # Store to second half: offset [2,0,0,0], tile covers [2,3,8,64] elements
         out = pl.store(c_tile, [2, 0, 0, 0], out)
         return out
 
@@ -79,10 +76,8 @@ class Tile4DQuadrantProgram:
         a: pl.Tensor[[2, 2, 8, 16], pl.FP32],
         out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
-        # Load top-right quadrant: a[0, 1, :, :]
         tile = pl.load(a, [0, 1, 0, 0], [1, 1, 8, 16])
         result_tile = pl.tile.mul(tile, tile)
-        # Store to bottom-left quadrant: out[1, 0, :, :]
         out = pl.store(result_tile, [1, 0, 0, 0], out)
         return out
 
@@ -117,12 +112,9 @@ class Tile4DTopToBottomProgram:
         b: pl.Tensor[[2, 2, 8, 16], pl.FP32],
         out: pl.Out[pl.Tensor[[2, 2, 8, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 2, 8, 16], pl.FP32]:
-        # Load entire top row as one tile: a[0, :, :, :] and b[0, :, :, :]
         a_tile = pl.load(a, [0, 0, 0, 0], [1, 2, 8, 16])
         b_tile = pl.load(b, [0, 0, 0, 0], [1, 2, 8, 16])
-        # Multiply element-wise so ResolveBackendOpLayouts can infer TileView
         result_tile = pl.tile.mul(a_tile, b_tile)
-        # Store to bottom row in one shot: out[1, :, :, :]
         out = pl.store(result_tile, [1, 0, 0, 0], out)
         return out
 
@@ -153,11 +145,9 @@ class Tile2DStoreTo3DProgram:
         b: pl.Tensor[[4, 16], pl.FP32],
         out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
     ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
-        # Load row 0 from each input: natively 2D tiles [1, 16]
         a_tile = pl.load(a, [0, 0], [1, 16])
         b_tile = pl.load(b, [0, 0], [1, 16])
         c_tile = pl.tile.mul(a_tile, b_tile)
-        # Store into slot [1, 2, 0] of the 3D tensor
         out = pl.store(c_tile, [1, 2, 0], out)
         return out
 
@@ -178,14 +168,13 @@ class Tile2DStoreTo3DProgram:
 class Tile4DMulPartialTestCase(PTOTestCase):
     """4D tile partial coverage: tile [2,3,8,64] stores to offset [2,0,0,0] of a [4,3,8,64] tensor."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "tile_4d_mul_partial"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -197,22 +186,19 @@ class Tile4DMulPartialTestCase(PTOTestCase):
         return Tile4DMulPartialProgram
 
     def compute_expected(self, tensors, params=None):
-        # First half of dim-0 is unsquared (out[:2] unchanged / zero-initialized)
-        # Second half of dim-0 = a[:2, ...] ** 2
         tensors["out"][2:, ...] = tensors["a"][:2, ...] * tensors["a"][:2, ...]
 
 
 class Tile4DTopToBottomTestCase(PTOTestCase):
     """4D tensor [2,2,8,16]; mul top row a*b via one [1,2,8,16] tile, store to bottom row."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "tile_4d_top_to_bottom"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -225,21 +211,19 @@ class Tile4DTopToBottomTestCase(PTOTestCase):
         return Tile4DTopToBottomProgram
 
     def compute_expected(self, tensors, params=None):
-        # Only bottom row is written; top row stays zero-initialized.
         tensors["out"][1] = tensors["a"][0] * tensors["b"][0]
 
 
 class Tile4DQuadrantTestCase(PTOTestCase):
     """4D tensor [2,2,8,16] split into 4 blocks; load top-right, store squared to bottom-left."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "tile_4d_quadrant"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -251,7 +235,6 @@ class Tile4DQuadrantTestCase(PTOTestCase):
         return Tile4DQuadrantProgram
 
     def compute_expected(self, tensors, params=None):
-        # Only bottom-left quadrant is written; the rest stays zero-initialized.
         tensors["out"][1, 0] = tensors["a"][0, 1] ** 2
 
 
@@ -264,14 +247,13 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
     'tile.store on ND tensor requires shapes tuple (args[3])'.
     """
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "tile_2d_store_to_3d"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -287,150 +269,35 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
         tensors["out"][1, 2, :] = tensors["a"][0, :] * tensors["b"][0, :]
 
 
-# --- A5 (Ascend 950) Test Cases ---
-
-
-class Tile4DMulPartialA5TestCase(Tile4DMulPartialTestCase):
-    """4D tile partial coverage with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_4d_mul_partial_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class Tile4DTopToBottomA5TestCase(Tile4DTopToBottomTestCase):
-    """4D tensor top-to-bottom with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_4d_top_to_bottom_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class Tile4DQuadrantA5TestCase(Tile4DQuadrantTestCase):
-    """4D tensor quadrant with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_4d_quadrant_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class Tile2DStoreTo3DA5TestCase(Tile2DStoreTo3DTestCase):
-    """2D tile store to 3D tensor with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_2d_store_to_3d_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 # --- Tests ---
 
 
 class TestElementwise4D:
     """End-to-end tests for elementwise ops on 4D tiles (exercises FlattenTileNdTo2D pass)."""
 
-    def test_tile_4d_top_to_bottom(self, test_runner):
-        """4D tensor [2,2,8,16]; a*b on top row via a single [1,2,8,16] tile, store to bottom row.
-
-        Loads a[0,:,:,:] and b[0,:,:,:] with tile shape [1,2,8,16] from offset
-        [0,0,0,0], multiplies them, and stores to out[1,:,:,:] at offset
-        [1,0,0,0].  Partition_view sizes for the store must be [1,2,8,16]
-        (tile shape), not [2,2,8,16] (full tensor shape).
-        """
-        test_case = Tile4DTopToBottomTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_4d_top_to_bottom(self, test_runner, backend):
+        """4D tensor [2,2,8,16]; a*b on top row via a single [1,2,8,16] tile, store to bottom row."""
+        result = test_runner.run(Tile4DTopToBottomTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_4d_quadrant(self, test_runner):
-        """4D tensor [2,2,8,16] divided into 4 blocks of [1,1,8,16].
-
-        Loads top-right block a[0,1,:,:], squares it, stores to bottom-left
-        block out[1,0,:,:].  Partition_view sizes for the store must be
-        [1,1,8,16] (tile shape).  With the current bug, sizes=[2,2,8,16] and
-        offset[0]=1 gives offset+size=3 > tensor_dim=2 (out of bounds).
-        """
-        test_case = Tile4DQuadrantTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_4d_quadrant(self, test_runner, backend):
+        """4D tensor [2,2,8,16] divided into 4 blocks of [1,1,8,16]."""
+        result = test_runner.run(Tile4DQuadrantTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_4d_mul_partial(self, test_runner):
-        """Partial-coverage 4D tile store: tile [2,3,8,64] at offset [2,0,0,0] of [4,3,8,64] tensor.
-
-        Verifies that partition_view sizes match the tile shape [2,3,8,64] (not the full
-        tensor [4,3,8,64]). With the bug, sizes=[4,3,8,64] and offset=[2,0,0,0] would
-        produce offset+size=[6,...] > tensor_dim[4,...], causing ptoas to reject the IR.
-        """
-        test_case = Tile4DMulPartialTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_4d_mul_partial(self, test_runner, backend):
+        """Partial-coverage 4D tile store: tile [2,3,8,64] at offset [2,0,0,0] of [4,3,8,64] tensor."""
+        result = test_runner.run(Tile4DMulPartialTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_2d_store_to_3d(self, test_runner):
-        """2D tile [1, 16] stored into a 3D tensor [2, 4, 16].
-
-        Regression test for the bug where FlattenTileNdTo2D only injected the
-        shapes tuple when the *tile* was ND, missing the case where the tile is
-        natively 2D but the output tensor is ND (rank > 2).
-        """
-        test_case = Tile2DStoreTo3DTestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_2d_store_to_3d(self, test_runner, backend):
+        """2D tile [1, 16] stored into a 3D tensor [2, 4, 16]."""
+        result = test_runner.run(Tile2DStoreTo3DTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    def test_tile_4d_mul_partial_a5(self, test_runner):
-        """Test 4D tile partial store with A5 (Ascend 950) backend."""
-        test_case = Tile4DMulPartialA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_4d_top_to_bottom_a5(self, test_runner):
-        """Test 4D tile top-to-bottom with A5 (Ascend 950) backend."""
-        test_case = Tile4DTopToBottomA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_4d_quadrant_a5(self, test_runner):
-        """Test 4D tile quadrant with A5 (Ascend 950) backend."""
-        test_case = Tile4DQuadrantA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_2d_store_to_3d_a5(self, test_runner):
-        """Test 2D tile store to 3D tensor with A5 (Ascend 950) backend."""
-        test_case = Tile2DStoreTo3DA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

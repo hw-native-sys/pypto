@@ -22,9 +22,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Programs ---
 
@@ -116,14 +115,13 @@ class FillpadMinProgram:
 class FillpadZeroTestCase(PTOTestCase):
     """Test fillpad - padding region should be filled with 0.0."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "fillpad_zero"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -135,7 +133,6 @@ class FillpadZeroTestCase(PTOTestCase):
         return FillpadZeroProgram
 
     def compute_expected(self, tensors, params=None):
-        """Expected: rows 0-47 = input, rows 48-63 = 0.0"""
         expected = torch.zeros(64, 64, dtype=torch.float32)
         expected[:48, :] = tensors["input_tensor"]
         tensors["output"][:] = expected
@@ -144,14 +141,13 @@ class FillpadZeroTestCase(PTOTestCase):
 class FillpadMaxTestCase(PTOTestCase):
     """Test fillpad - padding region should be filled with FP32 max."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "fillpad_max"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -163,7 +159,6 @@ class FillpadMaxTestCase(PTOTestCase):
         return FillpadMaxProgram
 
     def compute_expected(self, tensors, params=None):
-        """Expected: rows 0-47 = input, rows 48-63 = FP32 max"""
         expected = torch.full((64, 64), float("inf"), dtype=torch.float32)
         expected[:48, :] = tensors["input_tensor"]
         tensors["output"][:] = expected
@@ -172,14 +167,13 @@ class FillpadMaxTestCase(PTOTestCase):
 class FillpadMinTestCase(PTOTestCase):
     """Test fillpad - padding region should be filled with FP32 min (-inf)."""
 
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "fillpad_min"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -191,49 +185,9 @@ class FillpadMinTestCase(PTOTestCase):
         return FillpadMinProgram
 
     def compute_expected(self, tensors, params=None):
-        """Expected: rows 0-47 = input, rows 48-63 = -inf"""
         expected = torch.full((64, 64), float("-inf"), dtype=torch.float32)
         expected[:48, :] = tensors["input_tensor"]
         tensors["output"][:] = expected
-
-
-# --- A5 (Ascend 950) Test Cases ---
-
-
-class FillpadZeroA5TestCase(FillpadZeroTestCase):
-    """Test fillpad zero on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fillpad_zero_a5"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class FillpadMaxA5TestCase(FillpadMaxTestCase):
-    """Test fillpad max on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fillpad_max_a5"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class FillpadMinA5TestCase(FillpadMinTestCase):
-    """Test fillpad min on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fillpad_min_a5"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
 
 # --- Tests ---
@@ -242,46 +196,23 @@ class FillpadMinA5TestCase(FillpadMinTestCase):
 class TestFillpad:
     """Test suite to verify fillpad fills padding region with different pad values."""
 
-    def test_fillpad_zero(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_fillpad_zero(self, test_runner, backend):
         """Verify fillpad fills the padding region with 0.0."""
-        test_case = FillpadZeroTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadZeroTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fillpad_max(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_fillpad_max(self, test_runner, backend):
         """Verify fillpad fills the padding region with FP32 max value."""
-        test_case = FillpadMaxTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadMaxTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fillpad_min(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_fillpad_min(self, test_runner, backend):
         """Verify fillpad fills the padding region with FP32 min value (-inf)."""
-        test_case = FillpadMinTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadMinTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    def test_fillpad_zero_a5(self, test_runner):
-        """Verify fillpad fills padding with 0.0 on A5 (Ascend 950)."""
-        test_case = FillpadZeroA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_fillpad_max_a5(self, test_runner):
-        """Verify fillpad fills padding with FP32 max on A5 (Ascend 950)."""
-        test_case = FillpadMaxA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_fillpad_min_a5(self, test_runner):
-        """Verify fillpad fills padding with FP32 min on A5 (Ascend 950)."""
-        test_case = FillpadMinA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

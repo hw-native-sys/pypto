@@ -16,18 +16,17 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TestTileRowExpand(PTOTestCase):
-    """Base test case for tile.row_expand."""
+    """Test case for tile.row_expand."""
 
     __test__ = False
 
-    def __init__(self, m: int = 16, n: int = 16, config=None):
-        super().__init__(config)
+    def __init__(self, m: int = 16, n: int = 16, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.N = n
 
@@ -71,43 +70,13 @@ class TestTileRowExpand(PTOTestCase):
         tensors["y"][:] = tensors["x"][:, :1].repeat(1, self.N)
 
 
-class TestTileRowExpandPTO(TestTileRowExpand):
-    """Test tile.row_expand with PTO backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"tile_row_expand_pto_{self.M}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestTileRowExpandA5(TestTileRowExpand):
-    """Test tile.row_expand with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"tile_row_expand_a5_{self.M}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestTileColExpand(PTOTestCase):
-    """Base test case for tile.col_expand."""
+    """Test case for tile.col_expand."""
 
     __test__ = False
 
-    def __init__(self, m: int = 16, n: int = 16, config=None):
-        super().__init__(config)
+    def __init__(self, m: int = 16, n: int = 16, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.N = n
 
@@ -155,64 +124,20 @@ class TestTileColExpand(PTOTestCase):
         tensors["y"][:] = tensors["col_vec"].repeat(self.M, 1)
 
 
-class TestTileColExpandPTO(TestTileColExpand):
-    """Test tile.col_expand with PTO backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"tile_col_expand_pto_{self.M}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestTileColExpandA5(TestTileColExpand):
-    """Test tile.col_expand with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"tile_col_expand_a5_{self.M}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
-    def test_tile_row_expand_pto(self, test_runner):
-        """Test tile.row_expand with PTO backend."""
-        test_case = TestTileRowExpandPTO()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (row_expand): {result.error}"
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_row_expand(self, test_runner, backend):
+        """Test tile.row_expand across platforms."""
+        result = test_runner.run(TestTileRowExpand(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_col_expand_pto(self, test_runner):
-        """Test tile.col_expand with PTO backend."""
-        test_case = TestTileColExpandPTO()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (col_expand): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_row_expand_a5(self, test_runner):
-        """Test tile.row_expand with A5 (Ascend 950) backend."""
-        test_case = TestTileRowExpandA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5 row_expand): {result.error}"
-
-    @pytest.mark.a5
-    def test_tile_col_expand_a5(self, test_runner):
-        """Test tile.col_expand with A5 (Ascend 950) backend."""
-        test_case = TestTileColExpandA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5 col_expand): {result.error}"
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_col_expand(self, test_runner, backend):
+        """Test tile.col_expand across platforms."""
+        result = test_runner.run(TestTileColExpand(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
 
 if __name__ == "__main__":

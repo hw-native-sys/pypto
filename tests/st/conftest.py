@@ -44,6 +44,7 @@ from harness.core.environment import (  # noqa: E402
 from harness.core.harness import PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
+    _cache_key,
     _precompile_cache,
     prebuild_binaries,
     precompile_test_cases,
@@ -330,9 +331,9 @@ def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]
             instance = cls(**valid)
         except Exception:
             continue  # constructor mismatch — skip
-        name = instance.get_name()
-        if name not in seen:
-            seen[name] = instance
+        key = _cache_key(instance)
+        if key not in seen:
+            seen[key] = instance
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -354,7 +355,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         return
 
     # ── discover PTOTestCase instances ───────────────────────────────────────
-    seen: dict[str, PTOTestCase] = {}  # test_name → instance (deduped)
+    seen: dict[str, PTOTestCase] = {}  # cache_key → instance (deduped)
 
     for item in session.items:
         _collect_test_case_from_item(item, seen)
@@ -401,7 +402,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         ok_cases = [
             tc
             for tc in test_cases
-            if tc.get_name() in _precompile_cache and _precompile_cache[tc.get_name()][1] is None
+            if _cache_key(tc) in _precompile_cache and _precompile_cache[_cache_key(tc)][1] is None
         ]
         print(
             f"[PyPTO] Pre-generating golden inputs for {len(ok_cases)} test case(s)"

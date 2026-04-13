@@ -12,10 +12,22 @@
 from pypto.runtime.runner import RunConfig, RunResult
 
 from harness.core.environment import ensure_simpler_available
-from harness.core.harness import PTOTestCase, ScalarSpec, TensorSpec
+from harness.core.harness import (
+    A2A3_ONLY,
+    A5_ONLY,
+    ALL_PLATFORMS,
+    PLATFORMS,
+    PTOTestCase,
+    ScalarSpec,
+    TensorSpec,
+)
 from harness.core.test_runner import TestRunner
 
 __all__ = [
+    "A2A3_ONLY",
+    "A5_ONLY",
+    "ALL_PLATFORMS",
+    "PLATFORMS",
     "PTOTestCase",
     "TensorSpec",
     "ScalarSpec",

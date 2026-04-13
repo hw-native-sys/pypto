@@ -12,6 +12,8 @@ Tests for matrix multiplication operation using PyPTO frontend.
 
 This test validates the matmul operation implementation through the
 pto-testing-framework, ensuring correct code generation and execution.
+Each test case accepts an optional ``backend_type`` parameter so a single
+class can run on multiple platforms via ``@pytest.mark.parametrize``.
 """
 
 from typing import Any
@@ -20,16 +22,16 @@ import pypto.language as pl
 import pytest
 import torch
 from examples.kernels.matmul import MatmulaccProgram
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 
 class TestMatmul(PTOTestCase):
-    __test__ = False  # Not a pytest test class
+    """Matmul: C = A @ B."""
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, config=None):
-        super().__init__(config)
+    __test__ = False
+
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.K = k
         self.N = n
@@ -61,7 +63,6 @@ class TestMatmul(PTOTestCase):
                 tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
                 tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
                 tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                # store can support l0c -> GM directly
                 out_c = pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=c)
                 return out_c
 
@@ -89,8 +90,8 @@ class TestMatmulBTranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, config=None):
-        super().__init__(config)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.K = k
         self.N = n
@@ -151,8 +152,8 @@ class TestMatmulATranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, config=None):
-        super().__init__(config)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.K = k
         self.N = n
@@ -213,8 +214,8 @@ class TestMatmulABTranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, config=None):
-        super().__init__(config)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
+        super().__init__(config, backend_type=backend_type)
         self.M = m
         self.K = k
         self.N = n
@@ -269,126 +270,6 @@ class TestMatmulABTranspose(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"].to(torch.float32).T, tensors["b"].to(torch.float32).T)
 
 
-class TestMatmulPTO(TestMatmul):
-    """Test matmul with PTO backend and PTOAS optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_pto_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestMatmulBTransposePTO(TestMatmulBTranspose):
-    """Test matmul B transpose with PTO backend and PTOAS optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_btranspose_pto_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestMatmulATransposePTO(TestMatmulATranspose):
-    """Test matmul A transpose with PTO backend and PTOAS optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_atranspose_pto_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestMatmulABTransposePTO(TestMatmulABTranspose):
-    """Test matmul AB transpose with PTO backend and PTOAS optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_abtranspose_pto_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestMatmulA5(TestMatmul):
-    """Test matmul with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_a5_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestMatmulBTransposeA5(TestMatmulBTranspose):
-    """Test matmul B transpose with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_btranspose_a5_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestMatmulATransposeA5(TestMatmulATranspose):
-    """Test matmul A transpose with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_atranspose_a5_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestMatmulABTransposeA5(TestMatmulABTranspose):
-    """Test matmul AB transpose with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"matmul_abtranspose_a5_{self.M}x{self.K}x{self.N}"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestMatmulAcc(PTOTestCase):
     """Test matmul with accumulation (K-split into two chunks).
 
@@ -397,6 +278,9 @@ class TestMatmulAcc(PTOTestCase):
     """
 
     __test__ = False
+
+    def __init__(self, *, backend_type=None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "matmulacc_64x64x64"
@@ -415,191 +299,50 @@ class TestMatmulAcc(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
-class TestMatmulAccPTO(TestMatmulAcc):
-    """Test matmul_acc with PTO backend."""
+# =============================================================================
+# pytest test functions
+# =============================================================================
 
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "matmulacc_pto_64x64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestMatmulAccA5(TestMatmulAcc):
-    """Test matmul_acc with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "matmulacc_a5_64x64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
+_MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
+_TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
 
 
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [
-            (64, 64, 64),
-            (128, 64, 128),
-            (64, 128, 64),
-        ],
-    )
-    def test_matmul(self, test_runner, m, k, n):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", _MATMUL_SHAPES)
+    def test_matmul(self, test_runner, backend, m, k, n):
         """Test matmul with configurable matrix dimensions."""
-        test_case = TestMatmul(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestMatmul(m=m, k=k, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_transpose(self, test_runner, m, k, n):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
+    def test_matmul_btranspose(self, test_runner, backend, m, k, n):
         """Test matmul with B transposed (C = A @ B^T)."""
-        test_case = TestMatmulBTranspose(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestMatmulBTranspose(m=m, k=k, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [
-            (64, 64, 64),
-            (128, 64, 128),
-            (64, 128, 64),
-        ],
-    )
-    def test_matmul_pto(self, test_runner, m, k, n):
-        """Test matmul with PTO backend and PTOAS optimization."""
-        test_case = TestMatmulPTO(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_transpose_pto(self, test_runner, m, k, n):
-        """Test matmul with B transposed (C = A @ B^T)."""
-        test_case = TestMatmulBTransposePTO(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_atranspose(self, test_runner, m, k, n):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
+    def test_matmul_atranspose(self, test_runner, backend, m, k, n):
         """Test matmul with A transposed (C = A^T @ B)."""
-        test_case = TestMatmulATranspose(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestMatmulATranspose(m=m, k=k, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_abtranspose(self, test_runner, m, k, n):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
+    def test_matmul_abtranspose(self, test_runner, backend, m, k, n):
         """Test matmul with both A and B transposed (C = A^T @ B^T)."""
-        test_case = TestMatmulABTranspose(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestMatmulABTranspose(m=m, k=k, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_atranspose_pto(self, test_runner, m, k, n):
-        """Test matmul A transpose with PTO backend."""
-        test_case = TestMatmulATransposePTO(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
-
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_abtranspose_pto(self, test_runner, m, k, n):
-        """Test matmul AB transpose with PTO backend."""
-        test_case = TestMatmulABTransposePTO(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_matmulacc_64x64x64(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_matmulacc(self, test_runner, backend):
         """Test matmul with accumulation (K split into two chunks)."""
-        test_case = TestMatmulAcc()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestMatmulAcc(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
-
-    def test_matmulacc_pto_64x64x64(self, test_runner):
-        """Test matmul_acc with PTO backend."""
-        test_case = TestMatmulAccPTO()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64)],
-    )
-    def test_matmul_a5(self, test_runner, m, k, n):
-        """Test matmul with A5 (Ascend 950) backend."""
-        test_case = TestMatmulA5(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_btranspose_a5(self, test_runner, m, k, n):
-        """Test matmul B transpose with A5 (Ascend 950) backend."""
-        test_case = TestMatmulBTransposeA5(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_atranspose_a5(self, test_runner, m, k, n):
-        """Test matmul A transpose with A5 (Ascend 950) backend."""
-        test_case = TestMatmulATransposeA5(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize(
-        "m,k,n",
-        [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)],
-    )
-    def test_matmul_abtranspose_a5(self, test_runner, m, k, n):
-        """Test matmul AB transpose with A5 (Ascend 950) backend."""
-        test_case = TestMatmulABTransposeA5(m=m, k=k, n=n)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_matmulacc_a5_64x64x64(self, test_runner):
-        """Test matmul_acc with A5 (Ascend 950) backend."""
-        test_case = TestMatmulAccA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

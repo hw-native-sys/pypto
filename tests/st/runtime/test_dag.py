@@ -21,9 +21,8 @@ from typing import Any
 
 import pytest
 from examples.models.vector_dag import VectorDAGProgram
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class VectorDAGTestCase(PTOTestCase):
@@ -38,6 +37,11 @@ class VectorDAGTestCase(PTOTestCase):
       t3: g = kernel_mul(d, e)
       t4: f = kernel_add(g, c)
     """
+
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "vector_dag_128x128"
@@ -61,57 +65,14 @@ class VectorDAGTestCase(PTOTestCase):
         tensors["f"][:] = g + c
 
 
-class VectorDAGPTOTestCase(VectorDAGTestCase):
-    """Test vector DAG with PTO backend and PTOAS optimization."""
-
-    def get_name(self) -> str:
-        return "vector_dag_pto_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class VectorDAGA5TestCase(VectorDAGTestCase):
-    """Test vector DAG with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "vector_dag_a5_128x128"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestDAGOperations:
     """Test suite for DAG operations."""
 
-    def test_vector_dag_128x128(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_vector_dag(self, test_runner, backend):
         """Test vector DAG computation with 128x128 shape."""
-        test_case = VectorDAGTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for vector DAG: {result.error}"
-
-    def test_vector_dag_pto_128x128(self, test_runner):
-        """Test vector DAG with PTO backend and PTOAS optimization."""
-        test_case = VectorDAGPTOTestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed for vector DAG (PTO): {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    def test_vector_dag_a5_128x128(self, test_runner):
-        """Test vector DAG with A5 (Ascend 950) backend."""
-        test_case = VectorDAGA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
+        result = test_runner.run(VectorDAGTestCase(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
 
 if __name__ == "__main__":

@@ -20,11 +20,33 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import pytest
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
+
+# ---------------------------------------------------------------------------
+# Pre-defined platform parameter lists for @pytest.mark.parametrize.
+#
+# Usage:
+#     @pytest.mark.parametrize("backend", PLATFORMS)
+#     def test_foo(self, test_runner, backend):
+#         result = test_runner.run(MyTestCase(backend_type=backend))
+#         assert result.passed
+# ---------------------------------------------------------------------------
+
+PLATFORMS = [
+    pytest.param(BackendType.Ascend910B, id="a2a3"),
+    pytest.param(BackendType.Ascend950, id="a5", marks=pytest.mark.a5),
+]
+
+ALL_PLATFORMS = PLATFORMS
+
+A2A3_ONLY = [pytest.param(BackendType.Ascend910B, id="a2a3")]
+
+A5_ONLY = [pytest.param(BackendType.Ascend950, id="a5", marks=pytest.mark.a5)]
 
 
 class DataType(Enum):
@@ -125,13 +147,27 @@ class PTOTestCase(ABC):
                 tensors["c"][:] = tensors["a"] + tensors["b"]
     """
 
-    def __init__(self, config: RunConfig | None = None):
+    def __init__(
+        self,
+        config: RunConfig | None = None,
+        *,
+        backend_type: BackendType | None = None,
+        strategy: OptimizationStrategy | None = None,
+    ):
         """Initialize test case.
 
         Args:
             config: Test configuration. If None, uses default config.
+            backend_type: Override the backend type for code generation.
+                If None, falls back to the class-level ``get_backend_type()``
+                default (Ascend910B).  Pass explicitly to run the same test
+                case on a different platform without subclassing.
+            strategy: Override the optimization strategy.  If None, falls
+                back to the class-level ``get_strategy()`` default (Default).
         """
         self.config = config or RunConfig()
+        self._override_backend = backend_type
+        self._override_strategy = strategy
         self._tensor_specs: list[TensorSpec] | None = None
         self._scalar_specs: list[ScalarSpec] | None = None
 
@@ -161,23 +197,31 @@ class PTOTestCase(ABC):
     def get_strategy(self) -> OptimizationStrategy:
         """Return the optimization strategy for the pass pipeline.
 
-        Override to use a different strategy.
-        Default is OptimizationStrategy.Default.
+        If *strategy* was passed to the constructor, that value takes
+        precedence.  Otherwise falls back to ``OptimizationStrategy.Default``.
+        Subclasses may still override this method; the constructor override
+        only applies when the subclass does **not** redefine the method.
 
         Returns:
             OptimizationStrategy enum value.
         """
+        if self._override_strategy is not None:
+            return self._override_strategy
         return OptimizationStrategy.Default
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.
 
-        Override to target a different backend.
-        Default is BackendType.Ascend910B.
+        If *backend_type* was passed to the constructor, that value takes
+        precedence.  Otherwise falls back to ``BackendType.Ascend910B``.
+        Subclasses may still override this method; the constructor override
+        only applies when the subclass does **not** redefine the method.
 
         Returns:
             BackendType enum value.
         """
+        if self._override_backend is not None:
+            return self._override_backend
         return BackendType.Ascend910B
 
     def define_scalars(self) -> list[ScalarSpec]:

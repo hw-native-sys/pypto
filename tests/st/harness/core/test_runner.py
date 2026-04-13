@@ -61,7 +61,10 @@ _log = logging.getLogger(__name__)
 # Pre-compilation cache (Phase 1 / Phase 2 split)
 # ---------------------------------------------------------------------------
 
-# Maps test_name → (work_dir, error_str | None).
+# Maps cache_key → (work_dir, error_str | None).
+# The cache key combines test name and backend architecture (e.g.
+# "matmul_64x64x64@a2a3") so the same PTOTestCase can be compiled for
+# multiple backends without collisions.
 # Populated by precompile_test_cases() in the parent process during
 # pytest_collection_finish, before any test forks.  Forked children inherit
 # the populated dict via os.fork() copy-on-write and find their pre-compiled
@@ -80,6 +83,17 @@ _BACKEND_TO_ARCH: dict[BackendType, str] = {
     BackendType.Ascend910B: "a2a3",
     BackendType.Ascend950: "a5",
 }
+
+
+def _cache_key(tc: PTOTestCase) -> str:
+    """Return a unique cache key combining test name and backend architecture.
+
+    Using a composite key allows the same ``PTOTestCase`` (same ``get_name()``)
+    to be compiled for multiple backends (e.g. Ascend910B *and* Ascend950)
+    without cache-key collisions.
+    """
+    arch = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
+    return f"{tc.get_name()}@{arch}"
 
 
 def _resolve_platform(config_platform: str, backend_type: BackendType) -> str:
@@ -210,10 +224,10 @@ def precompile_test_cases(
     groups via ``reset_for_testing()``.
 
     Args:
-        test_cases: Instances to compile (should be deduplicated by ``get_name``
-            before calling).
+        test_cases: Instances to compile (should be deduplicated by
+            ``_cache_key`` before calling).
         cache_dir: Root output directory; each test case is compiled into
-            ``cache_dir / <test_name>``.
+            ``cache_dir / <cache_key>``.
         dump_passes: If ``True``, dump intermediate IR after each pass.
         max_workers: Thread-pool size per backend group.  Defaults to
             ``os.cpu_count()``.
@@ -224,14 +238,14 @@ def precompile_test_cases(
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
     def _compile_one(tc: "PTOTestCase") -> tuple[str, Path, str | None]:
-        name = tc.get_name()
-        work_dir = cache_dir / name
+        key = _cache_key(tc)
+        work_dir = cache_dir / key
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
             _compile_for_cache(tc, work_dir, dump_passes)
-            return name, work_dir, None
+            return key, work_dir, None
         except Exception as exc:
-            return name, work_dir, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+            return key, work_dir, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
 
     for backend_type, group in groups.items():
         # Set the backend type once for the whole group (idempotent if already
@@ -241,8 +255,8 @@ def precompile_test_cases(
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_compile_one, tc): tc for tc in group}
                 for fut in concurrent.futures.as_completed(futures):
-                    name, work_dir, error = fut.result()
-                    _precompile_cache[name] = (work_dir, error)
+                    key, work_dir, error = fut.result()
+                    _precompile_cache[key] = (work_dir, error)
         finally:
             # Reset so the next group can set a different backend type.
             reset_for_testing()
@@ -270,7 +284,7 @@ def pregenerate_golden_inputs(
     the (potentially expensive) ``generate_inputs`` call at test execution time.
 
     Args:
-        test_cases: Test case instances (should be deduplicated by ``get_name``).
+        test_cases: Test case instances (should be deduplicated by cache key).
         cache_dir: Root output directory used during precompilation.
         max_workers: Thread-pool size. Defaults to ``min(32, cpu_count + 4)``.
 
@@ -294,12 +308,13 @@ def pregenerate_golden_inputs(
     already_cached = 0
 
     for tc in test_cases:
-        work_dir = cache_dir / tc.get_name()
+        key = _cache_key(tc)
+        work_dir = cache_dir / key
         golden_path = work_dir / "golden.py"
         if not golden_path.exists():
             continue
         try:
-            module = _load_module(golden_path, f"_pregolden_{tc.get_name()}")
+            module = _load_module(golden_path, f"_pregolden_{key}")
         except Exception:
             continue
         if module is None:
@@ -362,7 +377,7 @@ def prebuild_binaries(
     in :mod:`pypto.runtime.runner`.
 
     Args:
-        test_cases: Test case instances (deduplicated by ``get_name``).
+        test_cases: Test case instances (deduplicated by cache key).
         cache_dir: Root output directory used during precompilation.
         platform: Session platform string (e.g. ``"a2a3"``).
         max_workers: Thread-pool size. Defaults to ``min(32, cpu_count + 4)``.
@@ -414,10 +429,10 @@ def prebuild_binaries(
     seen_runtimes: set[tuple[str, str]] = set()
 
     for tc in test_cases:
-        name = tc.get_name()
-        if name not in _precompile_cache or _precompile_cache[name][1] is not None:
+        key = _cache_key(tc)
+        if key not in _precompile_cache or _precompile_cache[key][1] is not None:
             continue
-        work_dir = _precompile_cache[name][0]
+        work_dir = _precompile_cache[key][0]
         mod = _load_kc(work_dir)
         if mod is None:
             continue
@@ -522,10 +537,11 @@ class TestRunner:
         """
         start_time = time.time()
         test_name = test_case.get_name()
+        cache_k = _cache_key(test_case)
 
         # --- Phase 2: pre-compiled artifacts available — skip compilation ---
-        if test_name in _precompile_cache:
-            cached_dir, cached_error = _precompile_cache[test_name]
+        if cache_k in _precompile_cache:
+            cached_dir, cached_error = _precompile_cache[cache_k]
             if cached_error is not None:
                 return RunResult(
                     passed=False,

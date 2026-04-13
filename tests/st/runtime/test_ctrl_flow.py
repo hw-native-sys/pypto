@@ -29,9 +29,8 @@ from typing import Any
 
 import pypto.language as pl
 import pytest
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TestForLoopAdd(PTOTestCase):
@@ -42,6 +41,9 @@ class TestForLoopAdd(PTOTestCase):
     """
 
     __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "for_loop_add_64x64"
@@ -87,21 +89,6 @@ class TestForLoopAdd(PTOTestCase):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
 
-class TestForLoopAddPTO(TestForLoopAdd):
-    """Test for loop add with PTO backend and Default optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_add_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
 class TestForLoopMul(PTOTestCase):
     """Test tile mul inside a for loop (1 iteration).
 
@@ -110,6 +97,9 @@ class TestForLoopMul(PTOTestCase):
     """
 
     __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "for_loop_mul_64x64"
@@ -155,21 +145,6 @@ class TestForLoopMul(PTOTestCase):
         tensors["c"][:] = tensors["a"] * tensors["b"]
 
 
-class TestForLoopMulPTO(TestForLoopMul):
-    """Test for loop mul with PTO backend and Default optimization."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_mul_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
 class TestForLoopYieldAdd(PTOTestCase):
     """Test for loop with yield carrying a tensor across iterations.
 
@@ -179,6 +154,9 @@ class TestForLoopYieldAdd(PTOTestCase):
     """
 
     __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "for_loop_yield_add_64x64"
@@ -235,6 +213,9 @@ class TestForLoopYieldTileAccum(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "for_loop_yield_tile_accum"
 
@@ -286,6 +267,9 @@ class TestIfYieldTensor(PTOTestCase):
     """
 
     __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "if_yield_tensor"
@@ -342,6 +326,9 @@ class TestForIfElseNested(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
         return "for_if_else_nested"
 
@@ -396,21 +383,6 @@ class TestForIfElseNested(PTOTestCase):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
 
-class TestForIfElseNestedPTO(TestForIfElseNested):
-    """Test if-else nested inside a for loop with PTO backend and PTOAS."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_if_else_nested_pto"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
 class TestWhileLoopAdd(PTOTestCase):
     """Test while loop performing tile add over 4 chunks.
 
@@ -422,14 +394,11 @@ class TestWhileLoopAdd(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
-        return "while_loop_add_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+        return "while_loop_add_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -484,14 +453,11 @@ class TestForLoopBreak(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
-        return "for_loop_break_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+        return "for_loop_break_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -533,7 +499,6 @@ class TestForLoopBreak(PTOTestCase):
         return ForLoopBreakProgram
 
     def compute_expected(self, tensors, params=None):
-        # Only first 2 chunks (rows 0-127) are processed
         tensors["c"][:128] = tensors["a"][:128] + tensors["b"][:128]
         tensors["c"][128:] = 0.0
 
@@ -548,14 +513,11 @@ class TestForLoopContinue(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
-        return "for_loop_continue_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+        return "for_loop_continue_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -597,7 +559,6 @@ class TestForLoopContinue(PTOTestCase):
         return ForLoopContinueProgram
 
     def compute_expected(self, tensors, params=None):
-        # Only even chunks (rows 0-63, 128-191) are processed
         tensors["c"][:64] = tensors["a"][:64] + tensors["b"][:64]
         tensors["c"][64:128] = 0.0
         tensors["c"][128:192] = tensors["a"][128:192] + tensors["b"][128:192]
@@ -615,14 +576,11 @@ class TestForLoopBreakContinue(PTOTestCase):
 
     __test__ = False
 
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
     def get_name(self) -> str:
-        return "for_loop_break_continue_pto_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+        return "for_loop_break_continue_64x64"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -666,312 +624,78 @@ class TestForLoopBreakContinue(PTOTestCase):
         return ForLoopBreakContinueProgram
 
     def compute_expected(self, tensors, params=None):
-        # break at i>=3, continue at odd i -> only i=0 and i=2 are processed
         tensors["c"][:64] = tensors["a"][:64] + tensors["b"][:64]
         tensors["c"][64:128] = 0.0
         tensors["c"][128:192] = tensors["a"][128:192] + tensors["b"][128:192]
         tensors["c"][192:] = 0.0
 
 
-class TestForLoopAddA5(TestForLoopAdd):
-    """Test for loop add with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_add_a5_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopMulA5(TestForLoopMul):
-    """Test for loop mul with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_mul_a5_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopYieldAddA5(TestForLoopYieldAdd):
-    """Test for loop yield add with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_yield_add_a5_64x64"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopYieldTileAccumA5(TestForLoopYieldTileAccum):
-    """Test for loop yield tile accumulator with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_yield_tile_accum_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestIfYieldTensorA5(TestIfYieldTensor):
-    """Test if-else with yield on A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "if_yield_tensor_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForIfElseNestedA5(TestForIfElseNested):
-    """Test if-else nested in for loop with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_if_else_nested_a5"
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestWhileLoopAddA5(TestWhileLoopAdd):
-    """Test while loop add with A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "while_loop_add_a5_64x64"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopBreakA5(TestForLoopBreak):
-    """Test for loop with break on A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_break_a5_64x64"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopContinueA5(TestForLoopContinue):
-    """Test for loop with continue on A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_continue_a5_64x64"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class TestForLoopBreakContinueA5(TestForLoopBreakContinue):
-    """Test for loop with break and continue on A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "for_loop_break_continue_a5_64x64"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
-    def test_for_loop_add(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_add(self, test_runner, backend):
         """Test for loop wrapping tile add."""
-        test_case = TestForLoopAdd()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestForLoopAdd(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_for_loop_add_pto(self, test_runner):
-        """Test for loop add with PTO backend and PTOAS."""
-        test_case = TestForLoopAddPTO()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    def test_for_loop_mul(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_mul(self, test_runner, backend):
         """Test for loop wrapping tile mul."""
-        test_case = TestForLoopMul()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestForLoopMul(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_for_loop_mul_pto(self, test_runner):
-        """Test for loop mul with PTO backend and PTOAS."""
-        test_case = TestForLoopMulPTO()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    def test_for_loop_yield_add(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_yield_add(self, test_runner, backend):
         """Test for loop with yield carrying tensor across iterations."""
-        test_case = TestForLoopYieldAdd()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestForLoopYieldAdd(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_for_loop_yield_tile_accum(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_yield_tile_accum(self, test_runner, backend):
         """Test for loop with yield carrying tile accumulator across iterations."""
-        test_case = TestForLoopYieldTileAccum()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestForLoopYieldTileAccum(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_if_yield_tensor(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_if_yield_tensor(self, test_runner, backend):
         """Test if-else with yield carrying tensors."""
-        test_case = TestIfYieldTensor()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestIfYieldTensor(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_for_if_else_nested(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_if_else_nested(self, test_runner, backend):
         """Test if-else nested inside a for loop."""
-        test_case = TestForIfElseNested()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TestForIfElseNested(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_if_else_nested_pto(self, test_runner):
-        """Test if-else nested inside a for loop with PTO backend and PTOAS."""
-        test_case = TestForIfElseNestedPTO()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_while_loop_add(self, test_runner, backend):
+        """Test while loop add (scf.while codegen)."""
+        result = test_runner.run(TestWhileLoopAdd(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    def test_while_loop_add_pto(self, test_runner):
-        """Test while loop add with PTO backend (scf.while codegen)."""
-        test_case = TestWhileLoopAdd()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_break(self, test_runner, backend):
+        """Test for loop with break."""
+        result = test_runner.run(TestForLoopBreak(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_break_pto(self, test_runner):
-        """Test for loop with break using PTO backend."""
-        test_case = TestForLoopBreak()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_continue(self, test_runner, backend):
+        """Test for loop with continue."""
+        result = test_runner.run(TestForLoopContinue(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_continue_pto(self, test_runner):
-        """Test for loop with continue using PTO backend."""
-        test_case = TestForLoopContinue()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_break_continue_pto(self, test_runner):
-        """Test for loop with break and continue using PTO backend."""
-        test_case = TestForLoopBreakContinue()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (PTO): {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    def test_for_loop_add_a5(self, test_runner):
-        """Test for loop add with A5 (Ascend 950) backend."""
-        test_case = TestForLoopAddA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_for_loop_mul_a5(self, test_runner):
-        """Test for loop mul with A5 (Ascend 950) backend."""
-        test_case = TestForLoopMulA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_for_loop_yield_add_a5(self, test_runner):
-        """Test for loop yield add with A5 (Ascend 950) backend."""
-        test_case = TestForLoopYieldAddA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_for_loop_yield_tile_accum_a5(self, test_runner):
-        """Test for loop yield tile accumulator with A5 (Ascend 950) backend."""
-        test_case = TestForLoopYieldTileAccumA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_if_yield_tensor_a5(self, test_runner):
-        """Test if-else with yield on A5 (Ascend 950) backend."""
-        test_case = TestIfYieldTensorA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    def test_for_if_else_nested_a5(self, test_runner):
-        """Test if-else nested in for loop with A5 (Ascend 950) backend."""
-        test_case = TestForIfElseNestedA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="PTOAS BUG")
-    def test_while_loop_add_a5(self, test_runner):
-        """Test while loop add with A5 (Ascend 950) backend."""
-        test_case = TestWhileLoopAddA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_break_a5(self, test_runner):
-        """Test for loop with break on A5 (Ascend 950) backend."""
-        test_case = TestForLoopBreakA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_continue_a5(self, test_runner):
-        """Test for loop with continue on A5 (Ascend 950) backend."""
-        test_case = TestForLoopContinueA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="PTOAS BUG")
-    def test_for_loop_break_continue_a5(self, test_runner):
-        """Test for loop with break and continue on A5 (Ascend 950) backend."""
-        test_case = TestForLoopBreakContinueA5()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_for_loop_break_continue(self, test_runner, backend):
+        """Test for loop with break and continue."""
+        result = test_runner.run(TestForLoopBreakContinue(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
 
 
 if __name__ == "__main__":

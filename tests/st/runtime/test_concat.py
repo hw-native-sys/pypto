@@ -15,13 +15,17 @@ from typing import Any
 
 import pytest
 from examples.kernels.concat import TileConcat32x32Program
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 
 
 class TileConcatTestCase(PTOTestCase):
     """Test case for tile column-wise concatenation (32x16 + 32x16 -> 32x32)."""
+
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
 
     def get_name(self) -> str:
         return "tile_concat_32x32"
@@ -36,48 +40,20 @@ class TileConcatTestCase(PTOTestCase):
     def get_program(self) -> Any:
         return TileConcat32x32Program
 
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         tensors["c"][:, :16] = tensors["a"]
         tensors["c"][:, 16:] = tensors["b"]
-
-
-class TileConcatA5TestCase(TileConcatTestCase):
-    """Test case for tile concat on A5 (Ascend 950) backend."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_concat_a5_32x32"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
 
 class TestConcatOperations:
     """Test suite for concat operations."""
 
     @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
-    def test_tile_concat_32x32(self, test_runner):
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tile_concat_32x32(self, test_runner, backend):
         """Test tile concatenation: 32x16 + 32x16 -> 32x32."""
-        test_case = TileConcatTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(TileConcatTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
-    def test_tile_concat_32x32_a5(self, test_runner):
-        """Test tile concatenation on A5 (Ascend 950) backend."""
-        test_case = TileConcatA5TestCase()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5): {result.error}"
 
 
 if __name__ == "__main__":

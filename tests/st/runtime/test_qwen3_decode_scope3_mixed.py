@@ -28,8 +28,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Mirror tests/st/conftest.py so direct `python <file>.py` execution can
-# resolve the local harness package before pytest takes over.
 _ST_DIR = Path(__file__).resolve().parents[1]
 if str(_ST_DIR) not in sys.path:
     sys.path.insert(0, str(_ST_DIR))
@@ -38,9 +36,6 @@ _PROJECT_ROOT = _ST_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# These imports intentionally follow sys.path bootstrapping so direct
-# `python tests/st/runtime/test_qwen3_decode_scope3_mixed.py` execution can
-# resolve the local harness package and worktree sources.
 import pypto.language as pl  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
@@ -112,7 +107,6 @@ def build_qwen3_scope3_program(
                         )
                         resid1_tile = pl.assemble(resid1_tile, pl.add(o_acc, resid), [0, o0])
 
-                    # Post-attention RMSNorm: compute inv_rms over resid1_tile.
                     sq_sum = pl.full([1, BATCH_TILE], dtype=pl.FP32, value=0.0)
                     for kb in pl.range(HIDDEN_BLOCKS):
                         k0 = kb * K_CHUNK
@@ -122,7 +116,6 @@ def build_qwen3_scope3_program(
                         )
                     inv_rms = pl.rsqrt(pl.add(pl.mul(sq_sum, hidden_inv), EPS))
 
-                    # Normalize and zero-init down_proj accumulator.
                     post_norm_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.BF16)
                     down_proj_tile = pl.create_tensor([BATCH_TILE, HIDDEN_CFG], dtype=pl.FP32)
                     for zi in pl.range(HIDDEN_BLOCKS):
@@ -141,7 +134,6 @@ def build_qwen3_scope3_program(
                             post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0]
                         )
 
-                    # MLP: gate/up projections + SiLU + down projection.
                     for ob in pl.range(MLP_OUT_BLOCKS):
                         o0 = ob * MLP_OUT_CHUNK
                         gate_acc = pl.full([BATCH_TILE, MLP_OUT_CHUNK], dtype=pl.FP32, value=0.0)
@@ -191,32 +183,28 @@ def golden(tensors: dict, params: dict | None = None) -> None:
       3. SwiGLU MLP: gate/up projections → silu(gate) * up → down projection
       4. Final residual addition → BF16 output
     """
-    attn_out = tensors["attn_out"]  # [B, H], BF16
-    hidden_states = tensors["hidden_states"]  # [B, H], BF16
-    wo = tensors["wo"]  # [H, H], BF16
-    post_rms_weight = tensors["post_rms_weight"]  # [1, H], FP32
-    w_gate = tensors["w_gate"]  # [H, I], BF16
-    w_up = tensors["w_up"]  # [H, I], BF16
-    w_down = tensors["w_down"]  # [I, H], BF16
+    attn_out = tensors["attn_out"]
+    hidden_states = tensors["hidden_states"]
+    wo = tensors["wo"]
+    post_rms_weight = tensors["post_rms_weight"]
+    w_gate = tensors["w_gate"]
+    w_up = tensors["w_up"]
+    w_down = tensors["w_down"]
 
     eps = 1e-6
 
-    # 1. Output projection (BF16 inputs, FP32 accumulation) + residual.
     o_proj = torch.matmul(attn_out.float(), wo.float())
     resid1 = o_proj + hidden_states.float()
 
-    # 2. Post-attention RMSNorm.
     variance = resid1.pow(2).mean(dim=-1, keepdim=True)
     inv_rms = torch.rsqrt(variance + eps)
     normed_bf16 = (resid1 * inv_rms * post_rms_weight).bfloat16()
 
-    # 3. SwiGLU MLP: gate/up projections, silu activation, down projection.
     gate = torch.matmul(normed_bf16.float(), w_gate.float())
     up = torch.matmul(normed_bf16.float(), w_up.float())
     mlp_bf16 = (gate * torch.sigmoid(gate) * up).bfloat16()
     down = torch.matmul(mlp_bf16.float(), w_down.float())
 
-    # 4. Final residual + cast to BF16.
     tensors["out"][:] = (down + resid1).bfloat16()
 
 
@@ -273,7 +261,7 @@ def build_tensor_specs(
     ]
 
 
-class _Qwen3DecodeScope3MixedBase(PTOTestCase):
+class Qwen3DecodeScope3MixedTestCase(PTOTestCase):
     """Shared ST test case for Qwen3 decode scope-3 mixed kernel."""
 
     __test__ = False
@@ -284,13 +272,17 @@ class _Qwen3DecodeScope3MixedBase(PTOTestCase):
         batch: int = BATCH,
         hidden_size: int = HIDDEN,
         intermediate_size: int = INTERMEDIATE,
+        *,
+        backend_type: BackendType | None = None,
         config: RunConfig | None = None,
     ):
-        # Preserve the original standalone script tolerances.
-        super().__init__(config or RunConfig(rtol=1e-3, atol=1e-3))
+        super().__init__(config or RunConfig(rtol=1e-3, atol=1e-3), backend_type=backend_type)
         self._batch = batch
         self._hidden_size = hidden_size
         self._intermediate_size = intermediate_size
+
+    def get_name(self) -> str:
+        return f"qwen3_decode_scope3_mixed_b{self._batch}_h{self._hidden_size}_i{self._intermediate_size}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return build_tensor_specs(
@@ -307,37 +299,13 @@ class _Qwen3DecodeScope3MixedBase(PTOTestCase):
         )
 
 
-class Qwen3DecodeScope3MixedTestCase(_Qwen3DecodeScope3MixedBase):
-    """Ascend 910B runtime test for Qwen3 decode scope-3 mixed kernel."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"qwen3_decode_scope3_mixed_b{self._batch}_h{self._hidden_size}_i{self._intermediate_size}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class Qwen3DecodeScope3MixedA5TestCase(_Qwen3DecodeScope3MixedBase):
-    """Ascend 950 runtime test for Qwen3 decode scope-3 mixed kernel."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"qwen3_decode_scope3_mixed_a5_b{self._batch}_h{self._hidden_size}_i{self._intermediate_size}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
 class TestQwen3DecodeScope3Mixed:
     """Pytest entry points for the Qwen3 decode scope-3 ST coverage."""
 
     @pytest.mark.hardware
     def test_qwen3_decode_scope3_mixed(self, test_runner):
         """Run the original a2a3 hardware case under the shared ST harness."""
-        result = test_runner.run(Qwen3DecodeScope3MixedTestCase())
+        result = test_runner.run(Qwen3DecodeScope3MixedTestCase(backend_type=BackendType.Ascend910B))
         assert result.passed, f"Qwen3 decode scope-3 mixed test failed: {result.error}"
 
     @pytest.mark.a5
@@ -345,7 +313,7 @@ class TestQwen3DecodeScope3Mixed:
         """Run the same scope-3 test on the Ascend 950 backend."""
         if test_runner.config.platform.endswith("sim"):
             pytest.skip("a5sim CPU stub does not support BF16 TMATMUL for this mixed-kernel case yet")
-        result = test_runner.run(Qwen3DecodeScope3MixedA5TestCase())
+        result = test_runner.run(Qwen3DecodeScope3MixedTestCase(backend_type=BackendType.Ascend950))
         assert result.passed, f"Qwen3 decode scope-3 mixed A5 test failed: {result.error}"
 
 

@@ -29,9 +29,8 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
 
 M = pl.dynamic("M")
@@ -50,8 +49,14 @@ class DynShapeAddTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, shape: tuple[int, int], config: RunConfig | None = None):
-        super().__init__(config)
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        *,
+        backend_type: BackendType | None = None,
+        config: RunConfig | None = None,
+    ):
+        super().__init__(config, backend_type=backend_type)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -65,7 +70,6 @@ class DynShapeAddTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        # Captured as closure variables by @pl.function / @pl.program decorators.
         rows = self._rows
         cols = self._cols
 
@@ -97,12 +101,6 @@ class DynShapeAddTestCase(PTOTestCase):
 
         return DynShapeAddProgram
 
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
@@ -122,9 +120,11 @@ class ValidShapeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         valid_shape: tuple[int, int],
+        *,
+        backend_type: BackendType | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config)
+        super().__init__(config, backend_type=backend_type)
         self._rows, self._cols = shape
         self._valid_rows, self._valid_cols = valid_shape
 
@@ -145,7 +145,6 @@ class ValidShapeAddTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        # Captured as closure variables by @pl.function / @pl.program decorators.
         rows = self._rows
         cols = self._cols
 
@@ -182,12 +181,6 @@ class ValidShapeAddTestCase(PTOTestCase):
 
         return ValidShapeAddProgram
 
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         vr = tensors["valid_shape"][0]
         vc = tensors["valid_shape"][1]
@@ -205,8 +198,14 @@ class LoopDynShapeAddTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, shape: tuple[int, int], config: RunConfig | None = None):
-        super().__init__(config)
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        *,
+        backend_type: BackendType | None = None,
+        config: RunConfig | None = None,
+    ):
+        super().__init__(config, backend_type=backend_type)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -220,7 +219,6 @@ class LoopDynShapeAddTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        # Captured as closure variables by @pl.function / @pl.program decorators.
         rows = self._rows
         cols = self._cols
 
@@ -255,50 +253,8 @@ class LoopDynShapeAddTestCase(PTOTestCase):
 
         return LoopDynShapeAddProgram
 
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = tensors["a"] + tensors["b"]
-
-
-class DynShapeAddA5TestCase(DynShapeAddTestCase):
-    """Test add kernel with fully dynamic M*N tensor shapes on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"dyn_shape_add_a5_{self._rows}x{self._cols}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class ValidShapeAddA5TestCase(ValidShapeAddTestCase):
-    """Test add kernel with static tensors and valid_shapes on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"valid_shape_add_a5_{self._rows}x{self._cols}_valid_{self._valid_rows}x{self._valid_cols}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
-
-class LoopDynShapeAddA5TestCase(LoopDynShapeAddTestCase):
-    """Test add kernel with dynamic M dim and scf.for loop on A5 (Ascend 950)."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return f"loop_dyn_shape_add_a5_{self._rows}x{self._cols}"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
 
 # =============================================================================
@@ -309,52 +265,26 @@ class LoopDynShapeAddA5TestCase(LoopDynShapeAddTestCase):
 class TestDynamicShapeOperations:
     """Test suite for dynamic shape kernel operations."""
 
+    @pytest.mark.parametrize("backend", PLATFORMS)
     @pytest.mark.parametrize("shape", _SHAPES)
-    def test_dyn_shape_add(self, test_runner, shape):
+    def test_dyn_shape_add(self, test_runner, shape, backend):
         """Test add with fully dynamic M×N tensor shapes."""
-        test_case = DynShapeAddTestCase(shape)
-        result = test_runner.run(test_case)
+        result = test_runner.run(DynShapeAddTestCase(shape, backend_type=backend))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
+    @pytest.mark.parametrize("backend", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((128, 128), (64, 64))])
-    def test_valid_shape_add(self, test_runner, shape, valid_shape):
+    def test_valid_shape_add(self, test_runner, shape, valid_shape, backend):
         """Test add with static tensors and valid_shapes read from an input tensor."""
-        test_case = ValidShapeAddTestCase(shape, valid_shape)
-        result = test_runner.run(test_case)
+        result = test_runner.run(ValidShapeAddTestCase(shape, valid_shape, backend_type=backend))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 
+    @pytest.mark.parametrize("backend", PLATFORMS)
     @pytest.mark.parametrize("shape", _SHAPES)
-    def test_loop_dyn_shape_add(self, test_runner, shape):
+    def test_loop_dyn_shape_add(self, test_runner, shape, backend):
         """Test add with dynamic M dim iterated in pairs via scf.for."""
-        test_case = LoopDynShapeAddTestCase(shape)
-        result = test_runner.run(test_case)
+        result = test_runner.run(LoopDynShapeAddTestCase(shape, backend_type=backend))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
-
-    # ---- A5 (Ascend 950) tests ----
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize("shape", _SHAPES)
-    def test_dyn_shape_add_a5(self, test_runner, shape):
-        """Test add with fully dynamic M×N tensor shapes on A5 (Ascend 950)."""
-        test_case = DynShapeAddA5TestCase(shape)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize("shape,valid_shape", [((128, 128), (64, 64))])
-    def test_valid_shape_add_a5(self, test_runner, shape, valid_shape):
-        """Test add with static tensors and valid_shapes on A5 (Ascend 950)."""
-        test_case = ValidShapeAddA5TestCase(shape, valid_shape)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5) for shape {shape}, valid_shape {valid_shape}: {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.parametrize("shape", _SHAPES)
-    def test_loop_dyn_shape_add_a5(self, test_runner, shape):
-        """Test add with dynamic M dim iterated in pairs on A5 (Ascend 950)."""
-        test_case = LoopDynShapeAddA5TestCase(shape)
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed (A5) for shape {shape}: {result.error}"
 
 
 if __name__ == "__main__":
