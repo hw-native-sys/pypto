@@ -393,9 +393,10 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
       auto it = param_to_index.find(var.get());
       if (it == param_to_index.end()) continue;
       ParamDirection d = inner_dirs[arg_idx];
-      if (d == ParamDirection::Out || d == ParamDirection::InOut ||
-          directions[it->second] == ParamDirection::In) {
-        directions[it->second] = d;
+      ParamDirection& merged = directions[it->second];
+      // Merge as a lattice: InOut > Out > In. Never downgrade a stronger direction.
+      if (d == ParamDirection::InOut || (d == ParamDirection::Out && merged == ParamDirection::In)) {
+        merged = d;
       }
     }
   }

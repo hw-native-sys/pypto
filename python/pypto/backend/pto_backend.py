@@ -396,7 +396,7 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     return _uses_dynamic_subblock_id(func)
 
 
-def _generate_kernel_header(func: _ir_core.Function) -> str:
+def _generate_kernel_header(func: _ir_core.Function, *, uses_spmd: bool | None = None) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
     fixed_subblock_id = _get_fixed_subblock_id(func)
     subblock_override = ""
@@ -430,8 +430,10 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
     # to runtime intrinsics that read from the dispatch payload (LocalContext).
     # AICore has no writable static data segment for GM pointers, so we store
     # the scalar values in [[block_local]] variables (same pattern as subblock bridge).
+    if uses_spmd is None:
+        uses_spmd = _uses_spmd_block_ops(func)
     spmd_override = ""
-    if _uses_spmd_block_ops(func):
+    if uses_spmd:
         spmd_override = textwrap.dedent(
             """\
             #if !defined(__CPU_SIM)
@@ -455,7 +457,12 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
     )
 
 
-def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
+def _generate_kernel_wrapper(
+    func: _ir_core.Function,
+    ptoas_code: str,
+    *,
+    group_uses_spmd: bool = False,
+) -> str:
     """Generate a complete kernel wrapper file for one InCore function.
 
     Combines:
@@ -463,7 +470,7 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
     2. Preprocessed ptoas code (static, no duplicate includes)
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
     """
-    header = _generate_kernel_header(func)
+    header = _generate_kernel_header(func, uses_spmd=group_uses_spmd or _uses_spmd_block_ops(func))
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     unpacking_code, var_names = _generate_arg_unpacking(func)
     call_args = ", ".join(var_names)
@@ -698,8 +705,11 @@ def _emit_group_output(
         return
 
     ptoas_cpp = _compile_pto_module(pto_code, group_name, output_dir)
+    group_uses_spmd = any(_uses_spmd_block_ops(f) for f in members)
     for func in members:
-        result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(func, ptoas_cpp)
+        result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
+            func, ptoas_cpp, group_uses_spmd=group_uses_spmd
+        )
 
 
 def _profiling_stage(prof: CompileProfiler | None, name: str) -> AbstractContextManager[Any]:

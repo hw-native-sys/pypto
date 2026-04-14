@@ -974,11 +974,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   // --- Alias generation helpers ---
 
-  std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
-    std::vector<ParamDirection> dirs = callee->param_directions_;
+  std::vector<ParamDirection> GetEffectiveDirections(const FunctionPtr& callee) {
     if (callee->func_type_ == FunctionType::Group) {
-      dirs = ComputeGroupEffectiveDirections(callee, program_);
+      return ComputeGroupEffectiveDirections(callee, program_);
     }
+    return callee->param_directions_;
+  }
+
+  std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
+    const auto dirs = GetEffectiveDirections(callee);
     std::vector<size_t> out_indices;
     for (size_t i = 0; i < dirs.size(); ++i) {
       if (dirs[i] == ParamDirection::Out || dirs[i] == ParamDirection::InOut) {
@@ -1012,7 +1016,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
 
-    auto out_indices = CollectOutIndices(callee);
+    auto effective_dirs = GetEffectiveDirections(callee);
+    std::vector<size_t> out_indices;
+    for (size_t i = 0; i < effective_dirs.size(); ++i) {
+      if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+        out_indices.push_back(i);
+      }
+    }
 
     for (const auto& elem : elements_it->second) {
       INTERNAL_CHECK_SPAN(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size(),
@@ -1020,10 +1030,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
           << " (has " << out_indices.size() << " Out/InOut params)";
       size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
-      INTERNAL_CHECK_SPAN(param_idx < callee->param_directions_.size(), call->span_)
+      INTERNAL_CHECK_SPAN(param_idx < effective_dirs.size(), call->span_)
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
-          << " (has " << callee->param_directions_.size() << " params)";
-      if (callee->param_directions_[param_idx] == ParamDirection::InOut) {
+          << " (has " << effective_dirs.size() << " params)";
+      if (effective_dirs[param_idx] == ParamDirection::InOut) {
         continue;
       }
       std::string elem_name = ReserveVarEmitName(elem.var);

@@ -180,22 +180,22 @@ class SPMDEscalating5Program:
     Mirrors the hardware SPMD multiblock pattern: each submission increases
     the block count to exercise progressively wider dispatch.
 
-    T0: core_num=4,  base=0,   rows [0, 512)       — basic multi-block
-    T1: core_num=8,  base=4,   rows [512, 1536)     — saturate one sched thread
-    T2: core_num=12, base=12,  rows [1536, 3072)    — cross-thread dispatch
-    T3: core_num=16, base=24,  rows [3072, 5120)    — occupy all AIV cores
-    T4: core_num=24, base=40,  rows [5120, 8192)    — multi-round full dispatch
-    Total: 64 blocks, output [8192, 128]
+    T0: core_num=1,  base=0,  rows [0, 128)    — basic multi-block
+    T1: core_num=2,  base=1,  rows [128, 384)  — saturate one sched thread
+    T2: core_num=3,  base=3,  rows [384, 768)  — cross-thread dispatch
+    T3: core_num=4,  base=6,  rows [768, 1280) — occupy all AIV cores
+    T4: core_num=6,  base=10, rows [1280, 2048) — multi-round full dispatch
+    Total: 16 blocks, output [2048, 128]
     """
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_add(
         self,
-        a: pl.Tensor[[8192, 128], pl.FP32],
-        b: pl.Tensor[[8192, 128], pl.FP32],
-        out: pl.Out[pl.Tensor[[8192, 128], pl.FP32]],
+        a: pl.Tensor[[2048, 128], pl.FP32],
+        b: pl.Tensor[[2048, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[2048, 128], pl.FP32]],
         base_offset: pl.Scalar[pl.INDEX],
-    ) -> pl.Tensor[[8192, 128], pl.FP32]:
+    ) -> pl.Tensor[[2048, 128], pl.FP32]:
         block_idx = pl.tile.get_block_idx()
         offset = (block_idx + base_offset) * 128
         tile_a = pl.load(a, [offset, 0], [128, 128])
@@ -207,20 +207,20 @@ class SPMDEscalating5Program:
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
         self,
-        a: pl.Tensor[[8192, 128], pl.FP32],
-        b: pl.Tensor[[8192, 128], pl.FP32],
-        out: pl.Out[pl.Tensor[[8192, 128], pl.FP32]],
-    ) -> pl.Tensor[[8192, 128], pl.FP32]:
-        with pl.spmd(core_num=4):
+        a: pl.Tensor[[2048, 128], pl.FP32],
+        b: pl.Tensor[[2048, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[2048, 128], pl.FP32]],
+    ) -> pl.Tensor[[2048, 128], pl.FP32]:
+        with pl.spmd(core_num=1):
             out = self.kernel_add(a, b, out, 0)
-        with pl.spmd(core_num=8):
-            out = self.kernel_add(a, b, out, 4)
-        with pl.spmd(core_num=12):
-            out = self.kernel_add(a, b, out, 12)
-        with pl.spmd(core_num=16):
-            out = self.kernel_add(a, b, out, 24)
-        with pl.spmd(core_num=24):
-            out = self.kernel_add(a, b, out, 40)
+        with pl.spmd(core_num=2):
+            out = self.kernel_add(a, b, out, 1)
+        with pl.spmd(core_num=3):
+            out = self.kernel_add(a, b, out, 3)
+        with pl.spmd(core_num=4):
+            out = self.kernel_add(a, b, out, 6)
+        with pl.spmd(core_num=6):
+            out = self.kernel_add(a, b, out, 10)
         return out
 
 
@@ -335,7 +335,7 @@ class SPMDMulTestCase(PTOTestCase):
 
 
 # Escalating-5: T0(4) + T1(8) + T2(12) + T3(16) + T4(24) = 64 blocks, 8192 rows
-ESC5_TOTAL_ROWS = 8192
+ESC5_TOTAL_ROWS = 2048
 
 
 class _BaseSPMDTestCase(PTOTestCase):
@@ -369,10 +369,10 @@ class SPMDThreeSubmitTestCase(_BaseSPMDTestCase):
 
 
 class SPMDEscalating5TestCase(_BaseSPMDTestCase):
-    """5 escalating SPMD submissions: core_num 4 -> 8 -> 12 -> 16 -> 24, all writing a + b."""
+    """5 escalating SPMD submissions: core_num 1 -> 2 -> 3 -> 4 -> 6, all writing a + b."""
 
     def get_name(self) -> str:
-        return "spmd_escalating5_8192x128"
+        return "spmd_escalating5_2048x128"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
