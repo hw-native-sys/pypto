@@ -14,12 +14,20 @@ Generates a ``golden.py`` file compatible with Simpler's CodeRunner from a list
 of :class:`TensorSpec` objects and a user-supplied golden function.
 
 :func:`write_golden` materialises all tensor data via
-:meth:`TensorSpec.create_tensor` and saves them as ``.pt`` files.  By default
-data goes to a ``data/`` directory co-located with ``golden.py``; an explicit
-``data_dir`` can redirect storage to any path.  When the target directory
-already contains the required files they are reused.  The generated
-``generate_inputs`` function loads tensors via ``torch.load``, ensuring
-deterministic and reproducible inputs across runs.
+:meth:`TensorSpec.create_tensor` and saves them as ``.pt`` files under
+``data/in/`` and ``data/out/`` subdirectories co-located with ``golden.py``.
+An explicit ``data_dir`` can redirect storage to any path.  When the target
+directory already contains the required files they are reused.
+
+Storage rules by tensor type:
+
+- **Pure input** (``is_output=False``): saved to ``data/in/{name}.pt`` only.
+- **Pure output** (``is_output=True``, ``init_value=None``): saved to
+  ``data/out/{name}.pt`` only; ``generate_inputs`` initialises with
+  ``torch.zeros``.
+- **Inout** (``is_output=True``, ``init_value`` set): saved to both
+  ``data/in/{name}.pt`` (initial value) and ``data/out/{name}.pt``
+  (golden result); ``generate_inputs`` loads from ``data/in/``.
 
 Generated file format (data-file mode)::
 
@@ -33,8 +41,8 @@ Generated file format (data-file mode)::
     ATOL = 1e-5
 
     def generate_inputs(params):
-        query = torch.load(_DATA_DIR / "query.pt", weights_only=True)
-        out   = torch.load(_DATA_DIR / "out.pt", weights_only=True)
+        query = torch.load(_DATA_DIR / "in" / "query.pt", weights_only=True)
+        out   = torch.zeros((128,), dtype=torch.float32)
         return [
             ("query", query),
             ("out", out),
@@ -81,13 +89,16 @@ def write_golden(
 ) -> Path:
     """Generate and write a ``golden.py`` file for Simpler's CodeRunner.
 
-    By default, all tensor data is materialised and saved as ``.pt`` files in a
-    ``data/`` subdirectory alongside the generated ``golden.py``.
+    All tensor data is materialised and saved as ``.pt`` files under
+    ``data/in/`` (inputs and inout initial values) and ``data/out/``
+    (golden outputs computed by *golden_fn*).  By default these directories
+    are created alongside the generated ``golden.py``; an explicit *data_dir*
+    redirects storage elsewhere.
 
     When *data_dir* is provided the generated ``golden.py`` always references
-    that directory.  If the directory already contains ``.pt`` files they are
-    reused; otherwise the directory is created and data files are generated
-    there.
+    that directory.  If the directory already contains the required ``.pt``
+    files they are reused; otherwise the directory is created and data files
+    are generated there.
 
     Args:
         tensor_specs: Ordered list of tensor specifications matching the program's
@@ -99,11 +110,12 @@ def write_golden(
         atol: Absolute tolerance used by CodeRunner for result comparison.
         scalar_specs: Optional list of scalar parameter specifications.  Scalar
             TaskArg entries appear after all tensor entries in the generated list.
-        data_dir: Target directory for ``.pt`` data files.  If the directory
-            exists and already contains data, it is reused without regeneration.
-            If it does not exist it is created and data is generated there.
-            The generated ``golden.py`` always references this path.
-            When ``None`` (default), data is saved to ``<output_path>/../data/``.
+        data_dir: Root directory for ``in/`` and ``out/`` data subdirectories.
+            If the directory already contains data it is reused without
+            regeneration.  If it does not exist it is created and data is
+            generated there.  The generated ``golden.py`` always references
+            this path.  When ``None`` (default), data is saved to
+            ``<output_path>/../data/``.
 
     Returns:
         The resolved ``output_path`` after writing.
@@ -115,8 +127,16 @@ def write_golden(
         resolved_dir = (output_path.parent / "data").resolve()
 
     if not _data_dir_has_files(resolved_dir, tensor_specs):
-        data = _materialize_tensors(tensor_specs)
-        _save_data_files(data, resolved_dir)
+        tensors = _materialize_tensors(tensor_specs)
+
+        in_data = {
+            s.name: tensors[s.name] for s in tensor_specs if not s.is_output or s.init_value is not None
+        }
+        _save_data_files(in_data, resolved_dir / "in")
+
+        golden_fn(tensors, None)
+        out_data = {s.name: tensors[s.name] for s in tensor_specs if s.is_output}
+        _save_data_files(out_data, resolved_dir / "out")
 
     content = generate_golden_source(
         tensor_specs,
@@ -260,10 +280,23 @@ def generate_golden_source(
 
 
 def _data_dir_has_files(data_dir: Path, tensor_specs: list[TensorSpec]) -> bool:
-    """Return ``True`` if *data_dir* already contains all required ``.pt`` files."""
-    if not data_dir.is_dir():
+    """Return ``True`` if *data_dir* already contains all required ``.pt`` files.
+
+    Checks ``in/`` for non-pure-output tensors and ``out/`` for output tensors.
+    """
+    in_dir = data_dir / "in"
+    out_dir = data_dir / "out"
+    if not in_dir.is_dir() or not out_dir.is_dir():
         return False
-    return all((data_dir / f"{spec.name}.pt").exists() for spec in tensor_specs)
+    for spec in tensor_specs:
+        if spec.is_output:
+            if not (out_dir / f"{spec.name}.pt").exists():
+                return False
+            if spec.init_value is not None and not (in_dir / f"{spec.name}.pt").exists():
+                return False
+        elif not (in_dir / f"{spec.name}.pt").exists():
+            return False
+    return True
 
 
 def _materialize_tensors(tensor_specs: list[TensorSpec]) -> dict[str, torch.Tensor]:
@@ -305,7 +338,11 @@ def _init_expr(
     emission before ``generate_inputs``.
     """
     if use_data_dir:
-        return f'torch.load(_DATA_DIR / "{spec.name}.pt", weights_only=True)'
+        if spec.is_output and spec.init_value is None:
+            dtype_str = _torch_dtype_str(spec.dtype)
+            shape_str = repr(tuple(spec.shape))
+            return f"torch.zeros({shape_str}, dtype={dtype_str})"
+        return f'torch.load(_DATA_DIR / "in" / "{spec.name}.pt", weights_only=True)'
 
     dtype_str = _torch_dtype_str(spec.dtype)
     shape_str = repr(tuple(spec.shape))

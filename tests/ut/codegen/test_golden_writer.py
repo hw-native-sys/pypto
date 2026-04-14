@@ -331,7 +331,7 @@ class TestDataFileMode:
     """Tests for data-file persistence mode (data_dir parameter)."""
 
     def test_golden_source_uses_torch_load(self, tmp_path):
-        """All tensor init expressions use torch.load when data_dir is set."""
+        """Input tensors use torch.load from in/, pure outputs use torch.zeros."""
         specs = [
             TensorSpec("a", [4], torch.float32, init_value=1.0),
             TensorSpec("out", [4], torch.float32, is_output=True),
@@ -344,10 +344,10 @@ class TestDataFileMode:
             data_dir=tmp_path,
         )
 
-        assert 'torch.load(_DATA_DIR / "a.pt"' in src
-        assert 'torch.load(_DATA_DIR / "out.pt"' in src
+        assert 'torch.load(_DATA_DIR / "in" / "a.pt"' in src
+        assert "torch.zeros" in src
         assert "torch.full" not in src
-        assert "torch.zeros" not in src
+        assert 'torch.load(_DATA_DIR / "in" / "out.pt"' not in src
 
     def test_explicit_data_dir_uses_absolute_path(self, tmp_path):
         """Explicit data_dir generates _DATA_DIR with absolute path."""
@@ -376,7 +376,7 @@ class TestDataFileMode:
 
         assert '_DATA_DIR = Path(__file__).parent / "data"' in src
         assert "from pathlib import Path" in src
-        assert 'torch.load(_DATA_DIR / "x.pt"' in src
+        assert 'torch.load(_DATA_DIR / "in" / "x.pt"' in src
 
     def test_no_data_dir_legacy_mode(self):
         """_DATA_DIR is absent when data_dir is None (legacy mode)."""
@@ -399,7 +399,7 @@ class TestDataFileMode:
         assert "torch.load" not in src
 
     def test_write_golden_creates_data_dir(self, tmp_path):
-        """write_golden creates data/ directory with .pt files."""
+        """write_golden creates data/in/ and data/out/ directories with .pt files."""
         specs = [
             TensorSpec("a", [8], torch.float32, init_value=torch.randn),
             TensorSpec("b", [8], torch.float32, init_value=2.0),
@@ -408,11 +408,14 @@ class TestDataFileMode:
         golden_path = tmp_path / "golden.py"
         write_golden(specs, _dummy_golden, golden_path)
 
-        data_dir = tmp_path / "data"
-        assert data_dir.is_dir()
-        assert (data_dir / "a.pt").exists()
-        assert (data_dir / "b.pt").exists()
-        assert (data_dir / "out.pt").exists()
+        in_dir = tmp_path / "data" / "in"
+        out_dir = tmp_path / "data" / "out"
+        assert in_dir.is_dir()
+        assert out_dir.is_dir()
+        assert (in_dir / "a.pt").exists()
+        assert (in_dir / "b.pt").exists()
+        assert not (in_dir / "out.pt").exists()
+        assert (out_dir / "out.pt").exists()
 
     def test_write_golden_roundtrip(self, tmp_path):
         """Generated golden.py is executable and loads persisted data."""
@@ -436,6 +439,11 @@ class TestDataFileMode:
         out_tensor = result[1][1]
         assert torch.equal(out_tensor, torch.zeros(4, dtype=torch.float32))
 
+        out_dir = tmp_path / "data" / "out"
+        assert out_dir.is_dir()
+        golden_out = torch.load(out_dir / "out.pt", weights_only=True)
+        assert torch.equal(golden_out, torch.full((4,), 9.0, dtype=torch.float32))
+
     def test_write_golden_large_tensor(self, tmp_path):
         """Large tensors (>100 elements) work in data-file mode."""
         large = torch.arange(0, 200, dtype=torch.float32)
@@ -444,12 +452,16 @@ class TestDataFileMode:
             TensorSpec("out", [200], torch.float32, is_output=True),
         ]
         golden_path = tmp_path / "golden.py"
-        write_golden(specs, _dummy_golden, golden_path)
 
-        data_dir = tmp_path / "data"
-        assert (data_dir / "big.pt").exists()
+        def golden_big(tensors, params=None):
+            tensors["out"][:] = tensors["big"] * 2
 
-        loaded = torch.load(data_dir / "big.pt", weights_only=True)
+        write_golden(specs, golden_big, golden_path)
+
+        in_dir = tmp_path / "data" / "in"
+        assert (in_dir / "big.pt").exists()
+
+        loaded = torch.load(in_dir / "big.pt", weights_only=True)
         assert torch.equal(loaded, large)
 
     def test_write_golden_random_factory_persisted(self, tmp_path):
@@ -459,9 +471,13 @@ class TestDataFileMode:
             TensorSpec("out", [16], torch.float32, is_output=True),
         ]
         golden_path = tmp_path / "golden.py"
-        write_golden(specs, _dummy_golden, golden_path)
 
-        saved = torch.load(tmp_path / "data" / "r.pt", weights_only=True)
+        def golden_r(tensors, params=None):
+            tensors["out"][:] = tensors["r"] * 2
+
+        write_golden(specs, golden_r, golden_path)
+
+        saved = torch.load(tmp_path / "data" / "in" / "r.pt", weights_only=True)
 
         src = golden_path.read_text(encoding="utf-8")
         namespace: dict[str, object] = {"__file__": str(golden_path)}
@@ -507,16 +523,19 @@ class TestDataFileMode:
         )
 
         assert f'_DATA_DIR = Path("{ext_dir.resolve()}")' in src
-        assert 'torch.load(_DATA_DIR / "a.pt"' in src
+        assert 'torch.load(_DATA_DIR / "in" / "a.pt"' in src
         assert "from pathlib import Path" in src
 
     def test_write_golden_reuses_existing_data_dir(self, tmp_path):
         """write_golden with existing data_dir reuses files without regeneration."""
         ext_dir = tmp_path / "ext"
-        ext_dir.mkdir()
+        in_dir = ext_dir / "in"
+        out_dir = ext_dir / "out"
+        in_dir.mkdir(parents=True)
+        out_dir.mkdir(parents=True)
         expected = torch.full((4,), 7.0, dtype=torch.float32)
-        torch.save(expected, ext_dir / "a.pt")
-        torch.save(torch.zeros(4, dtype=torch.float32), ext_dir / "out.pt")
+        torch.save(expected, in_dir / "a.pt")
+        torch.save(torch.zeros(4, dtype=torch.float32), out_dir / "out.pt")
 
         golden_path = tmp_path / "out" / "golden.py"
         golden_path.parent.mkdir()
@@ -546,9 +565,11 @@ class TestDataFileMode:
         ]
         write_golden(specs, _dummy_golden, golden_path, data_dir=ext_dir)
 
-        assert ext_dir.is_dir()
-        assert (ext_dir / "a.pt").exists()
-        assert (ext_dir / "out.pt").exists()
+        assert (ext_dir / "in").is_dir()
+        assert (ext_dir / "out").is_dir()
+        assert (ext_dir / "in" / "a.pt").exists()
+        assert not (ext_dir / "in" / "out.pt").exists()
+        assert (ext_dir / "out" / "out.pt").exists()
         assert not (tmp_path / "data").exists()
 
         src = golden_path.read_text(encoding="utf-8")
@@ -559,6 +580,91 @@ class TestDataFileMode:
         result = namespace["generate_inputs"](None)
         a_tensor = result[0][1]
         assert torch.equal(a_tensor, torch.full((4,), 3.0, dtype=torch.float32))
+
+    def test_inout_tensor_in_both_dirs(self, tmp_path):
+        """Inout tensor (is_output=True, init_value set) appears in both in/ and out/."""
+
+        def golden_with_inout(tensors, params=None):
+            tensors["acc"][:] = tensors["a"] + tensors["acc"]
+
+        specs = [
+            TensorSpec("a", [4], torch.float32, init_value=2.0),
+            TensorSpec("acc", [4], torch.float32, init_value=1.0, is_output=True),
+        ]
+        golden_path = tmp_path / "golden.py"
+        write_golden(specs, golden_with_inout, golden_path)
+
+        in_dir = tmp_path / "data" / "in"
+        out_dir = tmp_path / "data" / "out"
+        assert (in_dir / "a.pt").exists()
+        assert (in_dir / "acc.pt").exists()
+        assert (out_dir / "acc.pt").exists()
+
+        in_acc = torch.load(in_dir / "acc.pt", weights_only=True)
+        assert torch.equal(in_acc, torch.full((4,), 1.0, dtype=torch.float32))
+
+        out_acc = torch.load(out_dir / "acc.pt", weights_only=True)
+        assert torch.equal(out_acc, torch.full((4,), 3.0, dtype=torch.float32))
+
+        src = golden_path.read_text(encoding="utf-8")
+        assert 'torch.load(_DATA_DIR / "in" / "a.pt"' in src
+        assert 'torch.load(_DATA_DIR / "in" / "acc.pt"' in src
+
+    def test_pure_output_not_in_input_dir(self, tmp_path):
+        """Pure output tensors must not have files in data/in/."""
+
+        def golden_xy(tensors, params=None):
+            tensors["y"][:] = tensors["x"] * 5
+
+        specs = [
+            TensorSpec("x", [4], torch.float32, init_value=1.0),
+            TensorSpec("y", [4], torch.float32, is_output=True),
+        ]
+        golden_path = tmp_path / "golden.py"
+        write_golden(specs, golden_xy, golden_path)
+
+        in_dir = tmp_path / "data" / "in"
+        out_dir = tmp_path / "data" / "out"
+        assert (in_dir / "x.pt").exists()
+        assert not (in_dir / "y.pt").exists()
+        assert (out_dir / "y.pt").exists()
+
+    def test_repeated_runs_reuse_data_dir(self, tmp_path):
+        """Multiple write_golden calls with same data_dir reuse data, skipping golden_fn."""
+        data_dir = tmp_path / "shared_data"
+        specs = [
+            TensorSpec("a", [4], torch.float32, init_value=torch.randn),
+            TensorSpec("out", [4], torch.float32, is_output=True),
+        ]
+
+        call_log: list[int] = []
+
+        def counting_golden(tensors, params=None):
+            call_log.append(1)
+            tensors["out"][:] = tensors["a"] * 3
+
+        golden_path_1 = tmp_path / "run1" / "golden.py"
+        golden_path_1.parent.mkdir()
+        write_golden(specs, counting_golden, golden_path_1, data_dir=data_dir)
+        assert len(call_log) == 1
+
+        saved_a = torch.load(data_dir / "in" / "a.pt", weights_only=True)
+        saved_out = torch.load(data_dir / "out" / "out.pt", weights_only=True)
+
+        golden_path_2 = tmp_path / "run2" / "golden.py"
+        golden_path_2.parent.mkdir()
+        write_golden(specs, counting_golden, golden_path_2, data_dir=data_dir)
+        assert len(call_log) == 1
+
+        assert torch.equal(torch.load(data_dir / "in" / "a.pt", weights_only=True), saved_a)
+        assert torch.equal(torch.load(data_dir / "out" / "out.pt", weights_only=True), saved_out)
+
+        for gp in (golden_path_1, golden_path_2):
+            src = gp.read_text(encoding="utf-8")
+            ns: dict[str, object] = {"__file__": str(gp)}
+            exec(compile(src, str(gp), "exec"), ns)  # noqa: S102
+            result = ns["generate_inputs"](None)
+            assert torch.equal(result[0][1], saved_a)
 
 
 if __name__ == "__main__":

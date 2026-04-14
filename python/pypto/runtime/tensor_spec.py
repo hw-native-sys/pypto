@@ -59,7 +59,7 @@ class TensorSpec:
         Returns:
             Initialised tensor with the requested shape and dtype.
         """
-        if self.init_value is None or self.is_output:
+        if self.init_value is None:
             return torch.zeros(self.shape, dtype=self.dtype)
         if isinstance(self.init_value, (int, float)):
             return torch.full(self.shape, self.init_value, dtype=self.dtype)
