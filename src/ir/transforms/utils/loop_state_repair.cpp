@@ -267,6 +267,16 @@ void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<const Var
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       def_map[assign->var_.get()] = stmt;
     }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      BuildDefMap(FlattenBody(for_stmt->body_), def_map);
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      BuildDefMap(FlattenBody(if_stmt->then_body_), def_map);
+      if (if_stmt->else_body_.has_value()) {
+        BuildDefMap(FlattenBody(if_stmt->else_body_.value()), def_map);
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      BuildDefMap(FlattenBody(while_stmt->body_), def_map);
+    }
   }
 }
 

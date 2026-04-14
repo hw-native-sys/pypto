@@ -3131,6 +3131,143 @@ class TestDCERegression:
         # tpop_from_aic must appear before the add that uses its result
         assert aiv_str.index("pl.tile.tpop_from_aic") < aiv_str.index("pl.tile.add(")
 
+    def test_nested_loop_init_value_defs_pulled_into_split_body(self):
+        """Regression for issue #977: nested loop-local init-value defs must be
+        available in the split AIC body after ExpandMixedKernel.
+
+        Pattern: outer loop contains a CUBE seed matmul followed by an inner
+        loop with init_values referencing it.  All loads target Mat so the AIC
+        body keeps them directly (no boundary tpop indirection), making the
+        expected AIC straightforward to express in DSL form.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for ob in pl.range(2):
+                    seed_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    seed_left = pl.move(seed_mat, target_memory=pl.MemorySpace.Left)
+                    w_seed_mat = pl.load(w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    w_seed_right = pl.move(w_seed_mat, target_memory=pl.MemorySpace.Right)
+                    acc_init = pl.matmul(seed_left, w_seed_right)
+                    for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
+                        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                        w_mat = pl.load(w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                        w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                        acc_next = pl.matmul_acc(acc_iter, x_left, w_right)
+                        acc_out = pl.yield_(acc_next)
+                    acc_vec = pl.move(
+                        acc_out,
+                        target_memory=pl.MemorySpace.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
+                    out_0 = pl.store(acc_vec, [0, 0], out_0)
+                return out_0
+
+        After = _expand(Before)
+
+        @pl.program
+        class ExpectedAIC:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                for ob in pl.range(2):
+                    seed_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    seed_left = pl.move(seed_mat, target_memory=pl.MemorySpace.Left)
+                    w_seed_mat = pl.load(w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                    w_seed_right = pl.move(w_seed_mat, target_memory=pl.MemorySpace.Right)
+                    acc_init = pl.matmul(seed_left, w_seed_right)
+                    for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
+                        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                        w_mat = pl.load(w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                        w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                        acc_next = pl.matmul_acc(acc_iter, x_left, w_right)
+                        acc_out = pl.yield_(acc_next)
+                    pl.tpush_to_aiv(acc_out, split=0)
+
+        _assert_function_equal(After, ExpectedAIC, "main_incore_0_aic")
+
+    def test_nested_loop_vector_init_value_pulled_into_aic(self):
+        """Regression for issue #977: VECTOR init-value defined inside an outer
+        loop must be pulled back into the AIC body for a surviving iter_arg.
+
+        This is the actual Qwen3Scope1 failure pattern: tile.full creates a
+        Vec-typed zero accumulator inside an outer loop, then an inner loop
+        uses it as init_values for matmul_acc.  BuildCoreBody drops the VECTOR
+        tile.full from AIC, and FixupIterArgInitValues must pull its definition
+        chain from original_def_map -- which requires BuildDefMap to recurse
+        into nested loop bodies.
+
+        Uses PassContext(verification_level=NONE) because the Vec-typed init
+        and Acc-typed yield from matmul_acc intentionally mismatch at this IR
+        stage; in a full pipeline, NormalizeStmtStructure resolves this before
+        ExpandMixedKernel.  String assertions are used instead of structural
+        equality for the same reason.
+
+        Expected AIC structure (for reference):
+
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(self, x, w, out_0):
+                for ob in pl.range(2):
+                    acc_init = pl.tile.full([16, 64], dtype=pl.FP32, value=0.0)
+                    for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
+                        ...  # loads, moves, matmul_acc
+                        acc_out = pl.yield_(acc_next)
+                    pl.tpush_to_aiv(acc_out, split=0)
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                for ob in pl.range(2):
+                    acc_init = pl.tile.full([16, 64], dtype=pl.FP32, value=0.0)
+                    for kb, (acc_iter,) in pl.range(2, init_values=(acc_init,)):
+                        x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                        x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                        w_mat = pl.load(w, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                        w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                        acc_next = pl.matmul_acc(acc_iter, x_left, w_right)
+                        acc_out = pl.yield_(acc_next)
+                    acc_vec = pl.move(
+                        acc_out,
+                        target_memory=pl.MemorySpace.Vec,
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.none_box,
+                    )
+                    out_0 = pl.store(acc_vec, [0, 0], out_0)
+                return out_0
+
+        with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+            After = _expand(Before)
+
+        aic_func = After.get_function("main_incore_0_aic")
+        assert aic_func is not None
+
+        aic_str = aic_func.as_python()
+        assert "init_values=" in aic_str, "alive iter_arg must keep init_values"
+        assert "tile.matmul_acc" in aic_str
+        assert "tile.tpush_to_aiv" in aic_str
+        assert "tile.full" in aic_str, "nested VECTOR init-value def must be pulled into AIC body"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
