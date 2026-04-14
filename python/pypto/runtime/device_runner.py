@@ -29,13 +29,12 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
-import fcntl
 import importlib.util
 import logging
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -162,20 +161,8 @@ def _get_pto_isa_clone_path() -> Path:
     return Path(__file__).parent.parent.parent.parent / "_deps" / "pto-isa"
 
 
-@contextmanager
-def _pto_isa_lock(clone_path: Path) -> Iterator[None]:
-    """Acquire an exclusive file lock for PTO-ISA operations on *clone_path*."""
-    lock_path = clone_path.parent / ".pto-isa.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        yield
-
-
 def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https") -> str | None:
     """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
-
-    Uses a file lock to prevent parallel processes from racing on the clone.
 
     Args:
         commit: If provided, checkout this specific commit.
@@ -187,14 +174,11 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
     existing_root = os.environ.get("PTO_ISA_ROOT")
     if existing_root:
         if commit:
-            # Still need to checkout the requested commit even if PTO_ISA_ROOT is set
-            with _pto_isa_lock(Path(existing_root)):
-                _checkout_pto_isa_commit(Path(existing_root), commit)
+            _checkout_pto_isa_commit(Path(existing_root), commit)
         return existing_root
 
     clone_path = _get_pto_isa_clone_path()
-    with _pto_isa_lock(clone_path):
-        return _ensure_pto_isa_root_locked(clone_path, commit=commit, clone_protocol=clone_protocol)
+    return _ensure_pto_isa_root_locked(clone_path, commit=commit, clone_protocol=clone_protocol)
 
 
 def _ensure_pto_isa_root_locked(
