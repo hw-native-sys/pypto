@@ -609,7 +609,10 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
   std::optional<int> core_num = std::nullopt;
   auto core_num_obj = GetOptionalFieldObj(fields_obj, "core_num", ctx);
   if (core_num_obj.has_value() && core_num_obj->type != msgpack::type::NIL) {
-    auto raw = core_num_obj->via.i64;
+    CHECK(core_num_obj->type == msgpack::type::POSITIVE_INTEGER ||
+          core_num_obj->type == msgpack::type::NEGATIVE_INTEGER)
+        << "core_num must be an integer, got msgpack type " << static_cast<int>(core_num_obj->type);
+    auto raw = core_num_obj->as<int64_t>();
     CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
         << "core_num must be a positive integer that fits in int, got " << raw;
     core_num = static_cast<int>(raw);
@@ -619,7 +622,9 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
   std::optional<bool> sync_start = std::nullopt;
   auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
   if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
-    sync_start = sync_start_obj->via.boolean;
+    CHECK(sync_start_obj->type == msgpack::type::BOOLEAN)
+        << "sync_start must be a bool, got msgpack type " << static_cast<int>(sync_start_obj->type);
+    sync_start = sync_start_obj->as<bool>();
   }
 
   // Deserialize body

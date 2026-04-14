@@ -316,7 +316,6 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   Span combined_span(begin_span.filename_, begin_span.begin_line_, begin_span.begin_column_,
                      end_span.begin_line_, end_span.begin_column_);
 
-  // Pop context before ScopeStmt construction (which may throw on validation)
   auto scope_kind = scope_ctx->GetScopeKind();
   auto level = scope_ctx->GetLevel();
   auto role = scope_ctx->GetRole();
@@ -324,11 +323,12 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   auto name_hint = scope_ctx->GetNameHint();
   auto core_num = scope_ctx->GetCoreNum();
   auto sync_start = scope_ctx->GetSyncStart();
-  context_stack_.pop_back();
 
-  // Create scope statement
+  // Create scope statement before popping context so that if construction throws
+  // (e.g. validation CHECK fails) the builder state stays consistent.
   auto scope_stmt = std::make_shared<ScopeStmt>(scope_kind, body, combined_span, level, role, split,
                                                 std::move(name_hint), core_num, sync_start);
+  context_stack_.pop_back();
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {

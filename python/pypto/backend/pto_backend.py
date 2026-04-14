@@ -365,27 +365,23 @@ def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
     (defined in ``intrinsic.h``), so the wrapper needs a macro bridge.
     """
 
-    def _expr_contains_spmd_op(expr: _ir_core.Expr) -> bool:
-        """Recursively check if an expression tree contains SPMD block ops."""
-        if isinstance(expr, _ir_core.Call):
-            op = getattr(expr, "op", None)
-            if isinstance(op, _ir_core.Op) and op.name in _SPMD_BLOCK_OPS:
-                return True
-            for arg in expr.args:
-                if _expr_contains_spmd_op(arg):
-                    return True
-        return False
+    class _SpmdOpFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.found = False
 
-    stmts = _ir_core.flatten_to_stmts(func.body)
-    for stmt in stmts:
-        expr = None
-        if isinstance(stmt, _ir_core.EvalStmt):
-            expr = stmt.expr
-        elif isinstance(stmt, _ir_core.AssignStmt):
-            expr = stmt.value
-        if expr is not None and _expr_contains_spmd_op(expr):
-            return True
-    return False
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if self.found:
+                return
+            ir_op = getattr(op, "op", None)
+            if isinstance(ir_op, _ir_core.Op) and ir_op.name in _SPMD_BLOCK_OPS:
+                self.found = True
+                return
+            super().visit_call(op)
+
+    finder = _SpmdOpFinder()
+    finder.visit_stmt(func.body)
+    return finder.found
 
 
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:

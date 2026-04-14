@@ -134,9 +134,10 @@ program_expanded = expand_pass(program)
  11. 如果拆分后的函数体包含跨核 tile 操作，且尚未带有 setup，
       则推导并 prepend reserve/import/initialize_pipe 前缀
  12. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
- 13. 如果仍有非 Group 调用者需要保留原始函数名
-     （例如 standalone Spmd 包装）：同时创建 Group 函数（调用 AIC 和 AIV）
- 14. 如果只有已有 Group 调用者：跳过额外的 Group 包装
+ 13. 如果满足以下任一条件，同时创建 Group 函数（调用 AIC 和 AIV）：
+     - 仍有非 Group 调用者需要保留原始函数名（`needs_preserved_name`，例如 standalone Spmd 包装）
+     - 尚不存在 Group 调用者（`!has_group_caller`）
+ 14. 如果已存在 Group 调用者且无需保留名称：跳过额外的 Group 包装
 
 阶段 3 — 改写 Group 调用者：
   对于每个调用了已拆分 InCore 的 Group 函数，将 InCore 调用替换为

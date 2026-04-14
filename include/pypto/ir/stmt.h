@@ -768,6 +768,13 @@ class ScopeStmt : public Stmt {
       CHECK(scope_kind == ScopeKind::Spmd)
           << "core_num/sync_start are only valid on Spmd scopes, got " << ScopeKindToString(scope_kind);
     }
+    if (scope_kind == ScopeKind::Spmd) {
+      CHECK(core_num_.has_value()) << "Spmd scope requires core_num";
+      // Normalize sync_start: treat absent as false for canonical representation.
+      if (!sync_start_.has_value()) {
+        sync_start_ = false;
+      }
+    }
     if (core_num_.has_value()) {
       CHECK(*core_num_ > 0) << "core_num must be positive, got " << *core_num_;
     }

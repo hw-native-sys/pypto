@@ -49,7 +49,7 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
             << "Only one pl.spmd() block is allowed per cluster scope";
         core_num = op->core_num_;
         sync_start = op->sync_start_;
-        return op->body_;
+        return VisitStmt(op->body_);
       }
       return IRMutator::VisitStmt_(op);
     }
@@ -111,10 +111,9 @@ Pass OutlineClusterScopes() {
       }
       type_collector.VisitStmt(func->body_);
 
-      outline_utils::ScopeOutliner cluster_outliner(func->name_, type_collector.var_types,
-                                                    type_collector.var_objects, type_collector.known_names,
-                                                    ScopeKind::Cluster, FunctionType::Group, "_cluster_",
-                                                    program);
+      outline_utils::ScopeOutliner cluster_outliner(
+          func->name_, type_collector.var_types, type_collector.var_objects, type_collector.known_names,
+          ScopeKind::Cluster, FunctionType::Group, "_cluster_", program);
       auto body_after_cluster = cluster_outliner.VisitStmt(func->body_);
 
       const auto& cluster_outlined = cluster_outliner.GetOutlinedFunctions();
@@ -130,10 +129,20 @@ Pass OutlineClusterScopes() {
       }
       refreshed_collector.VisitStmt(body_after_cluster);
 
+      // Build a lookup program that includes both the original functions and the
+      // newly outlined cluster (Group) functions, so that spmd_outliner can resolve
+      // callees created during the cluster pass and infer correct param directions.
+      std::vector<FunctionPtr> lookup_functions;
+      lookup_functions.reserve(program->functions_.size() + cluster_outlined.size());
+      for (const auto& [_, existing] : program->functions_) {
+        lookup_functions.push_back(existing);
+      }
+      lookup_functions.insert(lookup_functions.end(), cluster_outlined.begin(), cluster_outlined.end());
+      auto lookup_program = std::make_shared<Program>(lookup_functions, program->name_, program->span_);
+
       outline_utils::ScopeOutliner spmd_outliner(
           func->name_, refreshed_collector.var_types, refreshed_collector.var_objects,
-          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Spmd, "_spmd_",
-          program);
+          refreshed_collector.known_names, ScopeKind::Spmd, FunctionType::Spmd, "_spmd_", lookup_program);
       auto body_after_spmd = spmd_outliner.VisitStmt(body_after_cluster);
 
       const auto& spmd_outlined = spmd_outliner.GetOutlinedFunctions();

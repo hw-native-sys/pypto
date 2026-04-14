@@ -718,15 +718,13 @@ class ScopeOutliner : public IRMutator {
 
     if (!program_) return directions;
 
-    // Find the first function call in the body
+    // Collect all GlobalVar function calls in the body to infer directions across all of them.
     class CallFinder : public IRVisitor {
      public:
-      CallPtr found_call;
+      std::vector<CallPtr> found_calls;
       void VisitExpr_(const CallPtr& call) override {
-        if (found_call) return;
         if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
-          found_call = call;
-          return;
+          found_calls.push_back(call);
         }
         IRVisitor::VisitExpr_(call);
       }
@@ -734,13 +732,7 @@ class ScopeOutliner : public IRMutator {
 
     CallFinder finder;
     finder.VisitStmt(body);
-    if (!finder.found_call) return directions;
-
-    auto gv = std::dynamic_pointer_cast<const GlobalVar>(finder.found_call->op_);
-    if (!gv) return directions;
-
-    auto callee = program_->GetFunction(gv->name_);
-    if (!callee) return directions;
+    if (finder.found_calls.empty()) return directions;
 
     // Build input_var pointer → index map
     std::unordered_map<const Var*, size_t> var_to_idx;
@@ -748,18 +740,24 @@ class ScopeOutliner : public IRMutator {
       var_to_idx[input_vars[i].get()] = i;
     }
 
-    // Map callee's directions to input_vars via the call arguments
-    const auto& call_args = finder.found_call->args_;
-    const auto& callee_dirs = callee->param_directions_;
-    for (size_t arg_idx = 0; arg_idx < call_args.size() && arg_idx < callee_dirs.size(); ++arg_idx) {
-      auto arg_var = As<Var>(call_args[arg_idx]);
-      if (!arg_var) continue;
-      auto it = var_to_idx.find(arg_var.get());
-      if (it == var_to_idx.end()) continue;
-      // Prefer Out/InOut over In
-      ParamDirection d = callee_dirs[arg_idx];
-      if (d == ParamDirection::Out || d == ParamDirection::InOut) {
-        directions[it->second] = d;
+    // Merge directions from all calls, preferring Out/InOut over In
+    for (const auto& call : finder.found_calls) {
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+      if (!gv) continue;
+      auto callee = program_->GetFunction(gv->name_);
+      if (!callee) continue;
+      const auto& call_args = call->args_;
+      const auto& callee_dirs = callee->param_directions_;
+      for (size_t arg_idx = 0; arg_idx < call_args.size() && arg_idx < callee_dirs.size(); ++arg_idx) {
+        auto arg_var = As<Var>(call_args[arg_idx]);
+        if (!arg_var) continue;
+        auto it = var_to_idx.find(arg_var.get());
+        if (it == var_to_idx.end()) continue;
+        // Prefer Out/InOut over In
+        ParamDirection d = callee_dirs[arg_idx];
+        if (d == ParamDirection::Out || d == ParamDirection::InOut) {
+          directions[it->second] = d;
+        }
       }
     }
 

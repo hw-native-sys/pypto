@@ -101,6 +101,7 @@ class Before:
 ```python
 @pl.program
 class After:
+    # kernel definition unchanged — omitted for brevity
     @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4, "sync_start": True})
     def main_spmd_0(self, x: pl.Tensor[[64], pl.FP32],
                     out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:

@@ -2112,7 +2112,7 @@ class ASTParser:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(core_num=N)",
+                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(core_num=4):",
                     )
             scope_kind = scope_kind_map[func_attr]
             span = self.span_tracker.get_span(stmt)
@@ -2190,7 +2190,7 @@ class ASTParser:
             )
         # Validate body is exactly one statement that is a function call
         spmd_hint = (
-            "The SPMD scope should wrap a single kernel call: "
+            "The SPMD scope should wrap a single function call: "
             "'with pl.spmd(core_num=4):\\n    out = self.kernel(a, b, out)'"
         )
         if len(stmt.body) != 1:

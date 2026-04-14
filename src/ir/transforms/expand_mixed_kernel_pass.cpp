@@ -877,10 +877,10 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
   }
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), group_func->span_);
-  auto result =
-      std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
-                                 group_func->return_types_, new_body, group_func->span_, group_func->func_type_,
-                                 group_func->level_, group_func->role_, group_func->attrs_);
+  auto result = std::make_shared<Function>(group_func->name_, group_func->params_,
+                                           group_func->param_directions_, group_func->return_types_, new_body,
+                                           group_func->span_, group_func->func_type_, group_func->level_,
+                                           group_func->role_, group_func->attrs_);
   return result;
 }
 

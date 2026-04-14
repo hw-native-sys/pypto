@@ -349,22 +349,22 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
   std::vector<ParamDirection> directions(group_func->params_.size(), ParamDirection::In);
   if (!program) return directions;
 
+  // Collect all inner (non-Group, non-Orchestration, non-Opaque) kernel calls.
+  // Group bodies from OutlineClusterScopes contain only top-level InCore calls,
+  // but we walk the whole body to be safe.
   class InnerCallFinder : public IRVisitor {
    public:
     explicit InnerCallFinder(const ProgramPtr& program) : program_(program) {}
     const ProgramPtr& program_;
-    CallPtr inner_call;
-    FunctionPtr inner_callee;
+    std::vector<std::pair<CallPtr, FunctionPtr>> inner_calls;
 
    protected:
     void VisitExpr_(const CallPtr& call) override {
-      if (inner_call) return;
       if (auto gv = As<GlobalVar>(call->op_)) {
         auto callee = program_->GetFunction(gv->name_);
         if (callee && callee->func_type_ != FunctionType::Group &&
             callee->func_type_ != FunctionType::Orchestration && callee->func_type_ != FunctionType::Opaque) {
-          inner_call = call;
-          inner_callee = callee;
+          inner_calls.emplace_back(call, callee);
           return;
         }
       }
@@ -374,7 +374,7 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
 
   InnerCallFinder finder(program);
   finder.VisitStmt(group_func->body_);
-  if (!finder.inner_call || !finder.inner_callee) {
+  if (finder.inner_calls.empty()) {
     return directions;
   }
 
@@ -383,18 +383,20 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
     param_to_index[group_func->params_[i].get()] = i;
   }
 
-  const auto& inner_args = finder.inner_call->args_;
-  const auto& inner_dirs = finder.inner_callee->param_directions_;
-  for (size_t arg_idx = 0; arg_idx < inner_args.size() && arg_idx < inner_dirs.size(); ++arg_idx) {
-    auto var = AsVarLike(inner_args[arg_idx]);
-    if (!var) continue;
-    auto it = param_to_index.find(var.get());
-    if (it == param_to_index.end()) continue;
-    ParamDirection d = inner_dirs[arg_idx];
-    // Prefer Out/InOut over In when a param feeds multiple positions.
-    if (d == ParamDirection::Out || d == ParamDirection::InOut ||
-        directions[it->second] == ParamDirection::In) {
-      directions[it->second] = d;
+  // Merge directions across all inner calls, preferring Out/InOut over In.
+  for (const auto& [inner_call, inner_callee] : finder.inner_calls) {
+    const auto& inner_args = inner_call->args_;
+    const auto& inner_dirs = inner_callee->param_directions_;
+    for (size_t arg_idx = 0; arg_idx < inner_args.size() && arg_idx < inner_dirs.size(); ++arg_idx) {
+      auto var = AsVarLike(inner_args[arg_idx]);
+      if (!var) continue;
+      auto it = param_to_index.find(var.get());
+      if (it == param_to_index.end()) continue;
+      ParamDirection d = inner_dirs[arg_idx];
+      if (d == ParamDirection::Out || d == ParamDirection::InOut ||
+          directions[it->second] == ParamDirection::In) {
+        directions[it->second] = d;
+      }
     }
   }
   return directions;
