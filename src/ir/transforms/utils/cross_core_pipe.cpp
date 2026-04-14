@@ -81,6 +81,7 @@ void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size) 
   }
   if (metadata.slot_size_bytes.value() != slot_size) {
     metadata.has_inconsistent_slot_size = true;
+    metadata.slot_size_bytes = std::max(metadata.slot_size_bytes.value(), slot_size);
   }
 }
 
@@ -129,16 +130,14 @@ std::optional<int64_t> GetCommonSlotSizeBytes(const CrossCorePipeMetadata& metad
   std::optional<int64_t> common_slot_size;
   for (const auto* direction : {&metadata.c2v, &metadata.v2c}) {
     if (!direction->has_ops) continue;
-    if (direction->has_inconsistent_slot_size || !direction->slot_size_bytes.has_value()) {
+    if (!direction->slot_size_bytes.has_value()) {
       return std::nullopt;
     }
     if (!common_slot_size.has_value()) {
       common_slot_size = direction->slot_size_bytes;
       continue;
     }
-    if (common_slot_size.value() != direction->slot_size_bytes.value()) {
-      return std::nullopt;
-    }
+    common_slot_size = std::max(common_slot_size.value(), direction->slot_size_bytes.value());
   }
   return common_slot_size;
 }

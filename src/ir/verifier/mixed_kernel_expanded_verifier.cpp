@@ -43,8 +43,6 @@ using core_affinity::kDirMaskV2C;
 using cross_core_pipe::CollectCrossCorePipeMetadata;
 using cross_core_pipe::CollectDominatingPipeSetupMetadata;
 using cross_core_pipe::CrossCorePipeMetadata;
-using cross_core_pipe::FormatObservedSlotSizes;
-using cross_core_pipe::PipeDirectionMetadata;
 using tpop_chain::IsExpectedTpopAssignStmt;
 using tpop_chain::IsTfreeStmt;
 using tpop_chain::StmtReferencesVar;
@@ -304,20 +302,6 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   if (!metadata.HasCrossCoreOps()) return;
   CrossCorePipeMetadata dominating_setup = CollectDominatingPipeSetupMetadata(FlattenBody(func->body_));
 
-  auto report_slot_issue = [&](const std::string& issue, const PipeDirectionMetadata& direction,
-                               const std::string& direction_name) {
-    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-                             "Function '" + func->name_ + "' uses " + direction_name + " cross-core tiles " +
-                                 issue + ": " + FormatObservedSlotSizes(direction.observed_slot_sizes),
-                             func->span_);
-  };
-
-  if (metadata.c2v.has_inconsistent_slot_size) {
-    report_slot_issue("with inconsistent slot sizes", metadata.c2v, "C2V");
-  }
-  if (metadata.v2c.has_inconsistent_slot_size) {
-    report_slot_issue("with inconsistent slot sizes", metadata.v2c, "V2C");
-  }
   if ((metadata.c2v.has_ops && !metadata.c2v.slot_size_bytes.has_value()) ||
       (metadata.v2c.has_ops && !metadata.v2c.slot_size_bytes.has_value())) {
     diagnostics.emplace_back(
@@ -327,19 +311,6 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
             "statically known tile shapes",
         func->span_);
   }
-  if (metadata.c2v.has_ops && metadata.v2c.has_ops && metadata.c2v.slot_size_bytes.has_value() &&
-      metadata.v2c.slot_size_bytes.has_value() &&
-      metadata.c2v.slot_size_bytes.value() != metadata.v2c.slot_size_bytes.value()) {
-    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-                             "Function '" + func->name_ +
-                                 "' uses bidirectional cross-core tiles with different "
-                                 "slot sizes (C2V=" +
-                                 std::to_string(metadata.c2v.slot_size_bytes.value()) +
-                                 ", V2C=" + std::to_string(metadata.v2c.slot_size_bytes.value()) +
-                                 "); single initialize_pipe slot_size is unsupported",
-                             func->span_);
-  }
-
   if (func->func_type_ == FunctionType::AIC) {
     if (!dominating_setup.has_aic_initialize_pipe) {
       diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,

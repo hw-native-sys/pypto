@@ -1746,37 +1746,6 @@ class TestPropertyVerification:
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
 
-    def test_verifier_rejects_inconsistent_bidirectional_slot_sizes(self):
-        """Bidirectional kernels must use a single slot size across both directions."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
-                x_sum = pl.add(x_tile, x_tile)
-                x_sum_mat = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
-                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_sum_left, y_right)
-                z_vec = pl.move(
-                    z_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-        with pytest.raises(Exception, match="single initialize_pipe slot_size is unsupported"):
-            _expand_raw(Before)
-
     def test_verifier_rejects_missing_tfree_for_tpop(self):
         """Cross-core tpop chains must release their slot with a matching tfree."""
 
@@ -1860,6 +1829,50 @@ class TestPropertyVerification:
 
 class TestAutoPipeSetup:
     """Test auto-generated reserve/import/initialize_pipe setup."""
+
+    def test_bidirectional_different_slot_sizes_uses_max(self):
+        """Bidirectional kernels with different per-direction tile sizes use max as slot_size."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sum = pl.add(x_tile, x_tile)
+                x_sum_mat = pl.move(x_sum, target_memory=pl.MemorySpace.Mat)
+                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_sum_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        # V2C: BF16 [16,128] = 4096 bytes; C2V: FP32 [16,128] = 8192 bytes; max = 8192
+        # bidirectional slot_num=4, buffer_size = 8192 * 4 = 32768
+        After = _expand_raw(Before)
+
+        aic_func = After.get_function("main_incore_0_aic")
+        assert aic_func is not None
+        aic_str = aic_func.as_python()
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+
+        assert "dir_mask=3, slot_size=8192" in aic_str
+        assert "dir_mask=3, slot_size=8192" in aiv_str
+        assert "size=32768" in aic_str
+        assert "size=32768" in aiv_str
 
     def test_auto_pipe_setup_inserted_for_c2v_kernel(self):
         """C2V-only kernels should auto-insert import on AIC and reserve on AIV."""
