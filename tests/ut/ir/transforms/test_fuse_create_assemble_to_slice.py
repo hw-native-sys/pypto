@@ -336,38 +336,38 @@ class TestFuseCreateAssembleToSlice:
                         out = pl.assemble(out, chunk, [b, 0, col])
                 return out
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def compute(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 4], pl.FP32]:
+                t: pl.Tile[[2, 4], pl.FP32] = pl.load(x, [0, 0], [2, 4])
+                out_1: pl.Tensor[[2, 4], pl.FP32] = pl.store(t, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[2, 4, 8], pl.FP32]],
+            ) -> pl.Tensor[[2, 4, 8], pl.FP32]:
+                for b in pl.range(2):
+                    for c in pl.range(2):
+                        col = c * 4
+                        chunk: pl.Tensor[[1, 2, 4], pl.FP32] = pl.slice(out, [1, 2, 4], [b, 0, col])
+                        # Use a different name because the DSL rejects reassigning
+                        # chunk (type [1,2,4]) with compute's return (type [2,4]).
+                        # After SSA both programs produce distinct vars anyway, and
+                        # name_hint_ is IgnoreField in structural equality.
+                        _chunk_ret: pl.Tensor[[2, 4], pl.FP32] = self.compute(x, chunk)
+                return out
+
         after = _run_prereqs_and_fuse(Before)
-
-        # After fusion: tensor.create + tensor.assemble should become tensor.slice.
-        ops = _collect_tensor_ops_in_orch(after)
-        assert "tensor.slice" in ops, f"Expected tensor.slice after fusion, got {ops}"
-        assert "tensor.create" not in ops, f"tensor.create should be fused away, got {ops}"
-        assert "tensor.assemble" not in ops, f"tensor.assemble should be fused away, got {ops}"
-
-        # Verify the generated tensor.slice has matching shape/offset ranks (both 3D).
-        class SliceRankChecker(ir_core.IRVisitor):
-            def __init__(self):
-                super().__init__()
-                self.checked = False
-
-            def visit_assign_stmt(self, stmt):
-                if hasattr(stmt.value, "op") and stmt.value.op.name == "tensor.slice":
-                    args = stmt.value.args
-                    shape_rank = len(args[1].elements)
-                    offset_rank = len(args[2].elements)
-                    assert shape_rank == offset_rank, (
-                        f"tensor.slice shape rank ({shape_rank}) != offset rank ({offset_rank})"
-                    )
-                    # shape should be [1, 2, 4] (padded with leading 1)
-                    assert shape_rank == 3, f"Expected rank 3 after padding, got {shape_rank}"
-                    self.checked = True
-                super().visit_assign_stmt(stmt)
-
-        for func in after.functions.values():
-            if func.func_type == ir_core.FunctionType.Orchestration:
-                checker = SliceRankChecker()
-                checker.visit_stmt(func.body)
-                assert checker.checked, "No tensor.slice found in orch function"
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
 
     def test_no_orchestration_function_noop(self):
         """Pass should be a no-op when there are no Orchestration functions."""

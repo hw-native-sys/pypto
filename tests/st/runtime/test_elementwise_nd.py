@@ -162,6 +162,39 @@ class Tile2DStoreTo3DProgram:
         return out
 
 
+@pl.program
+class TensorAssemble2DTo3DProgram:
+    """2D tensor.create assembled into 3D target with shape padding.
+
+    Exercises FuseCreateAssembleToSlice: the pass fuses tensor.create([4, 16])
+    + tensor.assemble(out[2, 4, 16], ..., [b, 0, 0]) into tensor.slice with
+    shape [1, 4, 16] (padded with leading 1 to match target rank).
+    Regression test for #1006.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def compute(
+        self,
+        x: pl.Tensor[[4, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+    ) -> pl.Tensor[[4, 16], pl.FP32]:
+        t: pl.Tile[[4, 16], pl.FP32] = pl.load(x, [0, 0], [4, 16])
+        out = pl.store(t, [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orch(
+        self,
+        x: pl.Tensor[[4, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
+    ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
+        for b in pl.range(2):
+            chunk: pl.Tensor[[4, 16], pl.FP32] = pl.create_tensor([4, 16], dtype=pl.FP32)
+            chunk = self.compute(x, chunk)
+            out = pl.assemble(out, chunk, [b, 0, 0])
+        return out
+
+
 # --- Test Cases ---
 
 
@@ -269,6 +302,31 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
         tensors["out"][1, 2, :] = tensors["a"][0, :] * tensors["b"][0, :]
 
 
+class TensorAssemble2DTo3DTestCase(PTOTestCase):
+    """2D create assembled into 3D target → fused to slice with leading-1 padding (#1006)."""
+
+    __test__ = False
+
+    def __init__(self, *, backend_type: BackendType | None = None, config=None):
+        super().__init__(config, backend_type=backend_type)
+
+    def get_name(self) -> str:
+        return "tensor_assemble_2d_to_3d"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [4, 16], DataType.FP32, init_value=torch.rand),
+            TensorSpec("out", [2, 4, 16], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorAssemble2DTo3DProgram
+
+    def compute_expected(self, tensors, params=None):
+        for b in range(2):
+            tensors["out"][b, :, :] = tensors["x"]
+
+
 # --- Tests ---
 
 
@@ -297,6 +355,12 @@ class TestElementwise4D:
     def test_tile_2d_store_to_3d(self, test_runner, backend):
         """2D tile [1, 16] stored into a 3D tensor [2, 4, 16]."""
         result = test_runner.run(Tile2DStoreTo3DTestCase(backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tensor_assemble_2d_to_3d(self, test_runner, backend):
+        """2D create assembled into 3D target, fused to slice with padding (#1006)."""
+        result = test_runner.run(TensorAssemble2DTo3DTestCase(backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
 

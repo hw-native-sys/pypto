@@ -315,6 +315,12 @@ class FuseCreateAssembleMutator : public IRMutator {
 
     auto slice_call = op_registry.Create("tensor.slice", {target, shape_tuple, offset_tuple}, assign->span_);
 
+    if (offset_ndim > ndim) {
+      auto new_var =
+          std::make_shared<Var>(assign->var_->name_hint_, slice_call->GetType(), assign->var_->span_);
+      var_remap_[assign->var_.get()] = new_var;
+      return std::make_shared<AssignStmt>(new_var, slice_call, assign->span_);
+    }
     return std::make_shared<AssignStmt>(assign->var_, slice_call, assign->span_);
   }
 
