@@ -739,8 +739,8 @@ class TestOutlineNamedIncoreScopes:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(
                 self,
-                a: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
+                a: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
                 return b
@@ -752,7 +752,7 @@ class TestOutlineNamedIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = self.first_kernel(x)
-                b: pl.Tensor[[64], pl.FP32] = self.main_incore_1(a, y)
+                b: pl.Tensor[[64], pl.FP32] = self.main_incore_1(y, a)
                 return b
 
         Before = passes.convert_to_ssa()(Before)
@@ -787,8 +787,8 @@ class TestOutlineNamedIncoreScopes:
             @pl.function(type=pl.FunctionType.InCore)
             def my_kernel_0(
                 self,
-                a: pl.Tensor[[64], pl.FP32],
                 y: pl.Tensor[[64], pl.FP32],
+                a: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 b: pl.Tensor[[64], pl.FP32] = pl.add(y, a)
                 return b
@@ -800,7 +800,7 @@ class TestOutlineNamedIncoreScopes:
                 y: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = self.my_kernel(x)
-                b: pl.Tensor[[64], pl.FP32] = self.my_kernel_0(a, y)
+                b: pl.Tensor[[64], pl.FP32] = self.my_kernel_0(y, a)
                 return b
 
         Before = passes.convert_to_ssa()(Before)

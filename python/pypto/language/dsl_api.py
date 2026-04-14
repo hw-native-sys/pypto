@@ -694,7 +694,7 @@ class ClusterContext:
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
 
-    def __init__(self, name_hint: str = "") -> None:
+    def __init__(self, *, name_hint: str = "") -> None:
         self.name_hint = name_hint
 
     def __enter__(self) -> None:
@@ -713,6 +713,9 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
     share the same physical cluster resources. The OutlineClusterScopes pass
     extracts Cluster scopes into separate Group-typed functions.
 
+    Args:
+        name_hint: Optional name hint for the outlined function.
+
     Returns:
         Context manager for Cluster scope
 
@@ -722,6 +725,63 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
         ...         y = pl.add(x, x)
     """
     return ClusterContext(name_hint=name_hint)
+
+
+class SpmdContext:
+    """Context manager for SPMD dispatch scope.
+
+    The parser recognizes this pattern and creates a ScopeStmt(Spmd).
+    """
+
+    def __init__(
+        self,
+        core_num: int,
+        sync_start: bool = False,
+        name_hint: str = "",
+    ) -> None:
+        self.core_num = core_num
+        self.sync_start = sync_start
+        self.name_hint = name_hint
+
+    def __enter__(self) -> None:
+        pass
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        pass
+
+
+def spmd(
+    *,
+    core_num: int,
+    sync_start: bool = False,
+    name_hint: str = "",
+) -> SpmdContext:
+    """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
+
+    The body must contain exactly one function call. Can be used standalone
+    (creates an implicit cluster) or nested inside pl.cluster().
+
+    Args:
+        core_num: Number of blocks for SPMD dispatch. Must be a positive integer.
+        sync_start: If True, all blocks start execution simultaneously (default: False).
+        name_hint: Optional name hint for the outlined function.
+
+    Returns:
+        Context manager for SPMD scope
+
+    Examples:
+        >>> # Standalone SPMD (pure AIV kernel)
+        >>> with pl.spmd(core_num=4):
+        ...     out = self.kernel(a, b, out)
+        >>>
+        >>> # SPMD inside cluster (mixed kernel)
+        >>> with pl.cluster():
+        ...     with pl.spmd(core_num=4, sync_start=True):
+        ...         out = self.kernel(a, b, out)
+    """
+    if not isinstance(core_num, int) or isinstance(core_num, bool) or core_num <= 0:
+        raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
+    return SpmdContext(core_num=core_num, sync_start=sync_start, name_hint=name_hint)
 
 
 class AtContext:
@@ -838,12 +898,14 @@ __all__ = [
     "auto_incore",
     "at",
     "cluster",
+    "spmd",
     "chunked_loop_optimizer",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",
     "AutoIncoreContext",
     "ClusterContext",
+    "SpmdContext",
     "AtContext",
     "RangeArg",
     "CondArg",

@@ -123,6 +123,12 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
       "system.aic_initialize_pipe", "system.tfree_to_aiv", "system.tpush_to_aiv", "tile.tpush_to_aiv",
       "tile.tpop_from_aiv"};
   if (cube_cross_core_ops.count(name)) return CoreAffinity::CUBE;
+  // SPMD block-index ops: needed on both AIC and AIV under SPMD dispatch
+  static const std::unordered_set<std::string> shared_tile_ops = {
+      "tile.get_block_idx",
+      "tile.get_block_num",
+  };
+  if (shared_tile_ops.count(name)) return CoreAffinity::SHARED;
   if (name.substr(0, 5) == "tile.") return CoreAffinity::VECTOR;
   return CoreAffinity::SHARED;
 }

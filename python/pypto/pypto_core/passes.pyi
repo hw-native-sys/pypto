@@ -335,7 +335,7 @@ def outline_incore_scopes() -> Pass:
     """Create a pass that outlines InCore scopes."""
 
 def outline_cluster_scopes() -> Pass:
-    """Create a pass that outlines Cluster scopes into Group functions."""
+    """Create a pass that outlines Cluster scopes to Group and standalone Spmd scopes to Spmd."""
 
 def outline_hierarchy_scopes() -> Pass:
     """Create a pass that outlines Hierarchy scopes into level/role functions."""

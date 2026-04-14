@@ -1969,6 +1969,63 @@ class TestTensorReadWriteOffsetCodegen:
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
+    def test_standalone_spmd_dispatches_group_with_spmd_launch_spec(self):
+        """Standalone Spmd should remain a wrapper and carry launch spec into Group dispatch."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdMixedProgram:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(core_num=4, sync_start=True):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMixedProgram))
+                )
+            )
+        spmd_func = transformed.get_function("main_spmd_0")
+        group_func = transformed.get_function("kernel")
+        assert spmd_func is not None
+        assert group_func is not None
+        assert spmd_func.func_type == pl.FunctionType.Spmd
+        assert group_func.func_type == pl.FunctionType.Group
+
+        code = _generate_orch_code(transformed)
+
+        assert "MixedKernels mixed_0" in code
+        assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
+        assert "params_t0.launch_spec.set_block_num(4);" in code
+        assert "params_t0.launch_spec.set_require_sync_start(true);" in code
+
 
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""

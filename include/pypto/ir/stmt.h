@@ -159,7 +159,8 @@ enum class ScopeKind : uint8_t {
   InCore = 0,      ///< InCore scope for AICore sub-graphs
   AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
   Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
-  Hierarchy = 3    ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
+  Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
+  Spmd = 4         ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
 };
 
 /**
@@ -249,7 +250,7 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore", "AutoInCore", or "Cluster")
+ * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", or "Spmd")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
@@ -261,6 +262,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "Cluster";
     case ScopeKind::Hierarchy:
       return "Hierarchy";
+    case ScopeKind::Spmd:
+      return "Spmd";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -280,6 +283,8 @@ inline ScopeKind StringToScopeKind(const std::string& str) {
     return ScopeKind::Cluster;
   } else if (str == "Hierarchy") {
     return ScopeKind::Hierarchy;
+  } else if (str == "Spmd") {
+    return ScopeKind::Spmd;
   } else {
     throw pypto::TypeError("Unknown ScopeKind: " + str);
   }
@@ -741,18 +746,31 @@ class ScopeStmt : public Stmt {
    * @param level Hierarchy level (for Hierarchy scopes)
    * @param role Function role (for Hierarchy scopes)
    * @param split Split mode for cross-core transfer (for AutoInCore scopes)
+   * @param core_num Number of SPMD blocks (for Spmd scopes)
+   * @param sync_start Whether to require sync-start for SPMD dispatch
    */
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
             std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-            std::string name_hint = "", std::vector<std::string> leading_comments = {})
+            std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+            std::optional<bool> sync_start = std::nullopt,
+            std::vector<std::string> leading_comments = {})
       : Stmt(std::move(span), std::move(leading_comments)),
         scope_kind_(scope_kind),
         body_(std::move(body)),
         level_(level),
         role_(role),
         split_(split),
-        name_hint_(std::move(name_hint)) {
+        name_hint_(std::move(name_hint)),
+        core_num_(core_num),
+        sync_start_(sync_start) {
     CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
+    if (core_num_.has_value() || sync_start_.has_value()) {
+      CHECK(scope_kind == ScopeKind::Spmd)
+          << "core_num/sync_start are only valid on Spmd scopes, got " << ScopeKindToString(scope_kind);
+    }
+    if (core_num_.has_value()) {
+      CHECK(*core_num_ > 0) << "core_num must be positive, got " << *core_num_;
+    }
   }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScopeStmt; }
@@ -770,6 +788,8 @@ class ScopeStmt : public Stmt {
                                           reflection::UsualField(&ScopeStmt::role_, "role"),
                                           reflection::UsualField(&ScopeStmt::split_, "split"),
                                           reflection::UsualField(&ScopeStmt::name_hint_, "name_hint"),
+                                          reflection::UsualField(&ScopeStmt::core_num_, "core_num"),
+                                          reflection::UsualField(&ScopeStmt::sync_start_, "sync_start"),
                                           reflection::UsualField(&ScopeStmt::body_, "body")));
   }
 
@@ -779,6 +799,8 @@ class ScopeStmt : public Stmt {
   std::optional<Role> role_;        // Function role (nullopt for non-Hierarchy scopes)
   std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
   std::string name_hint_;           // User-provided scope name hint (empty = auto-generate)
+  std::optional<int> core_num_;     // SPMD block count (for Spmd scopes)
+  std::optional<bool> sync_start_;  // Require sync-start for SPMD dispatch
   StmtPtr body_;                    // The nested statements
 };
 

@@ -353,6 +353,41 @@ def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
     return False
 
 
+_SPMD_BLOCK_OPS = frozenset({"tile.get_block_idx", "tile.get_block_num"})
+
+
+def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
+    """Return whether the function uses SPMD block identity ops (get_block_idx/num).
+
+    These ops compile to ccec built-ins that return physical core indices.
+    In the tensormap_and_ringbuffer runtime the logical block index must be
+    read from the dispatch payload via ``get_block_idx(args)`` / ``get_block_num(args)``
+    (defined in ``intrinsic.h``), so the wrapper needs a macro bridge.
+    """
+
+    def _expr_contains_spmd_op(expr: _ir_core.Expr) -> bool:
+        """Recursively check if an expression tree contains SPMD block ops."""
+        if isinstance(expr, _ir_core.Call):
+            op = getattr(expr, "op", None)
+            if isinstance(op, _ir_core.Op) and op.name in _SPMD_BLOCK_OPS:
+                return True
+            for arg in expr.args:
+                if _expr_contains_spmd_op(arg):
+                    return True
+        return False
+
+    stmts = _ir_core.flatten_to_stmts(func.body)
+    for stmt in stmts:
+        expr = None
+        if isinstance(stmt, _ir_core.EvalStmt):
+            expr = stmt.expr
+        elif isinstance(stmt, _ir_core.AssignStmt):
+            expr = stmt.value
+        if expr is not None and _expr_contains_spmd_op(expr):
+            return True
+    return False
+
+
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     """Return whether A2A3 split AIV wrappers must source subblock id from runtime context."""
     split_mode = getattr(func, "split", None)
@@ -394,7 +429,34 @@ def _generate_kernel_header(func: _ir_core.Function) -> str:
 
             """
         )
-    return _KERNEL_HEADER.format(func_name=func.name, subblock_override=subblock_override)
+
+    # SPMD block ops bridge: redirect ccec built-in get_block_idx()/get_block_num()
+    # to runtime intrinsics that read from the dispatch payload (LocalContext).
+    # AICore has no writable static data segment for GM pointers, so we store
+    # the scalar values in [[block_local]] variables (same pattern as subblock bridge).
+    spmd_override = ""
+    if _uses_spmd_block_ops(func):
+        spmd_override = textwrap.dedent(
+            """\
+            #if !defined(__CPU_SIM)
+            #include "intrinsic.h"
+
+            // SPMD runtime bridge: ccec get_block_idx()/get_block_num() return physical
+            // core indices; the runtime dispatches logical indices via LocalContext.
+            // Store scalar values in [[block_local]] and redirect via macros.
+            [[block_local]] static int32_t __pypto_spmd_block_idx;
+            [[block_local]] static int32_t __pypto_spmd_block_num;
+            #define get_block_idx() ((int64_t)__pypto_spmd_block_idx)
+            #define get_block_num() ((int64_t)__pypto_spmd_block_num)
+            #endif
+
+            """
+        )
+
+    return _KERNEL_HEADER.format(
+        func_name=func.name,
+        subblock_override=subblock_override + spmd_override,
+    )
 
 
 def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
@@ -418,12 +480,31 @@ def _generate_kernel_wrapper(func: _ir_core.Function, ptoas_code: str) -> str:
             "#endif\n\n"
         )
 
+    spmd_args_setup = ""
+    if _uses_spmd_block_ops(func):
+        # Use undef/redefine dance: temporarily remove our macros so we can call
+        # the intrinsic.h functions that take args, then restore the macros.
+        spmd_args_setup = (
+            "#if !defined(__CPU_SIM)\n"
+            "    // Read logical SPMD block identity from runtime dispatch payload\n"
+            '    #pragma push_macro("get_block_idx")\n'
+            '    #pragma push_macro("get_block_num")\n'
+            "    #undef get_block_idx\n"
+            "    #undef get_block_num\n"
+            "    __pypto_spmd_block_idx = get_block_idx(args);\n"
+            "    __pypto_spmd_block_num = get_block_num(args);\n"
+            '    #pragma pop_macro("get_block_idx")\n'
+            '    #pragma pop_macro("get_block_num")\n'
+            "#endif\n\n"
+        )
+
     wrapper_func = (
         "// --- Kernel entry point ---\n"
         'extern "C" __aicore__ __attribute__((always_inline)) '
         "void kernel_entry(__gm__ int64_t* args)\n"
         "{\n"
         f"{runtime_subblock_setup}"
+        f"{spmd_args_setup}"
         f"{unpacking_code}\n"
         f"    // Forward to ptoas-generated function\n"
         f"    {func.name}({call_args});\n"

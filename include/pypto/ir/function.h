@@ -45,6 +45,7 @@ namespace ir {
  * - AIC: Cube core kernel (specialized InCore)
  * - AIV: Vector core kernel (specialized InCore)
  * - Group: Co-scheduled group of AIC + AIV kernels
+ * - Spmd: SPMD data-parallel dispatch wrapper
  */
 enum class FunctionType : uint8_t {
   Opaque = 0,         ///< Default: unspecified function type
@@ -52,7 +53,8 @@ enum class FunctionType : uint8_t {
   InCore = 2,         ///< AICore sub-graph execution (unspecialized)
   AIC = 3,            ///< Cube core kernel (specialized InCore)
   AIV = 4,            ///< Vector core kernel (specialized InCore)
-  Group = 5           ///< Co-scheduled group of AIC + AIV kernels
+  Group = 5,          ///< Co-scheduled group of AIC + AIV kernels
+  Spmd = 6            ///< SPMD data-parallel dispatch
 };
 
 /**
@@ -242,6 +244,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "AIV";
     case FunctionType::Group:
       return "Group";
+    case FunctionType::Spmd:
+      return "Spmd";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -272,6 +276,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::AIV;
   } else if (str == "Group") {
     return FunctionType::Group;
+  } else if (str == "Spmd") {
+    return FunctionType::Spmd;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }

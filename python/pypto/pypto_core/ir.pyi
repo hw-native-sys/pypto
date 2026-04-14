@@ -677,6 +677,9 @@ class FunctionType(enum.Enum):
     Group = ...
     """Co-scheduled group of AIC + AIV kernels."""
 
+    Spmd = ...
+    """SPMD data-parallel dispatch."""
+
 class Level(enum.Enum):
     """Hierarchy level in the Linqu machine model.
 
@@ -1780,6 +1783,9 @@ class ScopeKind(enum.Enum):
     Hierarchy = 3
     """Distributed hierarchy scope (uses level/role on ScopeStmt)."""
 
+    Spmd = 4
+    """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
+
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
 
@@ -1810,6 +1816,12 @@ class ScopeStmt(Stmt):
     name_hint: Final[str]
     """User-provided scope name hint (empty string = auto-generate)."""
 
+    core_num: Final[int | None]
+    """SPMD block count (None for single block)."""
+
+    sync_start: Final[bool | None]
+    """Require sync-start for SPMD dispatch (None or False for default)."""
+
     body: Final[Stmt]
     """The nested statements."""
 
@@ -1822,6 +1834,8 @@ class ScopeStmt(Stmt):
         role: Role | None = None,
         split: SplitMode | None = None,
         name_hint: str = "",
+        core_num: int | None = None,
+        sync_start: bool | None = None,
     ) -> None:
         """Create a scope statement.
 
@@ -1833,6 +1847,8 @@ class ScopeStmt(Stmt):
             role: Function role (for Hierarchy scopes)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
             name_hint: User-provided scope name hint (empty = auto-generate)
+            core_num: SPMD block count (for Spmd scopes)
+            sync_start: Require sync-start for SPMD dispatch
         """
 
 class SeqStmts(Stmt):
@@ -2595,6 +2611,8 @@ class IRBuilder:
         role: Role | None = None,
         split: SplitMode | None = None,
         name_hint: str = "",
+        core_num: int | None = None,
+        sync_start: bool | None = None,
     ) -> None:
         """Begin building a scope statement.
 
@@ -2605,6 +2623,8 @@ class IRBuilder:
             role: Hierarchy scope role (default: None)
             split: Split mode for cross-core transfer (default: None)
             name_hint: User-provided scope name hint (default: empty, auto-generated)
+            core_num: SPMD block count (default: None)
+            sync_start: Require sync-start for SPMD dispatch (default: None)
         """
 
     def end_scope(self, end_span: Span) -> ScopeStmt:

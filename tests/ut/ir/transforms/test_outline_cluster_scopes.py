@@ -141,6 +141,68 @@ class TestOutlineClusterScopes:
         # InCore scopes should remain untouched by the cluster pass
         ir.assert_structural_equal(After, Before)
 
+    def test_outline_standalone_spmd_scope(self):
+        """Standalone pl.spmd() should outline to a Spmd wrapper, not a Group."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(core_num=4, sync_start=True):
+                    out = self.kernel(x, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4, "sync_start": True})
+            def main_spmd_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.main_spmd_0(x, out)
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_outline_cluster_in_orchestration_function(self):
         """Test that Cluster scopes in Orchestration functions are also outlined."""
 

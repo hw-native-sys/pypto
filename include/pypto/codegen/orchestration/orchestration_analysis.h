@@ -111,6 +111,8 @@ class BufferRootCollector : public ir::IRVisitor {
  */
 class VarLineageCollector : public ir::IRVisitor {
  public:
+  explicit VarLineageCollector(ir::ProgramPtr program);
+
   std::unordered_map<const ir::Var*, const ir::Var*> var_to_param;
 
   void Initialize(const std::vector<ir::VarPtr>& params);
@@ -127,7 +129,19 @@ class VarLineageCollector : public ir::IRVisitor {
  private:
   [[nodiscard]] const ir::Var* ResolveVar(const ir::Var* var) const;
   [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
+
+  ir::ProgramPtr program_;
 };
+
+/// Compute effective param directions for a Group function.
+///
+/// Group functions produced by the scope outliner have their parameters sorted
+/// alphabetically and all directions set to In. To recover the true
+/// Out/InOut direction, walk the Group body to find its inner kernel call and
+/// map the inner callee's directions back to the Group's parameter positions
+/// via pointer identity of the Var passed as the inner call argument.
+std::vector<ir::ParamDirection> ComputeGroupEffectiveDirections(const ir::FunctionPtr& group_func,
+                                                                const ir::ProgramPtr& program);
 
 }  // namespace codegen
 }  // namespace pypto
