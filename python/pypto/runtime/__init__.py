@@ -36,12 +36,13 @@ Example::
 """
 
 from .runner import RunConfig, RunResult, compile_program, run
-from .tensor_spec import TensorSpec
+from .tensor_spec import ScalarSpec, TensorSpec
 
 __all__ = [
     "run",
     "compile_program",
     "RunConfig",
     "RunResult",
+    "ScalarSpec",
     "TensorSpec",
 ]

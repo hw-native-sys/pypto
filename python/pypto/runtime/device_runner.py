@@ -52,7 +52,6 @@ from .task_interface import (
     make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
     scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
-from .tensor_spec import ScalarSpec, TensorSpec
 
 logger = logging.getLogger(__name__)
 
@@ -552,7 +551,7 @@ def validate_golden(
 # Tensor argument construction
 # ---------------------------------------------------------------------------
 
-# Return type shared by build_orch_args / build_orch_args_from_inputs.
+# Return type for build_orch_args_from_inputs.
 _OrchArgsTuple = tuple[ChipStorageTaskArgs, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 
@@ -592,40 +591,6 @@ def _collect_orch_args(
     return orch_args, all_tensors, inputs, outputs
 
 
-def build_orch_args(
-    tensor_specs: list[TensorSpec],
-    scalar_specs: list[ScalarSpec] | None = None,
-) -> _OrchArgsTuple:
-    """Build ``ChipStorageTaskArgs`` from tensor and scalar specs.
-
-    Creates tensors from *tensor_specs*, adds them to a ``ChipStorageTaskArgs``,
-    then appends any scalar arguments from *scalar_specs*.
-
-    Args:
-        tensor_specs: List of ``TensorSpec`` objects.
-        scalar_specs: Optional list of ``ScalarSpec`` objects for scalar TaskArg
-            parameters.
-
-    Returns:
-        ``(orch_args, all_tensors, inputs, outputs)`` where:
-        - *orch_args*: Ready for ``worker.run()``.
-        - *all_tensors*: All named tensors.
-        - *inputs*: Non-output tensors.
-        - *outputs*: Output tensors.
-    """
-    output_names = {spec.name for spec in tensor_specs if spec.is_output}
-
-    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]] = [
-        (spec.name, spec.create_tensor()) for spec in tensor_specs
-    ]
-    if scalar_specs:
-        for scalar_spec in scalar_specs:
-            ctype_cls = getattr(ctypes, f"c_{scalar_spec.ctype}")
-            items.append((scalar_spec.name, ctype_cls(scalar_spec.value)))
-
-    return _collect_orch_args(items, lambda name: name in output_names)
-
-
 def build_orch_args_from_inputs(
     inputs_result: list[tuple[str, Any]],
     output_names: set[str],
@@ -641,8 +606,7 @@ def build_orch_args_from_inputs(
         output_names: Set of tensor names that are outputs.
 
     Returns:
-        ``(orch_args, all_tensors, inputs, outputs)`` — same layout as
-        :func:`build_orch_args`.
+        ``(orch_args, all_tensors, inputs, outputs)``.
     """
     return _collect_orch_args(
         inputs_result,

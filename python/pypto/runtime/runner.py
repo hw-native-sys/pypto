@@ -35,7 +35,7 @@ Typical usage::
     print(result)  # PASS / FAIL: ...
 """
 
-import ctypes
+import importlib.util
 import os
 import subprocess
 import sys
@@ -57,114 +57,26 @@ from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
 from .golden_writer import write_golden
-from .tensor_spec import TensorSpec
+from .tensor_spec import ScalarSpec, TensorSpec
 
 _OUTPUTS_DIR = Path("outputs")
 
 
-# ---------------------------------------------------------------------------
-# Cache file helpers
-# ---------------------------------------------------------------------------
+def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
+    """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
 
-
-def _cache_dir(golden_path: Path) -> Path:
-    """Return the ``cache/`` subdirectory co-located with ``golden.py``."""
-    return golden_path.parent / "cache"
-
-
-def _inputs_cache_file(golden_path: Path, case_name: str) -> Path:
-    """Return the path for the pre-generated inputs ``.pt`` file.
-
-    All cache artefacts live under ``work_dir/cache/`` alongside the other
-    test-case outputs::
-
-        work_dir/
-          cache/
-            Default_inputs.pt
-            Default_golden.pt
-            Case1_inputs.pt
-            Case1_golden.pt
-          golden.py
-          kernels/
-          orchestration/
+    Returns ``None`` if the directory does not exist or any required file is
+    missing, allowing the caller to fall back to live computation.
     """
-    safe = case_name.replace("/", "_").replace(" ", "_")
-    return _cache_dir(golden_path) / f"{safe}_inputs.pt"
-
-
-def _golden_cache_file(golden_path: Path, case_name: str) -> Path:
-    """Return the path for the pre-computed golden outputs ``.pt`` file."""
-    safe = case_name.replace("/", "_").replace(" ", "_")
-    return _cache_dir(golden_path) / f"{safe}_golden.pt"
-
-
-def _save_inputs(result: list, path: Path) -> None:
-    """Serialise ``generate_inputs()`` result to *path* via ``torch.save``.
-
-    Each item in *result* is wrapped in a small dict so that ctypes scalars
-    can be reconstructed faithfully on load::
-
-        {"kind": "tensor", "name": "a",    "data": <torch.Tensor>}
-        {"kind": "ctypes", "name": "size", "ctype": "c_int64", "value": 1024}
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serialisable = []
-    for name, val in result:
-        if isinstance(val, torch.Tensor):
-            serialisable.append({"kind": "tensor", "name": name, "data": val})
-        elif isinstance(val, ctypes._SimpleCData):
-            serialisable.append(
-                {
-                    "kind": "ctypes",
-                    "name": name,
-                    "ctype": type(val).__name__,
-                    "value": val.value,
-                }
-            )
-        else:
-            raise TypeError(f"Cannot serialise arg {name!r}: unsupported type {type(val)}")
-    torch.save(serialisable, path)
-
-
-def _load_inputs(path: Path) -> list | None:
-    """Load and reconstruct a ``generate_inputs()`` result from *path*.
-
-    Returns ``None`` if the file does not exist or cannot be read.
-    """
-    if not path.exists():
+    if not out_dir.is_dir():
         return None
-    try:
-        items = torch.load(path, weights_only=False)
-        result = []
-        for item in items:
-            name = item["name"]
-            if item["kind"] == "tensor":
-                result.append((name, item["data"]))
-            elif item["kind"] == "ctypes":
-                ctype_cls = getattr(ctypes, item["ctype"])
-                result.append((name, ctype_cls(item["value"])))
-        return result
-    except Exception:
-        return None
-
-
-def _save_golden(golden: dict, path: Path) -> None:
-    """Serialise pre-computed golden output tensors to *path*."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(golden, path)
-
-
-def _load_golden(path: Path) -> dict | None:
-    """Load pre-computed golden output tensors from *path*.
-
-    Returns ``None`` if the file does not exist or cannot be read.
-    """
-    if not path.exists():
-        return None
-    try:
-        return torch.load(path, weights_only=False)
-    except Exception:
-        return None
+    result = {}
+    for name in output_names:
+        pt_file = out_dir / f"{name}.pt"
+        if not pt_file.exists():
+            return None
+        result[name] = torch.load(pt_file, weights_only=True)
+    return result
 
 
 @dataclass
@@ -326,6 +238,7 @@ def run(
     tensor_specs: list[TensorSpec],
     golden: Callable,
     config: RunConfig | None = None,
+    scalar_specs: list[ScalarSpec] | None = None,
 ) -> RunResult:
     """Compile *program* and run it on device, validating against *golden*.
 
@@ -345,6 +258,10 @@ def run(
             computes the expected outputs in-place (writes to
             ``tensors[output_name]``).  The function name does not matter.
         config: Run configuration.  Uses default :class:`RunConfig` if ``None``.
+        scalar_specs: Optional list of scalar parameter specifications.  Scalar
+            TaskArg entries appear after all tensor entries in the generated
+            ``golden.py``, matching the TaskArg slot order produced by
+            orchestration codegen.
 
     Returns:
         :class:`RunResult` with ``passed=True`` on success, or ``passed=False``
@@ -405,6 +322,7 @@ def run(
                 golden_path,
                 rtol=config.rtol,
                 atol=config.atol,
+                scalar_specs=scalar_specs,
                 data_dir=config.golden_data_dir,
             )
 
@@ -414,54 +332,24 @@ def run(
             return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
 
         # 5. Compile C++ → binaries + assemble ChipCallable
-        from .device_runner import (  # noqa: PLC0415
-            build_orch_args,
-            compile_and_assemble,
-            execute_on_device,
-            validate_golden,
-        )
+        from .device_runner import compile_and_assemble  # noqa: PLC0415
 
         with _stage("binary_compilation"):
             chip_callable, runtime_name = compile_and_assemble(
                 work_dir, config.platform, pto_isa_commit=config.pto_isa_commit
             )
 
-        # 6. Build tensor arguments
-        orch_args, all_tensors, inputs, outputs = build_orch_args(tensor_specs)
-
-        # 7. Compute golden
-        golden_outputs = {k: v.clone() for k, v in outputs.items()}
-        golden_with_inputs = {**inputs, **golden_outputs}
-        golden(golden_with_inputs, {})
-
-        # 8. Execute on device
-        if config.runtime_profiling:
-            pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(
-                config.platform, config.device_id
-            )
-
+        # 6–9. Load inputs, execute, validate
         with _stage("device_execution"):
-            execute_on_device(
-                chip_callable,
-                orch_args,
-                config.platform,
-                runtime_name,
-                config.device_id,
-                enable_profiling=config.runtime_profiling,
-            )
-
-        if config.runtime_profiling:
-            _collect_swimlane_data(
+            _execute_on_device(
                 work_dir,
+                golden_path,
+                chip_callable,
+                runtime_name,
                 config.platform,
                 config.device_id,
-                pre_run_logs,
-                device_log_dir,
-                pre_run_perf_files,
+                runtime_profiling=config.runtime_profiling,
             )
-
-        # 9. Validate
-        validate_golden(outputs, golden_outputs, rtol=config.rtol, atol=config.atol)
 
         profile_data = prof.to_dict() if prof is not None else None
         return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
@@ -490,56 +378,53 @@ def run(
 def _execute_on_device(
     work_dir: Path,
     golden_path: Path,
+    chip_callable: Any,
+    runtime_name: str,
     platform: str,
     device_id: int,
-    pto_isa_commit: str | None = None,
     runtime_profiling: bool = False,
 ) -> None:
-    """Compile, load, execute, and validate via PyPTO's device runner.
+    """Load inputs, execute on device, and validate against golden.
 
-    This function is used by the test harness (test_runner.py) to execute
-    pre-compiled test cases. For direct use, prefer :func:`run`.
+    Shared execution logic used by both :func:`run` and the test harness
+    (``test_runner.py``).  The caller is responsible for compiling binaries
+    via ``compile_and_assemble`` and passing the result here.
+
+    Tolerances (``RTOL``, ``ATOL``) are read from the generated ``golden.py``.
 
     Args:
-        work_dir: Root output directory containing ``kernels/`` and ``orchestration/``.
+        work_dir: Root output directory containing ``data/``, ``golden.py``, etc.
         golden_path: Path to the generated ``golden.py`` file.
+        chip_callable: Pre-compiled ``ChipCallable`` from ``compile_and_assemble``.
+        runtime_name: Runtime name from ``compile_and_assemble``.
         platform: Target execution platform.
         device_id: Hardware device index.
-        pto_isa_commit: If set, pin the pto-isa clone to this specific commit.
         runtime_profiling: If ``True``, enable runtime profiling.
     """
     from .device_runner import (  # noqa: PLC0415
         build_orch_args_from_inputs,
-        compile_and_assemble,
         execute_on_device,
         validate_golden,
     )
 
-    chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
-
     # Load golden.py to get generate_inputs and compute_golden
-    import importlib.util  # noqa: PLC0415
-
     spec = importlib.util.spec_from_file_location("_golden", str(golden_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load golden.py from {golden_path}")
     golden_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(golden_module)
 
-    # Load golden input cache if available
-    params: dict = {"name": "Default"}
-    result = _load_inputs(_inputs_cache_file(golden_path, "Default"))
-    if result is None:
-        result = golden_module.generate_inputs(params)
+    # Generate inputs (loads from data/in/ when use_data_files golden.py)
+    params: dict[str, str] = {"name": "Default"}
+    result = golden_module.generate_inputs(params)
 
     output_names = set(getattr(golden_module, "__outputs__", []))
     orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
 
-    # Compute golden
-    golden_cache = _load_golden(_golden_cache_file(golden_path, "Default"))
-    if golden_cache is not None:
-        golden_out = golden_cache
-    else:
+    # Load pre-computed golden from data/out/ if available
+    out_dir = golden_path.parent / "data" / "out"
+    golden_out = _load_golden_from_data_dir(out_dir, output_names)
+    if golden_out is None:
         golden_out = {k: v.clone() for k, v in outputs.items()}
         golden_with_inputs = {**inputs, **golden_out}
         golden_module.compute_golden(golden_with_inputs, params)
@@ -568,9 +453,12 @@ def _execute_on_device(
         )
 
     # Validate
-    rtol = getattr(golden_module, "RTOL", 1e-5)
-    atol = getattr(golden_module, "ATOL", 1e-5)
-    validate_golden(outputs, golden_out, rtol=rtol, atol=atol)
+    validate_golden(
+        outputs,
+        golden_out,
+        rtol=getattr(golden_module, "RTOL", 1e-5),
+        atol=getattr(golden_module, "ATOL", 1e-5),
+    )
 
 
 # ---------------------------------------------------------------------------
