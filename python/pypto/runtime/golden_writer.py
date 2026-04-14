@@ -109,7 +109,10 @@ def write_golden(
         The resolved ``output_path`` after writing.
     """
     output_path = Path(output_path)
-    resolved_dir = Path(data_dir).resolve() if data_dir is not None else output_path.parent / "data"
+    if data_dir is not None:
+        resolved_dir = Path(data_dir).resolve()
+    else:
+        resolved_dir = (output_path.parent / "data").resolve()
 
     if not _data_dir_has_files(resolved_dir, tensor_specs):
         data = _materialize_tensors(tensor_specs)
@@ -121,7 +124,8 @@ def write_golden(
         rtol,
         atol,
         scalar_specs=scalar_specs,
-        data_dir=resolved_dir,
+        data_dir=resolved_dir if data_dir is not None else None,
+        use_data_files=True,
     )
     output_path.write_text(content, encoding="utf-8")
     return output_path
@@ -136,6 +140,7 @@ def generate_golden_source(
     compute_golden_src: str | None = None,
     scalar_specs: list[ScalarSpec] | None = None,
     data_dir: Path | None = None,
+    use_data_files: bool = False,
 ) -> str:
     """Build the full content of golden.py as a string.
 
@@ -152,14 +157,19 @@ def generate_golden_source(
         scalar_specs: Optional list of scalar TaskArg specifications.  Entries are
             placed after all tensor entries in the returned list, matching the
             TaskArg slot order produced by orchestration codegen.
-        data_dir: When set, the generated ``generate_inputs`` loads all tensors
-            from ``.pt`` files via ``torch.load`` using a ``_DATA_DIR`` constant
-            pointing to this path.  When ``None`` (default), the legacy
-            inline-expression mode is used.
+        data_dir: When set, the generated ``_DATA_DIR`` constant uses this
+            absolute path.  When ``None`` and *use_data_files* is ``True``,
+            a portable ``Path(__file__).parent / "data"`` expression is used.
+        use_data_files: When ``True``, the generated ``generate_inputs``
+            loads all tensors from ``.pt`` files via ``torch.load``.
+            Defaults to ``False`` for backward compatibility with callers
+            that rely on inline expressions.
 
     Returns:
         Full Python source for ``golden.py`` as a string.
     """
+    emit_data_dir = use_data_files or data_dir is not None
+
     scalars = scalar_specs or []
     output_names = [spec.name for spec in tensor_specs if spec.is_output]
 
@@ -172,14 +182,14 @@ def generate_golden_source(
     imports = _compute_golden_imports(compute_golden_src)
     if scalars:
         imports.append("import ctypes")
-    if data_dir is not None:
+    if emit_data_dir:
         imports.append("from pathlib import Path")
     imports.append("import torch")
 
     # Pre-compute init expressions so that helper function preambles (e.g. for
     # callable init_values) are collected before we start building the output.
     preambles: dict[str, str] = {}
-    init_exprs = [_init_expr(spec, preambles, use_data_dir=data_dir is not None) for spec in tensor_specs]
+    init_exprs = [_init_expr(spec, preambles, use_data_dir=emit_data_dir) for spec in tensor_specs]
 
     lines: list[str] = [
         '"""',
@@ -191,10 +201,13 @@ def generate_golden_source(
         *imports,
     ]
 
-    if data_dir is not None:
+    if emit_data_dir:
         lines.append("")
-        escaped = str(data_dir).replace("\\", "\\\\")
-        lines.append(f'_DATA_DIR = Path("{escaped}")')
+        if data_dir is not None:
+            escaped = str(data_dir).replace("\\", "\\\\")
+            lines.append(f'_DATA_DIR = Path("{escaped}")')
+        else:
+            lines.append('_DATA_DIR = Path(__file__).parent / "data"')
 
     lines.extend(
         [

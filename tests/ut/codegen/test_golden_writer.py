@@ -349,8 +349,8 @@ class TestDataFileMode:
         assert "torch.full" not in src
         assert "torch.zeros" not in src
 
-    def test_data_dir_constant_present(self, tmp_path):
-        """Generated source includes _DATA_DIR when data_dir is set."""
+    def test_explicit_data_dir_uses_absolute_path(self, tmp_path):
+        """Explicit data_dir generates _DATA_DIR with absolute path."""
         specs = [TensorSpec("x", [2], torch.float32, init_value=1.0)]
         src = generate_golden_source(
             specs,
@@ -362,6 +362,21 @@ class TestDataFileMode:
 
         assert f'_DATA_DIR = Path("{tmp_path.resolve()}")' in src
         assert "from pathlib import Path" in src
+
+    def test_use_data_files_generates_relative_path(self):
+        """use_data_files=True without data_dir generates portable relative path."""
+        specs = [TensorSpec("x", [2], torch.float32, init_value=1.0)]
+        src = generate_golden_source(
+            specs,
+            _dummy_golden,
+            1e-5,
+            1e-5,
+            use_data_files=True,
+        )
+
+        assert '_DATA_DIR = Path(__file__).parent / "data"' in src
+        assert "from pathlib import Path" in src
+        assert 'torch.load(_DATA_DIR / "x.pt"' in src
 
     def test_no_data_dir_legacy_mode(self):
         """_DATA_DIR is absent when data_dir is None (legacy mode)."""
@@ -409,6 +424,8 @@ class TestDataFileMode:
         write_golden(specs, _dummy_golden, golden_path)
 
         src = golden_path.read_text(encoding="utf-8")
+        assert '_DATA_DIR = Path(__file__).parent / "data"' in src
+
         namespace: dict[str, object] = {"__file__": str(golden_path)}
         exec(compile(src, str(golden_path), "exec"), namespace)  # noqa: S102
 
