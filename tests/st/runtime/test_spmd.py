@@ -439,7 +439,7 @@ class TestSPMDOperations:
         """Wide escalating dispatch covers the smaller 3-submit escalating case."""
         self._run_case(test_runner, SPMDEscalating5TestCase())
 
-    @pytest.mark.xfail(reason="SPMD+MixedKernel precision issue under investigation (codegen correct, runtime scheduling suspect)")
+    @pytest.mark.xfail(reason="SPMD+MixedKernel precision issue under investigation")
     def test_spmd_mixed_kernel(self, test_runner):
         """SPMD MixedKernel: matmul + bias (cube + vector → AIC + AIV split)."""
         self._run_case(test_runner, SPMDMixedKernelTestCase())

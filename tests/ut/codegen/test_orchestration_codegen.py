@@ -17,8 +17,10 @@ import pypto.language as pl
 import pytest
 from pypto import backend, codegen, passes
 from pypto.backend import BackendType
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import ir
+from pypto.pypto_core import DataType, ir
 
 
 def assert_code_equal(actual: str, expected: str) -> None:
@@ -594,7 +596,8 @@ class TestOrchestration:
 
         code = _generate_orch_code(FourTupleProgram)
 
-        # All orch params are external tensors (mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7)
+        # All orch params are external tensors:
+        # mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7
         assert "Tensor ext_mi_in = from_tensor_arg(orch_args.tensor(3))" in code
         assert "Tensor ext_li_in = from_tensor_arg(orch_args.tensor(4))" in code
         assert "Tensor ext_oi_in = from_tensor_arg(orch_args.tensor(5))" in code
@@ -1552,8 +1555,6 @@ class TestOrchestration:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
-        from pypto.pypto_core import DataType
-
         span = ir.Span.unknown()
         INDEX = DataType.INDEX
         FP32 = DataType.FP32
@@ -2032,15 +2033,12 @@ class TestUnregisteredOpError:
 
     def test_unregistered_tensor_op_raises_error(self):
         """Unregistered tensor op (tensor.full) in Orchestration must raise RuntimeError."""
-        from pypto.ir.builder import IRBuilder
-        from pypto.ir.op import tensor as tensor_ops
-
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
-            x = orch_f.param("x", ir.TensorType([16, 16], pl.FP32))
+            orch_f.param("x", ir.TensorType([16, 16], pl.FP32))
             orch_f.return_type(ir.TensorType([16, 16], pl.FP32))
             filled = ib.let("filled", tensor_ops.full([16, 16], pl.FP32, 0.0))
             ib.return_stmt(filled)

@@ -164,8 +164,8 @@ class TestNonParallelCodeBetweenChunks:
             @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_incore_1(
                 self,
-                w0: pl.Tensor[[64, 64], pl.FP32],
                 x0: pl.Tensor[[8, 64], pl.FP32],
+                w0: pl.Tensor[[64, 64], pl.FP32],
             ) -> pl.Tensor[[8, 64], pl.FP32]:
                 for k0, (x1,) in pl.range(2, init_values=(x0,)):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.matmul(
@@ -195,7 +195,7 @@ class TestNonParallelCodeBetweenChunks:
                     ):
                         x3: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_0(x2)
                         x4: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x3)
-                    x5: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(w0, x4)
+                    x5: pl.Tensor[[8, 64], pl.FP32] = self.main_incore_1(x4, w0)
                     for j0, (x6,) in pl.parallel(
                         2, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):

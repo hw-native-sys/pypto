@@ -507,8 +507,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   struct GroupCalleeInfo {
     std::string aic_name;
     std::string aiv_name;
-    CallPtr inner_call;       // The call to the InCore kernel inside the Group body
-    FunctionPtr inner_callee; // The InCore function being called
+    CallPtr inner_call;        // The call to the InCore kernel inside the Group body
+    FunctionPtr inner_callee;  // The InCore function being called
   };
 
   struct WrapperCallInfo {
@@ -622,17 +622,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else if (auto const_bool = As<ConstBool>(inner_arg)) {
           params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
         } else {
-          INTERNAL_CHECK_SPAN(false, inner_call->span_)
-              << "Internal error: inner call arg " << inner_idx
-              << " is neither a variable nor a recognized constant";
+          INTERNAL_CHECK_SPAN(false, inner_call->span_) << "Internal error: inner call arg " << inner_idx
+                                                        << " is neither a variable nor a recognized constant";
         }
         continue;
       }
 
       auto it = wrapper_param_to_outer_idx.find(inner_arg_var.get());
       INTERNAL_CHECK_SPAN(it != wrapper_param_to_outer_idx.end(), inner_call->span_)
-          << "Internal error: inner call arg " << inner_idx
-          << " does not map to any wrapper parameter";
+          << "Internal error: inner call arg " << inner_idx << " does not map to any wrapper parameter";
 
       size_t outer_idx = it->second;
       const auto& outer_arg = outer_call->args_[outer_idx];
@@ -648,8 +646,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::string ext_name = GetExternalTensorName(var_name);
 
         INTERNAL_CHECK_SPAN(inner_idx < inner_callee->param_directions_.size(), inner_call->span_)
-            << "arg index " << inner_idx << " exceeds param count ("
-            << inner_callee->param_directions_.size() << ") for callee '" << inner_callee->name_ << "'";
+            << "arg index " << inner_idx << " exceeds param count (" << inner_callee->param_directions_.size()
+            << ") for callee '" << inner_callee->name_ << "'";
 
         ParamDirection dir = inner_callee->param_directions_[inner_idx];
         switch (dir) {
@@ -889,7 +887,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitTaskSubmitAndBind(submit_expr);
   }
 
-  void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func, const FunctionPtr& launch_func) {
+  void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
+                             const FunctionPtr& launch_func) {
     std::string group_name = group_func->name_;
 
     auto info = FindGroupCallees(group_func);
@@ -900,9 +899,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // unlike pto2_rt_submit_task (MixedKernels) which dispatches full clusters.
     if (info.aic_name.empty() && !info.aiv_name.empty()) {
       FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
-      INTERNAL_CHECK(aiv_func != nullptr)
-          << "Internal error: AIV function '" << info.aiv_name << "' not found for Group '" << group_name
-          << "'";
+      INTERNAL_CHECK(aiv_func != nullptr) << "Internal error: AIV function '" << info.aiv_name
+                                          << "' not found for Group '" << group_name << "'";
 
       (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;
       int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
@@ -936,10 +934,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     FunctionPtr aic_func = program_->GetFunction(info.aic_name);
     FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
-    INTERNAL_CHECK_SPAN(aic_func != nullptr, call->span_)
-        << "Internal error: AIC function '" << info.aic_name << "' not found for Group '" << group_name << "'";
-    INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_)
-        << "Internal error: AIV function '" << info.aiv_name << "' not found for Group '" << group_name << "'";
+    INTERNAL_CHECK_SPAN(aic_func != nullptr, call->span_) << "Internal error: AIC function '" << info.aic_name
+                                                          << "' not found for Group '" << group_name << "'";
+    INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_) << "Internal error: AIV function '" << info.aiv_name
+                                                          << "' not found for Group '" << group_name << "'";
 
     (*func_name_to_core_type_)[info.aic_name] = CoreType::CUBE;
     (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;

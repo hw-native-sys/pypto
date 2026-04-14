@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
-#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -29,6 +28,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -205,8 +205,7 @@ class ScopeOutliner : public IRMutator {
   ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                 const std::unordered_map<const Var*, VarPtr>& var_objects,
                 const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                FunctionType outlined_func_type, std::string name_suffix,
-                ProgramPtr program = nullptr)
+                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr)
       : func_name_(std::move(func_name)),
         var_types_(var_types),
         var_objects_(var_objects),
@@ -442,8 +441,8 @@ class ScopeOutliner : public IRMutator {
 
     // Create fresh parameters for the outlined function.
     // Infer param directions from the inner callee when possible (requires program_).
-    std::vector<ParamDirection> inferred_directions = InferParamDirections(input_vars, op->body_,
-                                                                          store_output_set);
+    std::vector<ParamDirection> inferred_directions =
+        InferParamDirections(input_vars, op->body_, store_output_set);
     std::vector<VarPtr> input_params;
     std::vector<ParamDirection> input_param_directions;
     std::unordered_map<const Var*, VarPtr> var_substitution_map;
@@ -706,8 +705,7 @@ class ScopeOutliner : public IRMutator {
   ///   3. Map input_vars to callee args by Var pointer identity
   ///   4. Copy callee directions; store targets get InOut; rest default to In
   std::vector<ParamDirection> InferParamDirections(
-      const std::vector<VarPtr>& input_vars,
-      const StmtPtr& body,
+      const std::vector<VarPtr>& input_vars, const StmtPtr& body,
       const std::unordered_set<const Var*>& store_output_set) const {
     std::vector<ParamDirection> directions(input_vars.size(), ParamDirection::In);
 
