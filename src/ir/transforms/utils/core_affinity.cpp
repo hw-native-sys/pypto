@@ -95,7 +95,12 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
     if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;
     return CoreAffinity::VECTOR;
   }
-  static const std::unordered_set<std::string> tile_arg_classified_ops = {"tile.store", "tile.reshape"};
+  // Some tile ops inherit their execution side from the source tile rather than
+  // the result memory space. If we classify them as generic Vector ops, later
+  // passes can incorrectly drop Cube-side producers that feed C<->V boundaries
+  // (for example, tile.slice on an Acc tile before tpush_to_aiv).
+  static const std::unordered_set<std::string> tile_arg_classified_ops = {"tile.store", "tile.reshape",
+                                                                          "tile.slice", "tile.extract"};
   if (tile_arg_classified_ops.count(name)) {
     auto ms = GetFirstTileArgMemory(call);
     if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;

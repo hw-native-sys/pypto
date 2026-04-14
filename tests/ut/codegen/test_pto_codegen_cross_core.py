@@ -610,6 +610,62 @@ class TestExpandMixedKernelCodegen:
         # tile.sub should NOT be in AIC
         assert "pto.tsub" not in aic_body, "AIC should not contain pto.tsub"
 
+    def test_acc_slice_before_c2v_boundary_codegen(self):
+        """Cube-side tile.slice feeding C2V boundary must survive mixed-kernel expansion."""
+
+        @pl.program
+        class SliceBeforeC2V:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                x_mat: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                acc: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
+                row: pl.Tile[[1, 128], pl.FP32] = pl.slice(acc, [1, 128], [0, 0])
+                row_vec: pl.Tile[[1, 128], pl.FP32] = pl.move(
+                    row,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.store(row_vec, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.create_tensor([1, 128], dtype=pl.FP32)
+                z: pl.Tensor[[1, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        codes = self._expand_and_generate(SliceBeforeC2V)
+
+        assert "main_incore_0_aic" in codes, "AIC function should be generated"
+        aic_body = _extract_func_section(codes["main_incore_0_aic"], "main_incore_0_aic")
+        assert "pto.textract" in aic_body, "AIC should keep the tile.slice producer before C2V push"
+        assert "pto.tpush_to_aiv" in aic_body, "AIC should push the sliced row to AIV"
+        assert aic_body.index("pto.textract") < aic_body.index("pto.tpush_to_aiv"), (
+            "AIC should extract the row tile before pushing it across cores"
+        )
+
+        assert "main_incore_0_aiv" in codes, "AIV function should be generated"
+        aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
+        assert "pto.tpop_from_aic" in aiv_body, "AIV should pop the sliced row from AIC"
+        assert "pto.tstore" in aiv_body, "AIV should store the popped row to the output tensor"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
