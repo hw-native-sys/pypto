@@ -33,12 +33,6 @@ from pathlib import Path
 import pytest
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
-from pypto.runtime.device_runner import (
-    compile_and_assemble,
-    compile_single_kernel,
-    compile_single_orchestration,
-    ensure_pto_isa_root,
-)
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
     _extract_compute_golden,
@@ -309,6 +303,12 @@ def prebuild_binaries(
     if not simpler_root:
         return 0
 
+    from pypto.runtime.device_runner import (  # noqa: PLC0415
+        compile_single_kernel,
+        compile_single_orchestration,
+        ensure_pto_isa_root,
+    )
+
     pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
     if pto_isa_root is None:
         return 0
@@ -454,6 +454,8 @@ class TestRunner:
                 # tolerances (1e-5) because pytest_collection_finish instantiates
                 # test cases without their RunConfig constructor args.
                 _write_golden_for_test_case(test_case, cached_dir / "golden.py")
+                from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
                 chip_callable, runtime_name = compile_and_assemble(
                     cached_dir, platform, pto_isa_commit=self.config.pto_isa_commit
                 )
@@ -538,6 +540,8 @@ class TestRunner:
                 )
 
             platform = _resolve_platform(self.config.platform, backend_type)
+            from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
             chip_callable, runtime_name = compile_and_assemble(
                 work_dir, platform, pto_isa_commit=self.config.pto_isa_commit
             )
