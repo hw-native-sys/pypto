@@ -269,6 +269,11 @@ class StructuralHasher {
     return h;
   }
 
+  // Stub for IgnoreField metadata (Stmt::leading_comments_). Required by the
+  // template instantiation path even though VisitIgnoreField discards the
+  // lambda — the compiler still type-checks the lambda body.
+  result_type VisitLeafField(const std::vector<std::string>& /*field*/) { return 0; }
+
   // Hash kwargs (vector of pairs - order is preserved and matters)
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& kwargs) {
     result_type h = 0;

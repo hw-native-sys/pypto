@@ -34,18 +34,24 @@ def _body_stmts(prog: ir.Program) -> list[ir.Stmt]:
 class TestCommentExtractor:
     def test_basic_line_comment(self):
         src = "x = 1  # note\n"
-        assert extract_line_comments(src) == {1: ["note"]}
+        assert extract_line_comments(src) == {1: [(7, "note")]}
 
     def test_full_line_comment(self):
         src = "# first\n"
-        assert extract_line_comments(src) == {1: ["first"]}
+        assert extract_line_comments(src) == {1: [(0, "first")]}
 
     def test_no_space_after_hash(self):
         src = "#compact\n"
-        assert extract_line_comments(src) == {1: ["compact"]}
+        assert extract_line_comments(src) == {1: [(0, "compact")]}
 
     def test_empty_source(self):
         assert extract_line_comments("") == {}
+
+    def test_captures_column_offset(self):
+        src = "for i in range(1):\n    x = 1\n    # indented tail\n"
+        result = extract_line_comments(src)
+        # The comment is at column 4 (body indent).
+        assert result == {3: [(4, "indented tail")]}
 
 
 class TestAttachInParsedProgram:
@@ -154,6 +160,52 @@ class TestAttachInParsedProgram:
         # else body first stmt gets "fallback" (the comment above `else:` attaches to first else stmt)
         assert if_stmt.else_body is not None
         assert _first_of(if_stmt.else_body).leading_comments == ["fallback"]
+
+
+class TestTailOfBlockWarning:
+    """Tail-of-block comments are dropped with a UserWarning (documented v1 behavior)."""
+
+    def test_tail_in_for_body_warns_and_drops(self):
+        with pytest.warns(UserWarning, match="tail-of-block comment"):
+
+            @pl.program
+            class P:
+                @pl.function
+                def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                    for i in pl.range(4):
+                        x = x + 1.0
+                        # tail
+                    return x
+
+        # The tail comment must NOT attach to the outer return stmt.
+        stmts = _body_stmts(P)
+        ret = next(s for s in stmts if isinstance(s, ir.ReturnStmt))
+        assert ret.leading_comments == []
+
+    def test_tail_in_function_body_warns(self):
+        with pytest.warns(UserWarning, match="tail-of-block comment"):
+
+            @pl.program
+            class P:  # noqa: F841
+                @pl.function
+                def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                    y = x
+                    return y
+                    # trailing after return
+
+    def test_tail_in_if_then_branch_warns(self):
+        with pytest.warns(UserWarning, match="tail-of-block comment"):
+
+            @pl.program
+            class P:  # noqa: F841
+                @pl.function
+                def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                    if x > 0.0:
+                        y = x
+                        # tail in then
+                    else:
+                        y = -x
+                    return y
 
 
 class TestRoundTripIdempotency:

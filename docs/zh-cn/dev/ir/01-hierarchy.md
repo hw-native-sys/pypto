@@ -161,16 +161,15 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 
 ### 语句的前导注释
 
-每个 `Stmt` 都带有一个可选的 `leading_comments_: vector<string>` 字段，用于保留 Python DSL 中的源码级 `#` 注释和裸字符串文档字符串（docstring）。打印器会将每一行以 `# <text>` 的形式输出在该语句上方；通过 `IRMutator` 重建语句的 pass 会经由 `MakeLikeStmt` 辅助自动传递该字段。
+每个 `Stmt` 都带有一个可选的 `leading_comments_: vector<string>` 字段，用于保留 Python DSL 中的源码级 `#` 注释和裸字符串文档字符串（docstring）。打印器会将每一行以 `# <text>` 的形式输出在该语句上方。
 
-- **不参与反射。** 该字段特意从 `GetFieldDescriptors` 中排除，因此不参与 `structural_equal`、结构哈希或序列化。两个仅在 `leading_comments_` 上有差异的语句相等且哈希一致。
-- **Python 侧只读。** `stmt.leading_comments` 仅暴露为只读。官方的修改通道是自由函数 `ir.attach_leading_comments(stmt, comments)`。
+- **构造函数参数（与 `span_` 对称）。** 每个 `Stmt` 子类的构造函数都在最后增加了 `leading_comments` 形参（默认值为 `{}`）。反序列化器从字段表中读取 `"leading_comments"`，与 `"span"` 一起传入构造函数——该字段在构造时即完成初始化，而非事后附加。
+- **注册为 `IgnoreField`。** 注释会在二进制序列化（`serialize_to_file`）中保留，但不参与 `structural_equal` 或结构哈希。两个仅在 `leading_comments_` 上有差异的语句相等且哈希一致。
+- **Python 侧只读。** `stmt.leading_comments` 仅暴露为只读。官方的修改通道是自由函数 `ir.attach_leading_comments(stmt, comments)`，供解析器构造器和合并注释的 pass 在晚期绑定时使用。
 - **解析器附着规则。** 不晚于该语句首行的注释会被作为前导注释收集。同一行的尾随注释（`y = 1  # note`）被提升到下一条语句的前导列表中。函数体中任何位置的裸字符串表达式（docstring）都会成为下一条语句的前导注释。
+- **块末尾注释。** 出现在块中最后一条语句之后（并与块同级缩进）的注释没有合适的附着目标，将被丢弃并发出 `UserWarning`。将它们移到某条语句之上或外层作用域以保留它们。列信息用于区分真正的块末尾注释和仅仅出现在中间行的外层注释（例如 `else:` 前的 `# fallback`）。
 - **SeqStmts 不变式。** `SeqStmts` 是一个透明容器，不应直接持有 `leading_comments_`；注释始终附着到其内部的（非 Seq）语句上。
-- **已知限制（v1）。**
-  - 块末尾的 `#` 注释（最后一条语句之后）会被丢弃。
-  - 直接构造语句而绕过 `MakeLikeStmt` 的 `IRMutator` *子类* 可能会在重建的语句上丢失注释。
-  - 注释不会在二进制序列化（`serialize_to_file`）中保留；它们是面向人类可读转储的 DSL 级注解。
+- **Pass 传递。** 重建语句的 IR pass 采用 `MutableCopy(op)` + 字段赋值——副本会自动保留 `leading_comments_` 以及其他所有未改动的字段。当一个 pass 将一条语句拆分为多条时（例如 `expand_mixed_kernel` 将 `InCore` 调用拆为 AIC + AIV），通过 `std::make_shared<NewT>(..., orig->leading_comments_)` 构造第一条新语句，使原语句的注释附着到第一条发出的语句上。当一个 pass 删除一条复合语句时（例如 `unroll_loops` 消除 `ForStmt`），其注释通过 `AttachLeadingComments` 转移到第一条留存的 body 语句上。
 
 ```python
 # DSL

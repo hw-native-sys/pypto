@@ -12,9 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
-#include <memory>
 #include <unordered_map>
-#include <utility>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -117,16 +115,6 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// (e.g., when IterArg's initValue_ changes, creating a new IterArg object).
   /// Checked in both VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr) for extensibility.
   std::unordered_map<const Expr*, ExprPtr> var_remap_;
-
-  /// Construct a new stmt of type T, preserving leading_comments_ from the original.
-  /// Returns a non-const shared_ptr<T> so callers can still mutate if needed;
-  /// implicitly converts to shared_ptr<const T> on return.
-  template <typename T, typename... Args>
-  static std::shared_ptr<T> MakeLikeStmt(const std::shared_ptr<const T>& orig, Args&&... args) {
-    auto new_stmt = std::make_shared<T>(std::forward<Args>(args)...);
-    new_stmt->leading_comments_ = orig->leading_comments_;
-    return new_stmt;
-  }
 };
 
 }  // namespace ir

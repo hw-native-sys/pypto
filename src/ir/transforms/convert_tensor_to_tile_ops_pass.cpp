@@ -330,8 +330,9 @@ class TypePropagatingMutator : public IRMutator {
     return UpdateLoopReturnVars(
         new_while->iter_args_, new_while->return_vars_, op->return_vars_,
         [&](auto new_rv) {
-          return std::make_shared<WhileStmt>(new_while->condition_, new_while->iter_args_, new_while->body_,
-                                             std::move(new_rv), new_while->span_);
+          auto result = MutableCopy(new_while);
+          result->return_vars_ = std::move(new_rv);
+          return StmtPtr(result);
         },
         result);
   }
@@ -399,11 +400,16 @@ class TypePropagatingMutator : public IRMutator {
     if (new_value->GetType() != op->value_->GetType()) {
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_value->GetType(), op->var_->span_);
       var_remap_[op->var_.get()] = new_var;
-      return std::make_shared<AssignStmt>(new_var, new_value, op->span_);
+      auto result = MutableCopy(op);
+      result->var_ = new_var;
+      result->value_ = new_value;
+      return result;
     }
     // Value changed but type did not — keep original Var, clear any stale remap.
     var_remap_.erase(op->var_.get());
-    return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = new_value;
+    return result;
   }
 
  private:
@@ -520,7 +526,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto new_expr = VisitExpr(op->expr_);
     // Helper: return updated EvalStmt only when the expression actually changed.
     auto maybe_update = [&]() -> StmtPtr {
-      return (new_expr.get() != op->expr_.get()) ? std::make_shared<EvalStmt>(new_expr, op->span_) : op;
+      if (new_expr.get() == op->expr_.get()) return StmtPtr(op);
+      auto result = MutableCopy(op);
+      result->expr_ = new_expr;
+      return result;
     };
 
     auto call = As<Call>(new_expr);
@@ -563,7 +572,10 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, load_call->GetType(), op->var_->span_);
     var_remap_[op->var_.get()] = tile_var;
-    return std::make_shared<AssignStmt>(tile_var, load_call, op->span_);
+    auto result = MutableCopy(op);
+    result->var_ = tile_var;
+    result->value_ = load_call;
+    return result;
   }
 
   /// Auto-bridge TensorType args to the memory space required by input_reqs.
@@ -1119,12 +1131,16 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
     new_body_stmts.reserve(body_stmts.size());
     for (const auto& body_stmt : body_stmts) {
       if (body_stmt == assemble_assign) {
-        new_body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, assemble_assign->span_));
+        auto new_assign = MutableCopy(assemble_assign);
+        new_assign->var_ = store_var;
+        new_assign->value_ = store_call;
+        new_body_stmts.push_back(std::move(new_assign));
         continue;
       }
       if (body_stmt == yield_stmt) {
-        new_body_stmts.push_back(
-            std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, yield_stmt->span_));
+        auto new_yield = MutableCopy(yield_stmt);
+        new_yield->value_ = std::vector<ExprPtr>{store_var};
+        new_body_stmts.push_back(std::move(new_yield));
         continue;
       }
       new_body_stmts.push_back(body_stmt);
@@ -1305,7 +1321,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     }
 
     // Build new return statement
-    new_stmts.push_back(std::make_shared<ReturnStmt>(new_return_exprs, return_stmt->span_));
+    auto new_return = MutableCopy(return_stmt);
+    new_return->value_ = std::move(new_return_exprs);
+    new_stmts.push_back(std::move(new_return));
   } else {
     // Void function (e.g. cross-core producer): add empty return
     INTERNAL_CHECK_SPAN(func->return_types_.empty(), func->span_)
@@ -1403,7 +1421,10 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     }
 
     auto new_assign_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
-    stmts.push_back(std::make_shared<AssignStmt>(new_assign_var, new_call, op->span_));
+    auto new_assign = MutableCopy(op);
+    new_assign->var_ = new_assign_var;
+    new_assign->value_ = new_call;
+    stmts.push_back(std::move(new_assign));
     var_remap_[op->var_.get()] = new_assign_var;
 
     return SeqStmts::Flatten(std::move(stmts), op->span_);

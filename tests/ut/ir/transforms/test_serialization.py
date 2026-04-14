@@ -798,5 +798,62 @@ class TestTypeSerialization:
         ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
 
 
+class TestLeadingCommentsRoundTrip:
+    """Stmt.leading_comments metadata survives serialize/deserialize."""
+
+    def _make_assign_with_comments(self, comments: list[str]) -> ir.Stmt:
+        var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        value = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        stmt = ir.AssignStmt(var, value, ir.Span.unknown())
+        return ir.attach_leading_comments(stmt, comments)
+
+    def test_single_comment_survives(self):
+        stmt = self._make_assign_with_comments(["note"])
+        restored = cast(ir.Stmt, ir.deserialize(ir.serialize(stmt)))
+        assert list(restored.leading_comments) == ["note"]
+
+    def test_multiple_comments_survive(self):
+        stmt = self._make_assign_with_comments(["first", "second", "third"])
+        restored = cast(ir.Stmt, ir.deserialize(ir.serialize(stmt)))
+        assert list(restored.leading_comments) == ["first", "second", "third"]
+
+    def test_empty_comments(self):
+        var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
+        value = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
+        stmt = ir.AssignStmt(var, value, ir.Span.unknown())
+        restored = cast(ir.Stmt, ir.deserialize(ir.serialize(stmt)))
+        assert list(restored.leading_comments) == []
+
+    def test_comments_on_nested_stmts(self):
+        import pypto.language as pl  # noqa: PLC0415 — local import keeps top-level test deps minimal
+
+        @pl.program
+        class P:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                # outer
+                for _i in pl.range(4):  # header
+                    # body
+                    x = x + 1.0
+                return x
+
+        restored = cast(ir.Program, ir.deserialize(ir.serialize(P)))
+
+        def _collect(stmt: ir.Stmt) -> list[list[str]]:
+            out: list[list[str]] = []
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    out.extend(_collect(s))
+            else:
+                out.append(list(stmt.leading_comments))
+                if isinstance(stmt, ir.ForStmt):
+                    out.extend(_collect(stmt.body))
+            return out
+
+        func = list(restored.functions.values())[0]
+        assert ["outer", "header"] in _collect(func.body)
+        assert ["body"] in _collect(func.body)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

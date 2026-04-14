@@ -40,12 +40,7 @@ def _collect_leading(stmt: ir.Stmt) -> list[list[str]]:
 class TestCommentsSurviveMutator:
     def test_base_mutator_rebuild_preserves_comments(self):
         """Comments on compound stmts rebuilt through IRMutator's base
-        VisitStmt_ path (via MakeLikeStmt) must survive transformation.
-
-        Documented v1 limitation: IRMutator *subclasses* that construct stmts
-        directly (bypassing MakeLikeStmt) may drop comments. The ``convert_to_ssa``
-        pass goes through the base path for ``ForStmt`` but not for ``AssignStmt``;
-        this test only asserts the preservation that the base path guarantees.
+        VisitStmt_ path (via MakeLikeStmt) survive transformation.
         """
 
         @pl.program
@@ -64,6 +59,45 @@ class TestCommentsSurviveMutator:
 
         after = _collect_leading(list(P2.functions.values())[0].body)
         assert ["loop annotation", "trailing"] in after
+
+    def test_convert_to_ssa_preserves_assign_comments(self):
+        """AssignStmt rebuilds in ConvertToSSA pass preserve leading_comments
+        after the pass was updated to use MakeLikeStmt instead of raw
+        std::make_shared<AssignStmt>.
+        """
+
+        @pl.program
+        class P:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                # first assign
+                y = x + 1.0
+                # second assign
+                z = y + 2.0
+                return z
+
+        P2 = passes.convert_to_ssa()(P)
+        after = _collect_leading(list(P2.functions.values())[0].body)
+        assert ["first assign"] in after
+        assert ["second assign"] in after
+
+    def test_simplify_preserves_comments(self):
+        """SimplifyMutator rebuilds (AssignStmt/ReturnStmt/YieldStmt/EvalStmt)
+        preserve leading_comments after the simplify pass was updated.
+        """
+
+        @pl.program
+        class P:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                # will simplify
+                y = x + 0.0  # adding zero — simplifies to `x`
+                return y
+
+        P2 = passes.simplify()(P)
+        after = _collect_leading(list(P2.functions.values())[0].body)
+        # Both leading + trailing comments get promoted as leading_comments on the assign.
+        assert ["will simplify", "adding zero — simplifies to `x`"] in after
 
 
 if __name__ == "__main__":

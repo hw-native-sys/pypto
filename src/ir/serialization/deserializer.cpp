@@ -107,7 +107,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     INTERNAL_CHECK(has_id && has_type && has_fields)
         << "Missing required fields (id, type, or fields) in node";
 
-    // Use type registry to create the node
+    // Use type registry to create the node. Per-type Stmt deserializers read
+    // "leading_comments" from fields_obj and pass it to the constructor —
+    // symmetric with how they read "span".
     IRNodePtr node = TypeRegistry::Instance().Create(type_name, fields_obj, zone, *this);
 
     // Store in reference table

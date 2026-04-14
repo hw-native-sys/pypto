@@ -167,11 +167,15 @@ class BackendLayoutRepairMutator : public IRMutator {
       rewritten.push_back(std::make_shared<AssignStmt>(row_major_var, repaired_call, op->span_));
 
       auto reshape_back = CreateReshapeCall(row_major_var, result_tile_type->shape_, call->span_);
-      rewritten.push_back(std::make_shared<AssignStmt>(op->var_, reshape_back, op->span_));
+      auto replacement = MutableCopy(op);
+      replacement->value_ = reshape_back;
+      rewritten.push_back(std::move(replacement));
       return MakeSeqOrSingle(std::move(rewritten), op->span_);
     }
 
-    rewritten.push_back(std::make_shared<AssignStmt>(op->var_, repaired_call, op->span_));
+    auto replacement = MutableCopy(op);
+    replacement->value_ = repaired_call;
+    rewritten.push_back(std::move(replacement));
     return MakeSeqOrSingle(std::move(rewritten), op->span_);
   }
 
@@ -208,7 +212,9 @@ class BackendLayoutRepairMutator : public IRMutator {
 
     auto repaired_expr =
         OpRegistry::GetInstance().Create(call->op_->name_, new_args, call->kwargs_, call->span_);
-    rewritten.push_back(std::make_shared<EvalStmt>(repaired_expr, op->span_));
+    auto replacement = MutableCopy(op);
+    replacement->expr_ = repaired_expr;
+    rewritten.push_back(std::move(replacement));
     return MakeSeqOrSingle(std::move(rewritten), op->span_);
   }
 

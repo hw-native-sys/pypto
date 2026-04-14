@@ -30,6 +30,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -314,7 +315,10 @@ StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   }
   INTERNAL_CHECK_SPAN(new_var, op->span_) << "AssignStmt var is not a Var after mutation";
   if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
-    return MakeLikeStmt<AssignStmt>(op, std::move(new_var), std::move(new_value), op->span_);
+    auto result = MutableCopy(op);
+    result->var_ = std::move(new_var);
+    result->value_ = std::move(new_value);
+    return result;
   }
   return op;
 }
@@ -358,13 +362,12 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
   }
 
   if (new_condition.get() != op->condition_.get() || then_changed || else_changed || return_vars_changed) {
-    if (new_else_body.has_value()) {
-      return MakeLikeStmt<IfStmt>(op, std::move(new_condition), std::move(new_then_body), *new_else_body,
-                                  std::move(new_return_vars), op->span_);
-    } else {
-      return MakeLikeStmt<IfStmt>(op, std::move(new_condition), std::move(new_then_body), std::nullopt,
-                                  std::move(new_return_vars), op->span_);
-    }
+    auto result = MutableCopy(op);
+    result->condition_ = std::move(new_condition);
+    result->then_body_ = std::move(new_then_body);
+    result->else_body_ = new_else_body;
+    result->return_vars_ = std::move(new_return_vars);
+    return result;
   }
   return op;
 }
@@ -385,7 +388,9 @@ StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
   }
 
   if (changed) {
-    return MakeLikeStmt<YieldStmt>(op, std::move(new_value), op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(new_value);
+    return result;
   }
   return op;
 }
@@ -406,7 +411,9 @@ StmtPtr IRMutator::VisitStmt_(const ReturnStmtPtr& op) {
   }
 
   if (changed) {
-    return MakeLikeStmt<ReturnStmt>(op, std::move(new_value), op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(new_value);
+    return result;
   }
   return op;
 }
@@ -497,10 +504,16 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
       new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || iter_args_changed ||
       body_changed || return_vars_changed || chunk_config_changed) {
-    return MakeLikeStmt<ForStmt>(op, std::move(new_loop_var), std::move(new_start), std::move(new_stop),
-                                 std::move(new_step), std::move(new_iter_args), std::move(new_body),
-                                 std::move(new_return_vars), op->span_, op->kind_,
-                                 std::move(new_chunk_config), op->attrs_);
+    auto result = MutableCopy(op);
+    result->loop_var_ = std::move(new_loop_var);
+    result->start_ = std::move(new_start);
+    result->stop_ = std::move(new_stop);
+    result->step_ = std::move(new_step);
+    result->iter_args_ = std::move(new_iter_args);
+    result->body_ = std::move(new_body);
+    result->return_vars_ = std::move(new_return_vars);
+    result->chunk_config_ = std::move(new_chunk_config);
+    return result;
   }
   return op;
 }
@@ -566,8 +579,12 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   }
 
   if (condition_changed || iter_args_changed || body_changed || return_vars_changed) {
-    return MakeLikeStmt<WhileStmt>(op, std::move(new_condition), std::move(new_iter_args),
-                                   std::move(new_body), std::move(new_return_vars), op->span_);
+    auto result = MutableCopy(op);
+    result->condition_ = std::move(new_condition);
+    result->iter_args_ = std::move(new_iter_args);
+    result->body_ = std::move(new_body);
+    result->return_vars_ = std::move(new_return_vars);
+    return result;
   }
   return op;
 }
@@ -577,8 +594,9 @@ StmtPtr IRMutator::VisitStmt_(const ScopeStmtPtr& op) {
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "ScopeStmt body mutated to null";
   if (new_body.get() != op->body_.get()) {
-    return MakeLikeStmt<ScopeStmt>(op, op->scope_kind_, std::move(new_body), op->span_, op->level_, op->role_,
-                                   op->split_, op->name_hint_);
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
   }
   return op;
 }
@@ -609,7 +627,9 @@ StmtPtr IRMutator::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK_SPAN(new_expr, op->span_) << "EvalStmt expr mutated to null";
 
   if (new_expr.get() != op->expr_.get()) {
-    return MakeLikeStmt<EvalStmt>(op, std::move(new_expr), op->span_);
+    auto result = MutableCopy(op);
+    result->expr_ = std::move(new_expr);
+    return result;
   }
   return op;
 }

@@ -191,7 +191,7 @@ class ASTParser:
         closure_vars: dict[str, Any] | None = None,
         buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
-        pending_comments: dict[int, list[str]] | None = None,
+        pending_comments: dict[int, list[tuple[int, str]]] | None = None,
     ):
         """Initialize AST parser.
 
@@ -262,7 +262,9 @@ class ASTParser:
         self._func_name: str = ""
 
         # Pending comments keyed by 1-based line number, drained by parse_statement.
-        self._pending_comments: dict[int, list[str]] = pending_comments or {}
+        # Each entry is (col_offset, text) so the parser can distinguish
+        # tail-of-block comments (inside body indent) from outer-scope comments.
+        self._pending_comments: dict[int, list[tuple[int, str]]] = pending_comments or {}
 
     @contextmanager
     def _yield_tracking_scope(self) -> Iterator[None]:
@@ -382,6 +384,7 @@ class ASTParser:
             # parse_statement — no separate skip is needed here.
             for stmt in func_def.body:
                 self.parse_statement(stmt)
+            self._discard_tail_block_comments(func_def.body)
 
         # Exit function scope
         self.scope_manager.exit_scope()
@@ -472,7 +475,7 @@ class ASTParser:
             end_line = stmt.end_lineno or stmt.lineno
         leading: list[str] = []
         for line in sorted(k for k in self._pending_comments if k <= end_line):
-            leading.extend(self._pending_comments.pop(line))
+            leading.extend(text for _col, text in self._pending_comments.pop(line))
         return leading
 
     def _requeue_comments_after(self, stmt: ast.stmt, comments: list[str]) -> None:
@@ -480,13 +483,57 @@ class ASTParser:
 
         Used when a stmt does not produce IR (docstring reroute, bare ``pass``)
         but may have collected leading comments that must survive to the next
-        stmt. No-op when ``comments`` is empty.
+        stmt. No-op when ``comments`` is empty. Synthetic comments inherit the
+        stmt's column offset so they are treated as body-level for tail-drop
+        purposes.
         """
         if not comments:
             return
         next_line = (stmt.end_lineno or stmt.lineno) + 1
+        col = stmt.col_offset
+        entries = [(col, text) for text in comments]
         existing = self._pending_comments.setdefault(next_line, [])
-        self._pending_comments[next_line] = [*comments, *existing]
+        self._pending_comments[next_line] = [*entries, *existing]
+
+    def _discard_tail_block_comments(self, body: list[ast.stmt]) -> None:
+        """Drop pending comments at or deeper than ``body``'s indentation.
+
+        Called after a block's body finishes parsing. Any pending comment whose
+        column is ``>= body[0].col_offset`` sat at the block's indent but was
+        not drained by any body stmt — a tail-of-block comment that has no
+        natural attachment target. We emit a warning and drop these, while
+        leaving shallower-indent comments (belonging to an outer scope) in
+        place so they can attach to the next outer-scope stmt.
+
+        No-op when ``body`` is empty (nothing to determine the block indent).
+        """
+        if not body or not self._pending_comments:
+            return
+        block_col = body[0].col_offset
+        tail: list[tuple[int, str]] = []
+        for line in sorted(self._pending_comments):
+            remaining: list[tuple[int, str]] = []
+            for col, text in self._pending_comments[line]:
+                if col >= block_col:
+                    tail.append((line, text))
+                else:
+                    remaining.append((col, text))
+            if remaining:
+                self._pending_comments[line] = remaining
+            else:
+                del self._pending_comments[line]
+        if not tail:
+            return
+        preview = ", ".join(f"line {line}: {text!r}" for line, text in tail[:3])
+        if len(tail) > 3:
+            preview += f", … (+{len(tail) - 3} more)"
+        warnings.warn(
+            f"Dropped {len(tail)} tail-of-block comment(s): {preview}. "
+            "Tail-of-block comments are not preserved in IR; move them above a "
+            "statement or into the outer scope to retain them.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:  # noqa: PLR0912
         """Parse annotated assignment: var: type = value.
@@ -998,6 +1045,7 @@ class ASTParser:
             with self._yield_tracking_scope():
                 for body_stmt in stmt.body:
                     self.parse_statement(body_stmt)
+                self._discard_tail_block_comments(stmt.body)
                 assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
                 loop_output_vars = self._current_yield_vars[:]
 
@@ -1447,6 +1495,7 @@ class ASTParser:
                         hint="Remove this pl.cond() - condition is already specified at the start",
                     )
                 self.parse_statement(body_stmt)
+            self._discard_tail_block_comments(stmt.body[1:])
 
             assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
             return self._current_yield_vars[:]
@@ -1566,6 +1615,7 @@ class ASTParser:
             # Parse body statements
             for body_stmt in stmt.body:
                 self.parse_statement(body_stmt)
+            self._discard_tail_block_comments(stmt.body)
 
             # Variables leak to outer scope (ConvertToSSA will handle)
             self.scope_manager.exit_scope(leak_vars=True)
@@ -1617,6 +1667,7 @@ class ASTParser:
                 self.scope_manager.enter_scope("if")
                 for then_stmt in stmt.body:
                     self.parse_statement(then_stmt)
+                self._discard_tail_block_comments(stmt.body)
                 self.scope_manager.exit_scope(leak_vars=should_leak)
 
                 # Parse else branch if present
@@ -1625,6 +1676,7 @@ class ASTParser:
                     self.scope_manager.enter_scope("else")
                     for else_stmt in stmt.orelse:
                         self.parse_statement(else_stmt)
+                    self._discard_tail_block_comments(stmt.orelse)
                     self.scope_manager.exit_scope(leak_vars=should_leak)
 
                 # Declare return vars AFTER parsing branches so captured yield types
@@ -1921,6 +1973,7 @@ class ASTParser:
                 self.scope_manager.enter_scope("scope")
                 for body_stmt in stmt.body:
                     self.parse_statement(body_stmt)
+                self._discard_tail_block_comments(stmt.body)
                 self.scope_manager.exit_scope(leak_vars=True)
 
     def _parse_at_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:

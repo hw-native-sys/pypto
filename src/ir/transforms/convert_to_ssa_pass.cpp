@@ -385,7 +385,10 @@ class SSAConverter {
     auto val = SubstExpr(op->value_);
     auto key = op->var_.get();
     auto var = AllocVersion(key, op->var_->GetType(), op->var_->span_);
-    return std::make_shared<AssignStmt>(var, val, op->span_);
+    auto result = MutableCopy(op);
+    result->var_ = var;
+    result->value_ = val;
+    return result;
   }
 
   // ── SeqStmts — computes future uses per-statement for escaping detection
@@ -840,18 +843,25 @@ class SSAConverter {
   StmtPtr ConvertReturn(const ReturnStmtPtr& op) {
     std::vector<ExprPtr> vals;
     for (const auto& v : op->value_) vals.push_back(SubstExpr(v));
-    return std::make_shared<ReturnStmt>(vals, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(vals);
+    return result;
   }
 
   StmtPtr ConvertYield(const YieldStmtPtr& op) {
     std::vector<ExprPtr> vals;
     for (const auto& v : op->value_) vals.push_back(SubstExpr(v));
-    return std::make_shared<YieldStmt>(vals, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(vals);
+    return result;
   }
 
   StmtPtr ConvertEval(const EvalStmtPtr& op) {
     auto e = SubstExpr(op->expr_);
-    return e != op->expr_ ? std::make_shared<EvalStmt>(e, op->span_) : op;
+    if (e == op->expr_) return op;
+    auto result = MutableCopy(op);
+    result->expr_ = e;
+    return result;
   }
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {

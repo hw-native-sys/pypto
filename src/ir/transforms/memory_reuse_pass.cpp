@@ -739,7 +739,8 @@ class YieldFixupMutator : public IRMutator {
     for (const auto& [idx, moved_var] : moves_to_insert) {
       new_yield_values[idx] = moved_var;
     }
-    auto new_yield = std::make_shared<YieldStmt>(new_yield_values, yield_stmt->span_);
+    auto new_yield = MutableCopy(yield_stmt);
+    new_yield->value_ = std::move(new_yield_values);
 
     // Insert tile.move stmts before yield and replace yield in body
     auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
@@ -820,7 +821,8 @@ class YieldFixupMutator : public IRMutator {
       for (const auto& [idx, moved_var] : else_moves) {
         new_else_yield_values[idx] = moved_var;
       }
-      auto new_yield = std::make_shared<YieldStmt>(new_else_yield_values, else_yield->span_);
+      auto new_yield = MutableCopy(else_yield);
+      new_yield->value_ = std::move(new_else_yield_values);
       new_else_body = InsertMovesAndReplaceYield(if_stmt->else_body_.value(), new_yield, else_move_stmts);
     }
 

@@ -822,7 +822,10 @@ class IterArgReuseOptimizer {
 
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
       var_remap_[op->var_.get()] = new_var;
-      return std::make_shared<AssignStmt>(new_var, new_call, op->span_);
+      auto result = MutableCopy(op);
+      result->var_ = new_var;
+      result->value_ = new_call;
+      return result;
     }
 
     ExprPtr VisitExpr_(const VarPtr& op) override {
@@ -1001,7 +1004,10 @@ class AssembleParentStridesOptimizer {
       auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, out_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, out_type, assign->var_->span_);
       var_remap_[op->var_.get()] = new_var;
-      return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
+      auto result = MutableCopy(assign);
+      result->var_ = new_var;
+      result->value_ = new_call;
+      return result;
     }
 
    private:
@@ -1219,11 +1225,14 @@ class AssembleLoopRewriter {
       std::vector<StmtPtr> new_loop_stmts;
       for (const auto& body_stmt : loop_body_stmts) {
         if (body_stmt.get() == assemble_assign.get()) {
-          new_loop_stmts.push_back(
-              std::make_shared<AssignStmt>(store_result_var, store_call, assemble_assign->span_));
+          auto store_assign = MutableCopy(assemble_assign);
+          store_assign->var_ = store_result_var;
+          store_assign->value_ = store_call;
+          new_loop_stmts.push_back(std::move(store_assign));
         } else if (auto y = As<YieldStmt>(body_stmt)) {
-          new_loop_stmts.push_back(
-              std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_result_var}, y->span_));
+          auto new_yield = MutableCopy(y);
+          new_yield->value_ = std::vector<ExprPtr>{store_result_var};
+          new_loop_stmts.push_back(std::move(new_yield));
         } else {
           new_loop_stmts.push_back(body_stmt);
         }
@@ -1232,10 +1241,11 @@ class AssembleLoopRewriter {
       auto new_loop_body = SeqStmts::Flatten(std::move(new_loop_stmts), op->body_->span_);
       auto new_return_var = return_var_remap_.at(store_info.store_var);
 
-      return std::make_shared<ForStmt>(op->loop_var_, op->start_, op->stop_, op->step_,
-                                       std::vector<IterArgPtr>{new_iter_arg}, new_loop_body,
-                                       std::vector<VarPtr>{new_return_var}, op->span_, op->kind_,
-                                       op->chunk_config_, op->attrs_);
+      auto result = MutableCopy(op);
+      result->iter_args_ = std::vector<IterArgPtr>{new_iter_arg};
+      result->body_ = new_loop_body;
+      result->return_vars_ = std::vector<VarPtr>{new_return_var};
+      return result;
     }
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -1278,7 +1288,9 @@ class AssembleLoopRewriter {
         new_ret_values.push_back(v);
       }
       if (!remapped) return op;
-      return std::make_shared<ReturnStmt>(std::move(new_ret_values), op->span_);
+      auto result = MutableCopy(op);
+      result->value_ = std::move(new_ret_values);
+      return result;
     }
 
    private:

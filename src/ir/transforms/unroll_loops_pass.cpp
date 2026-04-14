@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -127,7 +128,36 @@ class LoopUnrollMutator : public IRMutator {
     if (unrolled.empty()) {
       return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
     }
+    // The ForStmt is gone. Its leading_comments would otherwise vanish with it,
+    // so move them onto the first unrolled stmt so readers still see them above
+    // the expanded iterations. SeqStmts itself cannot carry comments (invariant).
+    if (!op->leading_comments_.empty()) {
+      AttachCommentsToFirstStmt(unrolled, op->leading_comments_);
+    }
     return std::make_shared<SeqStmts>(unrolled, op->span_);
+  }
+
+  // Prepend ``comments`` to the leading_comments of the first non-SeqStmts stmt
+  // reachable from ``stmts``. Used when replacing a commented compound stmt with
+  // a sequence that isn't itself allowed to carry comments.
+  static void AttachCommentsToFirstStmt(const std::vector<StmtPtr>& stmts,
+                                        const std::vector<std::string>& comments) {
+    StmtPtr first;
+    for (const auto& s : stmts) {
+      if (s) {
+        first = s;
+        break;
+      }
+    }
+    if (!first) return;
+    // Walk into nested SeqStmts to find the first terminal stmt.
+    while (auto seq = std::dynamic_pointer_cast<const SeqStmts>(first)) {
+      if (seq->stmts_.empty()) return;
+      first = seq->stmts_[0];
+    }
+    std::vector<std::string> merged = comments;
+    merged.insert(merged.end(), first->leading_comments_.begin(), first->leading_comments_.end());
+    AttachLeadingComments(first, std::move(merged));
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {

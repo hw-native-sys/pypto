@@ -852,12 +852,14 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
     if (call) {
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
       if (gv && gv->name_ == incore_name) {
-        // Emit AIC call (always fire-and-forget)
+        // Emit AIC call (always fire-and-forget). Original's leading_comments
+        // attach here — AIC is the semantic front of the split pair.
         auto aic_call =
             std::make_shared<Call>(std::make_shared<GlobalVar>(aic_name), call->args_, stmt->span_);
-        new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_));
+        new_stmts.push_back(std::make_shared<EvalStmt>(aic_call, stmt->span_, stmt->leading_comments_));
 
-        // Emit AIV call: AssignStmt preserves return value, EvalStmt for void
+        // Emit AIV call: AssignStmt preserves return value, EvalStmt for void.
+        // AIV is a continuation of the same logical op, so no comments attach.
         if (assign) {
           auto aiv_call = std::make_shared<Call>(std::make_shared<GlobalVar>(aiv_name), call->args_,
                                                  call->GetType(), stmt->span_);
@@ -1011,13 +1013,17 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     };
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {
-        new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, rw, assign->span_));
+        auto new_assign = MutableCopy(assign);
+        new_assign->value_ = rw;
+        new_stmts.push_back(std::move(new_assign));
         any_changed = true;
         continue;
       }
     } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
       if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_))) {
-        new_stmts.push_back(std::make_shared<EvalStmt>(rw, eval->span_));
+        auto new_eval = MutableCopy(eval);
+        new_eval->expr_ = rw;
+        new_stmts.push_back(std::move(new_eval));
         any_changed = true;
         continue;
       }
@@ -1122,7 +1128,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
       auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_));
       if (rw) {
         new_stmts.push_back(create);
-        new_stmts.push_back(std::make_shared<AssignStmt>(assign->var_, rw, assign->span_));
+        auto new_assign = MutableCopy(assign);
+        new_assign->value_ = rw;
+        new_stmts.push_back(std::move(new_assign));
         any_changed = true;
         continue;
       }
@@ -1130,7 +1138,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
       auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_));
       if (rw) {
         new_stmts.push_back(create);
-        new_stmts.push_back(std::make_shared<EvalStmt>(rw, eval->span_));
+        auto new_eval = MutableCopy(eval);
+        new_eval->expr_ = rw;
+        new_stmts.push_back(std::move(new_eval));
         any_changed = true;
         continue;
       }
@@ -1139,10 +1149,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
       auto nb = RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_bytes,
                                                 gm_buffer_elems, span, counter);
       if (nb != for_stmt->body_) {
-        new_stmts.push_back(
-            std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
-                                      for_stmt->iter_args_, nb, for_stmt->return_vars_, for_stmt->span_,
-                                      for_stmt->kind_, for_stmt->chunk_config_, for_stmt->attrs_));
+        auto new_for = MutableCopy(for_stmt);
+        new_for->body_ = nb;
+        new_stmts.push_back(std::move(new_for));
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);
@@ -1161,8 +1170,10 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         body_changed = (*ne != *else_body);
       }
       if (body_changed) {
-        new_stmts.push_back(
-            std::make_shared<IfStmt>(if_stmt->condition_, nt, ne, if_stmt->return_vars_, if_stmt->span_));
+        auto new_if = MutableCopy(if_stmt);
+        new_if->then_body_ = nt;
+        new_if->else_body_ = ne;
+        new_stmts.push_back(std::move(new_if));
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);
@@ -1171,8 +1182,9 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
       auto nb = RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, gm_buffer_bytes,
                                                 gm_buffer_elems, span, counter);
       if (nb != while_stmt->body_) {
-        new_stmts.push_back(std::make_shared<WhileStmt>(while_stmt->condition_, while_stmt->iter_args_, nb,
-                                                        while_stmt->return_vars_, while_stmt->span_));
+        auto new_while = MutableCopy(while_stmt);
+        new_while->body_ = nb;
+        new_stmts.push_back(std::move(new_while));
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);

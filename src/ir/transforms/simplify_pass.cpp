@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/arith/analyzer.h"
@@ -53,7 +54,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = analyzer_->Simplify(op->value_);
     if (new_value.get() == op->value_.get()) return op;
-    return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = new_value;
+    return result;
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -153,7 +156,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       if (new_val.get() != val.get()) changed = true;
     }
     if (!changed) return op;
-    return std::make_shared<ReturnStmt>(new_values, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(new_values);
+    return result;
   }
 
   StmtPtr VisitStmt_(const YieldStmtPtr& op) override {
@@ -166,13 +171,17 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       if (new_val.get() != val.get()) changed = true;
     }
     if (!changed) return op;
-    return std::make_shared<YieldStmt>(new_values, op->span_);
+    auto result = MutableCopy(op);
+    result->value_ = std::move(new_values);
+    return result;
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto new_expr = analyzer_->Simplify(op->expr_);
     if (new_expr.get() == op->expr_.get()) return op;
-    return std::make_shared<EvalStmt>(new_expr, op->span_);
+    auto result = MutableCopy(op);
+    result->expr_ = new_expr;
+    return result;
   }
 };
 
