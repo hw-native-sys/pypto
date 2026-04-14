@@ -286,15 +286,15 @@ def _data_dir_has_files(data_dir: Path, tensor_specs: list[TensorSpec]) -> bool:
     """
     in_dir = data_dir / "in"
     out_dir = data_dir / "out"
-    if not in_dir.is_dir() or not out_dir.is_dir():
-        return False
     for spec in tensor_specs:
         if spec.is_output:
-            if not (out_dir / f"{spec.name}.pt").exists():
+            if not out_dir.is_dir() or not (out_dir / f"{spec.name}.pt").exists():
                 return False
-            if spec.init_value is not None and not (in_dir / f"{spec.name}.pt").exists():
+            if spec.init_value is not None and (
+                not in_dir.is_dir() or not (in_dir / f"{spec.name}.pt").exists()
+            ):
                 return False
-        elif not (in_dir / f"{spec.name}.pt").exists():
+        elif not in_dir.is_dir() or not (in_dir / f"{spec.name}.pt").exists():
             return False
     return True
 

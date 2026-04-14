@@ -161,8 +161,6 @@ def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> No
     data = _materialize_tensors(runtime_specs)
     in_data = {s.name: data[s.name] for s in runtime_specs if not s.is_output or s.init_value is not None}
     _save_data_files(in_data, data_dir / "in")
-    out_data = {s.name: data[s.name] for s in runtime_specs if s.is_output}
-    _save_data_files(out_data, data_dir / "out")
     write_golden_src = generate_golden_source(
         runtime_specs,
         None,
