@@ -27,13 +27,15 @@ Simpler dependency remaining is:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import fcntl
 import importlib.util
 import logging
 import os
 import subprocess
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -85,9 +87,18 @@ _BINARY_RUNTIME_CACHE = (
 def _save_binary(data: bytes, path: Path) -> None:
     """Save compiled binary bytes to *path* atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        os.write(fd, data)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp_name, path)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def _load_binary(path: Path) -> bytes | None:
@@ -151,6 +162,16 @@ def _get_pto_isa_clone_path() -> Path:
     return Path(__file__).parent.parent.parent.parent / "_deps" / "pto-isa"
 
 
+@contextmanager
+def _pto_isa_lock(clone_path: Path) -> Iterator[None]:
+    """Acquire an exclusive file lock for PTO-ISA operations on *clone_path*."""
+    lock_path = clone_path.parent / ".pto-isa.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+
+
 def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https") -> str | None:
     """Ensure ``PTO_ISA_ROOT`` is available, either from env or by cloning.
 
@@ -165,13 +186,14 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
     """
     existing_root = os.environ.get("PTO_ISA_ROOT")
     if existing_root:
+        if commit:
+            # Still need to checkout the requested commit even if PTO_ISA_ROOT is set
+            with _pto_isa_lock(Path(existing_root)):
+                _checkout_pto_isa_commit(Path(existing_root), commit)
         return existing_root
 
     clone_path = _get_pto_isa_clone_path()
-    lock_path = clone_path.parent / ".pto-isa.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    with _pto_isa_lock(clone_path):
         return _ensure_pto_isa_root_locked(clone_path, commit=commit, clone_protocol=clone_protocol)
 
 
@@ -199,7 +221,7 @@ def _ensure_pto_isa_root_locked(
                     logger.warning(f"Failed to clone pto-isa:\n{result.stderr}")
                     return None
             if commit:
-                subprocess.run(
+                result = subprocess.run(
                     ["git", "checkout", commit],
                     check=False,
                     capture_output=True,
@@ -207,7 +229,9 @@ def _ensure_pto_isa_root_locked(
                     cwd=str(clone_path),
                     timeout=30,
                 )
-        except (subprocess.TimeoutExpired, Exception) as e:
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to checkout pto-isa commit {commit}:\n{result.stderr}")
+        except Exception as e:
             if not include_dir.exists():
                 logger.warning(f"Failed to clone pto-isa: {e}")
                 return None
@@ -513,7 +537,7 @@ def compile_and_assemble(
         # Compile via shared function; skip secondary prebuild cache write
         return compile_single_orchestration(orchestration["source"], compiler, runtime_name)
 
-    max_workers = 1 + len(kernels)
+    max_workers = min(64, 1 + len(kernels))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         fut_orch = executor.submit(_compile_orchestration)
         fut_kernels = [executor.submit(_compile_one_kernel, k) for k in kernels]
@@ -531,7 +555,7 @@ def compile_and_assemble(
     )
 
     # Locate runtime binaries
-    binaries = _find_runtime_binaries(platform, runtime_name)
+    binaries = _find_runtime_binaries(platform, runtime_name, compiler.runtime_root)
 
     return chip_callable, binaries
 
@@ -541,7 +565,7 @@ def compile_and_assemble(
 # ---------------------------------------------------------------------------
 
 
-def _find_runtime_binaries(platform: str, runtime_name: str) -> RuntimeBinaries:
+def _find_runtime_binaries(platform: str, runtime_name: str, simpler_root: Path) -> RuntimeBinaries:
     """Find pre-built runtime binaries from ``SIMPLER_ROOT/build/lib/``.
 
     Also checks the persistent binary cache under ``build_output/binary_cache/runtimes/``.
@@ -565,7 +589,6 @@ def _find_runtime_binaries(platform: str, runtime_name: str) -> RuntimeBinaries:
         )
 
     # Look up from SIMPLER_ROOT/build/lib/
-    simpler_root = Path(os.environ["SIMPLER_ROOT"])
     lib_dir = simpler_root / "build" / "lib" / arch / variant / runtime_name
 
     # Binary names match RuntimeCompiler's target config
@@ -639,28 +662,30 @@ def execute_on_device(
         runtime_env: Optional per-example environment variable overrides.
     """
     worker = ChipWorker()
-    worker.init(
-        str(runtime_binaries.host_path),
-        str(runtime_binaries.aicpu_path),
-        str(runtime_binaries.aicore_path),
-        sim_context_lib_path=str(runtime_binaries.sim_context_path)
-        if runtime_binaries.sim_context_path
-        else "",
-    )
-    worker.set_device(device_id)
+    try:
+        sim_ctx = runtime_binaries.sim_context_path
+        worker.init(
+            str(runtime_binaries.host_path),
+            str(runtime_binaries.aicpu_path),
+            str(runtime_binaries.aicore_path),
+            sim_context_lib_path=str(sim_ctx) if sim_ctx else "",
+        )
+        worker.set_device(device_id)
 
-    config = ChipCallConfig()
-    config.block_dim = block_dim
-    config.aicpu_thread_num = aicpu_thread_num
-    if enable_profiling:
-        config.enable_profiling = True
+        config = ChipCallConfig()
+        config.block_dim = block_dim
+        config.aicpu_thread_num = aicpu_thread_num
+        if enable_profiling:
+            config.enable_profiling = True
 
-    env = runtime_env or {}
-    with _temporary_env(env):
-        worker.run(chip_callable, orch_args, config)
-
-    worker.reset_device()
-    worker.finalize()
+        env = runtime_env or {}
+        with _temporary_env(env):
+            worker.run(chip_callable, orch_args, config)
+    finally:
+        if worker.device_set:
+            worker.reset_device()
+        if worker.initialized:
+            worker.finalize()
 
 
 # ---------------------------------------------------------------------------

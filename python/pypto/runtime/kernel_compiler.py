@@ -76,11 +76,12 @@ class KernelCompiler:
 
         # Map platform to architecture directory
         if platform in ("a2a3", "a2a3sim"):
-            self.platform_dir = self.runtime_root / "src" / "a2a3" / "platform"
+            self.arch = "a2a3"
         elif platform in ("a5", "a5sim"):
-            self.platform_dir = self.runtime_root / "src" / "a5" / "platform"
+            self.arch = "a5"
         else:
             raise ValueError(f"Unknown platform: {platform}")
+        self.platform_dir = self.runtime_root / "src" / self.arch / "platform"
 
         # Create toolchain objects based on platform
         if platform in ("a2a3", "a5"):
@@ -112,14 +113,7 @@ class KernelCompiler:
         Returns:
             List of include directory paths.
         """
-        if self.platform in ("a2a3", "a2a3sim"):
-            arch = "a2a3"
-        elif self.platform in ("a5", "a5sim"):
-            arch = "a5"
-        else:
-            arch = "a2a3"
-
-        runtime_dir = str(self.runtime_root / "src" / arch / "runtime" / runtime_name / "runtime")
+        runtime_dir = str(self.runtime_root / "src" / self.arch / "runtime" / runtime_name / "runtime")
         common_dir = str(self.runtime_root / "src" / "common" / "task_interface")
         return [runtime_dir, common_dir] + self.get_platform_include_dirs()
 
@@ -136,14 +130,7 @@ class KernelCompiler:
         Returns:
             List of absolute include directory paths.
         """
-        if self.platform in ("a2a3", "a2a3sim"):
-            arch = "a2a3"
-        elif self.platform in ("a5", "a5sim"):
-            arch = "a5"
-        else:
-            arch = "a2a3"
-
-        runtime_base_dir = self.runtime_root / "src" / arch / "runtime" / runtime_name
+        runtime_base_dir = self.runtime_root / "src" / self.arch / "runtime" / runtime_name
         include_dirs: list[str] = []
 
         build_config_path = runtime_base_dir / "build_config.py"
@@ -167,14 +154,7 @@ class KernelCompiler:
         Returns:
             ``(include_dirs, source_files)`` — both as absolute paths, or ``([], [])``.
         """
-        if self.platform in ("a2a3", "a2a3sim"):
-            arch = "a2a3"
-        elif self.platform in ("a5", "a5sim"):
-            arch = "a5"
-        else:
-            arch = "a2a3"
-
-        config_path = self.runtime_root / "src" / arch / "runtime" / runtime_name / "build_config.py"
+        config_path = self.runtime_root / "src" / self.arch / "runtime" / runtime_name / "build_config.py"
         if not config_path.is_file():
             return [], []
 
@@ -258,7 +238,7 @@ class KernelCompiler:
     @staticmethod
     def _make_temp_path(prefix: str, suffix: str, build_dir: str | None = None) -> str:
         """Create a unique temporary file path via mkstemp."""
-        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=build_dir or "/tmp")
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=build_dir or tempfile.gettempdir())
         os.close(fd)
         return path
 
