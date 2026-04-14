@@ -215,10 +215,7 @@ def test_config(request) -> RunConfig:
 def test_runner(test_config) -> TestRunner:
     """Session-scoped fixture providing a test runner instance.
 
-    Session scope is used because:
-    1. The runner caches compiled runtime binaries
-    2. Building the runtime takes significant time
-    3. The same runner can be reused across all tests
+    Session scope is used because the same runner can be reused across all tests.
     """
     return TestRunner(test_config)
 
@@ -412,10 +409,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         print(f"[PyPTO] Golden inputs pre-generated — {n_gen} case(s) cached\n")
 
         # ── Phase 2: pre-build binary artifacts ──────────────────────────────
-        # Compile incore kernels, orchestration .so, and runtime binaries in parallel.
-        # Results are saved to work_dir/cache/ and the global binary_cache/runtimes/
-        # directory. _execute_on_device installs a write-through patch so subsequent
-        # CodeRunner calls serve from disk without recompiling.
+        # Compile incore kernels and orchestration .so in parallel.
+        # Results are saved to work_dir/cache/.
         if not session.config.getoption("--codegen-only"):
             platform: str = session.config.getoption("--platform")
             pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")

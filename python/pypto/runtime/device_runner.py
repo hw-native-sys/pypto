@@ -90,25 +90,6 @@ def _load_binary(path: Path) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
-# Platform helpers
-# ---------------------------------------------------------------------------
-
-_PLATFORM_MAP = {
-    "a2a3": ("a2a3", "onboard"),
-    "a2a3sim": ("a2a3", "sim"),
-    "a5": ("a5", "onboard"),
-    "a5sim": ("a5", "sim"),
-}
-
-
-def _parse_platform(platform: str) -> tuple[str, str]:
-    """Parse platform string into ``(arch, variant)``."""
-    if platform not in _PLATFORM_MAP:
-        raise ValueError(f"Unknown platform: {platform!r}. Expected one of {list(_PLATFORM_MAP)}")
-    return _PLATFORM_MAP[platform]
-
-
-# ---------------------------------------------------------------------------
 # PTO-ISA management
 # ---------------------------------------------------------------------------
 
@@ -267,26 +248,6 @@ def _temporary_env(env_updates: dict[str, str]):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = prev
-
-
-def _kernel_config_runtime_env(kernel_config_module, kernels_dir: Path) -> dict[str, str]:
-    """Extract optional per-example environment variables from kernel_config.py."""
-    runtime_env = getattr(kernel_config_module, "RUNTIME_ENV", None)
-    if not isinstance(runtime_env, dict):
-        return {}
-
-    out: dict[str, str] = {}
-    for k, v in runtime_env.items():
-        if not isinstance(k, str):
-            continue
-        s = str(v)
-        is_path_like = k.endswith("_DIR") or k.endswith("_PATH")
-        if is_path_like and s:
-            p = Path(s)
-            if not p.is_absolute():
-                s = str((kernels_dir / p).resolve())
-        out[k] = s
-    return out
 
 
 # ---------------------------------------------------------------------------
