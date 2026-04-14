@@ -35,7 +35,12 @@ import pytest
 import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
-from pypto.runtime.golden_writer import _extract_compute_golden, generate_golden_source
+from pypto.runtime.golden_writer import (
+    _extract_compute_golden,
+    _materialize_tensors,
+    _save_data_files,
+    generate_golden_source,
+)
 from pypto.runtime.runner import (
     _BINARY_RUNTIME_CACHE,
     RunConfig,
@@ -152,6 +157,9 @@ def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> No
         lines.append('    raise NotImplementedError("compute_expected source extraction failed")')
         compute_golden_src = "\n".join(lines)
 
+    data_dir = output_path.parent / "data"
+    data = _materialize_tensors(runtime_specs)
+    _save_data_files(data, data_dir)
     write_golden_src = generate_golden_source(
         runtime_specs,
         None,
@@ -159,6 +167,7 @@ def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> No
         test_case.config.atol,
         compute_golden_src=compute_golden_src,
         scalar_specs=test_case.scalar_specs or None,
+        data_dir=data_dir.resolve(),
     )
     output_path.write_text(write_golden_src, encoding="utf-8")
 

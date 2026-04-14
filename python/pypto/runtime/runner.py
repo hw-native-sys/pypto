@@ -255,6 +255,13 @@ class RunConfig:
             default (``PrePipeline``, or ``PYPTO_WARNING_LEVEL`` env var).
         disabled_warnings: Set of warning checks to disable during compilation.
             ``None`` uses the default (``UnusedControlFlowResult`` disabled).
+        golden_data_dir: Target directory for ``.pt`` data files.  When set,
+            the generated ``golden.py`` always loads tensors from this path.
+            If the directory already contains all required ``.pt`` files they
+            are reused; otherwise the directory is created and data is generated
+            there.  Use a path from a previous run
+            (e.g. ``build_output/<name>_<ts>/data``) to reuse existing golden
+            data, or specify a new path to persist data to a fixed location.
     """
 
     __test__ = False  # Not a pytest test class
@@ -274,6 +281,7 @@ class RunConfig:
     compile_profiling: bool = False
     warning_level: WarningLevel | None = None
     disabled_warnings: WarningCheckSet | None = None
+    golden_data_dir: str | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -446,7 +454,14 @@ def run(
         # 3. Write golden.py
         golden_path = work_dir / "golden.py"
         with _stage("golden_write"):
-            write_golden(tensor_specs, golden, golden_path, rtol=config.rtol, atol=config.atol)
+            write_golden(
+                tensor_specs,
+                golden,
+                golden_path,
+                rtol=config.rtol,
+                atol=config.atol,
+                data_dir=config.golden_data_dir,
+            )
 
         # 4. Execute via Simpler's CodeRunner
         with _stage("device_execution"):
