@@ -793,6 +793,19 @@ void BindIR(nb::module_& m) {
   // Stmt - abstract base, const shared_ptr
   auto stmt_class = nb::class_<Stmt, IRNode>(ir, "Stmt", "Base class for all statements");
   BindFields<Stmt>(stmt_class);
+  // Manually expose leading_comments as read-only (intentionally outside
+  // GetFieldDescriptors — see stmt.h).
+  stmt_class.def_ro("leading_comments", &Stmt::leading_comments_,
+                    "Source-level comments printed above this statement (read-only; "
+                    "use ir.attach_leading_comments to modify).");
+
+  // Free function: attach leading comments to an existing statement.
+  // Python-side `Stmt.leading_comments` is read-only; this helper is the one
+  // sanctioned mutation channel (e.g., for the Python parser after building a
+  // stmt). See stmt.h:AttachLeadingComments for the const-safety rationale.
+  ir.def("attach_leading_comments", &AttachLeadingComments, nb::arg("stmt"), nb::arg("comments"),
+         "Attach leading comments to an existing statement (mutates IgnoreField metadata only). "
+         "Returns the same statement for convenient chaining.");
 
   // AssignStmt - const shared_ptr
   auto assign_stmt_class =

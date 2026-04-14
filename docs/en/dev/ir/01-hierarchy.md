@@ -144,6 +144,9 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 
 ## Statement Nodes
 
+All `Stmt` subclasses inherit a `leading_comments_: vector<string>` metadata
+field from the `Stmt` base class. See [Leading comments on statements](#leading-comments-on-statements) below.
+
 | Node Type | Fields | Description |
 | --------- | ------ | ----------- |
 | **AssignStmt** | `var_` (DefField), `value_` (UsualField) | Variable assignment |
@@ -156,6 +159,49 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **SeqStmts** | `stmts_` | General statement sequence |
 | **BreakStmt** | *(none)* | Exit loop |
 | **ContinueStmt** | *(none)* | Skip to next loop iteration |
+
+### Leading comments on statements
+
+Each `Stmt` carries an optional `leading_comments_: vector<string>` field that
+preserves source-level `#` comments and bare-string docstrings from the Python
+DSL. The printer emits each line as `# <text>` directly above the stmt; passes
+rebuilding stmts through `IRMutator` propagate the field automatically via the
+`MakeLikeStmt` helper.
+
+- **Not reflected.** The field is intentionally excluded from `GetFieldDescriptors`,
+  so it does not participate in `structural_equal`, structural hashing, or
+  serialization. Two stmts that differ only in `leading_comments_` compare and
+  hash equal.
+- **Read-only from Python.** `stmt.leading_comments` is exposed read-only. The
+  sanctioned mutation channel is the free function `ir.attach_leading_comments(stmt, comments)`.
+- **Parser attachment rules.** Comments on lines up to the stmt's first line are
+  drained as leading. Same-line trailing comments (`y = 1  # note`) are promoted
+  into the next stmt's leading list. Bare-string expressions (docstrings) anywhere
+  in the body become leading comments on the next stmt.
+- **SeqStmts invariant.** `SeqStmts` is a transparent container and must not
+  carry `leading_comments_`; comments always attach to inner (non-Seq) stmts.
+- **Known limitations (v1).**
+  - Tail-of-block `#` comments (after the last stmt in a block) are dropped.
+  - `IRMutator` *subclasses* that construct stmts directly instead of going
+    through `MakeLikeStmt` may drop comments on rebuilt stmts.
+  - Comments do not survive binary serialization (`serialize_to_file`); they are
+    DSL-level annotations for human-readable dumps.
+
+```python
+# DSL
+"""cache intermediate"""
+# reuse later
+y = x + 1  # for performance
+
+# Parsed
+# AssignStmt.leading_comments == ["cache intermediate", "reuse later", "for performance"]
+
+# Printed
+# cache intermediate
+# reuse later
+# for performance
+y: f32 = x + 1
+```
 
 ### ForStmt Details
 

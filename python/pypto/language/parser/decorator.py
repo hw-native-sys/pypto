@@ -22,6 +22,7 @@ from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import ir
 
 from .ast_parser import ASTParser
+from .comment_extractor import extract_line_comments
 from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 
@@ -671,6 +672,7 @@ def function(
                 col_offset,
                 strict_ssa=strict_ssa,
                 closure_vars=closure_vars,
+                pending_comments=extract_line_comments(source_code),
             )
 
             # Normalize attrs: convert enum values to ints for storage
@@ -841,6 +843,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
         try:
             tree = _parse_ast_tree(source_code, "class")
             class_def = _find_ast_node(tree, ast.ClassDef, c.__name__, "class")
+            pending_comments = extract_line_comments(source_code)
 
             # Pass 1: Collect all @pl.function methods and create GlobalVars
             global_vars = {}
@@ -886,7 +889,8 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = _strip_self_parameter(func_def)
 
-                # Create parser with global_vars and gvar_to_func map for cross-function call resolution
+                # Create parser with global_vars and gvar_to_func map for cross-function call resolution.
+                # Copy pending_comments so each function consumes comments independently.
                 parser = ASTParser(
                     source_file,
                     source_lines,
@@ -898,6 +902,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     closure_vars=closure_vars,
                     buffer_name_meta=buffer_name_meta,
                     dyn_var_cache=dyn_var_cache,
+                    pending_comments={k: list(v) for k, v in pending_comments.items()},
                 )
 
                 try:

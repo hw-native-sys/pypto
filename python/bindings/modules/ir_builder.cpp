@@ -273,6 +273,12 @@ void BindIRBuilder(nb::module_& m) {
            "Raises:\n"
            "    RuntimeError: If not inside a valid context")
 
+      .def("attach_leading_comments_to_last", &IRBuilder::AttachLeadingCommentsToLast, nb::arg("comments"),
+           "Attach leading comments to the most recently emitted stmt in the current context.\n\n"
+           "Used by the DSL parser to associate source comments with the stmt just emitted\n"
+           "(the outer stmt of a compound block, or the simple stmt itself). No-op if the\n"
+           "current context has no stmts or if comments is empty.")
+
       .def("assign", &IRBuilder::Assign, nb::arg("var"), nb::arg("value"), nb::arg("span"),
            "Create an assignment statement and emit it.\n\n"
            "Convenience method that creates and emits an assignment.\n\n"

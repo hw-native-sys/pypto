@@ -144,6 +144,8 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 
 ## 语句节点
 
+所有 `Stmt` 子类都从 `Stmt` 基类继承一个 `leading_comments_: vector<string>` 元数据字段。详见下文 [语句的前导注释](#语句的前导注释)。
+
 | 节点类型 | 字段 | 说明 |
 | -------- | ---- | ---- |
 | **AssignStmt** | `var_` (DefField), `value_` (UsualField) | 变量赋值 |
@@ -156,6 +158,35 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **SeqStmts** | `stmts_` | 通用语句序列 |
 | **BreakStmt** | *(无)* | 退出循环 |
 | **ContinueStmt** | *(无)* | 跳至下一次循环迭代 |
+
+### 语句的前导注释
+
+每个 `Stmt` 都带有一个可选的 `leading_comments_: vector<string>` 字段，用于保留 Python DSL 中的源码级 `#` 注释和裸字符串文档字符串（docstring）。打印器会将每一行以 `# <text>` 的形式输出在该语句上方；通过 `IRMutator` 重建语句的 pass 会经由 `MakeLikeStmt` 辅助自动传递该字段。
+
+- **不参与反射。** 该字段特意从 `GetFieldDescriptors` 中排除，因此不参与 `structural_equal`、结构哈希或序列化。两个仅在 `leading_comments_` 上有差异的语句相等且哈希一致。
+- **Python 侧只读。** `stmt.leading_comments` 仅暴露为只读。官方的修改通道是自由函数 `ir.attach_leading_comments(stmt, comments)`。
+- **解析器附着规则。** 不晚于该语句首行的注释会被作为前导注释收集。同一行的尾随注释（`y = 1  # note`）被提升到下一条语句的前导列表中。函数体中任何位置的裸字符串表达式（docstring）都会成为下一条语句的前导注释。
+- **SeqStmts 不变式。** `SeqStmts` 是一个透明容器，不应直接持有 `leading_comments_`；注释始终附着到其内部的（非 Seq）语句上。
+- **已知限制（v1）。**
+  - 块末尾的 `#` 注释（最后一条语句之后）会被丢弃。
+  - 直接构造语句而绕过 `MakeLikeStmt` 的 `IRMutator` *子类* 可能会在重建的语句上丢失注释。
+  - 注释不会在二进制序列化（`serialize_to_file`）中保留；它们是面向人类可读转储的 DSL 级注解。
+
+```python
+# DSL
+"""cache intermediate"""
+# reuse later
+y = x + 1  # for performance
+
+# Parsed
+# AssignStmt.leading_comments == ["cache intermediate", "reuse later", "for performance"]
+
+# Printed
+# cache intermediate
+# reuse later
+# for performance
+y: f32 = x + 1
+```
 
 ### ForStmt 详细说明
 

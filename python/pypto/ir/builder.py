@@ -491,6 +491,18 @@ class IRBuilder:
         """
         self._builder.emit(stmt)
 
+    def attach_leading_comments_to_last(self, comments: list[str]) -> None:
+        """Attach source-level comments to the most recently emitted stmt.
+
+        Used by the DSL parser to associate extracted comments with the stmt
+        just emitted in the current context. No-op when ``comments`` is empty
+        or no stmt has been emitted yet.
+
+        Args:
+            comments: Comment lines (without leading ``#``)
+        """
+        self._builder.attach_leading_comments_to_last(comments)
+
     def return_stmt(
         self,
         values: int | float | ir.Expr | Sequence[int | float | ir.Expr] | None = None,

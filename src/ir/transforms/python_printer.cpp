@@ -285,6 +285,10 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // Emit each leading comment line of `stmt` as `# <text>` above the stmt itself.
+  // Assumes the current indent has already been written to the stream.
+  void PrintLeadingComments(const StmtPtr& stmt);
+
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
@@ -1084,14 +1088,22 @@ void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
   }
 }
 
+void IRPythonPrinter::PrintLeadingComments(const StmtPtr& stmt) {
+  for (const auto& line : stmt->leading_comments_) {
+    stream_ << "# " << line << "\n" << GetIndent();
+  }
+}
+
 void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
+    INTERNAL_CHECK(seq->leading_comments_.empty()) << "SeqStmts should not carry leading comments directly";
     for (size_t i = 0; i < seq->stmts_.size(); ++i) {
       PrintStmtBlock(seq->stmts_[i]);
       if (i < seq->stmts_.size() - 1) stream_ << "\n";
     }
   } else {
     stream_ << GetIndent();
+    PrintLeadingComments(stmt);
     VisitStmt(stmt);
   }
 }

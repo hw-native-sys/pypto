@@ -327,6 +327,23 @@ class IRBuilder {
   void Emit(const StmtPtr& stmt);
 
   /**
+   * @brief Attach leading comments to the most recently emitted statement
+   *        in the current context.
+   *
+   * Used by the DSL parser to associate extracted source comments with the
+   * stmt that has just been emitted (the outer stmt of a compound block, or
+   * the simple stmt itself). Mutates the stmt's IgnoreField metadata only —
+   * no effect on structural equality or hashing.
+   *
+   * No-op if the current context has no statements yet or the comments list
+   * is empty.
+   *
+   * @param comments Comment lines (without leading '#')
+   * @throws RuntimeError if not inside a valid context
+   */
+  void AttachLeadingCommentsToLast(std::vector<std::string> comments);
+
+  /**
    * @brief Create an assignment statement and emit it
    *
    * Convenience method that creates an assignment and emits it.
@@ -522,6 +539,13 @@ class BuildContext {
   virtual void AddStmt(const StmtPtr& stmt) = 0;
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
+  // Return the most recently emitted stmt in this context, or nullptr if none.
+  // Subclasses that split stmts across multiple vectors (e.g., IfStmtContext's
+  // then/else branches) should override to return the right one.
+  [[nodiscard]] virtual StmtPtr GetLastEmittedStmt() const {
+    return stmts_.empty() ? nullptr : stmts_.back();
+  }
+
  protected:
   Type type_;
   Span begin_span_;
@@ -652,6 +676,10 @@ class IfStmtContext : public BuildContext {
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
 
   void AddStmt(const StmtPtr& stmt) override { (in_else_branch_ ? else_stmts_ : stmts_).push_back(stmt); }
+  [[nodiscard]] StmtPtr GetLastEmittedStmt() const override {
+    const auto& active = in_else_branch_ ? else_stmts_ : stmts_;
+    return active.empty() ? nullptr : active.back();
+  }
   [[nodiscard]] const ExprPtr& GetCondition() const { return condition_; }
   [[nodiscard]] bool InElseBranch() const { return in_else_branch_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetElseStmts() const { return else_stmts_; }

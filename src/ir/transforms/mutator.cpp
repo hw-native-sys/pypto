@@ -314,7 +314,7 @@ StmtPtr IRMutator::VisitStmt_(const AssignStmtPtr& op) {
   }
   INTERNAL_CHECK_SPAN(new_var, op->span_) << "AssignStmt var is not a Var after mutation";
   if (new_var.get() != op->var_.get() || new_value.get() != op->value_.get()) {
-    return std::make_shared<const AssignStmt>(std::move(new_var), std::move(new_value), op->span_);
+    return MakeLikeStmt<AssignStmt>(op, std::move(new_var), std::move(new_value), op->span_);
   }
   return op;
 }
@@ -359,11 +359,11 @@ StmtPtr IRMutator::VisitStmt_(const IfStmtPtr& op) {
 
   if (new_condition.get() != op->condition_.get() || then_changed || else_changed || return_vars_changed) {
     if (new_else_body.has_value()) {
-      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body),
-                                            *new_else_body, std::move(new_return_vars), op->span_);
+      return MakeLikeStmt<IfStmt>(op, std::move(new_condition), std::move(new_then_body), *new_else_body,
+                                  std::move(new_return_vars), op->span_);
     } else {
-      return std::make_shared<const IfStmt>(std::move(new_condition), std::move(new_then_body), std::nullopt,
-                                            std::move(new_return_vars), op->span_);
+      return MakeLikeStmt<IfStmt>(op, std::move(new_condition), std::move(new_then_body), std::nullopt,
+                                  std::move(new_return_vars), op->span_);
     }
   }
   return op;
@@ -385,7 +385,7 @@ StmtPtr IRMutator::VisitStmt_(const YieldStmtPtr& op) {
   }
 
   if (changed) {
-    return std::make_shared<const YieldStmt>(std::move(new_value), op->span_);
+    return MakeLikeStmt<YieldStmt>(op, std::move(new_value), op->span_);
   }
   return op;
 }
@@ -406,7 +406,7 @@ StmtPtr IRMutator::VisitStmt_(const ReturnStmtPtr& op) {
   }
 
   if (changed) {
-    return std::make_shared<const ReturnStmt>(std::move(new_value), op->span_);
+    return MakeLikeStmt<ReturnStmt>(op, std::move(new_value), op->span_);
   }
   return op;
 }
@@ -497,10 +497,10 @@ StmtPtr IRMutator::VisitStmt_(const ForStmtPtr& op) {
   if (new_loop_var.get() != op->loop_var_.get() || new_start.get() != op->start_.get() ||
       new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get() || iter_args_changed ||
       body_changed || return_vars_changed || chunk_config_changed) {
-    return std::make_shared<const ForStmt>(std::move(new_loop_var), std::move(new_start), std::move(new_stop),
-                                           std::move(new_step), std::move(new_iter_args), std::move(new_body),
-                                           std::move(new_return_vars), op->span_, op->kind_,
-                                           std::move(new_chunk_config), op->attrs_);
+    return MakeLikeStmt<ForStmt>(op, std::move(new_loop_var), std::move(new_start), std::move(new_stop),
+                                 std::move(new_step), std::move(new_iter_args), std::move(new_body),
+                                 std::move(new_return_vars), op->span_, op->kind_,
+                                 std::move(new_chunk_config), op->attrs_);
   }
   return op;
 }
@@ -566,8 +566,8 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   }
 
   if (condition_changed || iter_args_changed || body_changed || return_vars_changed) {
-    return std::make_shared<const WhileStmt>(std::move(new_condition), std::move(new_iter_args),
-                                             std::move(new_body), std::move(new_return_vars), op->span_);
+    return MakeLikeStmt<WhileStmt>(op, std::move(new_condition), std::move(new_iter_args),
+                                   std::move(new_body), std::move(new_return_vars), op->span_);
   }
   return op;
 }
@@ -577,8 +577,8 @@ StmtPtr IRMutator::VisitStmt_(const ScopeStmtPtr& op) {
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "ScopeStmt body mutated to null";
   if (new_body.get() != op->body_.get()) {
-    return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
-                                             op->role_, op->split_, op->name_hint_);
+    return MakeLikeStmt<ScopeStmt>(op, op->scope_kind_, std::move(new_body), op->span_, op->level_, op->role_,
+                                   op->split_, op->name_hint_);
   }
   return op;
 }
@@ -609,7 +609,7 @@ StmtPtr IRMutator::VisitStmt_(const EvalStmtPtr& op) {
   INTERNAL_CHECK_SPAN(new_expr, op->span_) << "EvalStmt expr mutated to null";
 
   if (new_expr.get() != op->expr_.get()) {
-    return std::make_shared<const EvalStmt>(std::move(new_expr), op->span_);
+    return MakeLikeStmt<EvalStmt>(op, std::move(new_expr), op->span_);
   }
   return op;
 }

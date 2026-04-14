@@ -308,6 +308,16 @@ class Stmt : public IRNode {
    */
   [[nodiscard]] std::string TypeName() const override { return "Stmt"; }
 
+  // Source-level comments printed above this statement.
+  //
+  // This field is INTENTIONALLY NOT registered in GetFieldDescriptors(): it is
+  // pure DSL-level annotation metadata that must not participate in structural
+  // equality, hashing, or serialization, and is exposed to Python manually as a
+  // read-only property (see python/bindings/modules/ir.cpp). Set while the stmt
+  // is still held as shared_ptr<X> (non-const) by the parser / IRMutator; the
+  // sanctioned mutation channel from Python is AttachLeadingComments.
+  std::vector<std::string> leading_comments_;
+
   static constexpr auto GetFieldDescriptors() { return IRNode::GetFieldDescriptors(); }
 };
 
@@ -899,6 +909,35 @@ class ContinueStmt : public Stmt {
 };
 
 using ContinueStmtPtr = std::shared_ptr<const ContinueStmt>;
+
+/**
+ * @brief Attach leading comments to an existing statement
+ *
+ * Stmts are handed around as `shared_ptr<const Stmt>` to discourage mutation of
+ * semantic fields, but `leading_comments_` is IgnoreField metadata that has no
+ * effect on structural equality or hashing. This helper is the single sanctioned
+ * mutation channel (e.g., for the Python parser attaching extracted comments
+ * after building a stmt). The `const_cast` is safe because the helper requires
+ * the caller already holds a StmtPtr referencing a concrete, owned stmt.
+ *
+ * Rejects `SeqStmts` targets: it is a transparent container and the printer
+ * enforces that its leading_comments_ is always empty. Attach comments to an
+ * inner stmt instead.
+ *
+ * Not thread-safe: concurrent callers must coordinate since the mutation is
+ * performed through `const_cast` on the shared target.
+ *
+ * @param stmt Statement to annotate (must be non-null, not a SeqStmts)
+ * @param comments Comment lines (without leading '#')
+ * @return The same StmtPtr, with `leading_comments_` replaced by `comments`
+ */
+inline StmtPtr AttachLeadingComments(StmtPtr stmt, std::vector<std::string> comments) {
+  CHECK(stmt) << "AttachLeadingComments: stmt must not be null";
+  CHECK(stmt->GetKind() != ObjectKind::SeqStmts)
+      << "AttachLeadingComments: cannot attach to SeqStmts; attach to an inner stmt instead";
+  const_cast<Stmt&>(*stmt).leading_comments_ = std::move(comments);
+  return stmt;
+}
 
 }  // namespace ir
 }  // namespace pypto

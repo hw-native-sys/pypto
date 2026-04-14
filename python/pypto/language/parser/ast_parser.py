@@ -179,7 +179,7 @@ def _normalize_inferred_type_for_annotation(
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         source_file: str,
         source_lines: list[str],
@@ -191,6 +191,7 @@ class ASTParser:
         closure_vars: dict[str, Any] | None = None,
         buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
+        pending_comments: dict[int, list[str]] | None = None,
     ):
         """Initialize AST parser.
 
@@ -209,6 +210,9 @@ class ASTParser:
             dyn_var_cache: Optional shared cache mapping dynamic var names to ir.Var objects.
                 When multiple functions in a @pl.program share this dict, the same DynVar
                 produces the same ir.Var across functions.
+            pending_comments: Map from 1-based line number to ``#``-stripped comment lines
+                (produced by :func:`extract_line_comments`). Drained in source order and
+                attached as ``leading_comments`` metadata to the stmt that follows.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -256,6 +260,9 @@ class ASTParser:
         )
         # Current function name (set during parse_function)
         self._func_name: str = ""
+
+        # Pending comments keyed by 1-based line number, drained by parse_statement.
+        self._pending_comments: dict[int, list[str]] = pending_comments or {}
 
     @contextmanager
     def _yield_tracking_scope(self) -> Iterator[None]:
@@ -370,12 +377,10 @@ class ASTParser:
                 else:
                     f.return_type(return_type)
 
-            # Parse function body (skip docstrings)
-            for i, stmt in enumerate(func_def.body):
-                # Skip docstrings (string constants as first statement or after decorators)
-                if i == 0 and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
-                    if isinstance(stmt.value.value, str):
-                        continue  # Skip docstring
+            # Parse function body. Docstrings (bare-string expressions anywhere
+            # in the body) are rerouted as leading_comments on the next stmt by
+            # parse_statement — no separate skip is needed here.
+            for stmt in func_def.body:
                 self.parse_statement(stmt)
 
         # Exit function scope
@@ -386,9 +391,29 @@ class ASTParser:
     def parse_statement(self, stmt: ast.stmt) -> None:
         """Parse a statement node.
 
+        Drains pending ``#`` comments on lines up to ``stmt.end_lineno`` and
+        attaches them as leading comments on the emitted IR stmt. Bare-string
+        expressions (docstrings) are not emitted as IR; their text is rerouted
+        into ``_pending_comments`` so the next stmt picks them up as leading
+        comments.
+
         Args:
             stmt: AST statement node
         """
+        leading = self._drain_pending_comments(stmt)
+
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            # Bare-string expression — treat as comment text on the next stmt.
+            # Prepend any `#` comments already collected for this line so the
+            # printed order matches source order.
+            doc_lines = stmt.value.value.splitlines() or [""]
+            self._requeue_comments_after(stmt, [*leading, *doc_lines])
+            return
+
         if isinstance(stmt, ast.AnnAssign):
             self.parse_annotated_assignment(stmt)
         elif isinstance(stmt, ast.Assign):
@@ -410,7 +435,10 @@ class ASTParser:
         elif isinstance(stmt, ast.Continue):
             self.parse_continue(stmt)
         elif isinstance(stmt, ast.Pass):
-            pass  # No-op: pass statements produce no IR
+            # No-op: pass statements produce no IR. Re-enqueue any collected
+            # comments for the following stmt so they don't get silently dropped.
+            self._requeue_comments_after(stmt, leading)
+            return
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
@@ -418,6 +446,47 @@ class ASTParser:
                 hint="Only assignments, for loops, while loops, if statements, "
                 "with statements, returns, break, continue, and pass are supported in DSL functions",
             )
+
+        if leading:
+            self.builder.attach_leading_comments_to_last(leading)
+
+    def _drain_pending_comments(self, stmt: ast.stmt) -> list[str]:
+        """Collect pending comments whose line numbers fall at or before ``stmt``.
+
+        For compound stmts (``for``/``while``/``if``/``with``), only comments
+        whose line is ``<= stmt.lineno`` (the header's first line) are drained;
+        body-inner comments are left for the body stmts' own drains. For simple
+        stmts, drain through ``stmt.end_lineno`` so trailing comments on the
+        last logical line (e.g. ``y = 1  # note``) are captured.
+
+        Returns comments in source order and removes them from the pending map.
+        """
+        if not self._pending_comments:
+            return []
+        # Compound stmts expose a non-empty ``body`` list; drain only through
+        # the header line so body-inner comments stay pending.
+        body = getattr(stmt, "body", None)
+        if isinstance(body, list) and body:
+            end_line = stmt.lineno
+        else:
+            end_line = stmt.end_lineno or stmt.lineno
+        leading: list[str] = []
+        for line in sorted(k for k in self._pending_comments if k <= end_line):
+            leading.extend(self._pending_comments.pop(line))
+        return leading
+
+    def _requeue_comments_after(self, stmt: ast.stmt, comments: list[str]) -> None:
+        """Re-enqueue ``comments`` onto the line after ``stmt`` ends.
+
+        Used when a stmt does not produce IR (docstring reroute, bare ``pass``)
+        but may have collected leading comments that must survive to the next
+        stmt. No-op when ``comments`` is empty.
+        """
+        if not comments:
+            return
+        next_line = (stmt.end_lineno or stmt.lineno) + 1
+        existing = self._pending_comments.setdefault(next_line, [])
+        self._pending_comments[next_line] = [*comments, *existing]
 
     def parse_annotated_assignment(self, stmt: ast.AnnAssign) -> None:  # noqa: PLR0912
         """Parse annotated assignment: var: type = value.
