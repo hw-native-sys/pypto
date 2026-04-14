@@ -422,7 +422,7 @@ def run(
         )
 
         with _stage("binary_compilation"):
-            chip_callable, binaries = compile_and_assemble(
+            chip_callable, runtime_name = compile_and_assemble(
                 work_dir, config.platform, pto_isa_commit=config.pto_isa_commit
             )
 
@@ -444,7 +444,8 @@ def run(
             execute_on_device(
                 chip_callable,
                 orch_args,
-                binaries,
+                config.platform,
+                runtime_name,
                 config.device_id,
                 enable_profiling=config.runtime_profiling,
             )
@@ -514,7 +515,7 @@ def _execute_on_device(
         validate_golden,
     )
 
-    chip_callable, binaries = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
+    chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit=pto_isa_commit)
 
     # Load golden.py to get generate_inputs and compute_golden
     import importlib.util  # noqa: PLC0415
@@ -550,7 +551,8 @@ def _execute_on_device(
     execute_on_device(
         chip_callable,
         orch_args,
-        binaries,
+        platform,
+        runtime_name,
         device_id,
         enable_profiling=runtime_profiling,
     )

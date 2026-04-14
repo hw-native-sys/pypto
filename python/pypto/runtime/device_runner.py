@@ -37,7 +37,6 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,12 +46,11 @@ from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .task_interface import (
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipCallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipWorker,
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    make_tensor_arg,
-    scalar_to_uint64,
+    Worker,  # pyright: ignore[reportAttributeAccessIssue]
+    make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+    scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
 from .tensor_spec import ScalarSpec, TensorSpec
 
@@ -60,27 +58,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# RuntimeBinaries
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class RuntimeBinaries:
-    """Paths to compiled runtime binaries (host, aicpu, aicore)."""
-
-    host_path: Path
-    aicpu_path: Path
-    aicore_path: Path
-    sim_context_path: Path | None = None
-
-
-# ---------------------------------------------------------------------------
 # Binary cache helpers
 # ---------------------------------------------------------------------------
-
-_BINARY_RUNTIME_CACHE = (
-    Path(__file__).parent.parent.parent.parent / "build_output" / "binary_cache" / "runtimes"
-)
 
 
 def _save_binary(data: bytes, path: Path) -> None:
@@ -108,25 +87,6 @@ def _load_binary(path: Path) -> bytes | None:
         return path.read_bytes()
     except Exception:
         return None
-
-
-def _get_simpler_stamp() -> str:
-    """Return Simpler's current git commit (short hash) as a cache-key stamp."""
-    simpler_root = os.environ.get("SIMPLER_ROOT", "")
-    if not simpler_root:
-        return "unknown"
-    try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            cwd=simpler_root,
-            timeout=5,
-        )
-        return r.stdout.strip() if r.returncode == 0 else "unknown"
-    except Exception:
-        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -441,14 +401,11 @@ def compile_and_assemble(
     work_dir: Path,
     platform: str,
     pto_isa_commit: str | None = None,
-) -> tuple[ChipCallable, RuntimeBinaries]:
+) -> tuple[ChipCallable, str]:
     """Compile kernels + orchestration from *work_dir*, assemble ``ChipCallable``.
 
     Reads ``kernel_config.py`` from *work_dir* to discover kernel sources,
     orchestration source, and runtime configuration.
-
-    Binary caching is integrated: cached binaries are served from
-    ``work_dir/cache/`` and ``build_output/binary_cache/runtimes/``.
 
     Args:
         work_dir: Root output directory containing ``kernels/``, ``orchestration/``,
@@ -457,7 +414,8 @@ def compile_and_assemble(
         pto_isa_commit: If set, pin the pto-isa clone to this commit.
 
     Returns:
-        ``(chip_callable, runtime_binaries)`` ready for execution.
+        ``(chip_callable, runtime_name)`` — the assembled callable and the
+        runtime name (e.g. ``"tensormap_and_ringbuffer"``).
     """
     # Load kernel_config.py
     config_path = work_dir / "kernel_config.py"
@@ -538,83 +496,7 @@ def compile_and_assemble(
         children=kernel_binaries,
     )
 
-    # Locate runtime binaries
-    binaries = _find_runtime_binaries(platform, runtime_name, compiler.runtime_root)
-
-    return chip_callable, binaries
-
-
-# ---------------------------------------------------------------------------
-# Runtime binary lookup
-# ---------------------------------------------------------------------------
-
-
-def _find_runtime_binaries(platform: str, runtime_name: str, simpler_root: Path) -> RuntimeBinaries:
-    """Find pre-built runtime binaries from ``SIMPLER_ROOT/build/lib/``.
-
-    Also checks the persistent binary cache under ``build_output/binary_cache/runtimes/``.
-    """
-    stamp = _get_simpler_stamp()
-    arch, variant = _parse_platform(platform)
-
-    # Check persistent cache first
-    cache_dir = _BINARY_RUNTIME_CACHE / stamp
-    host_cache = cache_dir / f"{runtime_name}_{platform}_host.bin"
-    aicpu_cache = cache_dir / f"{runtime_name}_{platform}_aicpu.bin"
-    aicore_cache = cache_dir / f"{runtime_name}_{platform}_aicore.bin"
-
-    if host_cache.exists() and aicpu_cache.exists() and aicore_cache.exists():
-        sim_ctx = _resolve_sim_context(arch, variant)
-        return RuntimeBinaries(
-            host_path=host_cache,
-            aicpu_path=aicpu_cache,
-            aicore_path=aicore_cache,
-            sim_context_path=sim_ctx,
-        )
-
-    # Look up from SIMPLER_ROOT/build/lib/
-    lib_dir = simpler_root / "build" / "lib" / arch / variant / runtime_name
-
-    # Binary names match RuntimeCompiler's target config
-    host_name = "libhost_runtime.so"
-    aicpu_name = "libaicpu_kernel.so"
-    aicore_name = "aicore_kernel.o" if variant == "onboard" else "libaicore_kernel.so"
-
-    host_path = lib_dir / host_name
-    aicpu_path = lib_dir / aicpu_name
-    aicore_path = lib_dir / aicore_name
-
-    missing = [str(p) for p in (host_path, aicpu_path, aicore_path) if not p.is_file()]
-    if missing:
-        raise FileNotFoundError(
-            f"Pre-built runtime binaries not found for '{runtime_name}' "
-            f"(platform={platform}):\n"
-            + "\n".join(f"  {m}" for m in missing)
-            + "\nRun 'cd $SIMPLER_ROOT && pip install .' to build them."
-        )
-
-    # Cache for future use
-    _save_binary(host_path.read_bytes(), host_cache)
-    _save_binary(aicpu_path.read_bytes(), aicpu_cache)
-    _save_binary(aicore_path.read_bytes(), aicore_cache)
-
-    sim_ctx = _resolve_sim_context(arch, variant)
-    return RuntimeBinaries(
-        host_path=host_path,
-        aicpu_path=aicpu_path,
-        aicore_path=aicore_path,
-        sim_context_path=sim_ctx,
-    )
-
-
-def _resolve_sim_context(arch: str, variant: str) -> Path | None:
-    """Return path to ``libcpu_sim_context.so`` for sim platforms, ``None`` for onboard."""
-    if variant != "sim":
-        return None
-    simpler_root = Path(os.environ.get("SIMPLER_ROOT", ""))
-    if not simpler_root:
-        return None
-    return simpler_root / "build" / "lib" / arch / variant / "libcpu_sim_context.so"
+    return chip_callable, runtime_name
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +507,8 @@ def _resolve_sim_context(arch: str, variant: str) -> Path | None:
 def execute_on_device(
     chip_callable: ChipCallable,
     orch_args: ChipStorageTaskArgs,
-    runtime_binaries: RuntimeBinaries,
+    platform: str,
+    runtime_name: str,
     device_id: int,
     *,
     block_dim: int = 24,
@@ -633,43 +516,33 @@ def execute_on_device(
     enable_profiling: bool = False,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
-    """Execute *chip_callable* on device via ``ChipWorker``.
+    """Execute *chip_callable* on device via Simpler's unified ``Worker``.
 
     Args:
         chip_callable: Assembled callable (orchestration + kernels).
         orch_args: Tensor/scalar arguments.
-        runtime_binaries: Paths to host/aicpu/aicore runtime binaries.
+        platform: Target execution platform (e.g. ``"a2a3sim"``).
+        runtime_name: Runtime implementation name (e.g. ``"tensormap_and_ringbuffer"``).
         device_id: NPU device index.
         block_dim: Block dimension for execution.
         aicpu_thread_num: Number of AICPU threads.
         enable_profiling: Enable runtime profiling.
         runtime_env: Optional per-example environment variable overrides.
     """
-    worker = ChipWorker()
-    try:
-        sim_ctx = runtime_binaries.sim_context_path
-        worker.init(
-            str(runtime_binaries.host_path),
-            str(runtime_binaries.aicpu_path),
-            str(runtime_binaries.aicore_path),
-            sim_context_lib_path=str(sim_ctx) if sim_ctx else "",
+    worker = Worker(level=2, device_id=device_id, platform=platform, runtime=runtime_name)
+    worker.init()
+
+    env = runtime_env or {}
+    with _temporary_env(env):
+        worker.run(
+            chip_callable,
+            orch_args,
+            block_dim=block_dim,
+            aicpu_thread_num=aicpu_thread_num,
+            enable_profiling=enable_profiling,
         )
-        worker.set_device(device_id)
 
-        config = ChipCallConfig()
-        config.block_dim = block_dim
-        config.aicpu_thread_num = aicpu_thread_num
-        if enable_profiling:
-            config.enable_profiling = True
-
-        env = runtime_env or {}
-        with _temporary_env(env):
-            worker.run(chip_callable, orch_args, config)
-    finally:
-        if worker.device_set:
-            worker.reset_device()
-        if worker.initialized:
-            worker.finalize()
+    worker.close()
 
 
 # ---------------------------------------------------------------------------
