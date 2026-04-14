@@ -37,7 +37,10 @@ def extract_line_comments(source: str) -> dict[int, list[tuple[int, str]]]:
         tokens = tokenize.generate_tokens(io.StringIO(source).readline)
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
-                text = tok.string.lstrip("#")
+                # Strip exactly one leading '#' and at most one following space.
+                # Multi-hash forms like "## heading" keep their extra hashes so
+                # the printed comment still reads "# heading" after re-emission.
+                text = tok.string[1:] if tok.string.startswith("#") else tok.string
                 if text.startswith(" "):
                     text = text[1:]
                 result.setdefault(tok.start[0], []).append((tok.start[1], text))

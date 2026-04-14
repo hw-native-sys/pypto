@@ -53,6 +53,12 @@ class TestCommentExtractor:
         # The comment is at column 4 (body indent).
         assert result == {3: [(4, "indented tail")]}
 
+    def test_multi_hash_preserves_extra_hashes(self):
+        # Strip exactly one leading '#' so "## heading" re-emits as "# heading"
+        # rather than collapsing to "heading".
+        assert extract_line_comments("## heading\n") == {1: [(0, "# heading")]}
+        assert extract_line_comments("###section\n") == {1: [(0, "##section")]}
+
 
 class TestAttachInParsedProgram:
     def test_leading_comment(self):
