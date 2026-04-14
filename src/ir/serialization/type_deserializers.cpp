@@ -51,6 +51,10 @@ using DeserializerContext = serialization::detail::DeserializerContext;
 // Extract a stmt's "leading_comments" field (absent ⇒ empty vector). Symmetric with
 // DeserializeSpan — each Stmt deserializer passes the result as the last ctor arg so
 // leading_comments is initialized at construction time, not attached after the fact.
+//
+// A missing field silently defaults to empty (backward compat with older .pto blobs).
+// A present field with an unexpected type raises — silently treating malformed data
+// as "no comments" would hide serializer/deserializer mismatches.
 static std::vector<std::string> DeserializeLeadingComments(const msgpack::object& fields_obj) {
   std::vector<std::string> comments;
   if (fields_obj.type != msgpack::type::MAP) return comments;
@@ -60,9 +64,14 @@ static std::vector<std::string> DeserializeLeadingComments(const msgpack::object
     std::string key;
     p->key.convert(key);
     if (key != "leading_comments") continue;
-    if (p->val.type != msgpack::type::ARRAY) return comments;
+    CHECK(p->val.type == msgpack::type::ARRAY)
+        << "Deserializer: 'leading_comments' must be a string array, got msgpack type "
+        << static_cast<int>(p->val.type);
     comments.reserve(p->val.via.array.size);
     for (uint32_t i = 0; i < p->val.via.array.size; ++i) {
+      CHECK(p->val.via.array.ptr[i].type == msgpack::type::STR)
+          << "Deserializer: 'leading_comments[" << i << "]' must be a string, got msgpack type "
+          << static_cast<int>(p->val.via.array.ptr[i].type);
       std::string text;
       p->val.via.array.ptr[i].convert(text);
       comments.push_back(std::move(text));

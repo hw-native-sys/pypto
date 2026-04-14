@@ -1139,6 +1139,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
       stream_ << GetIndent();
+      PrintLeadingComments(yield_stmt);
       PrintYieldAssignmentVars(return_vars);
       stream_ << " = " << prefix_ << ".yield_(";
       for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
@@ -1148,6 +1149,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       stream_ << ")";
     } else {
       stream_ << GetIndent();
+      PrintLeadingComments(yield_stmt);
       VisitStmt(yield_stmt);
     }
   } else if (auto seq_stmts = As<SeqStmts>(body)) {
@@ -1165,6 +1167,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
           // Wrap as assignment
           stream_ << GetIndent();
+          PrintLeadingComments(yield_stmt);
           PrintYieldAssignmentVars(return_vars);
           stream_ << " = " << prefix_ << ".yield_(";
           for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
@@ -1174,6 +1177,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
           stream_ << ")";
         } else {
           stream_ << GetIndent();
+          PrintLeadingComments(yield_stmt);
           VisitStmt(stmt);
         }
       } else {
@@ -1304,7 +1308,9 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
           // Convert yield to return in function context
           if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
-            stream_ << GetIndent() << "return";
+            stream_ << GetIndent();
+            PrintLeadingComments(yield_stmt);
+            stream_ << "return";
             if (!yield_stmt->value_.empty()) {
               stream_ << " ";
               for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
@@ -1321,7 +1327,9 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         }
       }
     } else if (auto yield_stmt = As<YieldStmt>(func->body_)) {
-      stream_ << GetIndent() << "return";
+      stream_ << GetIndent();
+      PrintLeadingComments(yield_stmt);
+      stream_ << "return";
       if (!yield_stmt->value_.empty()) {
         stream_ << " ";
         for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {

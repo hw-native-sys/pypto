@@ -799,7 +799,11 @@ class SeqStmts : public Stmt {
    * @param span Source location
    */
   SeqStmts(std::vector<StmtPtr> stmts, Span span, std::vector<std::string> leading_comments = {})
-      : Stmt(std::move(span), std::move(leading_comments)), stmts_(std::move(stmts)) {}
+      : Stmt(std::move(span), std::move(leading_comments)), stmts_(std::move(stmts)) {
+    INTERNAL_CHECK(leading_comments_.empty())
+        << "SeqStmts is a transparent container and must not carry leading comments; "
+           "attach to an inner (non-Seq) stmt instead";
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SeqStmts; }
   [[nodiscard]] std::string TypeName() const override { return "SeqStmts"; }

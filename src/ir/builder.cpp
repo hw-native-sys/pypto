@@ -151,6 +151,7 @@ StmtPtr IRBuilder::EndForLoop(const Span& end_span) {
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {
+    ApplyPendingLeadingComments(for_stmt);
     CurrentContext()->AddStmt(for_stmt);
   }
 
@@ -217,6 +218,7 @@ StmtPtr IRBuilder::EndWhileLoop(const Span& end_span) {
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {
+    ApplyPendingLeadingComments(while_stmt);
     CurrentContext()->AddStmt(while_stmt);
   }
 
@@ -279,6 +281,7 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {
+    ApplyPendingLeadingComments(if_stmt);
     CurrentContext()->AddStmt(if_stmt);
   }
 
@@ -322,6 +325,7 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
 
   // Emit to parent context if it exists
   if (!context_stack_.empty()) {
+    ApplyPendingLeadingComments(scope_stmt);
     CurrentContext()->AddStmt(scope_stmt);
   }
 
@@ -403,19 +407,29 @@ void IRBuilder::Emit(const StmtPtr& stmt) {
   if (context_stack_.empty()) {
     throw pypto::RuntimeError("Cannot emit statement: not inside any context");
   }
-
-  auto* ctx = CurrentContext();
-  ctx->AddStmt(stmt);
+  ApplyPendingLeadingComments(stmt);
+  CurrentContext()->AddStmt(stmt);
 }
 
-void IRBuilder::AttachLeadingCommentsToLast(std::vector<std::string> comments) {
-  if (comments.empty()) return;
-  if (context_stack_.empty()) {
-    throw pypto::RuntimeError("Cannot attach leading comments: not inside any context");
-  }
-  auto last = CurrentContext()->GetLastEmittedStmt();
-  if (!last) return;
-  AttachLeadingComments(last, std::move(comments));
+void IRBuilder::ApplyPendingLeadingComments(const StmtPtr& stmt) {
+  if (pending_leading_stack_.empty() || context_stack_.empty()) return;
+  auto& top = pending_leading_stack_.back();
+  if (top.comments.empty() || top.target != CurrentContext()) return;
+  AttachLeadingComments(stmt, std::move(top.comments));
+  top.comments.clear();  // entry stays on the stack; Pop clears it
+}
+
+void IRBuilder::PushPendingLeadingComments(std::vector<std::string> comments) {
+  BuildContext* target = context_stack_.empty() ? nullptr : context_stack_.back().get();
+  pending_leading_stack_.push_back({std::move(comments), target});
+}
+
+std::vector<std::string> IRBuilder::PopPendingLeadingComments() {
+  INTERNAL_CHECK(!pending_leading_stack_.empty())
+      << "PopPendingLeadingComments called without a matching Push";
+  auto comments = std::move(pending_leading_stack_.back().comments);
+  pending_leading_stack_.pop_back();
+  return comments;
 }
 
 AssignStmtPtr IRBuilder::Assign(const VarPtr& var, const ExprPtr& value, const Span& span) {

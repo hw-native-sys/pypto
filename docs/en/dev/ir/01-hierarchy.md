@@ -178,10 +178,13 @@ DSL. The printer emits each line as `# <text>` directly above the stmt.
 - **Read-only from Python.** `stmt.leading_comments` is exposed read-only. The
   sanctioned mutation channel is the free function `ir.attach_leading_comments(stmt, comments)`,
   used by the parser builder and comment-merging passes for late binding.
-- **Parser attachment rules.** Comments on lines up to the stmt's first line are
-  drained as leading. Same-line trailing comments (`y = 1  # note`) are promoted
-  into the next stmt's leading list. Bare-string expressions (docstrings) anywhere
-  in the body become leading comments on the next stmt.
+- **Parser attachment rules.** For simple stmts, comments on lines up to the
+  stmt's `end_lineno` are drained as leading — this means same-line trailing
+  comments (`y = 1  # note`) attach to the same stmt, not the next one. For
+  compound stmts (`for`/`while`/`if`/`with`), draining caps at the header's
+  first line so body-inner comments are left for the body stmts. Bare-string
+  expressions (docstrings) anywhere in the body become leading comments on
+  the next stmt.
 - **Tail-of-block comments.** Comments after the last stmt in a block (at the
   block's indentation) have no natural attachment target and are dropped with a
   `UserWarning`. Move them above a stmt or into the outer scope to retain them.

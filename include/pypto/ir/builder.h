@@ -327,21 +327,33 @@ class IRBuilder {
   void Emit(const StmtPtr& stmt);
 
   /**
-   * @brief Attach leading comments to the most recently emitted statement
-   *        in the current context.
+   * @brief Push leading comments onto the pending stack.
    *
-   * Used by the DSL parser to associate extracted source comments with the
-   * stmt that has just been emitted (the outer stmt of a compound block, or
-   * the simple stmt itself). Mutates the stmt's IgnoreField metadata only —
-   * no effect on structural equality or hashing.
+   * The DSL parser calls this before dispatching to a ``parse_*`` helper.
+   * The first stmt emitted in the same context as the push (e.g. the outer
+   * compound stmt) absorbs the queued comments through its ctor path. If
+   * the helper emits nothing (e.g. ``pl.static_assert``), call
+   * ``PopPendingLeadingComments`` afterward to recover the unconsumed entry.
    *
-   * No-op if the current context has no statements yet or the comments list
-   * is empty.
+   * The stack lets nested ``parse_statement`` calls (parent + body stmts)
+   * keep their pending entries independent: the parent's queue waits on the
+   * outer context while inner-stmt queues consume in the inner body
+   * context. Without a stack, the outer entry would be clobbered when the
+   * body parse sets its own pending.
    *
    * @param comments Comment lines (without leading '#')
-   * @throws RuntimeError if not inside a valid context
    */
-  void AttachLeadingCommentsToLast(std::vector<std::string> comments);
+  void PushPendingLeadingComments(std::vector<std::string> comments);
+
+  /**
+   * @brief Pop the top pending entry, returning whatever stayed unconsumed.
+   *
+   * The parser pairs one pop with every push. If the dispatched helper
+   * emitted a matching stmt, the popped entry is empty. Otherwise the
+   * parser re-queues the returned comments onto the next line so they
+   * land on the next source stmt instead of being silently dropped.
+   */
+  [[nodiscard]] std::vector<std::string> PopPendingLeadingComments();
 
   /**
    * @brief Create an assignment statement and emit it
@@ -507,6 +519,27 @@ class IRBuilder {
  private:
   std::vector<std::unique_ptr<BuildContext>> context_stack_;
 
+  // Stack of pending leading-comment entries. The parser pushes one entry
+  // per ``parse_statement`` call (before dispatching) and pops it afterward.
+  // Each entry is bound to the context that was current at push time — Emit
+  // consumes only when the top-of-stack entry's target matches the context
+  // receiving the new stmt. This lets nested parse_statement calls coexist:
+  // outer push waits on the outer (FunctionContext etc.) for the compound
+  // stmt, inner push waits on the inner (ForContext etc.) for the body
+  // stmt. Without the target binding, inner-body emits would steal the
+  // outer queue and leave the compound stmt without its comments.
+  struct PendingLeadingCommentsEntry {
+    std::vector<std::string> comments;
+    BuildContext* target;
+  };
+  std::vector<PendingLeadingCommentsEntry> pending_leading_stack_;
+
+  // If the current context matches pending_target_context_, apply the queued
+  // leading comments to `stmt`. Called from Emit() and from every compound-stmt
+  // exit path (EndForLoop / EndWhileLoop / EndIf / EndScope) before appending
+  // the synthesized stmt to the outer context.
+  void ApplyPendingLeadingComments(const StmtPtr& stmt);
+
   // Helper to get current context with type checking
   template <typename T>
   T* GetCurrentContextAs();
@@ -538,13 +571,6 @@ class BuildContext {
   // Accumulate statements in this context
   virtual void AddStmt(const StmtPtr& stmt) = 0;
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
-
-  // Return the most recently emitted stmt in this context, or nullptr if none.
-  // Subclasses that split stmts across multiple vectors (e.g., IfStmtContext's
-  // then/else branches) should override to return the right one.
-  [[nodiscard]] virtual StmtPtr GetLastEmittedStmt() const {
-    return stmts_.empty() ? nullptr : stmts_.back();
-  }
 
  protected:
   Type type_;
@@ -676,10 +702,6 @@ class IfStmtContext : public BuildContext {
   void AddReturnVar(const VarPtr& var) { return_vars_.push_back(var); }
 
   void AddStmt(const StmtPtr& stmt) override { (in_else_branch_ ? else_stmts_ : stmts_).push_back(stmt); }
-  [[nodiscard]] StmtPtr GetLastEmittedStmt() const override {
-    const auto& active = in_else_branch_ ? else_stmts_ : stmts_;
-    return active.empty() ? nullptr : active.back();
-  }
   [[nodiscard]] const ExprPtr& GetCondition() const { return condition_; }
   [[nodiscard]] bool InElseBranch() const { return in_else_branch_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetElseStmts() const { return else_stmts_; }

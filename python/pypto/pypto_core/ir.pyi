@@ -2684,16 +2684,20 @@ class IRBuilder:
             stmt: Statement to emit
         """
 
-    def attach_leading_comments_to_last(self, comments: list[str]) -> None:
-        """Attach leading comments to the most recently emitted statement.
+    def push_pending_leading_comments(self, comments: list[str]) -> None:
+        """Push leading comments onto the pending stack.
 
-        Used by the DSL parser to associate extracted source comments with the
-        stmt just emitted in the current context (outer stmt of a compound
-        block, or the simple stmt itself). No-op if the current context has no
-        statements yet or ``comments`` is empty.
+        The DSL parser calls this before dispatching to a ``parse_*`` helper.
+        Pair every push with exactly one ``pop_pending_leading_comments``.
 
         Args:
             comments: Comment lines (without leading ``#``)
+        """
+
+    def pop_pending_leading_comments(self) -> list[str]:
+        """Pop the top pending entry, returning whatever stayed unconsumed.
+
+        Returns ``[]`` when the matching emit already consumed the queue.
         """
 
     def assign(self, var: Var, value: Expr, span: Span) -> AssignStmt:

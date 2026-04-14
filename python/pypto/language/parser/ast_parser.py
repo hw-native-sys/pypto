@@ -417,6 +417,16 @@ class ASTParser:
             self._requeue_comments_after(stmt, [*leading, *doc_lines])
             return
 
+        # Push leading comments onto the builder's pending stack BEFORE
+        # dispatching. The first stmt the helper emits in the same context as
+        # this push absorbs the queued comments through its ctor path. The
+        # stack (rather than a single slot) lets nested parse_statement calls
+        # (this compound stmt + its body stmts) each have their own pending
+        # entry without clobbering the outer one. If the helper emits nothing
+        # (e.g. pl.static_assert, pass), pop returns the entry untouched and
+        # we re-queue it into _pending_comments so the next stmt picks it up.
+        self.builder.push_pending_leading_comments(leading)
+
         if isinstance(stmt, ast.AnnAssign):
             self.parse_annotated_assignment(stmt)
         elif isinstance(stmt, ast.Assign):
@@ -438,10 +448,7 @@ class ASTParser:
         elif isinstance(stmt, ast.Continue):
             self.parse_continue(stmt)
         elif isinstance(stmt, ast.Pass):
-            # No-op: pass statements produce no IR. Re-enqueue any collected
-            # comments for the following stmt so they don't get silently dropped.
-            self._requeue_comments_after(stmt, leading)
-            return
+            pass  # Produces no IR; residue handling below re-queues the comments.
         else:
             raise UnsupportedFeatureError(
                 f"Unsupported statement type: {type(stmt).__name__}",
@@ -450,32 +457,58 @@ class ASTParser:
                 "with statements, returns, break, continue, and pass are supported in DSL functions",
             )
 
-        if leading:
-            self.builder.attach_leading_comments_to_last(leading)
+        # Pop the pending entry we pushed above. If the helper emitted a
+        # matching stmt, the result is empty. Otherwise the unconsumed
+        # comments get re-queued into _pending_comments so the next source
+        # stmt picks them up.
+        residue = self.builder.pop_pending_leading_comments()
+        if residue:
+            self._requeue_comments_after(stmt, residue)
 
     def _drain_pending_comments(self, stmt: ast.stmt) -> list[str]:
         """Collect pending comments whose line numbers fall at or before ``stmt``.
 
-        For compound stmts (``for``/``while``/``if``/``with``), only comments
-        whose line is ``<= stmt.lineno`` (the header's first line) are drained;
-        body-inner comments are left for the body stmts' own drains. For simple
-        stmts, drain through ``stmt.end_lineno`` so trailing comments on the
-        last logical line (e.g. ``y = 1  # note``) are captured.
+        For simple stmts, drain through ``stmt.end_lineno`` so trailing comments
+        on the last logical line (e.g. ``y = 1  # note``) attach to the stmt.
 
-        Returns comments in source order and removes them from the pending map.
+        For compound stmts (``for``/``while``/``if``/``with``) with a non-empty
+        body, the header can span multiple physical lines. We drain up to the
+        line just before the first body stmt and split by column: comments at
+        a column *less than* the body's indent are header-level and attach to
+        the compound stmt; comments at the body's indent are left pending for
+        the first body stmt to pick up.
+
+        Returns comments in source order and removes header/simple entries from
+        the pending map.
         """
         if not self._pending_comments:
             return []
-        # Compound stmts expose a non-empty ``body`` list; drain only through
-        # the header line so body-inner comments stay pending.
         body = getattr(stmt, "body", None)
+        leading: list[str] = []
         if isinstance(body, list) and body:
-            end_line = stmt.lineno
+            header_end = body[0].lineno - 1
+            body_col = body[0].col_offset
+            for line in sorted(k for k in self._pending_comments if k <= header_end):
+                if line == stmt.lineno:
+                    # Inline trailer on the header's first line (e.g.
+                    # `for i in range(16):  # tiles`) — always attach, regardless
+                    # of the high column where tokenize reports it.
+                    leading.extend(text for _col, text in self._pending_comments.pop(line))
+                    continue
+                kept: list[tuple[int, str]] = []
+                for col, text in self._pending_comments[line]:
+                    if col < body_col:
+                        leading.append(text)
+                    else:
+                        kept.append((col, text))
+                if kept:
+                    self._pending_comments[line] = kept
+                else:
+                    del self._pending_comments[line]
         else:
             end_line = stmt.end_lineno or stmt.lineno
-        leading: list[str] = []
-        for line in sorted(k for k in self._pending_comments if k <= end_line):
-            leading.extend(text for _col, text in self._pending_comments.pop(line))
+            for line in sorted(k for k in self._pending_comments if k <= end_line):
+                leading.extend(text for _col, text in self._pending_comments.pop(line))
         return leading
 
     def _requeue_comments_after(self, stmt: ast.stmt, comments: list[str]) -> None:

@@ -880,6 +880,21 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # ir.Var objects for dynamic dimension variables (issue #618).
             dyn_var_cache: dict[str, ir.Var] = {}
 
+            # Compute per-method line-range boundaries. Each method owns comments from
+            # its first-line up to the line just before the next method (or end of
+            # class for the last one). This captures tail-of-block comments inside
+            # the method body that AST end_lineno excludes, without letting earlier-
+            # or later-method comments leak across.
+            method_boundaries: dict[int, tuple[int, int]] = {}
+            sorted_defs = sorted(func_defs, key=lambda d: d.lineno)
+            for idx, fd in enumerate(sorted_defs):
+                start = fd.lineno
+                if idx + 1 < len(sorted_defs):
+                    end = sorted_defs[idx + 1].lineno - 1
+                else:
+                    end = max((fd.end_lineno or fd.lineno), max(pending_comments, default=fd.lineno))
+                method_boundaries[id(fd)] = (start, end)
+
             for func_def in func_defs:
                 # Extract function type, level/role, and attrs from decorator
                 func_type = _extract_function_type_from_decorator(func_def)
@@ -889,8 +904,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 # Strip 'self' parameter if present (must be done before parsing)
                 func_def_to_parse = _strip_self_parameter(func_def)
 
-                # Create parser with global_vars and gvar_to_func map for cross-function call resolution.
-                # Copy pending_comments so each function consumes comments independently.
+                method_start, method_end = method_boundaries[id(func_def)]
+                method_comments = {
+                    k: list(v) for k, v in pending_comments.items() if method_start <= k <= method_end
+                }
                 parser = ASTParser(
                     source_file,
                     source_lines,
@@ -902,7 +919,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     closure_vars=closure_vars,
                     buffer_name_meta=buffer_name_meta,
                     dyn_var_cache=dyn_var_cache,
-                    pending_comments={k: list(v) for k, v in pending_comments.items()},
+                    pending_comments=method_comments,
                 )
 
                 try:
