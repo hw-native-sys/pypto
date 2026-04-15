@@ -22,6 +22,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -35,24 +36,50 @@ namespace ir {
 namespace {
 
 constexpr const char* kUnrollReplicatedAttr = "unroll_replicated";
-constexpr const char* kTileLoadOpName = "tile.load";
-constexpr const char* kTileStoreOpName = "tile.store";
 
 /// IO category used for priority during the topological sort. Lower is emitted first.
 enum class IOCategory : int { Load = 0, Compute = 1, Store = 2 };
 
-bool IsCallTo(const ExprPtr& expr, const std::string& op_name) {
+/// Singletons for the ops the pass cares about — resolved once from the registry
+/// and compared by identity in ``CategorizeStmt``. Using pointer identity instead
+/// of name strings avoids string comparisons in the hot path and makes the set
+/// of recognized ops explicit at pass construction.
+struct IOCategoryOps {
+  OpPtr tile_load;   ///< Read: tensor → tile data movement
+  OpPtr tile_read;   ///< Read: extract scalar from a tile
+  OpPtr tile_store;  ///< Write: tile → tensor data movement
+  OpPtr tile_write;  ///< Write: put scalar into a tile
+
+  static IOCategoryOps Build() {
+    const auto& registry = OpRegistry::GetInstance();
+    return {
+        registry.GetOp("tile.load"),
+        registry.GetOp("tile.read"),
+        registry.GetOp("tile.store"),
+        registry.GetOp("tile.write"),
+    };
+  }
+
+  [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
+  [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
+};
+
+OpPtr CalledOp(const ExprPtr& expr) {
   auto call = std::dynamic_pointer_cast<const Call>(expr);
-  return call && call->op_ && call->op_->name_ == op_name;
+  return call ? call->op_ : OpPtr{};
 }
 
-IOCategory CategorizeStmt(const StmtPtr& stmt) {
+IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-    if (IsCallTo(assign->value_, kTileLoadOpName)) return IOCategory::Load;
-    if (IsCallTo(assign->value_, kTileStoreOpName)) return IOCategory::Store;
+    auto op = CalledOp(assign->value_);
+    if (op) {
+      if (ops.IsLoadLike(op)) return IOCategory::Load;
+      if (ops.IsStoreLike(op)) return IOCategory::Store;
+    }
   }
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    if (IsCallTo(eval->expr_, kTileStoreOpName)) return IOCategory::Store;
+    auto op = CalledOp(eval->expr_);
+    if (op && ops.IsStoreLike(op)) return IOCategory::Store;
   }
   return IOCategory::Compute;
 }
@@ -64,7 +91,8 @@ IOCategory CategorizeStmt(const StmtPtr& stmt) {
  */
 class ReorderUnrolledIOMutator : public IRMutator {
  public:
-  explicit ReorderUnrolledIOMutator(ProgramPtr program) : program_(std::move(program)) {}
+  explicit ReorderUnrolledIOMutator(ProgramPtr program)
+      : program_(std::move(program)), io_ops_(IOCategoryOps::Build()) {}
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     // Recurse first so any inner unroll-replicated regions are reordered too.
@@ -97,7 +125,7 @@ class ReorderUnrolledIOMutator : public IRMutator {
     const size_t N = stmts.size();
 
     std::vector<IOCategory> cats(N);
-    for (size_t i = 0; i < N; ++i) cats[i] = CategorizeStmt(stmts[i]);
+    for (size_t i = 0; i < N; ++i) cats[i] = CategorizeStmt(stmts[i], io_ops_);
 
     // Per-stmt count of unsatisfied predecessors. Only count predecessors that
     // are themselves nodes in this region (the graph may include external preds
@@ -169,6 +197,7 @@ class ReorderUnrolledIOMutator : public IRMutator {
   }
 
   ProgramPtr program_;
+  IOCategoryOps io_ops_;
 };
 
 }  // namespace

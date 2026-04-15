@@ -34,44 +34,96 @@ for i in pl.range(64, unroll=4):
 
 ## Behavior
 
-For `for i in range(start, stop, step)` with `attrs_["unroll_factor"] = F` and trip count `T = (stop - start) / step`:
+For `for i in range(start, stop, step)` with `attrs_["unroll_factor"] = F`:
 
-- **Clean divide** (`T % F == 0`): one outer loop of `T/F` iterations, body is a `SeqStmts` of `F` clones; the outer loop carries `attrs_["unroll_replicated"] = F`.
-- **Remainder** (`T % F != 0`): outer replicated loop covers `(T // F) * F` iterations; a trailing remainder loop covers the leftover `T % F` iterations with the original stride. The remainder loop carries no marker.
+- **Main loop**: stride `F*step`, body is a `SeqStmts` of `F` clones; the outer loop carries `attrs_["unroll_replicated"] = F`.
 - **Cloning**: each clone uses `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)`. Fresh def-vars per clone keep SSA intact and give `MemoryReuse` distinct tile identities to work with.
 
-## Constraints (first cut)
+Two lowering modes — static vs dynamic — differ only in how the main loop's `stop` and the remainder are computed.
+
+### Static bounds — all of `start`, `stop`, `step` are compile-time integers
+
+With trip count `T = (stop - start) / step`:
+
+- Main loop stops at `start + (T // F) * F * step`.
+- If `T % F != 0`, a single **tail branch** is emitted: a trip-1 `ForStmt` tagged `unroll_replicated = T % F`, containing `T % F` cloned bodies at offsets `start + (T // F) * F * step + j * step` for `j ∈ [0, T%F)`. No runtime dispatch is needed — the remainder count is known.
+
+### Dynamic bounds — `start` and/or `stop` are runtime Exprs (`step` still static)
+
+- Let `main_end = ((stop - start) / (F*step)) * (F*step) + start` materialized as a fresh SSA `AssignStmt`.
+- Main loop is `for i in range(start, main_end, F*step)`.
+- Remainder is dispatched by `rem = stop - main_end` through a cascaded IfStmt chain:
+
+  ```text
+  if rem == 1:    <1 clone>                      # outermost
+  else if rem == 2: <2 clones marked unroll_replicated=2>
+  else if rem == 3: <3 clones marked unroll_replicated=3>
+  # ...
+  else if rem == F-1: <F-1 clones>
+  # rem == 0 falls through — no tail work.
+  ```
+
+  Each branch's body is a trip-1 `ForStmt` tagged `unroll_replicated = k`, so `ReorderUnrolledIO` reorders each branch internally the same way it does the main loop. SSA stays clean: each branch is self-contained; no conditionally-defined var escapes its IfStmt.
+
+## Constraints
 
 | Constraint | Reason |
 | ---------- | ------ |
-| `start`, `stop`, `step` must be compile-time integer constants | Trip count needed to size the main/remainder split |
+| `step` must be a compile-time integer constant | Main loop's stride and per-clone offsets both require `factor * step` as an integer |
 | `iter_args` / `init_values` not allowed | Loop-carried state across replicated copies needs SSA-aware renaming not yet implemented |
 | `unroll` and `chunk` are mutually exclusive on `pl.range` | Different optimization axes; combining them adds semantic ambiguity without a clear use case |
 
-## Example
+## Examples
 
-**Before** (input IR with `unroll_factor=4` attr on the ForStmt):
+### Static — trip count known (`N=10`, `F=4`)
 
 ```python
-for i in pl.range(0, 8, 1, attrs={"unroll_factor": 4}):
+# Before
+for i in pl.range(0, 10, 1, attrs={"unroll_factor": 4}):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
+
+# After: main loop covers [0, 8), single tail branch for the leftover 2 iters
+for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
+    tile_x_0 = pl.tile.load(input_a, [i * 128], [128]); pl.tile.store(tile_x_0, [i * 128], output)
+    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128]); pl.tile.store(tile_x_1, [(i + 1) * 128], output)
+    tile_x_2 = pl.tile.load(input_a, [(i + 2) * 128], [128]); pl.tile.store(tile_x_2, [(i + 2) * 128], output)
+    tile_x_3 = pl.tile.load(input_a, [(i + 3) * 128], [128]); pl.tile.store(tile_x_3, [(i + 3) * 128], output)
+
+for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
+    tile_x_4 = pl.tile.load(input_a, [8 * 128], [128]); pl.tile.store(tile_x_4, [8 * 128], output)
+    tile_x_5 = pl.tile.load(input_a, [9 * 128], [128]); pl.tile.store(tile_x_5, [9 * 128], output)
 ```
 
-**After**:
+### Dynamic — runtime stop `n`
 
 ```python
-for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
-    # k=0 clone
-    tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
-    pl.tile.store(tile_x_0, [i * 128], output)
-    # k=1 clone
-    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128])
-    pl.tile.store(tile_x_1, [(i + 1) * 128], output)
-    # k=2, k=3 clones similarly
+# Before
+for i in pl.range(0, n, 1, attrs={"unroll_factor": 4}):
+    tile_x = pl.tile.load(input_a, [i * 128], [128])
+    pl.tile.store(tile_x, [i * 128], output)
+
+# After
+unroll_main_end: pl.Scalar[pl.INDEX] = ((n - 0) // 4) * 4 + 0
+for i in pl.range(0, unroll_main_end, 4, attrs={"unroll_replicated": 4}):
+    <4 clones as above>
+
+unroll_rem: pl.Scalar[pl.INDEX] = n - unroll_main_end
+if unroll_rem == 1:
+    for _tail_iter_1 in pl.range(0, 1, 1, attrs={"unroll_replicated": 1}):
+        tile_x_t0 = pl.tile.load(input_a, [unroll_main_end * 128], [128])
+        pl.tile.store(tile_x_t0, [unroll_main_end * 128], output)
+else:
+    if unroll_rem == 2:
+        for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
+            <2 clones at offsets unroll_main_end + 0, unroll_main_end + 1>
+    else:
+        if unroll_rem == 3:
+            for _tail_iter_3 in pl.range(0, 1, 1, attrs={"unroll_replicated": 3}):
+                <3 clones at offsets unroll_main_end + 0, +1, +2>
 ```
 
-The downstream `ReorderUnrolledIO` pass picks up `unroll_replicated`-tagged loops and clusters loads at the top, stores at the bottom — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers.
+Every main-loop iteration AND every tail branch carries the `unroll_replicated` marker, so `ReorderUnrolledIO` uniformly clusters loads at the top, stores at the bottom — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers. Ping-pong buffering works for both the bulk (main) and the tail.
 
 ## Related
 

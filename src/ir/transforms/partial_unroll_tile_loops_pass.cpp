@@ -32,6 +32,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -57,6 +58,19 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
                           " must be a compile-time integer constant, got " + expr->TypeName());
 }
 
+/// Non-throwing variant — returns nullopt if `expr` is not a compile-time integer.
+std::optional<int64_t> TryGetConstInt(const ExprPtr& expr) {
+  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(expr)) {
+    return ci->value_;
+  }
+  if (auto neg = std::dynamic_pointer_cast<const Neg>(expr)) {
+    if (auto inner = std::dynamic_pointer_cast<const ConstInt>(neg->operand_)) {
+      return -inner->value_;
+    }
+  }
+  return std::nullopt;
+}
+
 /// Trip count for a static for-loop range.
 int64_t ComputeStaticTripCount(int64_t start, int64_t stop, int64_t step) {
   if (step > 0 && start < stop) return (stop - start + step - 1) / step;
@@ -66,6 +80,17 @@ int64_t ComputeStaticTripCount(int64_t start, int64_t stop, int64_t step) {
 
 ExprPtr MakeConstIndex(int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+}
+
+/// `base + offset_val`, with constant-folding when `base` is a ConstInt.
+/// Emitting the unfolded form trips the round-trip verifier because the
+/// reparser folds `8 + 1` back to `9`.
+ExprPtr OffsetIndex(const ExprPtr& base, int64_t offset_val, const Span& span) {
+  if (offset_val == 0) return base;
+  if (auto ci = std::dynamic_pointer_cast<const ConstInt>(base)) {
+    return MakeConstIndex(ci->value_ + offset_val, span);
+  }
+  return MakeAdd(base, MakeConstIndex(offset_val, span), span);
 }
 
 /// Copy `original` while removing `kUnrollFactorAttr` and (optionally) adding
@@ -91,12 +116,13 @@ VarPtr CloneLoopVar(const VarPtr& original) {
 
 /**
  * @brief Mutator that lowers ForStmt nodes carrying `attrs_["unroll_factor"]`
- *        into a replicated outer loop (+ optional remainder loop).
+ *        into a replicated main loop plus a modulo-dispatch remainder.
  *
- * Triggers only on loops with a compile-time constant trip count. Loops with
- * iter_args / loop-carried state are rejected; this matches the existing
- * full-unroll pass restriction and keeps the first cut focused on the
- * ping-pong-buffering use case.
+ * Static bounds → single-branch tail with exactly rem_iters clones.
+ * Dynamic bounds (start and/or stop are runtime Exprs) → a cascaded
+ *   `if rem == k` dispatch for k in [1, factor), each branch containing
+ *   k cloned bodies tagged `unroll_replicated = k`. Step must always be a
+ *   compile-time constant; iter_args are rejected (matches full-unroll).
  */
 class PartialUnrollMutator : public IRMutator {
  public:
@@ -113,93 +139,174 @@ class PartialUnrollMutator : public IRMutator {
     // Recurse into the body first so nested unroll-marked loops are lowered too.
     auto inner_body = VisitStmt(op->body_);
 
-    int64_t start = GetConstIntValue(op->start_, "start");
-    int64_t stop = GetConstIntValue(op->stop_, "stop");
+    // Step must always be static — the main loop's stride and per-clone offsets
+    // both depend on `factor * step` being a compile-time integer.
     int64_t step = GetConstIntValue(op->step_, "step");
     CHECK(step != 0) << "PartialUnrollTileLoops: step cannot be zero";
 
-    int64_t trip = ComputeStaticTripCount(start, stop, step);
-    if (factor == 1 || trip == 0) {
-      // Drop the unroll_factor attr and return otherwise unchanged.
-      auto cleaned = MutableCopy(op);
-      cleaned->body_ = inner_body;
-      cleaned->attrs_ = RewriteAttrs(op->attrs_, std::nullopt);
-      return cleaned;
+    // factor == 1: drop the attr and keep the loop otherwise unchanged.
+    if (factor == 1) {
+      return CleanupUnrollAttr(op, inner_body);
     }
 
-    int64_t main_iters = trip / factor;
-    int64_t rem_iters = trip % factor;
-
-    std::vector<StmtPtr> result;
-    if (main_iters > 0) {
-      result.push_back(BuildMainLoop(op, inner_body, factor, start, step, main_iters));
+    auto start_const = TryGetConstInt(op->start_);
+    auto stop_const = TryGetConstInt(op->stop_);
+    if (start_const.has_value() && stop_const.has_value()) {
+      return LowerStatic(op, inner_body, factor, *start_const, *stop_const, step);
     }
-    if (rem_iters > 0) {
-      result.push_back(BuildRemainderLoop(op, inner_body, factor, start, step, main_iters));
-    }
-    return SeqStmts::Flatten(std::move(result), op->span_);
+    return LowerDynamic(op, inner_body, factor, step);
   }
 
  private:
+  /// No replication needed — drop the attr and return the loop unchanged.
+  StmtPtr CleanupUnrollAttr(const ForStmtPtr& op, const StmtPtr& inner_body) {
+    auto cleaned = MutableCopy(op);
+    cleaned->body_ = inner_body;
+    cleaned->attrs_ = RewriteAttrs(op->attrs_, std::nullopt);
+    return cleaned;
+  }
+
   /**
    * @brief Build the replicated main loop: body is a SeqStmts of `factor` clones,
    *        each with the original loop var substituted by `(new_var + k * step)`.
    */
-  StmtPtr BuildMainLoop(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t start,
-                        int64_t step, int64_t main_iters) {
+  StmtPtr BuildMainLoop(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t step,
+                        const ExprPtr& main_start, const ExprPtr& main_stop) {
     Span sp = op->span_;
     VarPtr new_loop_var = CloneLoopVar(op->loop_var_);
 
     std::vector<StmtPtr> clones;
     clones.reserve(static_cast<size_t>(factor));
     for (int64_t k = 0; k < factor; ++k) {
-      ExprPtr substitute;
-      if (k == 0) {
-        substitute = new_loop_var;
-      } else {
-        substitute = MakeAdd(new_loop_var, MakeConstIndex(k * step, sp), sp);
-      }
+      ExprPtr substitute = OffsetIndex(new_loop_var, k * step, sp);
       std::unordered_map<const Var*, ExprPtr> sub_map = {{op->loop_var_.get(), substitute}};
       auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
       clones.push_back(cloned.cloned_body);
     }
     auto new_body = SeqStmts::Flatten(std::move(clones), sp);
 
-    // Outer step becomes factor * step; outer stop is the largest multiple of
-    // (factor * step) that fits within the original range.
-    ExprPtr new_start = op->start_;
-    ExprPtr new_stop = MakeConstIndex(start + main_iters * factor * step, sp);
     ExprPtr new_step = MakeConstIndex(factor * step, sp);
-
     Attrs new_attrs = RewriteAttrs(op->attrs_, factor);
-    return std::make_shared<ForStmt>(new_loop_var, new_start, new_stop, new_step,
+    return std::make_shared<ForStmt>(new_loop_var, main_start, main_stop, new_step,
                                      /*iter_args=*/std::vector<IterArgPtr>{}, new_body,
                                      /*return_vars=*/std::vector<VarPtr>{}, sp, op->kind_,
                                      /*chunk_config=*/std::nullopt, new_attrs, op->leading_comments_);
   }
 
   /**
-   * @brief Build the trailing remainder loop covering the iterations that don't
-   *        fit a full replicated stride. No replication, no marker attr.
+   * @brief Build a trip-1 ForStmt wrapping `k_clones` cloned bodies at
+   *        offsets `base_index + j*step` (j in [0, k_clones)), tagged with
+   *        `unroll_replicated = k_clones` so ReorderUnrolledIO processes it.
+   *
+   * This is the attrs-bearing container for a remainder branch; SeqStmts has
+   * no attrs_, so we wrap in a degenerate ForStmt purely for the marker.
    */
-  StmtPtr BuildRemainderLoop(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t start,
-                             int64_t step, int64_t main_iters) {
+  StmtPtr BuildTailBranch(const ForStmtPtr& op, const StmtPtr& body, int64_t k_clones, int64_t step,
+                          const ExprPtr& base_index) {
     Span sp = op->span_;
-    VarPtr new_loop_var = CloneLoopVar(op->loop_var_);
+    std::vector<StmtPtr> clones;
+    clones.reserve(static_cast<size_t>(k_clones));
+    for (int64_t j = 0; j < k_clones; ++j) {
+      ExprPtr substitute = OffsetIndex(base_index, j * step, sp);
+      std::unordered_map<const Var*, ExprPtr> sub_map = {{op->loop_var_.get(), substitute}};
+      auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
+      clones.push_back(cloned.cloned_body);
+    }
+    auto seq_body = SeqStmts::Flatten(std::move(clones), sp);
 
-    std::unordered_map<const Var*, ExprPtr> sub_map = {{op->loop_var_.get(), new_loop_var}};
-    auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
-
-    ExprPtr rem_start = MakeConstIndex(start + main_iters * factor * step, sp);
-    ExprPtr rem_stop = op->stop_;
-    ExprPtr rem_step = MakeConstIndex(step, sp);
-
-    Attrs new_attrs = RewriteAttrs(op->attrs_, std::nullopt);
-    return std::make_shared<ForStmt>(new_loop_var, rem_start, rem_stop, rem_step,
-                                     /*iter_args=*/std::vector<IterArgPtr>{}, cloned.cloned_body,
-                                     /*return_vars=*/std::vector<VarPtr>{}, sp, op->kind_,
-                                     /*chunk_config=*/std::nullopt, new_attrs,
+    auto dummy_var = std::make_shared<Var>("_tail_iter_" + std::to_string(k_clones),
+                                           std::make_shared<ScalarType>(DataType::INDEX), sp);
+    Attrs attrs = {{kUnrollReplicatedAttr, static_cast<int>(k_clones)}};
+    return std::make_shared<ForStmt>(dummy_var, MakeConstIndex(0, sp), MakeConstIndex(1, sp),
+                                     MakeConstIndex(1, sp),
+                                     /*iter_args=*/std::vector<IterArgPtr>{}, seq_body,
+                                     /*return_vars=*/std::vector<VarPtr>{}, sp, ForKind::Sequential,
+                                     /*chunk_config=*/std::nullopt, attrs,
                                      /*leading_comments=*/std::vector<std::string>{});
+  }
+
+  /**
+   * @brief Static lowering: compile-time trip count → main loop + (optional)
+   *        single-branch tail with exactly rem_iters clones. No dispatch needed
+   *        because the remainder count is known.
+   */
+  StmtPtr LowerStatic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t start, int64_t stop,
+                      int64_t step) {
+    int64_t trip = ComputeStaticTripCount(start, stop, step);
+    if (trip == 0) {
+      return CleanupUnrollAttr(op, body);
+    }
+    int64_t main_iters = trip / factor;
+    int64_t rem_iters = trip % factor;
+
+    std::vector<StmtPtr> result;
+    if (main_iters > 0) {
+      ExprPtr main_start = op->start_;
+      ExprPtr main_stop = MakeConstIndex(start + main_iters * factor * step, op->span_);
+      result.push_back(BuildMainLoop(op, body, factor, step, main_start, main_stop));
+    }
+    if (rem_iters > 0) {
+      int64_t tail_base = start + main_iters * factor * step;
+      ExprPtr base_index = MakeConstIndex(tail_base, op->span_);
+      result.push_back(BuildTailBranch(op, body, rem_iters, step, base_index));
+    }
+    return SeqStmts::Flatten(std::move(result), op->span_);
+  }
+
+  /**
+   * @brief Dynamic lowering: start and/or stop are runtime Exprs. Emits:
+   *
+   *   main_end = ((stop - start) / (F*step)) * (F*step) + start
+   *   for i in range(start, main_end, F*step) [unroll_replicated=F]: <F clones>
+   *   rem = stop - main_end
+   *   if rem == 1: <1 clone>      # outermost
+   *   else if rem == 2: <2 clones>
+   *   else ...
+   *   else if rem == F-1: <F-1 clones>
+   *   # when rem == 0, no branch matches and the tail is skipped.
+   */
+  StmtPtr LowerDynamic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t step) {
+    Span sp = op->span_;
+
+    // main_end = ((stop - start) / (F*step)) * (F*step) + start
+    ExprPtr chunk = MakeConstIndex(factor * step, sp);
+    ExprPtr span_expr = MakeSub(op->stop_, op->start_, sp);
+    ExprPtr num_chunks = MakeFloorDiv(span_expr, chunk, sp);
+    ExprPtr scaled = MakeMul(num_chunks, chunk, sp);
+    ExprPtr main_end_value = MakeAdd(op->start_, scaled, sp);
+
+    VarPtr main_end_var =
+        std::make_shared<Var>("unroll_main_end", std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto main_end_assign = std::make_shared<AssignStmt>(main_end_var, main_end_value, sp);
+
+    // Main loop — stop is the fresh SSA var `main_end_var`.
+    StmtPtr main_loop = BuildMainLoop(op, body, factor, step,
+                                      /*main_start=*/op->start_,
+                                      /*main_stop=*/main_end_var);
+
+    // rem = stop - main_end
+    VarPtr rem_var = std::make_shared<Var>("unroll_rem", std::make_shared<ScalarType>(DataType::INDEX), sp);
+    auto rem_assign = std::make_shared<AssignStmt>(rem_var, MakeSub(op->stop_, main_end_var, sp), sp);
+
+    // Build the cascade from innermost (k = factor-1) outward so that each outer
+    // IfStmt can point at the previously-built IfStmt as its else branch.
+    std::optional<StmtPtr> inner;
+    for (int64_t k = factor - 1; k >= 1; --k) {
+      ExprPtr cond = MakeEq(rem_var, MakeConstIndex(k, sp), sp);
+      StmtPtr branch_body = BuildTailBranch(op, body, k, step, main_end_var);
+      auto if_stmt = std::make_shared<IfStmt>(cond, branch_body, inner,
+                                              /*return_vars=*/std::vector<VarPtr>{}, sp);
+      inner = StmtPtr(if_stmt);
+    }
+
+    std::vector<StmtPtr> result;
+    result.push_back(main_end_assign);
+    result.push_back(main_loop);
+    if (inner.has_value()) {
+      result.push_back(rem_assign);
+      result.push_back(*inner);
+    }
+    return SeqStmts::Flatten(std::move(result), sp);
   }
 };
 

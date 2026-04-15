@@ -34,44 +34,96 @@ for i in pl.range(64, unroll=4):
 
 ## 行为
 
-对于 `attrs_["unroll_factor"] = F`、迭代次数 `T = (stop - start) / step` 的循环：
+对于 `attrs_["unroll_factor"] = F` 的循环：
 
-- **整除情形**（`T % F == 0`）：一个外层循环 `T/F` 次迭代，循环体为 `F` 份副本组成的 `SeqStmts`；外层循环带 `attrs_["unroll_replicated"] = F` 标记。
-- **带余数情形**（`T % F != 0`）：外层复制循环覆盖 `(T // F) * F` 次迭代；剩余 `T % F` 次由原步长的余数循环承担。余数循环不带标记。
+- **主循环**：步长为 `F*step`，循环体为 `F` 份副本组成的 `SeqStmts`；外层循环带 `attrs_["unroll_replicated"] = F` 标记。
 - **克隆细节**：每份副本通过 `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)` 生成。每个副本拥有新鲜的定义变量，既保持 SSA，又给 `MemoryReuse` 提供独立的 tile 身份。
 
-## 约束（首版）
+根据 `start` / `stop` 是否为编译期常量，分为两种降级模式，区别仅在主循环的 `stop` 与余数处理方式。
+
+### 静态边界 —— `start`、`stop`、`step` 均为编译期整数
+
+迭代次数 `T = (stop - start) / step`：
+
+- 主循环终点为 `start + (T // F) * F * step`。
+- 若 `T % F != 0`，再发射一个**尾部分支**：trip-1 `ForStmt`（标记 `unroll_replicated = T % F`），内含 `T % F` 份克隆体，偏移为 `start + (T // F) * F * step + j * step`，`j ∈ [0, T%F)`。余数已知，不需要运行时分派。
+
+### 动态边界 —— `start` / `stop` 为运行时 Expr（`step` 仍为静态）
+
+- 令 `main_end = ((stop - start) / (F*step)) * (F*step) + start`，以 `AssignStmt` 绑定为新的 SSA 变量。
+- 主循环 `for i in range(start, main_end, F*step)`。
+- 余数通过 `rem = stop - main_end` 经由级联 IfStmt 分派：
+
+  ```text
+  if rem == 1:    <1 份克隆>                         # 最外层
+  else if rem == 2: <2 份克隆，unroll_replicated=2>
+  else if rem == 3: <3 份克隆，unroll_replicated=3>
+  # ...
+  else if rem == F-1: <F-1 份克隆>
+  # rem == 0 不匹配任何分支，跳过尾部。
+  ```
+
+  每个分支的 body 为一个 trip-1 `ForStmt`，带 `unroll_replicated = k` 标记，因此 `ReorderUnrolledIO` 以与主循环相同的方式对每个分支内部进行重排。SSA 依然干净：每个分支自包含，任何条件定义的变量都不会逃出其 IfStmt。
+
+## 约束
 
 | 约束 | 原因 |
 | ---- | ---- |
-| `start`、`stop`、`step` 必须为编译期整数常量 | 计算主循环 / 余数循环大小所需 |
+| `step` 必须为编译期整数常量 | 主循环步长及各副本偏移均依赖 `factor * step` 为整数 |
 | 不允许 `iter_args` / `init_values` | 跨副本的循环携带状态需要 SSA 重命名，首版未实现 |
 | `unroll` 与 `chunk` 在 `pl.range` 中互斥 | 二者优化方向不同，组合使用语义模糊且无明显场景 |
 
 ## 示例
 
-**变换前**（输入 IR，ForStmt 带 `unroll_factor=4` 属性）:
+### 静态 —— 迭代次数已知（`N=10`、`F=4`）
 
 ```python
-for i in pl.range(0, 8, 1, attrs={"unroll_factor": 4}):
+# 变换前
+for i in pl.range(0, 10, 1, attrs={"unroll_factor": 4}):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
+
+# 变换后：主循环覆盖 [0, 8)，单个尾部分支处理剩余 2 次迭代
+for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
+    tile_x_0 = pl.tile.load(input_a, [i * 128], [128]); pl.tile.store(tile_x_0, [i * 128], output)
+    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128]); pl.tile.store(tile_x_1, [(i + 1) * 128], output)
+    tile_x_2 = pl.tile.load(input_a, [(i + 2) * 128], [128]); pl.tile.store(tile_x_2, [(i + 2) * 128], output)
+    tile_x_3 = pl.tile.load(input_a, [(i + 3) * 128], [128]); pl.tile.store(tile_x_3, [(i + 3) * 128], output)
+
+for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
+    tile_x_4 = pl.tile.load(input_a, [8 * 128], [128]); pl.tile.store(tile_x_4, [8 * 128], output)
+    tile_x_5 = pl.tile.load(input_a, [9 * 128], [128]); pl.tile.store(tile_x_5, [9 * 128], output)
 ```
 
-**变换后**:
+### 动态 —— 运行时 `n`
 
 ```python
-for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
-    # k=0 副本
-    tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
-    pl.tile.store(tile_x_0, [i * 128], output)
-    # k=1 副本
-    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128])
-    pl.tile.store(tile_x_1, [(i + 1) * 128], output)
-    # k=2、k=3 副本类推
+# 变换前
+for i in pl.range(0, n, 1, attrs={"unroll_factor": 4}):
+    tile_x = pl.tile.load(input_a, [i * 128], [128])
+    pl.tile.store(tile_x, [i * 128], output)
+
+# 变换后
+unroll_main_end: pl.Scalar[pl.INDEX] = ((n - 0) // 4) * 4 + 0
+for i in pl.range(0, unroll_main_end, 4, attrs={"unroll_replicated": 4}):
+    <4 份克隆体，与静态示例相同>
+
+unroll_rem: pl.Scalar[pl.INDEX] = n - unroll_main_end
+if unroll_rem == 1:
+    for _tail_iter_1 in pl.range(0, 1, 1, attrs={"unroll_replicated": 1}):
+        tile_x_t0 = pl.tile.load(input_a, [unroll_main_end * 128], [128])
+        pl.tile.store(tile_x_t0, [unroll_main_end * 128], output)
+else:
+    if unroll_rem == 2:
+        for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
+            <偏移 unroll_main_end + 0、+1 的 2 份克隆体>
+    else:
+        if unroll_rem == 3:
+            for _tail_iter_3 in pl.range(0, 1, 1, attrs={"unroll_replicated": 3}):
+                <偏移 unroll_main_end + 0、+1、+2 的 3 份克隆体>
 ```
 
-下游的 `ReorderUnrolledIO` Pass 会识别 `unroll_replicated` 标记的循环，将 load 上拉、store 下沉，让各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。
+主循环与每个尾部分支都带 `unroll_replicated` 标记，`ReorderUnrolledIO` 以一致方式将 load 上拉、store 下沉，使各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。主干与尾部都能从 ping-pong 缓冲中受益。
 
 ## 相关
 
