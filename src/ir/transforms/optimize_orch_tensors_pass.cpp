@@ -1446,6 +1446,248 @@ class AssembleLoopRewriter {
   }
 };
 
+// ============================================================================
+// Pattern 4: SliceParentStridesOptimizer
+//
+// Cross-function analysis: scans orchestration for
+//   slice_var = tensor.slice(parent, shape, offset)
+//   or: slice_var = tile.slice(parent, shape, offset)
+// where slice_var is passed as an In argument to an InCore call.
+// Records the parent tensor's shape and computes correct strides.
+// Updates the InCore function's In param TensorType to carry
+// parent-derived strides via TensorView.
+// ============================================================================
+
+class SliceParentStridesOptimizer {
+ public:
+  ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    auto slice_info = Analyze(program, incore_names);
+    if (slice_info.empty()) return program;
+
+    std::vector<FunctionPtr> new_functions;
+    for (const auto& [gvar, func] : program->functions_) {
+      new_functions.push_back(func);
+    }
+
+    Apply(new_functions, incore_names, slice_info);
+
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  /// Information about a slice operation.
+  struct SliceOperationInfo {
+    VarPtr slice_var;              ///< The variable holding the slice result
+    VarPtr parent_var;              ///< The parent tensor being sliced
+    std::vector<ExprPtr> parent_shape;  ///< Parent tensor's shape
+  };
+
+  /// Mapping: function_name -> param_index -> parent_shape
+  using SliceParentShapeMap = std::unordered_map<std::string,
+      std::unordered_map<size_t, std::vector<ExprPtr>>>;
+
+  // -- Analysis: IRVisitor that tracks slice operations and InCore call sites --
+
+  class SliceAnalyzer : public IRVisitor {
+   public:
+    SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
+        : program_(program), incore_names_(incore_names) {}
+
+    const SliceParentShapeMap& result() const { return result_; }
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (!call) return;
+
+      // Detect: slice_var = tensor.slice(parent, shape, offset)
+      //     or: slice_var = tile.slice(parent, shape, offset)
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) &&
+          (call->op_->name_ == "tensor.slice" || call->op_->name_ == "tile.slice")) {
+        if (call->args_.size() >= 3) {
+          auto parent_var = AsVarLike(call->args_[0]);
+          if (parent_var) {
+            auto parent_tensor_type = As<TensorType>(parent_var->GetType());
+            if (parent_tensor_type) {
+              // Record slice operation
+              slice_ops_[op->var_.get()] = {op->var_, parent_var, parent_tensor_type->shape_};
+            }
+          }
+        }
+      }
+
+      // Track InCore calls
+      auto fname = GetCallFuncName(call);
+      if (incore_names_.count(fname)) {
+        auto incore_func = FindFunction(program_, fname);
+        if (!incore_func) return;
+
+        // Check which arguments are slice vars
+        for (size_t arg_i = 0; arg_i < call->args_.size() && arg_i < incore_func->params_.size(); ++arg_i) {
+          // Only process In parameters
+          if (arg_i < incore_func->param_directions_.size() &&
+              incore_func->param_directions_[arg_i] != ParamDirection::In) {
+            continue;
+          }
+
+          auto arg_var = AsVarLike(call->args_[arg_i]);
+          if (!arg_var) continue;
+
+          auto it = slice_ops_.find(arg_var.get());
+          if (it != slice_ops_.end()) {
+            // This In parameter uses a slice var - record parent shape
+            result_[fname][arg_i] = it->second.parent_shape;
+          }
+        }
+      }
+
+      IRVisitor::VisitStmt_(op);
+    }
+
+   private:
+    const ProgramPtr& program_;
+    const std::unordered_set<std::string>& incore_names_;
+    std::unordered_map<const Var*, SliceOperationInfo> slice_ops_;
+    SliceParentShapeMap result_;
+  };
+
+  /// Analyze orchestration functions for slice patterns.
+  SliceParentShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    SliceAnalyzer analyzer(program, incore_names);
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) continue;
+      analyzer.VisitStmt(func->body_);
+    }
+    return analyzer.result();
+  }
+
+  /// Compute row-major strides from a shape: [D1*D2*...*Dn, D2*...*Dn, ..., 1].
+  static std::vector<ExprPtr> ComputeStrides(const std::vector<ExprPtr>& shape) {
+    std::vector<int64_t> dims;
+    dims.reserve(shape.size());
+    for (const auto& dim : shape) {
+      auto ci = As<ConstInt>(dim);
+      if (!ci) return {};
+      dims.push_back(ci->value_);
+    }
+
+    size_t ndim = dims.size();
+    std::vector<ExprPtr> strides(ndim);
+    int64_t product = 1;
+    for (size_t i = ndim; i > 0; --i) {
+      strides[i - 1] = std::make_shared<ConstInt>(product, DataType::INDEX, Span::unknown());
+      product *= dims[i - 1];
+    }
+    return strides;
+  }
+
+  // -- Mutation: IRMutator that propagates updated param types through tile.load --
+
+  class InParamStrideUpdateMutator : public IRMutator {
+   public:
+    void AddInParamStrideUpdate(const Var* old_param_ptr, const VarPtr& new_param_var) {
+      in_param_subs_[old_param_ptr] = new_param_var;
+      new_param_ptrs_.insert(new_param_var.get());
+    }
+
+   protected:
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = in_param_subs_.find(op.get());
+      if (it != in_param_subs_.end()) return it->second;
+      auto remap_it = var_remap_.find(op.get());
+      if (remap_it != var_remap_.end()) return remap_it->second;
+      return op;
+    }
+
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      auto visited = IRMutator::VisitStmt_(op);
+      auto assign = As<AssignStmt>(visited);
+      if (!assign) return visited;
+
+      auto call = As<Call>(assign->value_);
+      if (!call || call->op_->name_ != "tile.load" || call->args_.empty()) return assign;
+
+      auto input_var = AsVarLike(call->args_[0]);
+      if (!input_var || !new_param_ptrs_.count(input_var.get())) return assign;
+
+      // Update call type to match the updated input type
+      auto input_type = input_var->GetType();
+      auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, input_type, call->span_);
+      auto new_var = std::make_shared<Var>(assign->var_->name_hint_, input_type, assign->var_->span_);
+
+      var_remap_[op->var_.get()] = new_var;
+      return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
+    }
+
+   private:
+    std::unordered_map<const Var*, VarPtr> in_param_subs_;
+    std::unordered_set<const Var*> new_param_ptrs_;
+    std::unordered_map<const Var*, VarPtr> var_remap_;
+  };
+
+  /// Apply slice parent strides to InCore functions.
+  void Apply(std::vector<FunctionPtr>& functions, const std::unordered_set<std::string>& incore_names,
+             const SliceParentShapeMap& parent_shapes) {
+    for (auto& func : functions) {
+      if (!incore_names.count(func->name_)) continue;
+
+      auto ps_it = parent_shapes.find(func->name_);
+      if (ps_it == parent_shapes.end()) continue;
+      const auto& param_idx_to_shape = ps_it->second;
+
+      bool changed = false;
+      std::vector<VarPtr> new_params = func->params_;
+
+      for (const auto& [param_idx, parent_shape] : param_idx_to_shape) {
+        if (param_idx >= func->params_.size()) continue;
+
+        // Only update In parameters
+        if (param_idx < func->param_directions_.size() &&
+            func->param_directions_[param_idx] != ParamDirection::In) {
+          continue;
+        }
+
+        auto full_strides = ComputeStrides(parent_shape);
+        if (full_strides.empty()) continue;
+
+        auto tensor_type = As<TensorType>(func->params_[param_idx]->GetType());
+        if (!tensor_type) continue;
+
+        // Extract trailing strides matching the input tensor's rank.
+        // For a 3D parent [B, M, N] with strides [M*N, N, 1] and a 2D input [M', N'],
+        // we need the last 2 strides: [N, 1].
+        size_t in_rank = tensor_type->shape_.size();
+        if (in_rank > full_strides.size()) continue;
+        std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),
+                                     full_strides.end());
+
+        TensorView view(std::move(strides), TensorLayout::ND);
+        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
+                                                     tensor_type->memref_, std::move(view));
+        auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,
+                                               func->params_[param_idx]->span_);
+
+        changed = true;
+        new_params[param_idx] = new_param;
+      }
+
+      if (!changed) continue;
+
+      InParamStrideUpdateMutator mutator;
+      for (size_t i = 0; i < func->params_.size(); ++i) {
+        if (new_params[i].get() != func->params_[i].get()) {
+          mutator.AddInParamStrideUpdate(func->params_[i].get(), new_params[i]);
+        }
+      }
+      auto new_body = mutator.VisitStmt(func->body_);
+
+      func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                        new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                        func->attrs_);
+    }
+  }
+};
+
 }  // namespace
 
 // ============================================================================
@@ -1472,7 +1714,10 @@ Pass OptimizeOrchTensors() {
     auto p2 = AssembleParentStridesOptimizer().Run(p1, incore_names);
 
     // Pattern 3: Assemble-loop rewrite (sees Pattern 2 results)
-    return AssembleLoopRewriter().Run(p2, incore_names);
+    auto p3 = AssembleLoopRewriter().Run(p2, incore_names);
+
+    // Pattern 4: Slice parent strides (sees Pattern 3 results)
+    return SliceParentStridesOptimizer().Run(p3, incore_names);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);
