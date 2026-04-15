@@ -15,41 +15,19 @@ torch-aware helpers (make_tensor_arg, scalar_to_uint64) come from the
 """
 
 from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
-    CONTINUOUS_TENSOR_MAX_DIMS,
-    ArgDirection,
     ChipCallable,
-    ChipCallConfig,
     ChipStorageTaskArgs,
-    ContinuousTensor,
     CoreCallable,
-    DataType,
-    DynamicTaskArgs,
-    TaggedTaskArgs,
-    TensorArgType,
-    arg_direction_name,
-    get_dtype_name,
-    get_element_size,
     make_tensor_arg,
     scalar_to_uint64,
 )
 from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
 
 __all__ = [
-    "DataType",
-    "get_element_size",
-    "get_dtype_name",
-    "CONTINUOUS_TENSOR_MAX_DIMS",
-    "ContinuousTensor",
-    "ChipStorageTaskArgs",
-    "TensorArgType",
-    "DynamicTaskArgs",
-    "TaggedTaskArgs",
-    "ArgDirection",
-    "CoreCallable",
     "ChipCallable",
-    "ChipCallConfig",
+    "ChipStorageTaskArgs",
+    "CoreCallable",
     "Worker",
-    "arg_direction_name",
     "make_tensor_arg",
     "scalar_to_uint64",
 ]
