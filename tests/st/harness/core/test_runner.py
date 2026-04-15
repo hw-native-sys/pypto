@@ -401,26 +401,27 @@ def prebuild_binaries(
     simpler_root = os.environ.get("SIMPLER_ROOT", "")
     if not simpler_root:
         return 0
-    for sub in ("examples/scripts", "python"):
-        p = str(Path(simpler_root) / sub)
+    for p in (str(Path(simpler_root)), str(Path(simpler_root) / "python")):
         if p not in sys.path:
             sys.path.insert(0, p)
 
     try:
-        code_runner_mod = importlib.import_module("code_runner")
-        kernel_compiler_mod = importlib.import_module("simpler.kernel_compiler")
-        runtime_builder_mod = importlib.import_module("runtime_builder")
+        kernel_compiler_mod = importlib.import_module("simpler_setup.kernel_compiler")
+        runtime_builder_mod = importlib.import_module("simpler_setup.runtime_builder")
+        pto_isa_mod = importlib.import_module("simpler_setup.pto_isa")
     except ImportError:
         return 0
 
-    _ensure_pto_isa_root = code_runner_mod._ensure_pto_isa_root
     KernelCompiler = kernel_compiler_mod.KernelCompiler
     RuntimeBuilder = runtime_builder_mod.RuntimeBuilder
 
     _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)
 
-    pto_isa_root = _ensure_pto_isa_root(verbose=False, clone_protocol="https", commit=pto_isa_commit)
-    if pto_isa_root is None:
+    try:
+        pto_isa_root = pto_isa_mod.ensure_pto_isa_root(
+            verbose=False, clone_protocol="https", commit=pto_isa_commit
+        )
+    except OSError:
         return 0
 
     def _load_kc(work_dir: Path):

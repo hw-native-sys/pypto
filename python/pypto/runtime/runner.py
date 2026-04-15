@@ -676,14 +676,14 @@ def _execute_on_device(
     """
     simpler_root = os.environ.get("SIMPLER_ROOT")
     if simpler_root:
-        for sub in ("examples/scripts", "python"):
-            p = str(Path(simpler_root) / sub)
+        # Add simpler root for simpler_setup package and python/ for the simpler package.
+        for p in (str(Path(simpler_root)), str(Path(simpler_root) / "python")):
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-    CodeRunner = importlib.import_module("code_runner").CodeRunner
-    KernelCompiler = importlib.import_module("simpler.kernel_compiler").KernelCompiler
-    RuntimeBuilder = importlib.import_module("runtime_builder").RuntimeBuilder
+    CodeRunner = importlib.import_module("simpler_setup.code_runner").CodeRunner
+    KernelCompiler = importlib.import_module("simpler_setup.kernel_compiler").KernelCompiler
+    RuntimeBuilder = importlib.import_module("simpler_setup.runtime_builder").RuntimeBuilder
 
     _install_golden_inputs_patch(CodeRunner)
     _install_binary_cache_patch(KernelCompiler, RuntimeBuilder)

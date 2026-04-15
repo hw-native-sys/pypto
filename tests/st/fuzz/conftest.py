@@ -19,13 +19,13 @@ def pytest_configure(config):
     pytest-forked forks the process after collection but inherits the
     parent's sys.path.  By setting the paths here (before any fork)
     rather than in a session fixture, we guarantee that forked children
-    see the correct paths for ``code_runner``, ``runtime_builder``, etc.
+    see the correct paths for ``simpler_setup``, ``simpler``, etc.
     """
     simpler_root = os.environ.get("SIMPLER_ROOT")
     if not simpler_root:
         return
 
-    for sub in ("examples/scripts", "python"):
-        p = os.path.join(simpler_root, sub)
+    # simpler root for simpler_setup package; python/ for the simpler package.
+    for p in (simpler_root, os.path.join(simpler_root, "python")):
         if os.path.isdir(p) and p not in sys.path:
             sys.path.insert(0, p)

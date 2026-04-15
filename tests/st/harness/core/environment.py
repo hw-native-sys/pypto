@@ -42,14 +42,6 @@ def get_simpler_python_path() -> Path | None:
     return root / "python"
 
 
-def get_simpler_scripts_path() -> Path | None:
-    """Get Simpler scripts path (simpler/examples/scripts directory)."""
-    root = get_simpler_root()
-    if root is None:
-        return None
-    return root / "examples" / "scripts"
-
-
 def ensure_simpler_available() -> Path:
     """Ensure Simpler is available, raise error if SIMPLER_ROOT is not set.
 

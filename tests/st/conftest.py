@@ -39,7 +39,7 @@ import pytest  # noqa: E402
 from harness.core.environment import (  # noqa: E402
     ensure_simpler_available,
     get_simpler_python_path,
-    get_simpler_scripts_path,
+    get_simpler_root,
 )
 from harness.core.harness import PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
@@ -90,8 +90,9 @@ def setup_simpler_dependency(request):
     simpler_root = ensure_simpler_available()
     os.environ["SIMPLER_ROOT"] = str(simpler_root)
 
-    # Add simpler to sys.path after ensuring it's available
-    for path in [get_simpler_python_path(), get_simpler_scripts_path()]:
+    # Add simpler to sys.path after ensuring it's available.
+    # simpler root is needed for the simpler_setup package; python/ for the simpler package.
+    for path in [get_simpler_root(), get_simpler_python_path()]:
         if path is not None and path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
 
