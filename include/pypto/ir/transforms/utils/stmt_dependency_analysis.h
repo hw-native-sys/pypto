@@ -36,8 +36,9 @@ namespace stmt_dep {
  *
  * The graph is sound under the InOut-use discipline (RFC #1026): physical
  * memory mutation is mirrored by SSA version changes, so SSA def-use captures
- * all real dependencies. Callers needing soundness must first run
- * CheckInOutUseDiscipline and refuse to proceed on any violation.
+ * all real dependencies. `BuildStmtDependencyGraph` enforces this
+ * precondition when a program is supplied; callers that bypass that path
+ * must ensure the discipline holds before relying on the graph for soundness.
  */
 struct StmtDependencyGraph {
   /// Top-level stmts in region order.

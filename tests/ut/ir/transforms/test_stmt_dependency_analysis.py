@@ -345,6 +345,57 @@ class TestInOutUseDiscipline:
 
         assert dep_analysis.check_inout_use_discipline(_seq_body(P, "main"), P) is None
 
+    def test_loop_backedge_is_flagged(self):
+        """A call in a for body kills a var; an earlier read in the same body
+        is reachable via the back-edge and must be flagged."""
+
+        @pl.program
+        class P:
+            @pl.function
+            def mutate(self, T: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = pl.add(T, T)
+                return r
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                # On iter 2, the read of x happens AFTER iter 1's mutate(x).
+                # The back-edge reachability must flag this.
+                for i in pl.range(0, 4, 1):  # noqa: F841
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # VIOLATION via back-edge  # noqa: F841
+                    z: pl.Tensor[[64], pl.FP32] = self.mutate(x)  # noqa: F841
+                return x
+
+        _assert_violation(_seq_body(P, "main"), P, "x")
+
+    def test_for_loop_var_is_not_flagged(self):
+        """The ForStmt's loop_var is a definition at the loop header, not a read.
+        Even when the loop body mutates a var of the same name, the loop_var
+        definition site itself must not be flagged."""
+
+        # Construct IR where the for-stmt's loop_var shares a Var* with a var
+        # killed earlier is not expressible in the DSL directly, but the fix is
+        # structural (skip def fields in VisitStmt_). Verify the common case: a
+        # clean for-loop over a range doesn't raise even when an outer InOut
+        # call has happened.
+        @pl.program
+        class P:
+            @pl.function
+            def mutate(self, T: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = pl.add(T, T)
+                return r
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                T_new: pl.Tensor[[64], pl.FP32] = self.mutate(x)
+                # Loop header `i` and iter_arg `acc` are definitions — must not
+                # be flagged as reads even though the body runs after an InOut
+                # call has marked `x` dead.
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(T_new,)):  # noqa: F841
+                    acc = pl.yield_(pl.add(acc, T_new))
+                return acc
+
+        assert dep_analysis.check_inout_use_discipline(_seq_body(P, "main"), P) is None
+
     def test_build_graph_raises_on_violation(self):
         """`build_stmt_dependency_graph` must also abort on discipline violations."""
 

@@ -93,6 +93,17 @@ namespace {
 
 /// Visitor that walks a region in CFG order and flags post-call reads of
 /// InOut/Out-passed variables.
+///
+/// The visitor distinguishes read contexts from definition contexts by
+/// overriding each stmt visitor: we only descend into RHS / condition / body
+/// fields, never into LHS / loop_var_ / return_vars_ / iter_args themselves.
+/// This prevents definition sites from being falsely reported as reads.
+///
+/// Loop back-edges are modelled conservatively: before entering a loop body,
+/// the visitor pre-populates `dead_` with every var the body would kill. This
+/// captures back-edge reachability: a read in iteration N+1 of a var that
+/// iteration N's call marked InOut/Out is flagged on the first (and only)
+/// pass over the body.
 class InOutUseDisciplineChecker : public IRVisitor {
  public:
   explicit InOutUseDisciplineChecker(ProgramPtr program) : program_(std::move(program)) {}
@@ -101,6 +112,8 @@ class InOutUseDisciplineChecker : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr& op) override {
+    // Only read contexts reach this hook — the overridden stmt visitors skip
+    // definition fields before recursion lands here.
     const Var* raw = op.get();
     if (dead_.count(raw) != 0) {
       auto origin_it = dead_origin_.find(raw);
@@ -111,7 +124,7 @@ class InOutUseDisciplineChecker : public IRVisitor {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "InOutUseDiscipline", 0, std::move(msg),
                                 op->span_);
     }
-    // Delegate to base so IterArg::initValue_ is still visited.
+    // Delegate to base so TensorType::shape_ expressions on the var are still visited.
     IRVisitor::VisitVarLike_(op);
   }
 
@@ -143,12 +156,15 @@ class InOutUseDisciplineChecker : public IRVisitor {
     }
   }
 
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    // LHS (`op->var_`) is a definition — skip it. Only the RHS is a read.
+    VisitExpr(op->value_);
+  }
+
   void VisitStmt_(const IfStmtPtr& op) override {
     // Then- and else-branches are mutually exclusive at runtime, so a
     // post-call mark added in one branch must not bleed into the other.
-    // Snapshot `dead_` before each branch, then take the union afterwards —
-    // reads *after* the if-stmt still see the effect of either branch, but
-    // reads *within* the sibling branch don't.
+    // `return_vars_` are definitions — skip them.
     VisitExpr(op->condition_);
 
     auto snapshot = dead_;
@@ -166,7 +182,56 @@ class InOutUseDisciplineChecker : public IRVisitor {
     dead_.insert(dead_after_then.begin(), dead_after_then.end());
   }
 
+  void VisitStmt_(const ForStmtPtr& op) override {
+    // Header reads: bounds and iter_args' initial values.
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    if (op->chunk_config_.has_value() && op->chunk_config_->size) {
+      VisitExpr(op->chunk_config_->size);
+    }
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    // `loop_var_`, `iter_args_` themselves, and `return_vars_` are definitions
+    // at the loop header — skip them.
+
+    // Back-edge modelling: any kill anywhere in the body is reachable from
+    // iteration N's tail to iteration N+1's start, so the var must be dead
+    // at body entry for the subsequent iteration's reads to be flagged.
+    // Pre-populate `dead_` with the body's kills, then walk the body.
+    CollectKillsInto(op->body_, dead_, dead_origin_);
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    for (const auto& ia : op->iter_args_) {
+      if (ia->initValue_) VisitExpr(ia->initValue_);
+    }
+    // `iter_args_` and `return_vars_` are definitions — skip them.
+    CollectKillsInto(op->body_, dead_, dead_origin_);
+    VisitStmt(op->body_);
+  }
+
  private:
+  /// Pre-scan a subtree and merge every var it would mark InOut/Out-dead into
+  /// `dead` (with origin span recorded in `origin`). Uses a fresh sub-checker
+  /// so the main walk's state and diagnostics are untouched.
+  void CollectKillsInto(const StmtPtr& stmt, std::unordered_set<const Var*>& dead,
+                        std::unordered_map<const Var*, Span>& origin) const {
+    if (!stmt) return;
+    InOutUseDisciplineChecker sub(program_);
+    sub.VisitStmt(stmt);
+    dead.insert(sub.dead_.begin(), sub.dead_.end());
+    for (const auto& [v, span] : sub.dead_origin_) {
+      origin.emplace(v, span);
+    }
+    // Sub-diagnostics are intentionally discarded: this is a precondition
+    // walk, not the real check. The main walk over the same body will
+    // surface any violations.
+  }
+
   ProgramPtr program_;
   std::unordered_set<const Var*> dead_;
   std::unordered_map<const Var*, Span> dead_origin_;
