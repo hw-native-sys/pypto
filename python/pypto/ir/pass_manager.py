@@ -141,6 +141,8 @@ class PassManager:
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
             ("NormalizeReturnOrder", lambda: passes.normalize_return_order()),
+            ("PartialUnrollTileLoops", lambda: passes.partial_unroll_tile_loops()),
+            ("ReorderUnrolledIO", lambda: passes.reorder_unrolled_io()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),

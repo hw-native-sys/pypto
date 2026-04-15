@@ -325,6 +325,23 @@ def interchange_chunk_loops() -> Pass:
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
 
+def partial_unroll_tile_loops() -> Pass:
+    """Create a tile-level partial-unroll pass for ``pl.range(N, unroll=F)`` loops.
+
+    Replicates each loop body F times per outer iteration, optionally appending a
+    remainder loop. Produces an ``unroll_replicated`` marker attr consumed by
+    ``reorder_unrolled_io``.
+    """
+
+def reorder_unrolled_io() -> Pass:
+    """Create a pass that clusters tile.load to the top and tile.store to the bottom
+    within unroll-replicated regions.
+
+    Performs a priority-aware stable topological sort over each marked SeqStmts so
+    sibling clones' input and output tiles become co-live, enabling ping-pong
+    buffering once MemoryReuse runs.
+    """
+
 def ctrl_flow_transform() -> Pass:
     """Create a control flow structuring pass (eliminate break/continue)."""
 

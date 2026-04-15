@@ -211,6 +211,43 @@ Pass InterchangeChunkLoops();
 Pass UnrollLoops();
 
 /**
+ * @brief Partially unroll tile-level loops carrying ``unroll_factor`` attr
+ *
+ * Lowers ``for i in pl.range(N, unroll=F)`` into an outer loop of ``N/F``
+ * iterations whose body is a ``SeqStmts`` of ``F`` deep-cloned copies of the
+ * original body, each with the loop variable substituted as
+ * ``new_var + k * step``. A trailing remainder loop covers ``N % F`` if non-zero.
+ * The new outer loop carries ``attrs_["unroll_replicated"] = F`` so the
+ * downstream ``ReorderUnrolledIO`` pass can identify the replicated region.
+ *
+ * First-cut restrictions: static bounds only, no iter_args/init_values.
+ *
+ * Runs at the tile level (after NormalizeReturnOrder, before InitMemRef) so
+ * each clone's tile variables become candidates for distinct MemRef allocations
+ * — enabling ping-pong buffering for the cloned bodies.
+ */
+Pass PartialUnrollTileLoops();
+
+/**
+ * @brief Cluster tile.load and tile.store calls within unroll-replicated regions
+ *
+ * For every ForStmt carrying ``attrs_["unroll_replicated"]``, performs a
+ * priority-aware stable topological sort over the body's top-level statements:
+ *   - tile.load assignments are pulled as far up as the dependency graph permits
+ *   - tile.store calls are pushed as far down as the dependency graph permits
+ *   - compute statements settle in the middle
+ *
+ * The result is `[loads…, compute…, stores…]` whenever the dataflow allows.
+ * Input tiles for sibling clones become co-live near the top, output tiles
+ * become co-live near the bottom — preventing MemoryReuse from coalescing them
+ * and enabling symmetric ping-pong execution.
+ *
+ * Uses ``stmt_dep::BuildStmtDependencyGraph`` and
+ * ``stmt_dep::CheckInOutUseDiscipline`` for soundness.
+ */
+Pass ReorderUnrolledIO();
+
+/**
  * @brief Transform break/continue into structured control flow
  *
  * Converts BreakStmt/ContinueStmt into equivalent if-else and while constructs.

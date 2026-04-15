@@ -323,6 +323,14 @@ void BindPass(nb::module_& m) {
   passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
              "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
+  passes.def("partial_unroll_tile_loops", &pass::PartialUnrollTileLoops,
+             "Lower ``pl.range(N, unroll=F)`` loops at the tile level: replicate the body F\n"
+             "times per outer iteration with a remainder loop covering N % F when needed.\n"
+             "Produces a marker attr ``unroll_replicated`` that ReorderUnrolledIO consumes.");
+  passes.def("reorder_unrolled_io", &pass::ReorderUnrolledIO,
+             "Within unroll-replicated regions, lift tile.load to the top and sink tile.store\n"
+             "to the bottom, subject to the SSA dependency graph. Enables symmetric ping-pong\n"
+             "buffering by making sibling clones' input and output tiles co-live.");
   passes.def("ctrl_flow_transform", &pass::CtrlFlowTransform,
              "Create a control flow structuring pass (eliminate break/continue)");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");

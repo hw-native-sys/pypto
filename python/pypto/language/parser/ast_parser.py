@@ -1186,6 +1186,40 @@ class ASTParser:
         if chunk_expr is not None:
             self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
 
+        # Validate unroll= and merge into attrs as "unroll_factor".
+        unroll_expr = range_args.get("unroll")
+        unroll_factor: int | None = None
+        if unroll_expr is not None:
+            if chunk_expr is not None:
+                raise ParserSyntaxError(
+                    "unroll= and chunk= are mutually exclusive on pl.range()",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint="Use unroll= for ping-pong replication or chunk= for chunked iteration, not both.",
+                )
+            if range_args["init_values"]:
+                raise ParserSyntaxError(
+                    "unroll= cannot be combined with init_values=",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint=(
+                        "Partial unroll does not yet support loop-carried state. "
+                        "Drop init_values= or remove unroll=."
+                    ),
+                )
+            if not _is_const_int(unroll_expr):
+                raise ParserSyntaxError(
+                    "unroll must be a compile-time constant positive integer",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint="Use an integer literal: unroll=4",
+                )
+            unroll_val = _const_int_value(unroll_expr)
+            if unroll_val is None or unroll_val < 1:
+                raise ParserSyntaxError(
+                    f"unroll factor must be >= 1, got {unroll_val}",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint="Use a positive integer for unroll: unroll=4",
+                )
+            unroll_factor = unroll_val
+
         kind = self._ITERATOR_TO_KIND[iterator_type]
         # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
         # Bare Python ints still map to INDEX, but explicitly typed INT64 bounds
@@ -1211,7 +1245,10 @@ class ASTParser:
         prev_in_for_loop = self.in_for_loop
         prev_in_while_loop = self.in_while_loop
 
-        attrs_dict = range_args.get("attrs") or None
+        attrs_dict: dict[str, object] | None = range_args.get("attrs") or None
+        if unroll_factor is not None:
+            attrs_dict = dict(attrs_dict) if attrs_dict else {}
+            attrs_dict["unroll_factor"] = unroll_factor
         with self.builder.for_loop(
             loop_var,
             range_args["start"],
@@ -1303,6 +1340,8 @@ class ASTParser:
                 )
         elif keyword.arg == "chunk":
             result["chunk"] = self.parse_expression(keyword.value)
+        elif keyword.arg == "unroll":
+            result["unroll"] = self.parse_expression(keyword.value)
         elif keyword.arg == "chunk_policy":
             if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                 _VALID_CHUNK_POLICIES = {"leading_full", "guarded"}
@@ -1367,6 +1406,7 @@ class ASTParser:
             "init_values": [],
             "chunk": None,
             "chunk_policy": "guarded",
+            "unroll": None,
             "attrs": {},
         }
         for keyword in call.keywords:

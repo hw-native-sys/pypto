@@ -159,6 +159,20 @@ inline const PassProperties kAllocateMemoryAddrProperties{
 inline const PassProperties kNormalizeReturnOrderProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
 
+// -- Partial unroll + reorder passes (tile-level, before InitMemRef) ---------
+
+inline const PassProperties kPartialUnrollTileLoopsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+
+inline const PassProperties kReorderUnrolledIOProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

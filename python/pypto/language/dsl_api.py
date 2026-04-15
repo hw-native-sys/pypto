@@ -98,6 +98,7 @@ class RangeIterator(Generic[T]):
         init_values: tuple[Any, ...] | None = None,
         chunk: int | None = None,
         chunk_policy: str = "guarded",
+        unroll_factor: int | None = None,
     ):
         """Initialize range iterator.
 
@@ -108,6 +109,7 @@ class RangeIterator(Generic[T]):
             init_values: Initial values for iter_args
             chunk: Chunk size for loop chunking (None = no chunking)
             chunk_policy: Chunk distribution policy (default: "guarded")
+            unroll_factor: Partial unroll factor for tile-level ping-pong (None = no unroll)
         """
         self.start = start
         self.stop = stop
@@ -115,6 +117,7 @@ class RangeIterator(Generic[T]):
         self.init_values = init_values or ()
         self.chunk = chunk
         self.chunk_policy = chunk_policy
+        self.unroll_factor = unroll_factor
         self.current = start
 
     def __iter__(self) -> RangeIterator[T]:
@@ -173,40 +176,60 @@ def _make_range_iterator(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "guarded",
+    unroll_factor: int | None = None,
     func_name: str = "range",
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), and unroll()."""
     if chunk is not None and (not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0):
         raise ValueError(f"{func_name}() chunk must be a positive integer, got {chunk!r}")
+    if unroll_factor is not None:
+        if not isinstance(unroll_factor, int) or isinstance(unroll_factor, bool) or unroll_factor < 1:
+            raise ValueError(f"{func_name}() unroll factor must be a positive integer, got {unroll_factor!r}")
+        if chunk is not None:
+            raise ValueError(f"{func_name}() unroll= and chunk= are mutually exclusive")
+    kwargs = {
+        "init_values": init_values,
+        "chunk": chunk,
+        "chunk_policy": chunk_policy,
+        "unroll_factor": unroll_factor,
+    }
     if len(args) == 1:
-        return RangeIterator(args[0], init_values=init_values, chunk=chunk, chunk_policy=chunk_policy)
+        return RangeIterator(args[0], **kwargs)
     elif len(args) == 2:
-        return RangeIterator(
-            args[1], args[0], init_values=init_values, chunk=chunk, chunk_policy=chunk_policy
-        )
+        return RangeIterator(args[1], args[0], **kwargs)
     elif len(args) == 3:
-        return RangeIterator(
-            args[1], args[0], args[2], init_values=init_values, chunk=chunk, chunk_policy=chunk_policy
-        )
+        return RangeIterator(args[1], args[0], args[2], **kwargs)
     else:
         raise ValueError(f"{func_name}() takes 1 to 3 positional arguments")
 
 
 @overload
 def range(
-    *args: RangeArg, init_values: None = None, chunk: int | None = None, chunk_policy: str = "guarded"
+    *args: RangeArg,
+    init_values: None = None,
+    chunk: int | None = None,
+    chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[Scalar]: ...
 
 
 @overload
 def range(
-    *args: RangeArg, init_values: tuple[T1], chunk: int | None = None, chunk_policy: str = "guarded"
+    *args: RangeArg,
+    init_values: tuple[T1],
+    chunk: int | None = None,
+    chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
 @overload
 def range(
-    *args: RangeArg, init_values: tuple[T1, T2], chunk: int | None = None, chunk_policy: str = "guarded"
+    *args: RangeArg,
+    init_values: tuple[T1, T2],
+    chunk: int | None = None,
+    chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
@@ -216,6 +239,7 @@ def range(
     init_values: tuple[T1, T2, T3],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
@@ -225,6 +249,7 @@ def range(
     init_values: tuple[T1, T2, T3, T4],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
@@ -234,6 +259,7 @@ def range(
     init_values: tuple[T1, T2, T3, T4, T5],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
@@ -242,13 +268,15 @@ def range(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "guarded",
+    unroll: int | None = None,
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a range iterator for for loops.
 
-    Supports two patterns:
-        Simple:    for i in pl.range(10):
-        Iter args: for i, (var1, var2) in pl.range(16, init_values=(init1, init2)):
-        Chunked:   for i in pl.range(0, 10, chunk=5):
+    Supports several patterns:
+        Simple:        for i in pl.range(10):
+        Iter args:     for i, (var1, var2) in pl.range(16, init_values=(init1, init2)):
+        Chunked:       for i in pl.range(0, 10, chunk=5):
+        Partial unroll: for i in pl.range(64, unroll=4):  # 16 outer iters, 4 body copies each
 
     Args can be int literals or Scalar variables:
         for i in pl.range(n):  # n is pl.Scalar[pl.INT64]
@@ -261,13 +289,22 @@ def range(
         init_values: Initial values for iteration arguments
         chunk: Chunk size for loop chunking (splits loop into nested loops)
         chunk_policy: Chunk distribution policy (default: "guarded")
+        unroll: Partial unroll factor for tile-level ping-pong buffering. Replicates
+            the loop body ``unroll`` times per outer iteration; the outer loop steps
+            by ``step * unroll``. Mutually exclusive with ``chunk``. Lowered by the
+            ``PartialUnrollTileLoops`` pass at the tile level.
 
     Returns:
         If no init_values: RangeIterator yielding loop variable (Scalar)
         If init_values: RangeIterator yielding (loop_var, (iter_args...))
     """
     return _make_range_iterator(
-        *args, init_values=init_values, chunk=chunk, chunk_policy=chunk_policy, func_name="range"
+        *args,
+        init_values=init_values,
+        chunk=chunk,
+        chunk_policy=chunk_policy,
+        unroll_factor=unroll,
+        func_name="range",
     )
 
 

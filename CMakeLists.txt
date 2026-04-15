@@ -162,6 +162,8 @@ set(PYPTO_SOURCES
     src/ir/transforms/split_chunked_loops_pass.cpp
     src/ir/transforms/interchange_chunk_loops_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp
+    src/ir/transforms/partial_unroll_tile_loops_pass.cpp
+    src/ir/transforms/reorder_unrolled_io_pass.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
     src/ir/transforms/utils/core_affinity.cpp
