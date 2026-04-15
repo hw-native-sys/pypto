@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 from pypto.pypto_core.ir import SplitMode
 
+from .optimizations import Optimization
+
 
 class _ChunkedLoopOptimizerCall:
     """Result of calling chunked_loop_optimizer(split=...).
@@ -727,11 +729,11 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
 class AtContext:
     """Context manager for hierarchy-level scope.
 
-    Returned by pl.at(level=..., role=..., optimization=...) and used with the 'with' statement.
-    The parser recognizes this pattern and creates:
-    - ScopeStmt(InCore) when level=CORE_GROUP (no optimization, no split)
-    - ScopeStmt(InCore, split=...) when level=CORE_GROUP with split=...
-    - ScopeStmt(AutoInCore) when level=CORE_GROUP and optimization=pl.chunked_loop_optimizer
+    Returned by pl.at(level=..., role=..., optimizations=[...]) and used with the
+    'with' statement. The parser recognizes this pattern and creates:
+    - ScopeStmt(InCore) when level=CORE_GROUP (no optimizations)
+    - ScopeStmt(InCore, split=...) when level=CORE_GROUP with optimizations=[pl.split(...)]
+    - ScopeStmt(AutoInCore) when level=CORE_GROUP with optimizations=[pl.auto_chunk]
     - ScopeStmt(Hierarchy) for all other levels
     """
 
@@ -740,12 +742,15 @@ class AtContext:
         level: ir.Level,
         role: ir.Role | None = None,
         *,
+        optimizations: list[Optimization] | None = None,
+        # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
         split: SplitMode | None = None,
         name_hint: str = "",
     ) -> None:
         self.level = level
         self.role = role
+        self.optimizations = optimizations
         self.optimization = optimization
         self.split = split
         self.name_hint = name_hint
@@ -761,59 +766,57 @@ def at(
     level: ir.Level,
     role: ir.Role | None = None,
     *,
+    optimizations: list[Optimization] | None = None,
+    # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
     split: SplitMode | None = None,
     name_hint: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
 
-    When used with ``level=pl.Level.CORE_GROUP``, this creates an InCore scope
-    (equivalent to the deprecated ``pl.incore()``).
+    With ``level=pl.Level.CORE_GROUP``, the ``optimizations=`` list controls
+    the resulting scope kind:
 
-    When used with ``level=pl.Level.CORE_GROUP`` and
-    ``optimization=pl.chunked_loop_optimizer``, this creates an AutoInCore scope
-    (equivalent to the deprecated ``pl.auto_incore()``).
-
-    When used with ``level=pl.Level.CORE_GROUP`` and ``split=pl.SplitMode.UP_DOWN``,
-    this creates an InCore scope with explicit split mode for cross-core data transfer.
+    - no entries → ``ScopeStmt(InCore)``
+    - ``pl.split(mode)`` → ``ScopeStmt(InCore, split=mode)``
+    - ``pl.auto_chunk`` → ``ScopeStmt(AutoInCore)``
+    - both entries → ``ScopeStmt(AutoInCore, split=mode)``
 
     For all other levels, this creates a Hierarchy scope.
 
     Args:
-        level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.CORE_GROUP)
+        level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.CORE_GROUP).
         role: Function role (Orchestrator or Worker). Default: None.
-        optimization: Optional optimization hint. Use pl.chunked_loop_optimizer
-            (or pl.chunked_loop_optimizer(split=...)) with level=CORE_GROUP
-            to enable compiler-driven chunked loop outlining.
-        name_hint: Optional name hint for the outlined function (must be a valid identifier)
-        split: Split mode for cross-core data transfer. Use with level=CORE_GROUP
-            to specify how tile data is split between AIC and AIV cores.
-            Cannot be used together with optimization=.
+        optimizations: Optional list of optimization entries. Each entry is
+            an instance of :class:`Optimization` (e.g. ``pl.split(mode)`` or
+            ``pl.auto_chunk``). Entries are independent and may be combined.
+        optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
+            ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
+        split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.
+        name_hint: Optional name hint for the outlined function (must be a
+            valid identifier).
 
     Returns:
-        Context manager for the appropriate scope
+        Context manager for the appropriate scope.
 
     Examples:
         >>> # InCore scope (replaces pl.incore()):
         >>> with pl.at(level=pl.Level.CORE_GROUP):
         ...     y = pl.ops.add(x, x)
 
-        >>> # InCore scope with split mode:
-        >>> with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-        ...     y = pl.ops.add(x, x)
-
-        >>> # Named InCore scope:
-        >>> with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_matmul_add"):
+        >>> # InCore scope with split hint:
+        >>> with pl.at(level=pl.Level.CORE_GROUP,
+        ...            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
         ...     y = pl.ops.add(x, x)
 
         >>> # AutoInCore scope (replaces pl.auto_incore()):
-        >>> with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+        >>> with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
 
-        >>> # AutoInCore with explicit split mode:
+        >>> # AutoInCore + split hint (combined, independent entries):
         >>> with pl.at(level=pl.Level.CORE_GROUP,
-        ...            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)):
+        ...            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
 
@@ -821,7 +824,14 @@ def at(
         >>> with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
         ...     y = pl.add(x, x)
     """
-    return AtContext(level, role, optimization=optimization, split=split, name_hint=name_hint)
+    return AtContext(
+        level,
+        role,
+        optimizations=optimizations,
+        optimization=optimization,
+        split=split,
+        name_hint=name_hint,
+    )
 
 
 __all__ = [

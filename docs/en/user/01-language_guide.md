@@ -419,18 +419,41 @@ with pl.incore():
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
-For compiler-driven chunked loop outlining (AutoInCore), use `pl.chunked_loop_optimizer`:
+For compiler-driven chunked loop outlining (AutoInCore), pass `pl.auto_chunk` in
+the `optimizations` list:
 
 ```python
 # Preferred (new API):
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
 
-# Deprecated (use pl.at instead):
+# Deprecated (still works, emits DeprecationWarning):
+with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+    ...
+
 with pl.auto_incore():
+    ...
+```
+
+To set a cross-core split mode (consumed by the `ExpandMixedKernel` pass), use
+`pl.split(...)` — independent from `pl.auto_chunk`, so the two can be combined:
+
+```python
+# Plain InCore + split hint:
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+
+# AutoInCore + split hint (independent entries, combined freely):
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
+
+# Deprecated single-kwarg form (still works, emits DeprecationWarning):
+with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+    ...
 ```
 
 ## Memory and Data Movement

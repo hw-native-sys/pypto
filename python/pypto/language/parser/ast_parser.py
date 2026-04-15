@@ -14,6 +14,7 @@ import keyword as _keyword_mod
 import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pypto.ir import IRBuilder
@@ -174,6 +175,23 @@ def _normalize_inferred_type_for_annotation(
         inferred_type.tile_view,
         inferred_type.memory_space,
     )
+
+
+@dataclass
+class _AtKwargState:
+    """Mutable accumulator used while parsing pl.at() keyword arguments."""
+
+    level: "ir.Level | None" = None
+    role: "ir.Role | None" = None
+    name_hint: str = ""
+    requests_auto_chunk: bool = False
+    split_mode: "ir.SplitMode | None" = None
+    # Tracks which kwarg produced the AutoChunk / split state so the validation
+    # step can reject mixing the new `optimizations=` list with the deprecated
+    # `optimization=`/`split=` kwargs and emit DeprecationWarning at the end.
+    new_optimizations_kw: "ast.keyword | None" = field(default=None)
+    legacy_optimization_kw: "ast.keyword | None" = field(default=None)
+    legacy_split_kw: "ast.keyword | None" = field(default=None)
 
 
 class ASTParser:
@@ -1578,23 +1596,19 @@ class ASTParser:
 
     def _parse_at_kwargs(
         self, call: ast.Call
-    ) -> tuple[ir.Level, ir.Role | None, ir.SplitMode | None, ir.SplitMode | None, str]:
-        """Extract level, role, optimization, split, and name from pl.at(...) call.
+    ) -> tuple[ir.Level, ir.Role | None, bool, ir.SplitMode | None, str]:
+        """Extract level, role, AutoChunk request, split mode, and name from pl.at(...) call.
 
-        Supports both positional and keyword forms:
-        - pl.at(pl.Level.HOST)
-        - pl.at(pl.Level.HOST, pl.Role.Worker)
-        - pl.at(level=pl.Level.HOST, role=pl.Role.Worker)
-        - pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
-        - pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=...))
-        - pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)
-        - pl.at(level=pl.Level.CORE_GROUP, name_hint="my_kernel")
-
-        Args:
-            call: AST Call node for pl.at(...)
+        Supports both positional and keyword forms. Preferred new API uses the
+        ``optimizations=[...]`` list with ``pl.split(...)`` and ``pl.auto_chunk``
+        entries. The legacy ``optimization=`` and top-level ``split=`` kwargs
+        are still accepted but emit a DeprecationWarning. Mixing the new
+        ``optimizations=`` list with either deprecated kwarg is a hard error.
 
         Returns:
-            Tuple of (level, role, opt_split, direct_split, name_hint).
+            Tuple of (level, role, requests_auto_chunk, split_mode, name_hint).
+            ``requests_auto_chunk`` is True when the resulting scope must be
+            ``AutoInCore`` rather than ``InCore``.
         """
         if len(call.args) > 2:
             raise ParserSyntaxError(
@@ -1602,68 +1616,42 @@ class ASTParser:
                 hint="Use pl.at(level) or pl.at(level, role)",
             )
 
-        level = None
-        role = None
-        opt_split: ir.SplitMode | None = None
-        direct_split: ir.SplitMode | None = None
-        name_hint = ""
-
-        # Parse positional arguments
+        state = _AtKwargState()
         if len(call.args) >= 1:
-            level = extract_enum_value(call.args[0], LEVEL_MAP, "Level", "pl.Level")
+            state.level = extract_enum_value(call.args[0], LEVEL_MAP, "Level", "pl.Level")
         if len(call.args) >= 2:
-            role = extract_enum_value(call.args[1], ROLE_MAP, "Role", "pl.Role")
+            state.role = extract_enum_value(call.args[1], ROLE_MAP, "Role", "pl.Role")
 
-        # Parse keyword arguments
         for kw in call.keywords:
-            level, role, opt_split, direct_split, name_hint = self._parse_at_keyword(
-                kw, level, role, opt_split, direct_split, name_hint
-            )
-        if level is None:
+            self._dispatch_at_keyword(kw, state)
+
+        if state.level is None:
             raise ParserSyntaxError(
                 "pl.at() requires a level argument",
                 hint="Use pl.at(pl.Level.HOST) or pl.at(level=pl.Level.HOST)",
             )
-        return level, role, opt_split, direct_split, name_hint
 
-    def _parse_at_keyword(
-        self,
-        kw: ast.keyword,
-        level: "ir.Level | None",
-        role: "ir.Role | None",
-        opt_split: "ir.SplitMode | None",
-        direct_split: "ir.SplitMode | None",
-        name_hint: str,
-    ) -> tuple["ir.Level | None", "ir.Role | None", "ir.SplitMode | None", "ir.SplitMode | None", str]:
-        """Parse a single keyword argument from pl.at() call."""
+        self._validate_at_kwarg_combinations(state)
+        return state.level, state.role, state.requests_auto_chunk, state.split_mode, state.name_hint
+
+    def _dispatch_at_keyword(self, kw: ast.keyword, state: "_AtKwargState") -> None:
+        """Dispatch a single pl.at() keyword argument and update state."""
         if kw.arg == "level":
-            if level is not None:
-                raise ParserSyntaxError(
-                    "pl.at() got multiple values for argument 'level'",
-                )
-            level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
+            if state.level is not None:
+                raise ParserSyntaxError("pl.at() got multiple values for argument 'level'")
+            state.level = extract_enum_value(kw.value, LEVEL_MAP, "Level", "pl.Level")
         elif kw.arg == "role":
-            if role is not None:
-                raise ParserSyntaxError(
-                    "pl.at() got multiple values for argument 'role'",
-                )
-            role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
+            if state.role is not None:
+                raise ParserSyntaxError("pl.at() got multiple values for argument 'role'")
+            state.role = extract_enum_value(kw.value, ROLE_MAP, "Role", "pl.Role")
+        elif kw.arg == "optimizations":
+            self._handle_at_optimizations_kw(kw, state)
         elif kw.arg == "optimization":
-            if opt_split is not None:
-                raise ParserSyntaxError(
-                    "pl.at() got multiple values for argument 'optimization'",
-                    span=self.span_tracker.get_span(kw),
-                )
-            opt_split = self._parse_chunked_loop_optimizer(kw.value)
-        elif kw.arg == "name_hint":
-            name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
+            self._handle_at_legacy_optimization_kw(kw, state)
         elif kw.arg == "split":
-            if direct_split is not None:
-                raise ParserSyntaxError(
-                    "pl.at() got multiple values for argument 'split'",
-                    span=self.span_tracker.get_span(kw),
-                )
-            direct_split = self._eval_split_mode(kw.value)
+            self._handle_at_legacy_split_kw(kw, state)
+        elif kw.arg == "name_hint":
+            state.name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
         elif kw.arg is None:
             raise ParserSyntaxError(
                 "Unsupported **kwargs in pl.at()",
@@ -1672,9 +1660,195 @@ class ASTParser:
         else:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{kw.arg}' in pl.at()",
-                hint="Supported arguments: level, role, optimization, split, name_hint",
+                hint="Supported arguments: level, role, optimizations, name_hint",
             )
-        return level, role, opt_split, direct_split, name_hint
+
+    def _handle_at_optimizations_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
+        if state.new_optimizations_kw is not None:
+            raise ParserSyntaxError(
+                "pl.at() got multiple values for argument 'optimizations'",
+                span=self.span_tracker.get_span(kw),
+            )
+        state.new_optimizations_kw = kw
+        state.requests_auto_chunk, state.split_mode = self._parse_optimizations_list(kw.value)
+
+    def _handle_at_legacy_optimization_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
+        if state.legacy_optimization_kw is not None:
+            raise ParserSyntaxError(
+                "pl.at() got multiple values for argument 'optimization'",
+                span=self.span_tracker.get_span(kw),
+            )
+        state.legacy_optimization_kw = kw
+        # Bare or called legacy optimizer always implies AutoChunk.
+        state.requests_auto_chunk = True
+        state.split_mode = self._parse_chunked_loop_optimizer(kw.value)
+
+    def _handle_at_legacy_split_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
+        if state.legacy_split_kw is not None:
+            raise ParserSyntaxError(
+                "pl.at() got multiple values for argument 'split'",
+                span=self.span_tracker.get_span(kw),
+            )
+        state.legacy_split_kw = kw
+        state.split_mode = self._eval_split_mode(kw.value)
+
+    def _validate_at_kwarg_combinations(self, state: "_AtKwargState") -> None:
+        """Reject illegal kwarg combinations and emit DeprecationWarnings."""
+        # Hard error when mixing new optimizations= with deprecated kwargs.
+        if state.new_optimizations_kw is not None and (
+            state.legacy_optimization_kw is not None or state.legacy_split_kw is not None
+        ):
+            offending = state.legacy_optimization_kw or state.legacy_split_kw
+            assert offending is not None
+            raise ParserSyntaxError(
+                "Cannot mix 'optimizations=' with deprecated 'optimization=' or 'split=' kwargs in pl.at()",
+                span=self.span_tracker.get_span(offending),
+                hint="Use only optimizations=[pl.split(...), pl.auto_chunk] — drop the deprecated kwargs.",
+            )
+
+        # Preserve the pre-existing rule that the two deprecated kwargs cannot be
+        # combined: legacy `optimization=` always implied AutoInCore + a baked-in
+        # split, so combining it with legacy top-level `split=` was ambiguous.
+        if state.legacy_optimization_kw is not None and state.legacy_split_kw is not None:
+            raise ParserSyntaxError(
+                "Cannot use both 'optimization' and 'split' in pl.at()",
+                span=self.span_tracker.get_span(state.legacy_split_kw),
+                hint="Use optimizations=[pl.auto_chunk, pl.split(...)] for AutoInCore + "
+                "split, or optimizations=[pl.split(...)] for plain InCore + split.",
+            )
+
+        # Emit deprecation warnings for legacy kwargs (after mixing checks, so the
+        # user sees the structural error first if both apply).
+        if state.legacy_optimization_kw is not None:
+            warnings.warn(
+                "pl.at(optimization=pl.chunked_loop_optimizer[(...)]) is deprecated; "
+                "use pl.at(optimizations=[pl.auto_chunk]) — combine with pl.split(...) "
+                "if a split mode is needed.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if state.legacy_split_kw is not None:
+            warnings.warn(
+                "pl.at(split=...) is deprecated; use pl.at(optimizations=[pl.split(...)]).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+    def _parse_optimizations_list(self, value: ast.expr) -> tuple[bool, "ir.SplitMode | None"]:
+        """Parse pl.at(..., optimizations=[...]) AST node.
+
+        Each entry must be one of:
+
+        - ``pl.auto_chunk`` — request AutoInCore semantics.
+        - ``pl.split(MODE)`` — set the cross-core split mode.
+
+        Both fully qualified forms (``pl.optimizations.auto_chunk``,
+        ``pl.optimizations.split(MODE)``) are also accepted.
+
+        Returns:
+            Tuple ``(requests_auto_chunk, split_mode)``.
+        """
+        if not isinstance(value, ast.List):
+            raise ParserSyntaxError(
+                "pl.at(optimizations=...) must be a list literal",
+                span=self.span_tracker.get_span(value),
+                hint="Use optimizations=[pl.split(pl.SplitMode.UP_DOWN)] or optimizations=[pl.auto_chunk].",
+            )
+
+        requests_auto_chunk = False
+        split_mode: ir.SplitMode | None = None
+        seen_auto_chunk = False
+        seen_split = False
+
+        for entry in value.elts:
+            if self._is_pl_auto_chunk(entry):
+                if seen_auto_chunk:
+                    raise ParserSyntaxError(
+                        "Duplicate 'pl.auto_chunk' in optimizations=[...]",
+                        span=self.span_tracker.get_span(entry),
+                    )
+                seen_auto_chunk = True
+                requests_auto_chunk = True
+            elif (mode := self._try_parse_pl_split(entry)) is not None:
+                if seen_split:
+                    raise ParserSyntaxError(
+                        "Duplicate 'pl.split(...)' in optimizations=[...]",
+                        span=self.span_tracker.get_span(entry),
+                    )
+                seen_split = True
+                split_mode = mode
+            else:
+                raise ParserSyntaxError(
+                    "Unsupported entry in pl.at(optimizations=[...])",
+                    span=self.span_tracker.get_span(entry),
+                    hint="Each entry must be pl.auto_chunk or pl.split(pl.SplitMode.X).",
+                )
+
+        return requests_auto_chunk, split_mode
+
+    @staticmethod
+    def _is_pl_auto_chunk(node: ast.expr) -> bool:
+        """Return True if the AST node is ``pl.auto_chunk`` or ``pl.optimizations.auto_chunk``."""
+        if not isinstance(node, ast.Attribute) or node.attr != "auto_chunk":
+            return False
+        # pl.auto_chunk
+        if isinstance(node.value, ast.Name) and node.value.id == "pl":
+            return True
+        # pl.optimizations.auto_chunk
+        if (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "optimizations"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "pl"
+        ):
+            return True
+        return False
+
+    def _try_parse_pl_split(self, node: ast.expr) -> "ir.SplitMode | None":
+        """Return the SplitMode if the AST node is ``pl.split(MODE)``; else None.
+
+        Also accepts the fully qualified form ``pl.optimizations.split(MODE)``.
+        """
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "split":
+            return None
+        # pl.split(...)
+        if isinstance(func.value, ast.Name) and func.value.id == "pl":
+            pass
+        # pl.optimizations.split(...)
+        elif (
+            isinstance(func.value, ast.Attribute)
+            and func.value.attr == "optimizations"
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "pl"
+        ):
+            pass
+        else:
+            return None
+
+        if node.keywords:
+            raise ParserSyntaxError(
+                "pl.split() does not accept keyword arguments",
+                span=self.span_tracker.get_span(node),
+                hint="Use pl.split(pl.SplitMode.UP_DOWN).",
+            )
+        if len(node.args) != 1:
+            raise ParserSyntaxError(
+                f"pl.split() takes exactly 1 positional argument, got {len(node.args)}",
+                span=self.span_tracker.get_span(node),
+                hint="Use pl.split(pl.SplitMode.UP_DOWN).",
+            )
+        mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
+        if mode == ir.SplitMode.NONE:
+            raise ParserSyntaxError(
+                "pl.split(pl.SplitMode.NONE) is not supported",
+                span=self.span_tracker.get_span(node.args[0]),
+                hint="Use pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT, or omit the "
+                "pl.split(...) entry entirely.",
+            )
+        return mode
 
     def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode":
         """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
@@ -1849,32 +2023,24 @@ class ASTParser:
 
     def _parse_at_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
         """Parse pl.at(...) context manager into a ScopeStmt."""
-        level, role, opt_split, direct_split, name_hint = self._parse_at_kwargs(context_expr)
+        level, role, requests_auto_chunk, split_mode, name_hint = self._parse_at_kwargs(context_expr)
         span = self.span_tracker.get_span(stmt)
 
         is_core_group = level == ir.Level.CORE_GROUP
 
-        if opt_split is not None and not is_core_group:
+        if requests_auto_chunk and not is_core_group:
             raise ParserSyntaxError(
-                "optimization=chunked_loop_optimizer is only supported with level=pl.Level.CORE_GROUP",
+                "pl.auto_chunk is only supported with level=pl.Level.CORE_GROUP",
                 span=span,
-                hint="Use pl.at(level=pl.Level.CORE_GROUP, "
-                "optimization=pl.chunked_loop_optimizer) for AutoInCore scope",
+                hint="Use pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]) "
+                "for an AutoInCore scope.",
             )
 
-        if direct_split is not None and not is_core_group:
+        if split_mode is not None and not is_core_group:
             raise ParserSyntaxError(
-                "split= is only supported with level=pl.Level.CORE_GROUP",
+                "pl.split(...) is only supported with level=pl.Level.CORE_GROUP",
                 span=span,
-                hint="Use pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)",
-            )
-
-        if opt_split is not None and direct_split is not None:
-            raise ParserSyntaxError(
-                "Cannot use both 'optimization' and 'split' in pl.at()",
-                span=span,
-                hint="Use split= inside optimization=pl.chunked_loop_optimizer(split=...) "
-                "for AutoInCore scope, or use split= directly for InCore scope",
+                hint="Use pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]).",
             )
 
         if is_core_group and role is not None:
@@ -1889,10 +2055,10 @@ class ASTParser:
             self._parse_scope_body(
                 stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role, name_hint=name_hint
             )
-        elif opt_split is not None:
-            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=opt_split, name_hint=name_hint)
+        elif requests_auto_chunk:
+            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=split_mode, name_hint=name_hint)
         else:
-            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, split=direct_split, name_hint=name_hint)
+            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, split=split_mode, name_hint=name_hint)
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.

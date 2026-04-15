@@ -419,18 +419,41 @@ with pl.incore():
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
-如需编译器驱动的 chunked 循环 outline（AutoInCore），使用 `pl.chunked_loop_optimizer`：
+如需编译器驱动的 chunked 循环 outline（AutoInCore），在 `optimizations` 列表中传入
+`pl.auto_chunk`：
 
 ```python
 # 推荐用法（新 API）：
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
 
-# 已弃用（请改用 pl.at）：
+# 已弃用（仍可用，会触发 DeprecationWarning）：
+with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+    ...
+
 with pl.auto_incore():
+    ...
+```
+
+如需为 `ExpandMixedKernel` Pass 指定跨核 split 模式，使用 `pl.split(...)` —— 它与
+`pl.auto_chunk` 互相独立，可任意组合：
+
+```python
+# 普通 InCore + split 提示：
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+
+# AutoInCore + split 提示（独立条目，自由组合）：
+with pl.at(level=pl.Level.CORE_GROUP,
+           optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
+
+# 已弃用的单关键字形式（仍可用，会触发 DeprecationWarning）：
+with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+    ...
 ```
 
 ## 内存与数据搬运

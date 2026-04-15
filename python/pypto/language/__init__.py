@@ -56,7 +56,7 @@ from pypto.pypto_core.ir import (
     TileLayout,
 )
 
-from . import parser
+from . import optimizations, parser
 from .dsl_api import (
     at,
     auto_incore,
@@ -168,6 +168,7 @@ from .op.unified_ops import (
     transpose,
     write,
 )
+from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
@@ -238,6 +239,9 @@ __all__ = [
     "auto_incore",
     "cluster",
     "chunked_loop_optimizer",
+    "optimizations",
+    "split",
+    "auto_chunk",
     "tile",
     "system",
     "tensor",
