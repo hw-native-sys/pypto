@@ -214,6 +214,84 @@ class TestTailOfBlockWarning:
                     return y
 
 
+class TestSiblingBlockAttribution:
+    """Leading comments inside a later sibling block must not be swept by the
+    previous block's tail-drop (regression for codex P1)."""
+
+    def test_sibling_for_loops_preserve_inner_leading(self):
+        with pytest.warns(UserWarning, match="tail-of-block comment"):
+
+            @pl.program
+            class P:
+                @pl.function
+                def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                    for i in pl.range(4):
+                        x = x + 1.0
+                        # tail of first for
+                    for j in pl.range(4):
+                        # leading for y
+                        y = x * 2.0
+                    return y
+
+        stmts = _body_stmts(P)
+        # The second for-loop's first body stmt should carry the leading comment.
+        for_stmts = [s for s in stmts if isinstance(s, ir.ForStmt)]
+        assert len(for_stmts) == 2
+        second_body = for_stmts[1].body
+        first = second_body.stmts[0] if isinstance(second_body, ir.SeqStmts) else second_body
+        assert "leading for y" in first.leading_comments
+        # The "tail of first for" must NOT leak into the second loop's body.
+        assert "tail of first for" not in first.leading_comments
+
+    def test_sibling_if_blocks_preserve_inner_leading(self):
+        with pytest.warns(UserWarning, match="tail-of-block comment"):
+
+            @pl.program
+            class P:
+                @pl.function
+                def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                    if x > 0.0:
+                        y = x
+                        # tail in first if
+                    if x < 0.0:
+                        # leading in second if
+                        y = -x
+                    return y
+
+        stmts = _body_stmts(P)
+        if_stmts = [s for s in stmts if isinstance(s, ir.IfStmt)]
+        assert len(if_stmts) == 2
+        second_then = if_stmts[1].then_body
+        first = second_then.stmts[0] if isinstance(second_then, ir.SeqStmts) else second_then
+        assert "leading in second if" in first.leading_comments
+        assert "tail in first if" not in first.leading_comments
+
+
+class TestWrappedHeaderComments:
+    """Comments inside a wrapped multi-line header attach to the compound stmt,
+    not to the first body stmt (regression for codex P2)."""
+
+    def test_wrapped_for_header_comment_attaches_to_for(self):
+        @pl.program
+        class P:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.FP32]) -> pl.Scalar[pl.FP32]:
+                for i in pl.range(
+                    4,
+                    # wrap comment
+                ):
+                    x = x + 1.0
+                return x
+
+        stmts = _body_stmts(P)
+        for_stmt = next(s for s in stmts if isinstance(s, ir.ForStmt))
+        assert "wrap comment" in for_stmt.leading_comments
+        # The wrap comment must NOT attach to the inner body stmt.
+        body = for_stmt.body
+        first = body.stmts[0] if isinstance(body, ir.SeqStmts) else body
+        assert "wrap comment" not in first.leading_comments
+
+
 class TestRoundTripIdempotency:
     def test_leading_and_trailing_roundtrip(self):
         @pl.program
