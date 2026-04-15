@@ -752,8 +752,7 @@ class ScopeStmt : public Stmt {
   ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
             std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
             std::string name_hint = "", std::optional<int> core_num = std::nullopt,
-            std::optional<bool> sync_start = std::nullopt,
-            std::vector<std::string> leading_comments = {})
+            std::optional<bool> sync_start = std::nullopt, std::vector<std::string> leading_comments = {})
       : Stmt(std::move(span), std::move(leading_comments)),
         scope_kind_(scope_kind),
         body_(std::move(body)),

@@ -578,7 +578,7 @@ class TestSPMDOperations:
         self._run_case(test_runner, SPMDSyncStartSingleTestCase())
 
     def test_spmd_sync_start_mixed(self, test_runner):
-        """4 submissions: T0 baseline + T1/T2/T3 with sync_start=True, mirroring the simpler sync_start test."""
+        """4 submissions: T0 baseline + T1/T2/T3 with sync_start=True, mirroring the sync_start test."""
         self._run_case(test_runner, SPMDSyncStartMixedTestCase())
 
 
