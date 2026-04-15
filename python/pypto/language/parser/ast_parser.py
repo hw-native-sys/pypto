@@ -981,11 +981,11 @@ class ASTParser:
         """Validate chunk arguments for range/parallel/unroll loops."""
         if not self._is_inside_scope(ir.ScopeKind.AutoInCore):
             raise ParserSyntaxError(
-                "chunk=... loops are only valid inside with pl.auto_incore(): or "
-                "with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):",
+                "chunk=... loops are only valid inside "
+                "with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):",
                 span=self.span_tracker.get_span(iter_call),
                 hint="Wrap the loop in 'with pl.at(level=pl.Level.CORE_GROUP, "
-                "optimization=pl.chunked_loop_optimizer):' or remove the chunk= argument.",
+                "optimizations=[pl.auto_chunk]):' or remove the chunk= argument.",
             )
         if not _is_const_int(chunk_expr):
             raise ParserSyntaxError(
@@ -1964,15 +1964,16 @@ class ASTParser:
                     )
             if func_attr == "incore":
                 warnings.warn(
-                    "pl.incore() is deprecated; use 'with pl.at(level=pl.Level.CORE_GROUP):' instead",
+                    "pl.incore() is deprecated; use 'with pl.at(level=pl.Level.CORE_GROUP):' "
+                    "(optionally with optimizations=[pl.split(pl.SplitMode.X)]) instead",
                     DeprecationWarning,
                     stacklevel=2,
                 )
             else:
                 warnings.warn(
                     "pl.auto_incore() is deprecated; use "
-                    "'with pl.at(level=pl.Level.CORE_GROUP, "
-                    "optimization=pl.chunked_loop_optimizer):' instead",
+                    "'with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):' "
+                    "(combine with pl.split(pl.SplitMode.X) if a split mode is needed) instead",
                     DeprecationWarning,
                     stacklevel=2,
                 )
