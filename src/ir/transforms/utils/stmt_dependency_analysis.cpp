@@ -157,8 +157,14 @@ class InOutUseDisciplineChecker : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    // LHS (`op->var_`) is a definition — skip it. Only the RHS is a read.
+    // RHS is read first (the call's args are evaluated before the assignment
+    // takes effect). Then LHS is a re-definition — clear the var from dead_
+    // so subsequent reads see the (re-)bound value, not the pre-call one.
     VisitExpr(op->value_);
+    if (op->var_) {
+      dead_.erase(op->var_.get());
+      dead_origin_.erase(op->var_.get());
+    }
   }
 
   void VisitStmt_(const IfStmtPtr& op) override {
@@ -196,12 +202,25 @@ class InOutUseDisciplineChecker : public IRVisitor {
     // `loop_var_`, `iter_args_` themselves, and `return_vars_` are definitions
     // at the loop header — skip them.
 
-    // Back-edge modelling: any kill anywhere in the body is reachable from
-    // iteration N's tail to iteration N+1's start, so the var must be dead
-    // at body entry for the subsequent iteration's reads to be flagged.
-    // Pre-populate `dead_` with the body's kills, then walk the body.
-    CollectKillsInto(op->body_, dead_, dead_origin_);
+    // Back-edge modelling: any kill in the body is reachable from iteration N
+    // to iteration N+1's start, so the killed var must be dead at body entry
+    // for subsequent iterations' reads to be flagged. Exclude vars that are
+    // re-bound each iteration: iter_args (back-edge re-defines them) and any
+    // var with an AssignStmt LHS inside the body (the assignment re-defines
+    // before any read could see the dead pre-call value).
+    auto exclude = CollectRebindings(op);
+    CollectKillsInto(op->body_, dead_, dead_origin_, exclude);
     VisitStmt(op->body_);
+    // After the loop completes, iter_args go out of scope. Their dead state
+    // is local to this loop's iterations and must not leak to enclosing
+    // scopes (where they would be falsely flagged on the enclosing loop's
+    // back-edge pre-population walk).
+    for (const auto& ia : op->iter_args_) {
+      if (ia) {
+        dead_.erase(ia.get());
+        dead_origin_.erase(ia.get());
+      }
+    }
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -210,21 +229,67 @@ class InOutUseDisciplineChecker : public IRVisitor {
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }
     // `iter_args_` and `return_vars_` are definitions — skip them.
-    CollectKillsInto(op->body_, dead_, dead_origin_);
+    auto exclude = CollectRebindings(op);
+    CollectKillsInto(op->body_, dead_, dead_origin_, exclude);
     VisitStmt(op->body_);
+    for (const auto& ia : op->iter_args_) {
+      if (ia) {
+        dead_.erase(ia.get());
+        dead_origin_.erase(ia.get());
+      }
+    }
   }
 
  private:
+  /// Collect vars that are re-bound each iteration of the given loop:
+  ///   - iter_args (re-defined via the back-edge)
+  ///   - any var that appears as an AssignStmt LHS in the body
+  /// These vars should NOT be added to the back-edge dead set, because the
+  /// re-binding gives reads in the next iteration a fresh value.
+  template <typename LoopPtr>
+  std::unordered_set<const Var*> CollectRebindings(const LoopPtr& op) const {
+    std::unordered_set<const Var*> result;
+    for (const auto& ia : op->iter_args_) {
+      if (ia) result.insert(ia.get());
+    }
+    if (op->body_) CollectAssignedVars(op->body_, result);
+    return result;
+  }
+
+  /// Walk a subtree and add every AssignStmt's LHS var to `out`.
+  void CollectAssignedVars(const StmtPtr& stmt, std::unordered_set<const Var*>& out) const {
+    class Walker : public IRVisitor {
+     public:
+      explicit Walker(std::unordered_set<const Var*>& out) : out_(out) {}
+      void VisitStmt_(const AssignStmtPtr& op) override {
+        if (op->var_) out_.insert(op->var_.get());
+        IRVisitor::VisitStmt_(op);
+      }
+
+     private:
+      std::unordered_set<const Var*>& out_;
+    };
+    Walker w(out);
+    w.VisitStmt(stmt);
+  }
+
   /// Pre-scan a subtree and merge every var it would mark InOut/Out-dead into
-  /// `dead` (with origin span recorded in `origin`). Uses a fresh sub-checker
+  /// `dead` (with origin span recorded in `origin`). Vars listed in `exclude`
+  /// are skipped — used to drop iter_args vars from the back-edge dead set
+  /// (the back-edge re-defines them each iteration). Uses a fresh sub-checker
   /// so the main walk's state and diagnostics are untouched.
   void CollectKillsInto(const StmtPtr& stmt, std::unordered_set<const Var*>& dead,
-                        std::unordered_map<const Var*, Span>& origin) const {
+                        std::unordered_map<const Var*, Span>& origin,
+                        const std::unordered_set<const Var*>& exclude) const {
     if (!stmt) return;
     InOutUseDisciplineChecker sub(program_);
     sub.VisitStmt(stmt);
-    dead.insert(sub.dead_.begin(), sub.dead_.end());
+    for (const Var* v : sub.dead_) {
+      if (exclude.count(v) != 0) continue;
+      dead.insert(v);
+    }
     for (const auto& [v, span] : sub.dead_origin_) {
+      if (exclude.count(v) != 0) continue;
       origin.emplace(v, span);
     }
     // Sub-diagnostics are intentionally discarded: this is a precondition
@@ -240,11 +305,16 @@ class InOutUseDisciplineChecker : public IRVisitor {
 
 }  // namespace
 
-void CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program) {
-  if (!region) return;
+std::vector<Diagnostic> CollectInOutUseDisciplineDiagnostics(const StmtPtr& region,
+                                                             const ProgramPtr& program) {
+  if (!region) return {};
   InOutUseDisciplineChecker checker(program);
   checker.VisitStmt(region);
-  auto diagnostics = checker.TakeDiagnostics();
+  return checker.TakeDiagnostics();
+}
+
+void CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program) {
+  auto diagnostics = CollectInOutUseDisciplineDiagnostics(region, program);
   if (diagnostics.empty()) return;
 
   std::string report = PropertyVerifierRegistry::GenerateReport(diagnostics);

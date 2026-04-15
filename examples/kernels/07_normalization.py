@@ -75,8 +75,8 @@ class RMSNormProgram:
         gamma: pl.Tensor[[1, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
     ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output = self.kernel_rms_norm(x, gamma, output)
-        return output
+        output_ret = self.kernel_rms_norm(x, gamma, output)
+        return output_ret
 
 
 @pl.program
@@ -138,8 +138,8 @@ class LayerNormProgram:
         beta: pl.Tensor[[1, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
     ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output = self.kernel_layer_norm(x, gamma, beta, output)
-        return output
+        output_ret = self.kernel_layer_norm(x, gamma, beta, output)
+        return output_ret
 
 
 if __name__ == "__main__":

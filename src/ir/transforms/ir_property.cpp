@@ -63,6 +63,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "OutParamNotShadowed";
     case IRProperty::NoNestedInCore:
       return "NoNestedInCore";
+    case IRProperty::InOutUseValid:
+      return "InOutUseValid";
     default:
       return "Unknown";
   }
@@ -103,7 +105,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::MixedKernelExpanded,
                                    IRProperty::AllocatedMemoryAddr,
                                    IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks};
+                                   IRProperty::NoRedundantBlocks,
+                                   IRProperty::InOutUseValid};
   return props;
 }
 
@@ -129,7 +132,8 @@ VerificationLevel GetDefaultVerificationLevel() {
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore};
+                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
+                                   IRProperty::InOutUseValid};
   return props;
 }
 

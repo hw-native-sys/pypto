@@ -46,8 +46,8 @@ class HelloWorldProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c = self.tile_add(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_add(a, b, out_c)
+        return out_c_ret
 
 
 if __name__ == "__main__":

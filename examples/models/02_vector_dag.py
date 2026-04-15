@@ -103,15 +103,15 @@ class VectorDAGProgram:
         t4: f = kernel_add(g, c)
         """
         c = pl.create_tensor([128, 128], dtype=pl.FP32)
-        c = self.kernel_add(a, b, c)
+        c_done = self.kernel_add(a, b, c)
         d = pl.create_tensor([128, 128], dtype=pl.FP32)
-        d = self.kernel_add_scalar(c, 1.0, d)
+        d_done = self.kernel_add_scalar(c_done, 1.0, d)
         e = pl.create_tensor([128, 128], dtype=pl.FP32)
-        e = self.kernel_add_scalar(c, 2.0, e)
+        e_done = self.kernel_add_scalar(c_done, 2.0, e)
         g = pl.create_tensor([128, 128], dtype=pl.FP32)
-        g = self.kernel_mul(d, e, g)
-        f = self.kernel_add(g, c, f)
-        return f
+        g_done = self.kernel_mul(d_done, e_done, g)
+        f_ret = self.kernel_add(g_done, c_done, f)
+        return f_ret
 
 
 @pl.program
@@ -171,13 +171,13 @@ class ExampleOrchProgram:
     ) -> pl.Tensor[[16, 16], pl.FP32]:
         """Orchestration: f = (a + b + 1)(a + b + 2)"""
         c = pl.create_tensor([16, 16], dtype=pl.FP32)
-        c = self.kernel_add(a, b, c)
+        c_done = self.kernel_add(a, b, c)
         d = pl.create_tensor([16, 16], dtype=pl.FP32)
-        d = self.kernel_add_scalar(c, 1.0, d)
+        d_done = self.kernel_add_scalar(c_done, 1.0, d)
         e = pl.create_tensor([16, 16], dtype=pl.FP32)
-        e = self.kernel_add_scalar(c, 2.0, e)
-        f_result = self.kernel_mul(d, e, f_result)
-        return f_result
+        e_done = self.kernel_add_scalar(c_done, 2.0, e)
+        f_result_ret = self.kernel_mul(d_done, e_done, f_result)
+        return f_result_ret
 
 
 def golden(tensors: dict, params: dict | None = None) -> None:

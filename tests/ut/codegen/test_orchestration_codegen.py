@@ -1225,8 +1225,8 @@ class TestOrchestration:
             ) -> pl.Tensor[[4, 8], pl.FP32]:
                 for r in pl.range(4):
                     row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
-                    row = self.fill_row(x, r, row)
-                    out = pl.assemble(out, row, [r, 0])
+                    row_done = self.fill_row(x, r, row)
+                    out = pl.assemble(out, row_done, [r, 0])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)

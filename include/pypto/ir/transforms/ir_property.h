@@ -50,6 +50,7 @@ enum class IRProperty : uint64_t {
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
   NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
+  InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
   kCount                    ///< Sentinel (must be last)
 };
 

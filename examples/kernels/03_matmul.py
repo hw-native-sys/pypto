@@ -51,8 +51,8 @@ class MatmulProgram:
         b: pl.Tensor[[64, 64], pl.FP32],
         out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c = self.matmul(a, b, out_c)
-        return out_c
+        out_c_ret = self.matmul(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -94,8 +94,8 @@ class MatmulaccProgram:
         b: pl.Tensor[[64, 64], pl.FP32],
         out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c = self.matmul_acc(a, b, out_c)
-        return out_c
+        out_c_ret = self.matmul_acc(a, b, out_c)
+        return out_c_ret
 
 
 if __name__ == "__main__":

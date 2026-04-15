@@ -44,8 +44,8 @@ class TileConcat32x32Program:
         self, a: pl.Tensor[[32, 16], pl.FP32], b: pl.Tensor[[32, 16], pl.FP32]
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         out_c = pl.create_tensor([32, 32], dtype=pl.FP32)
-        out_c = self.tile_concat(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_concat(a, b, out_c)
+        return out_c_ret
 
 
 if __name__ == "__main__":

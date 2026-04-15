@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 
@@ -76,6 +77,23 @@ struct StmtDependencyGraph {
  *         carries the full set of diagnostics with precise source locations.
  */
 void CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program);
+
+/**
+ * @brief Collect (without throwing) all InOut-use discipline violations.
+ *
+ * Same analysis as `CheckInOutUseDiscipline` but returns the diagnostics
+ * instead of throwing. Used by the structural property verifier
+ * (`InOutUseValid`) so the registry can aggregate diagnostics across
+ * multiple verifiers before raising.
+ *
+ * @param region The region (typically a SeqStmts) to scan.
+ * @param program The program — used to resolve callees to their parameter
+ *                directions. May be null; in that case all calls are
+ *                treated as built-ins (no contributions to the dead set).
+ * @return Vector of diagnostics; empty when the region conforms.
+ */
+std::vector<Diagnostic> CollectInOutUseDisciplineDiagnostics(const StmtPtr& region,
+                                                             const ProgramPtr& program);
 
 /**
  * @brief Build the statement dependency graph for a region.

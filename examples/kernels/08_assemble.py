@@ -87,8 +87,8 @@ class TileAssembleAccMatProgram:
         b: pl.Tensor[[16, 16], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, a, b, y)
-        return y
+        y_ret = self.tile_assemble(x, a, b, y)
+        return y_ret
 
 
 @pl.program
@@ -115,8 +115,8 @@ class TileAssembleVecProgram:
         src: pl.Tensor[[32, 16], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, src, y)
-        return y
+        y_ret = self.tile_assemble(x, src, y)
+        return y_ret
 
 
 @pl.program
@@ -143,8 +143,8 @@ class TileAssembleRowByRowProgram:
         src: pl.Tensor[[32, 16], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, src, y)
-        return y
+        y_ret = self.tile_assemble(x, src, y)
+        return y_ret
 
 
 @pl.program
@@ -173,8 +173,8 @@ class TileAssembleDoubleLoopProgram:
         src: pl.Tensor[[32, 16], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, src, y)
-        return y
+        y_ret = self.tile_assemble(x, src, y)
+        return y_ret
 
 
 @pl.program
@@ -200,8 +200,8 @@ class TileAssembleLoopColBroadcastProgram:
         src: pl.Tensor[[32, 8], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, src, y)
-        return y
+        y_ret = self.tile_assemble(x, src, y)
+        return y_ret
 
 
 @pl.program
@@ -228,8 +228,8 @@ class TileAssembleDoubleLoopBroadcastProgram:
         src: pl.Tensor[[16, 16], pl.FP32],
         y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y = self.tile_assemble(x, src, y)
-        return y
+        y_ret = self.tile_assemble(x, src, y)
+        return y_ret
 
 
 if __name__ == "__main__":

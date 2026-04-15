@@ -47,8 +47,8 @@ class TileAddProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c = self.tile_add(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_add(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -73,8 +73,8 @@ class TileMulProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c = self.tile_mul(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_mul(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -101,8 +101,8 @@ class TileAdd64Program:
         b: pl.Tensor[[64, 64], pl.FP32],
         out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c = self.tile_add(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_add(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -129,8 +129,8 @@ class TileMul64Program:
         b: pl.Tensor[[64, 64], pl.FP32],
         out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c = self.tile_mul(a, b, out_c)
-        return out_c
+        out_c_ret = self.tile_mul(a, b, out_c)
+        return out_c_ret
 
 
 # Aliases for backward compatibility with tests that use size-suffixed names

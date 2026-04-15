@@ -79,13 +79,13 @@ class FFNGeluProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
         # activated = GELU(gate)
         activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated = self.gelu_kernel(gate, activated)
+        activated_done = self.gelu_kernel(gate_done, activated)
         # output = activated @ down_proj_weight
-        output = matmul_kernel(activated, down_proj_weight, output)
-        return output
+        output_done = matmul_kernel(activated_done, down_proj_weight, output)
+        return output_done
 
 
 # ── FFN with SwiGLU activation ───────────────────────────────────────────────
@@ -123,16 +123,16 @@ class FFNSwigluProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
         # up = hidden_states @ up_proj_weight
         up = pl.create_tensor([64, 64], dtype=pl.FP32)
-        up = matmul_kernel(hidden_states, up_proj_weight, up)
+        up_done = matmul_kernel(hidden_states, up_proj_weight, up)
         # activated = SwiGLU(gate, up)
         activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated = self.swiglu_kernel(gate, up, activated)
+        activated_done = self.swiglu_kernel(gate_done, up_done, activated)
         # output = activated @ down_proj_weight
-        output = matmul_kernel(activated, down_proj_weight, output)
-        return output
+        output_done = matmul_kernel(activated_done, down_proj_weight, output)
+        return output_done
 
 
 # ── FFN with ReLU activation ─────────────────────────────────────────────────
@@ -162,13 +162,13 @@ class FFNReluProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         # gate = hidden_states @ gate_proj_weight
         gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
         # activated = ReLU(gate)
         activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated = self.relu_kernel(gate, activated)
+        activated_done = self.relu_kernel(gate_done, activated)
         # output = activated @ down_proj_weight
-        output = matmul_kernel(activated, down_proj_weight, output)
-        return output
+        output_done = matmul_kernel(activated_done, down_proj_weight, output)
+        return output_done
 
 
 if __name__ == "__main__":

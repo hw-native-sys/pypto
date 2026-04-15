@@ -52,8 +52,8 @@ class SiluProgram:
         x: pl.Tensor[[32, 128], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output = self.kernel_silu(x, output)
-        return output
+        output_ret = self.kernel_silu(x, output)
+        return output_ret
 
 
 @pl.program
@@ -81,8 +81,8 @@ class GeluProgram:
         x: pl.Tensor[[32, 128], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output = self.kernel_gelu(x, output)
-        return output
+        output_ret = self.kernel_gelu(x, output)
+        return output_ret
 
 
 @pl.program
@@ -113,8 +113,8 @@ class SwigluProgram:
         up: pl.Tensor[[32, 128], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output = self.kernel_swiglu(gate, up, output)
-        return output
+        output_ret = self.kernel_swiglu(gate, up, output)
+        return output_ret
 
 
 @pl.program
@@ -147,8 +147,8 @@ class GegluProgram:
         up: pl.Tensor[[32, 128], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
     ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output = self.kernel_geglu(gate, up, output)
-        return output
+        output_ret = self.kernel_geglu(gate, up, output)
+        return output_ret
 
 
 if __name__ == "__main__":

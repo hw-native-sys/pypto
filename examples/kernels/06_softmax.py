@@ -61,8 +61,8 @@ class TileSoftmaxProgram:
         a: pl.Tensor[[64, 64], pl.FP32],
         output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
     ) -> pl.Tensor[[64, 64], pl.FP32]:
-        output = self.tile_softmax(a, output)
-        return output
+        output_ret = self.tile_softmax(a, output)
+        return output_ret
 
 
 if __name__ == "__main__":

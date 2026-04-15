@@ -221,6 +221,18 @@ PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
  */
 PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
 
+/**
+ * @brief Factory function for creating InOutUseValid property verifier
+ *
+ * Verifies the InOut-use discipline (RFC #1026): no statement reachable in CFG
+ * order from a user-function call that passes variable `v` as InOut or Out may
+ * read `v`. Post-mutation values must flow through the call's return slots.
+ * Built-in ops (tile.*, tensor.*, system.*) are out of scope — their memory
+ * effects are handled separately.
+ * @return Shared pointer to InOutUseValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateInOutUseValidPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

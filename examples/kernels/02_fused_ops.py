@@ -55,8 +55,8 @@ class FusedAddScaleProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c = self.fused_add_scale(a, b, out_c)
-        return out_c
+        out_c_ret = self.fused_add_scale(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -83,8 +83,8 @@ class FusedAddReluProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c = self.fused_add_relu(a, b, out_c)
-        return out_c
+        out_c_ret = self.fused_add_relu(a, b, out_c)
+        return out_c_ret
 
 
 @pl.program
@@ -129,9 +129,9 @@ class FusedMatmulBiasProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: c = matmul(a, b) + bias"""
         mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
-        mm_out = self.matmul_kernel(a, b, mm_out)
-        c = self.add_bias_kernel(mm_out, bias, c)
-        return c
+        mm_done = self.matmul_kernel(a, b, mm_out)
+        c_ret = self.add_bias_kernel(mm_done, bias, c)
+        return c_ret
 
 
 @pl.program
@@ -177,9 +177,9 @@ class FusedLinearReluProgram:
     ) -> pl.Tensor[[64, 64], pl.FP32]:
         """Orchestrate: y = relu(matmul(x, w) + bias)"""
         mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
-        mm_out = self.matmul_kernel(x, w, mm_out)
-        y = self.add_bias_relu_kernel(mm_out, bias, y)
-        return y
+        mm_done = self.matmul_kernel(x, w, mm_out)
+        y_ret = self.add_bias_relu_kernel(mm_done, bias, y)
+        return y_ret
 
 
 if __name__ == "__main__":
