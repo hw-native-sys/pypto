@@ -329,7 +329,8 @@ void BindPass(nb::module_& m) {
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
-             "Create a pass that outlines Cluster scopes into separate Group functions");
+             "Create a pass that outlines Cluster scopes into Group functions "
+             "and standalone Spmd scopes into Spmd functions");
   passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
              "Create a pass that outlines Hierarchy scopes into separate level/role functions");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,

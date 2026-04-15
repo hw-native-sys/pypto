@@ -10,7 +10,7 @@
 - **AIV 函数**（`FunctionType::AIV`）— 仅包含 Vector + 共享操作
 - **Group 函数**（`FunctionType::Group`）— 依次调用 AIC 和 AIV，替换原始函数
 
-当已有 Group 函数调用该 InCore 函数时（如来自 `OutlineClusterScopes`），该 Pass 会**就地改写该 Group 函数**以直接调用 AIC + AIV，避免产生冗余的 Group 包装。仅当 InCore 没有已有的 Group 调用者时，才会创建新的 Group 包装函数。
+当已有 Group 函数调用该 InCore 函数时（如来自 `OutlineClusterScopes`），该 Pass 会**就地改写该 Group 函数**以直接调用 AIC + AIV，避免产生冗余的 Group 包装。若 standalone `Spmd` 包装函数调用该 InCore，则该 Pass 会保留 `Spmd` 包装，并在其下方创建新的 `Group` 被调函数，使 launch 语义继续保留在 `FunctionType::Spmd` 上。
 
 对于**非混合 InCore 函数**（纯 Cube 或纯 Vector），该 Pass 将 `FunctionType::InCore` 转换为对应的类型，无需拆分：
 
@@ -104,7 +104,7 @@ program_expanded = expand_pass(program)
 
 ```text
 阶段 1 — 预扫描：
-  识别具有已有 Group 调用者的 InCore 函数。
+  识别哪些 InCore 函数已有 Group 调用者，以及哪些调用者仍然需要保留原始函数名。
 
 阶段 2 — 展开每个 InCore 函数 F：
   1. 递归分类所有语句的亲和性（包括循环/条件内部）
@@ -134,7 +134,10 @@ program_expanded = expand_pass(program)
  11. 如果拆分后的函数体包含跨核 tile 操作，且尚未带有 setup，
       则推导并 prepend reserve/import/initialize_pipe 前缀
  12. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
- 13. 如果没有已有 Group 调用者：同时创建 Group 函数（调用 AIC 和 AIV）
+ 13. 如果满足以下任一条件，同时创建 Group 函数（调用 AIC 和 AIV）：
+     - 仍有非 Group 调用者需要保留原始函数名（`needs_preserved_name`，例如 standalone Spmd 包装）
+     - 尚不存在 Group 调用者（`!has_group_caller`）
+ 14. 如果已存在 Group 调用者且无需保留名称：跳过额外的 Group 包装
 
 阶段 3 — 改写 Group 调用者：
   对于每个调用了已拆分 InCore 的 Group 函数，将 InCore 调用替换为
@@ -225,7 +228,7 @@ class After:
 
 ## 示例 2：InCore 有已有 Group 调用者
 
-当 `OutlineClusterScopes` 已经创建了调用 InCore 的 Group 函数时，该 Pass 改写已有 Group，而不创建新的包装函数。
+当 `OutlineClusterScopes` 已经创建了调用 InCore 的 Group 函数时，该 Pass 改写已有 Group，而不创建新的包装函数。若 `OutlineClusterScopes` 创建的是 standalone `Spmd` 包装，则该 Pass 会保留该 `Spmd` 函数，并把它改为调用新的同名 `Group` 函数。
 
 **之前**：
 
@@ -316,6 +319,7 @@ class After:
 | `CreateMove` 传播布局 kwargs | 当结果类型携带 TileView 时，`blayout`/`slayout` 作为 kwargs 转发，使生成的 `tile.move` 调用自描述 |
 | Group 保留原始函数名 | 无已有 Group 调用者时：Orchestration 调用点无需修改——不需要重写调用点 |
 | 改写已有 Group 调用者 | 当 Group 已调用 InCore 时（如来自 `OutlineClusterScopes`）：就地改写以调用 AIC + AIV，避免冗余的 Group→Group 嵌套 |
+| 保留 standalone Spmd 包装 | 当 standalone `Spmd` 调用 InCore 时：保留 `FunctionType::Spmd`，在其下创建 `Group` 被调函数，并继续由 Spmd 持有 `core_num` / `sync_start` |
 | 参数复制到所有三个函数 | 简化连接；DCE 在下游 Pass 中移除未使用的参数 |
 | 递归处理复合语句 | 正确拆分 `ForStmt`、`IfStmt`、`WhileStmt` 内部的混合操作 |
 | 两阶段拆分后循环状态修复 | 先保证 loop-carried state 合法，再在 DCE 移除死共享别名后重新裁剪 iter_arg，最后再跑一次 DCE 清理暴露出的 init-value 链 |

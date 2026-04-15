@@ -931,6 +931,7 @@ void BindIR(nb::module_& m) {
       .value("AutoInCore", ScopeKind::AutoInCore, "AutoInCore scope for automatic chunking")
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
+      .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
       .export_values();
 
   // SplitMode enum
@@ -943,11 +944,12 @@ void BindIR(nb::module_& m) {
   // ScopeStmt - const shared_ptr
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
-  scope_stmt_class.def(nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>,
-                                std::optional<Role>, std::optional<SplitMode>, std::string>(),
-                       nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
-                       nb::arg("role") = nb::none(), nb::arg("split") = nb::none(), nb::arg("name_hint") = "",
-                       "Create a scope statement");
+  scope_stmt_class.def(
+      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>,
+               std::optional<SplitMode>, std::string, std::optional<int>, std::optional<bool>>(),
+      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
+      nb::arg("role") = nb::none(), nb::arg("split") = nb::none(), nb::arg("name_hint") = "",
+      nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(), "Create a scope statement");
   BindFields<ScopeStmt>(scope_stmt_class);
 
   // SeqStmts - const shared_ptr
@@ -994,6 +996,7 @@ void BindIR(nb::module_& m) {
       .value("AIC", FunctionType::AIC, "Cube core kernel (specialized InCore)")
       .value("AIV", FunctionType::AIV, "Vector core kernel (specialized InCore)")
       .value("Group", FunctionType::Group, "Co-scheduled group of AIC + AIV kernels")
+      .value("Spmd", FunctionType::Spmd, "SPMD data-parallel dispatch")
       .export_values();
 
   // Level enum — hierarchy level in the Linqu machine model

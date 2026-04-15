@@ -409,9 +409,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string value;
   };
 
-  std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
+  std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func,
+                                          const std::vector<ParamDirection>* directions_override = nullptr) {
     std::vector<ParamEntry> params;
     const std::string& callee_name = callee_func->name_;
+    const auto& directions =
+        directions_override != nullptr ? *directions_override : callee_func->param_directions_;
 
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
       const auto& arg = call->args_[arg_idx];
@@ -425,11 +428,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         std::string ext_name = GetExternalTensorName(var_name);
 
-        INTERNAL_CHECK_SPAN(arg_idx < callee_func->param_directions_.size(), call->span_)
-            << "arg count (" << call->args_.size() << ") exceeds param count ("
-            << callee_func->param_directions_.size() << ") for callee '" << callee_name << "'";
+        INTERNAL_CHECK_SPAN(arg_idx < directions.size(), call->span_)
+            << "arg count (" << call->args_.size() << ") exceeds param count (" << directions.size()
+            << ") for callee '" << callee_name << "'";
 
-        ParamDirection dir = callee_func->param_directions_[arg_idx];
+        ParamDirection dir = directions[arg_idx];
         switch (dir) {
           case ParamDirection::Out:
             params.push_back({ParamKind::Output, ext_name});
@@ -501,14 +504,57 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  /// Walk the Group function body to find the AIC and AIV callee names.
-  void FindGroupCallees(const FunctionPtr& group_func, std::string& aic_name, std::string& aiv_name) {
+  struct GroupCalleeInfo {
+    std::string aic_name;
+    std::string aiv_name;
+    CallPtr inner_call;        // The call to the InCore kernel inside the Group body
+    FunctionPtr inner_callee;  // The InCore function being called
+  };
+
+  struct WrapperCallInfo {
+    CallPtr inner_call;
+    FunctionPtr inner_callee;
+  };
+
+  WrapperCallInfo FindWrapperInnerCall(const FunctionPtr& wrapper_func) {
+    class InnerCallFinder : public IRVisitor {
+     public:
+      explicit InnerCallFinder(const ProgramPtr& program) : program_(program) {}
+      const ProgramPtr& program_;
+      CallPtr inner_call;
+      FunctionPtr inner_callee;
+
+     protected:
+      void VisitExpr_(const CallPtr& call) override {
+        if (inner_call) return;
+        if (auto gv = As<GlobalVar>(call->op_)) {
+          auto callee = program_->GetFunction(gv->name_);
+          if (callee) {
+            inner_call = call;
+            inner_callee = callee;
+            return;
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+
+    InnerCallFinder finder(program_);
+    finder.VisitStmt(wrapper_func->body_);
+    return {std::move(finder.inner_call), std::move(finder.inner_callee)};
+  }
+
+  /// Walk the Group function body to find the AIC and AIV callee names
+  /// and the inner InCore call (needed for param reordering).
+  GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func) {
     class CalleeFinder : public IRVisitor {
      public:
       explicit CalleeFinder(const ProgramPtr& program) : program_(program) {}
       const ProgramPtr& program_;
       std::string aic_name;
       std::string aiv_name;
+      CallPtr inner_call;
+      FunctionPtr inner_callee;
 
      protected:
       void VisitExpr_(const CallPtr& call) override {
@@ -517,8 +563,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
           if (callee) {
             if (callee->func_type_ == FunctionType::AIC && aic_name.empty()) {
               aic_name = callee->name_;
+              if (!inner_call) {
+                inner_call = call;
+                inner_callee = callee;
+              }
             } else if (callee->func_type_ == FunctionType::AIV && aiv_name.empty()) {
               aiv_name = callee->name_;
+              if (!inner_call) {
+                inner_call = call;
+                inner_callee = callee;
+              }
+            } else if (callee->func_type_ == FunctionType::InCore && !inner_call) {
+              inner_call = call;
+              inner_callee = callee;
             }
           }
         }
@@ -528,8 +585,115 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     CalleeFinder finder(program_);
     finder.VisitStmt(group_func->body_);
-    aic_name = std::move(finder.aic_name);
-    aiv_name = std::move(finder.aiv_name);
+    return {std::move(finder.aic_name), std::move(finder.aiv_name), std::move(finder.inner_call),
+            std::move(finder.inner_callee)};
+  }
+
+  /// Build task params for a wrapper function call, reordered to match the
+  /// inner callee's parameter order.
+  ///
+  /// Wrapper functions may omit constants or otherwise expose a different
+  /// parameter order than the callee binary expects. Submit args using the
+  /// inner callee's order, not the wrapper's order.
+  std::vector<ParamEntry> BuildWrapperReorderedParams(const CallPtr& outer_call,
+                                                      const FunctionPtr& wrapper_func,
+                                                      const CallPtr& inner_call,
+                                                      const FunctionPtr& inner_callee) {
+    std::unordered_map<const Var*, size_t> wrapper_param_to_outer_idx;
+    for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
+      wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
+    }
+
+    std::vector<ParamEntry> params;
+    for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
+      const auto& inner_arg = inner_call->args_[inner_idx];
+      auto inner_arg_var = AsVarLike(inner_arg);
+
+      // Constant args are inlined in the wrapper body — emit them directly.
+      if (!inner_arg_var) {
+        if (auto const_int = As<ConstInt>(inner_arg)) {
+          std::string cpp_type = const_int->dtype().ToCTypeString();
+          std::string value = FormatConstIntValue(const_int, cpp_type);
+          params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
+        } else if (auto const_float = As<ConstFloat>(inner_arg)) {
+          std::string cpp_type = const_float->dtype().ToCTypeString();
+          std::string value = FormatConstFloatValue(const_float, cpp_type);
+          params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
+        } else if (auto const_bool = As<ConstBool>(inner_arg)) {
+          params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+        } else {
+          INTERNAL_CHECK_SPAN(false, inner_call->span_) << "Internal error: inner call arg " << inner_idx
+                                                        << " is neither a variable nor a recognized constant";
+        }
+        continue;
+      }
+
+      auto it = wrapper_param_to_outer_idx.find(inner_arg_var.get());
+      INTERNAL_CHECK_SPAN(it != wrapper_param_to_outer_idx.end(), inner_call->span_)
+          << "Internal error: inner call arg " << inner_idx << " does not map to any wrapper parameter";
+
+      size_t outer_idx = it->second;
+      const auto& outer_arg = outer_call->args_[outer_idx];
+      std::string var_name = TryGetVarName(outer_arg);
+
+      if (!var_name.empty()) {
+        if (auto scalar_type = As<ScalarType>(outer_arg->GetType())) {
+          std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type)});
+          continue;
+        }
+
+        std::string ext_name = GetExternalTensorName(var_name);
+
+        INTERNAL_CHECK_SPAN(inner_idx < inner_callee->param_directions_.size(), inner_call->span_)
+            << "arg index " << inner_idx << " exceeds param count (" << inner_callee->param_directions_.size()
+            << ") for callee '" << inner_callee->name_ << "'";
+
+        ParamDirection dir = inner_callee->param_directions_[inner_idx];
+        switch (dir) {
+          case ParamDirection::Out:
+            params.push_back({ParamKind::Output, ext_name});
+            break;
+          case ParamDirection::InOut:
+            params.push_back({ParamKind::InOut, ext_name});
+            break;
+          case ParamDirection::In:
+            params.push_back({ParamKind::Input, ext_name});
+            break;
+          default:
+            INTERNAL_CHECK_SPAN(false, inner_call->span_)
+                << "Internal error: unexpected ParamDirection value " << static_cast<int>(dir);
+        }
+      } else if (auto const_int = As<ConstInt>(outer_arg)) {
+        std::string cpp_type = const_int->dtype().ToCTypeString();
+        std::string value = FormatConstIntValue(const_int, cpp_type);
+        params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
+      } else if (auto const_float = As<ConstFloat>(outer_arg)) {
+        std::string cpp_type = const_float->dtype().ToCTypeString();
+        std::string value = FormatConstFloatValue(const_float, cpp_type);
+        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
+      } else if (auto const_bool = As<ConstBool>(outer_arg)) {
+        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+      }
+    }
+
+    // Tensors must precede scalars
+    std::stable_partition(params.begin(), params.end(),
+                          [](const ParamEntry& p) { return p.kind != ParamKind::Scalar; });
+
+    return params;
+  }
+
+  void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const FunctionPtr& launch_func) {
+    int core_num = launch_func->GetAttr<int>("core_num", 0);
+    bool sync_start = launch_func->GetAttr<bool>("sync_start", false);
+    if (core_num > 0) {
+      std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+      code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+    }
+    if (sync_start) {
+      code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";
+    }
   }
 
   void EmitTaskSubmitAndBind(const std::string& submit_expr) {
@@ -660,8 +824,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(callee_func != nullptr, call->span_)
         << "Internal error: function '" << callee_name << "' not found after validation.";
 
+    if (callee_func->func_type_ == FunctionType::Spmd) {
+      GenerateSpmdCallCode(call, callee_func);
+      return;
+    }
+
     if (callee_func->func_type_ == FunctionType::Group) {
-      GenerateGroupCallCode(call, callee_func);
+      GenerateGroupCallCode(call, callee_func, callee_func);
       return;
     }
 
@@ -686,31 +855,100 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitTaskSubmitAndBind(submit_expr);
   }
 
-  void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func) {
+  void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func) {
+    auto info = FindWrapperInnerCall(spmd_func);
+    INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
+        << "Internal error: no inner call found in Spmd function '" << spmd_func->name_ << "'";
+
+    if (info.inner_callee->func_type_ == FunctionType::Group) {
+      GenerateGroupCallCode(call, info.inner_callee, spmd_func);
+      return;
+    }
+
+    const std::string& callee_name = info.inner_callee->name_;
+    CoreType core_type = InferFunctionCoreType(info.inner_callee);
+    (*func_name_to_core_type_)[callee_name] = core_type;
+
+    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
+    auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+
+    std::string ind = Indent();
+    std::string task_var = "params_t" + std::to_string(task_counter_);
+    code_ << "\n";
+    code_ << ind << "// Spmd " << spmd_func->name_ << ": " << callee_name << "\n";
+    code_ << ind << "Arg " << task_var << ";\n";
+    for (const auto& p : params) {
+      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+    }
+    EmitLaunchSpec(ind, task_var, spmd_func);
+
+    std::string submit_expr =
+        CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
+    EmitTaskSubmitAndBind(submit_expr);
+  }
+
+  void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
+                             const FunctionPtr& launch_func) {
     std::string group_name = group_func->name_;
 
-    std::string aic_name;
-    std::string aiv_name;
-    FindGroupCallees(group_func, aic_name, aiv_name);
-    INTERNAL_CHECK_SPAN(!aic_name.empty(), call->span_)
+    auto info = FindGroupCallees(group_func);
+
+    // AIV-only Group: pure vector SPMD kernel (no AIC callee).
+    // Dispatch as a single AIV task with core_num/sync_start from the Group.
+    // Use pto2_rt_submit_aiv_task which dispatches across independent AIV cores,
+    // unlike pto2_rt_submit_task (MixedKernels) which dispatches full clusters.
+    if (info.aic_name.empty() && !info.aiv_name.empty()) {
+      FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
+      INTERNAL_CHECK(aiv_func != nullptr) << "Internal error: AIV function '" << info.aiv_name
+                                          << "' not found for Group '" << group_name << "'";
+
+      (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;
+      int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
+
+      // Reorder params from wrapper param order to inner kernel arg order.
+      INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
+          << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
+      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
+
+      std::string ind = Indent();
+      std::string task_var = "params_t" + std::to_string(task_counter_);
+      code_ << "\n";
+      code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
+      code_ << ind << "Arg " << task_var << ";\n";
+      for (const auto& p : params) {
+        code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+      }
+
+      EmitLaunchSpec(ind, task_var, launch_func);
+
+      std::string submit_expr =
+          CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
+      EmitTaskSubmitAndBind(submit_expr);
+      return;
+    }
+
+    INTERNAL_CHECK_SPAN(!info.aic_name.empty(), call->span_)
         << "Internal error: no AIC callee found in Group '" << group_name << "' body";
-    INTERNAL_CHECK_SPAN(!aiv_name.empty(), call->span_)
+    INTERNAL_CHECK_SPAN(!info.aiv_name.empty(), call->span_)
         << "Internal error: no AIV callee found in Group '" << group_name << "' body";
 
-    FunctionPtr aic_func = program_->GetFunction(aic_name);
-    FunctionPtr aiv_func = program_->GetFunction(aiv_name);
-    INTERNAL_CHECK_SPAN(aic_func != nullptr, call->span_)
-        << "Internal error: AIC function '" << aic_name << "' not found for Group '" << group_name << "'";
-    INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_)
-        << "Internal error: AIV function '" << aiv_name << "' not found for Group '" << group_name << "'";
+    FunctionPtr aic_func = program_->GetFunction(info.aic_name);
+    FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
+    INTERNAL_CHECK_SPAN(aic_func != nullptr, call->span_) << "Internal error: AIC function '" << info.aic_name
+                                                          << "' not found for Group '" << group_name << "'";
+    INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_) << "Internal error: AIV function '" << info.aiv_name
+                                                          << "' not found for Group '" << group_name << "'";
 
-    (*func_name_to_core_type_)[aic_name] = CoreType::CUBE;
-    (*func_name_to_core_type_)[aiv_name] = CoreType::VECTOR;
+    (*func_name_to_core_type_)[info.aic_name] = CoreType::CUBE;
+    (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;
 
-    auto params = BuildTaskParams(call, aic_func);
+    // Reorder params from wrapper param order to inner kernel arg order.
+    INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
+        << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
+    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
 
-    int aic_id = GetOrCreateFuncId(aic_name, func_name_to_id_, next_func_id_);
-    int aiv_id = GetOrCreateFuncId(aiv_name, func_name_to_id_, next_func_id_);
+    int aic_id = GetOrCreateFuncId(info.aic_name, func_name_to_id_, next_func_id_);
+    int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
 
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -727,6 +965,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
           << third_id << "};\n";
 
+    EmitLaunchSpec(ind, task_var, launch_func);
+
     std::string submit_expr =
         "pto2_rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr);
@@ -734,11 +974,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   // --- Alias generation helpers ---
 
-  static std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
+  std::vector<ParamDirection> GetEffectiveDirections(const FunctionPtr& callee) {
+    if (callee->func_type_ == FunctionType::Group) {
+      return ComputeGroupEffectiveDirections(callee, program_);
+    }
+    return callee->param_directions_;
+  }
+
+  std::vector<size_t> CollectOutIndices(const FunctionPtr& callee) {
+    const auto dirs = GetEffectiveDirections(callee);
     std::vector<size_t> out_indices;
-    for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
-      if (callee->param_directions_[i] == ParamDirection::Out ||
-          callee->param_directions_[i] == ParamDirection::InOut) {
+    for (size_t i = 0; i < dirs.size(); ++i) {
+      if (dirs[i] == ParamDirection::Out || dirs[i] == ParamDirection::InOut) {
         out_indices.push_back(i);
       }
     }
@@ -769,7 +1016,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
 
-    auto out_indices = CollectOutIndices(callee);
+    auto effective_dirs = GetEffectiveDirections(callee);
+    std::vector<size_t> out_indices;
+    for (size_t i = 0; i < effective_dirs.size(); ++i) {
+      if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+        out_indices.push_back(i);
+      }
+    }
 
     for (const auto& elem : elements_it->second) {
       INTERNAL_CHECK_SPAN(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size(),
@@ -777,10 +1030,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
           << " (has " << out_indices.size() << " Out/InOut params)";
       size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
-      INTERNAL_CHECK_SPAN(param_idx < callee->param_directions_.size(), call->span_)
+      INTERNAL_CHECK_SPAN(param_idx < effective_dirs.size(), call->span_)
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
-          << " (has " << callee->param_directions_.size() << " params)";
-      if (callee->param_directions_[param_idx] == ParamDirection::InOut) {
+          << " (has " << effective_dirs.size() << " params)";
+      if (effective_dirs[param_idx] == ParamDirection::InOut) {
         continue;
       }
       std::string elem_name = ReserveVarEmitName(elem.var);
@@ -867,7 +1120,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   OrchestrationInfoCollector info_collector;
   info_collector.VisitStmt(func->body_);
 
-  VarLineageCollector lineage;
+  VarLineageCollector lineage(program);
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
 

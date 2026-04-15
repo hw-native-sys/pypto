@@ -11,6 +11,7 @@
 
 #include <any>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -604,11 +605,33 @@ static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack
     name_hint = name_hint_obj->as<std::string>();
   }
 
+  // Deserialize optional core_num
+  std::optional<int> core_num = std::nullopt;
+  auto core_num_obj = GetOptionalFieldObj(fields_obj, "core_num", ctx);
+  if (core_num_obj.has_value() && core_num_obj->type != msgpack::type::NIL) {
+    CHECK(core_num_obj->type == msgpack::type::POSITIVE_INTEGER ||
+          core_num_obj->type == msgpack::type::NEGATIVE_INTEGER)
+        << "core_num must be an integer, got msgpack type " << static_cast<int>(core_num_obj->type);
+    auto raw = core_num_obj->as<int64_t>();
+    CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
+        << "core_num must be a positive integer that fits in int, got " << raw;
+    core_num = static_cast<int>(raw);
+  }
+
+  // Deserialize optional sync_start
+  std::optional<bool> sync_start = std::nullopt;
+  auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
+  if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
+    CHECK(sync_start_obj->type == msgpack::type::BOOLEAN)
+        << "sync_start must be a bool, got msgpack type " << static_cast<int>(sync_start_obj->type);
+    sync_start = sync_start_obj->as<bool>();
+  }
+
   // Deserialize body
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint),
-                                     DeserializeLeadingComments(fields_obj));
+                                     core_num, sync_start, DeserializeLeadingComments(fields_obj));
 }
 
 // Deserialize SeqStmts

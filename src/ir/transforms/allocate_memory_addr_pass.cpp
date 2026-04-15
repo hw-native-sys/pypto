@@ -334,6 +334,12 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
  * and the alloc statement arguments in place.
  */
 FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
+  // Only InCore-variant functions use reserve_buffer / tile memory allocation.
+  // Spmd, Group, Orchestration, and Opaque functions do not have on-chip tile buffers.
+  if (!IsInCoreType(func->func_type_)) {
+    return func;
+  }
+
   // Obtain the allocation policy from the backend (or fall back to the default).
   auto policy = backend::BackendConfig::IsConfigured() ? backend::GetBackend()->CreateMemoryAllocatorPolicy()
                                                        : std::make_unique<DefaultMemoryAllocatorPolicy>();

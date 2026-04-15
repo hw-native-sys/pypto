@@ -46,6 +46,7 @@ class VarDefUseCollector : public IRVisitor {
   std::unordered_set<const Var*> var_defs;
   std::unordered_set<const Var*> var_uses;
   std::vector<const Var*> var_defs_ordered;
+  std::vector<const Var*> var_uses_ordered;
   std::unordered_set<const Var*> var_assign_defs;
 
   /// Return var_defs ∪ var_uses — all variables referenced in the subtree.
@@ -56,8 +57,16 @@ class VarDefUseCollector : public IRVisitor {
   }
 
  protected:
-  void VisitExpr_(const VarPtr& op) override { var_uses.insert(op.get()); }
-  void VisitExpr_(const IterArgPtr& op) override { var_uses.insert(op.get()); }
+  void VisitExpr_(const VarPtr& op) override {
+    if (var_uses.insert(op.get()).second) {
+      var_uses_ordered.push_back(op.get());
+    }
+  }
+  void VisitExpr_(const IterArgPtr& op) override {
+    if (var_uses.insert(op.get()).second) {
+      var_uses_ordered.push_back(op.get());
+    }
+  }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     var_defs.insert(op->var_.get());

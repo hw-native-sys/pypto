@@ -387,7 +387,7 @@ def get_block_idx(span: Span | None = None) -> Call:
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression that returns a UINT64 scalar representing the block index
+        Call expression that returns an INDEX scalar representing the block index
 
     Example:
         >>> block_idx = pl.tile.get_block_idx()
@@ -408,10 +408,23 @@ def get_subblock_idx(span: Span | None = None) -> Call:
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression that returns an INT64 scalar representing the sub-block index
+        Call expression that returns an INDEX scalar representing the sub-block index
     """
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call("tile.get_subblock_idx", [], {}, actual_span)
+
+
+def get_block_num(span: Span | None = None) -> Call:
+    """Get the total number of blocks in the current SPMD task.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an INDEX scalar representing the total block count
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.get_block_num", [], {}, actual_span)
 
 
 def full(

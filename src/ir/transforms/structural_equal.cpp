@@ -449,6 +449,38 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const std::optional<int>& lhs, const std::optional<int>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("optional<int> presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs.has_value() && *lhs != *rhs) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("optional<int> value mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const std::optional<bool>& lhs, const std::optional<bool>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("optional<bool> presence mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs.has_value() && *lhs != *rhs) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("optional<bool> value mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   result_type VisitLeafField(const ParamDirection& lhs, const ParamDirection& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {

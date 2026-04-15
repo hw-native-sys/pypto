@@ -17,8 +17,10 @@ import pypto.language as pl
 import pytest
 from pypto import backend, codegen, passes
 from pypto.backend import BackendType
+from pypto.ir.builder import IRBuilder
+from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import ir
+from pypto.pypto_core import DataType, ir
 
 
 def assert_code_equal(actual: str, expected: str) -> None:
@@ -594,7 +596,8 @@ class TestOrchestration:
 
         code = _generate_orch_code(FourTupleProgram)
 
-        # All orch params are external tensors (mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7)
+        # All orch params are external tensors:
+        # mij=0, lij=1, oi_new=2, mi_in=3, li_in=4, oi_in=5, dst_in=6, final=7
         assert "Tensor ext_mi_in = from_tensor_arg(orch_args.tensor(3))" in code
         assert "Tensor ext_li_in = from_tensor_arg(orch_args.tensor(4))" in code
         assert "Tensor ext_oi_in = from_tensor_arg(orch_args.tensor(5))" in code
@@ -1552,8 +1555,6 @@ class TestOrchestration:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
-        from pypto.pypto_core import DataType
-
         span = ir.Span.unknown()
         INDEX = DataType.INDEX
         FP32 = DataType.FP32
@@ -1969,21 +1970,75 @@ class TestTensorReadWriteOffsetCodegen:
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
+    def test_standalone_spmd_dispatches_group_with_spmd_launch_spec(self):
+        """Standalone Spmd should remain a wrapper and carry launch spec into Group dispatch."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdMixedProgram:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(core_num=4, sync_start=True):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMixedProgram))
+                )
+            )
+        spmd_func = transformed.get_function("main_spmd_0")
+        group_func = transformed.get_function("kernel")
+        assert spmd_func is not None
+        assert group_func is not None
+        assert spmd_func.func_type == pl.FunctionType.Spmd
+        assert group_func.func_type == pl.FunctionType.Group
+
+        code = _generate_orch_code(transformed)
+
+        assert "MixedKernels mixed_0" in code
+        assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
+        assert "params_t0.launch_spec.set_block_num(4);" in code
+        assert "params_t0.launch_spec.set_require_sync_start(true);" in code
+
 
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
 
     def test_unregistered_tensor_op_raises_error(self):
         """Unregistered tensor op (tensor.full) in Orchestration must raise RuntimeError."""
-        from pypto.ir.builder import IRBuilder
-        from pypto.ir.op import tensor as tensor_ops
-
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
-            x = orch_f.param("x", ir.TensorType([16, 16], pl.FP32))
+            orch_f.param("x", ir.TensorType([16, 16], pl.FP32))
             orch_f.return_type(ir.TensorType([16, 16], pl.FP32))
             filled = ib.let("filled", tensor_ops.full([16, 16], pl.FP32, 0.0))
             ib.return_stmt(filled)

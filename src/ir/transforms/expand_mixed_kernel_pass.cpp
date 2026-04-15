@@ -877,16 +877,16 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
   }
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), group_func->span_);
-  auto result =
-      std::make_shared<Function>(group_func->name_, group_func->params_, group_func->param_directions_,
-                                 group_func->return_types_, new_body, group_func->span_, FunctionType::Group,
-                                 group_func->level_, group_func->role_, group_func->attrs_);
+  auto result = std::make_shared<Function>(group_func->name_, group_func->params_,
+                                           group_func->param_directions_, group_func->return_types_, new_body,
+                                           group_func->span_, group_func->func_type_, group_func->level_,
+                                           group_func->role_, group_func->attrs_);
   return result;
 }
 
-/// Check if a Group function body contains a call to a given function name.
-bool GroupCallsFunction(const FunctionPtr& group_func, const std::string& callee_name) {
-  auto stmts = FlattenBody(group_func->body_);
+/// Check if a function body contains a call to a given function name.
+bool FunctionCallsFunction(const FunctionPtr& func, const std::string& callee_name) {
+  auto stmts = FlattenBody(func->body_);
   for (const auto& stmt : stmts) {
     CallPtr call;
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -1358,7 +1358,7 @@ namespace pass {
 
 Pass ExpandMixedKernel() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Phase 1: Pre-scan — find InCore functions that have existing Group callers
+    // Phase 1: Pre-scan — find InCore functions that have existing callers.
     std::unordered_set<std::string> incore_names;
     for (const auto& [gvar, func] : program->functions_) {
       if (func->func_type_ == FunctionType::InCore) {
@@ -1366,13 +1366,19 @@ Pass ExpandMixedKernel() {
       }
     }
 
-    // Map InCore name -> set of Group function names that call it
+    // Map InCore name -> callers that can be rewritten in place.
     std::unordered_set<std::string> incore_with_group_caller;
+    // Map InCore name -> callers that still need the original function name to remain callable.
+    std::unordered_set<std::string> incore_with_preserved_name_caller;
     for (const auto& [gvar, func] : program->functions_) {
-      if (func->func_type_ != FunctionType::Group) continue;
       for (const auto& name : incore_names) {
-        if (GroupCallsFunction(func, name)) {
+        if (!FunctionCallsFunction(func, name)) {
+          continue;
+        }
+        if (func->func_type_ == FunctionType::Group) {
           incore_with_group_caller.insert(name);
+        } else {
+          incore_with_preserved_name_caller.insert(name);
         }
       }
     }
@@ -1425,9 +1431,13 @@ Pass ExpandMixedKernel() {
                   << "consider using split=pl.SplitMode.UP_DOWN on its auto_incore scope";
       }
 
-      // Expand mixed kernel — skip Group wrapper if an existing Group caller exists
+      // Expand mixed kernel.
+      // Existing Group callers can be rewritten in place, but any non-Group
+      // caller (for example a standalone Spmd wrapper) still needs the
+      // original function name to resolve to a callable wrapper.
       bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
-      auto expanded = ExpandMixedFunction(func, /*create_group=*/!has_group_caller);
+      bool needs_preserved_name = incore_with_preserved_name_caller.count(func->name_) > 0;
+      auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller);
 
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);
@@ -1444,7 +1454,7 @@ Pass ExpandMixedKernel() {
     for (auto& func : new_functions) {
       if (func->func_type_ != FunctionType::Group) continue;
       for (const auto& [incore_name, info] : rewrite_map) {
-        if (GroupCallsFunction(func, incore_name)) {
+        if (FunctionCallsFunction(func, incore_name)) {
           func = RewriteGroupCaller(func, incore_name, info.aic_name, info.aiv_name);
         }
       }

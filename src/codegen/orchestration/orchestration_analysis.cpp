@@ -253,6 +253,8 @@ std::vector<const Var*> BufferRootCollector::CollectCallOutputRoots(const CallPt
 // VarLineageCollector
 // ---------------------------------------------------------------------------
 
+VarLineageCollector::VarLineageCollector(ProgramPtr program) : program_(std::move(program)) {}
+
 void VarLineageCollector::Initialize(const std::vector<VarPtr>& params) {
   for (const auto& param : params) {
     var_to_param[param.get()] = param.get();
@@ -293,6 +295,35 @@ void VarLineageCollector::VisitStmt_(const AssignStmtPtr& assign) {
     if (param) {
       var_to_param[assign->var_.get()] = param;
     }
+  } else if (auto call = As<Call>(assign->value_)) {
+    // Propagate lineage through function calls: the result inherits lineage
+    // from the Out/InOut argument. This covers sequential SPMD submissions
+    // like: out = self.kernel(a, b, out) where `out` is the output buffer.
+    //
+    // Group functions (produced by ScopeOutliner) have all directions set to
+    // In, so we trace through their bodies to find the inner kernel call and
+    // use its directions mapped back to the Group's parameter positions.
+    if (!IsBuiltinOp(call->op_->name_)) {
+      auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+      if (callee) {
+        std::vector<ParamDirection> effective_dirs = callee->param_directions_;
+        if (callee->func_type_ == FunctionType::Group) {
+          effective_dirs = ComputeGroupEffectiveDirections(callee, program_);
+        }
+        for (size_t i = 0; i < effective_dirs.size() && i < call->args_.size(); ++i) {
+          if (effective_dirs[i] != ParamDirection::Out && effective_dirs[i] != ParamDirection::InOut) {
+            continue;
+          }
+          if (auto arg_var = AsVarLike(call->args_[i])) {
+            const Var* param = ResolveVar(arg_var.get());
+            if (param) {
+              var_to_param[assign->var_.get()] = param;
+              break;
+            }
+          }
+        }
+      }
+    }
   }
   IRVisitor::VisitStmt_(assign);
 }
@@ -307,6 +338,69 @@ const Var* VarLineageCollector::ResolveExpr(const ExprPtr& expr) const {
     return ResolveVar(var.get());
   }
   return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// ComputeGroupEffectiveDirections
+// ---------------------------------------------------------------------------
+
+std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& group_func,
+                                                            const ProgramPtr& program) {
+  std::vector<ParamDirection> directions(group_func->params_.size(), ParamDirection::In);
+  if (!program) return directions;
+
+  // Collect all inner (non-Group, non-Orchestration, non-Opaque) kernel calls.
+  // Group bodies from OutlineClusterScopes contain only top-level InCore calls,
+  // but we walk the whole body to be safe.
+  class InnerCallFinder : public IRVisitor {
+   public:
+    explicit InnerCallFinder(const ProgramPtr& program) : program_(program) {}
+    const ProgramPtr& program_;
+    std::vector<std::pair<CallPtr, FunctionPtr>> inner_calls;
+
+   protected:
+    void VisitExpr_(const CallPtr& call) override {
+      if (auto gv = As<GlobalVar>(call->op_)) {
+        auto callee = program_->GetFunction(gv->name_);
+        if (callee && callee->func_type_ != FunctionType::Group &&
+            callee->func_type_ != FunctionType::Orchestration && callee->func_type_ != FunctionType::Opaque) {
+          inner_calls.emplace_back(call, callee);
+          return;
+        }
+      }
+      IRVisitor::VisitExpr_(call);
+    }
+  };
+
+  InnerCallFinder finder(program);
+  finder.VisitStmt(group_func->body_);
+  if (finder.inner_calls.empty()) {
+    return directions;
+  }
+
+  std::unordered_map<const Var*, size_t> param_to_index;
+  for (size_t i = 0; i < group_func->params_.size(); ++i) {
+    param_to_index[group_func->params_[i].get()] = i;
+  }
+
+  // Merge directions across all inner calls, preferring Out/InOut over In.
+  for (const auto& [inner_call, inner_callee] : finder.inner_calls) {
+    const auto& inner_args = inner_call->args_;
+    const auto& inner_dirs = inner_callee->param_directions_;
+    for (size_t arg_idx = 0; arg_idx < inner_args.size() && arg_idx < inner_dirs.size(); ++arg_idx) {
+      auto var = AsVarLike(inner_args[arg_idx]);
+      if (!var) continue;
+      auto it = param_to_index.find(var.get());
+      if (it == param_to_index.end()) continue;
+      ParamDirection d = inner_dirs[arg_idx];
+      ParamDirection& merged = directions[it->second];
+      // Merge as a lattice: InOut > Out > In. Never downgrade a stronger direction.
+      if (d == ParamDirection::InOut || (d == ParamDirection::Out && merged == ParamDirection::In)) {
+        merged = d;
+      }
+    }
+  }
+  return directions;
 }
 
 }  // namespace codegen

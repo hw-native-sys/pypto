@@ -62,6 +62,7 @@ FUNCTION_TYPE_MAP: dict[str, ir.FunctionType] = {
     "AIC": ir.FunctionType.AIC,
     "AIV": ir.FunctionType.AIV,
     "Group": ir.FunctionType.Group,
+    "Spmd": ir.FunctionType.Spmd,
 }
 
 

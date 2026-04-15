@@ -10,7 +10,7 @@ After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may c
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
 - **Group function** (`FunctionType::Group`) — calls AIC then AIV, replaces the original
 
-When an existing Group function already calls the InCore function (e.g. from `OutlineClusterScopes`), the pass **rewrites that Group in-place** to call AIC + AIV directly, avoiding a redundant Group wrapper. A new Group wrapper is only created when the InCore has no existing Group caller.
+When an existing Group function already calls the InCore function (e.g. from `OutlineClusterScopes`), the pass **rewrites that Group in-place** to call AIC + AIV directly, avoiding a redundant Group wrapper. When a standalone `Spmd` wrapper calls the InCore function, the pass preserves the `Spmd` wrapper and creates a `Group` callee under it so launch semantics stay on `FunctionType::Spmd`.
 
 For **non-mixed InCore functions** (pure Cube or pure Vector), the pass converts `FunctionType::InCore` to the corresponding type without splitting:
 
@@ -104,7 +104,8 @@ program_expanded = expand_pass(program)
 
 ```text
 Phase 1 — Pre-scan:
-  Identify InCore functions that have existing Group callers.
+  Identify InCore functions that have existing Group callers and
+  callers that still need the original function name to remain callable.
 
 Phase 2 — Expand each InCore function F:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
@@ -136,7 +137,10 @@ Phase 2 — Expand each InCore function F:
  11. If the split bodies use cross-core tile ops and do not already contain setup,
       derive reserve/import/initialize_pipe prologues and prepend them
  12. Create AIC function (no return) and AIV function (original return)
- 13. If no existing Group caller: also create a Group function (calls AIC then AIV)
+ 13. If a non-Group caller still needs the original function name
+     (for example a standalone Spmd wrapper): also create a Group
+     function (calls AIC then AIV)
+ 14. If there are only existing Group callers: skip the extra Group wrapper
 
 Phase 3 — Rewrite Group callers:
   For each Group function that calls a split InCore, replace the InCore call
@@ -227,7 +231,7 @@ class After:
 
 ## Example 2: InCore with existing Group caller
 
-When `OutlineClusterScopes` has already created a Group function calling the InCore, the pass rewrites the existing Group instead of creating a new wrapper.
+When `OutlineClusterScopes` has already created a Group function calling the InCore, the pass rewrites the existing Group instead of creating a new wrapper. When `OutlineClusterScopes` has created a standalone `Spmd` wrapper, the pass keeps that `Spmd` function and retargets it to a new `Group` callee with the original InCore name.
 
 **Before**:
 
@@ -318,6 +322,7 @@ This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` 
 | `CreateMove` propagates layout kwargs | When the result type has a TileView, `blayout`/`slayout` are forwarded as kwargs so the generated `tile.move` call is self-describing |
 | Group keeps original function name | When no existing Group caller: Orchestration call sites work unchanged — no call-site rewriting needed |
 | Rewrite existing Group callers | When a Group already calls the InCore (e.g. from `OutlineClusterScopes`): rewrite it in-place to call AIC + AIV, avoiding redundant Group→Group nesting |
+| Preserve standalone Spmd wrappers | When a standalone `Spmd` calls the InCore: keep `FunctionType::Spmd`, create a `Group` callee underneath, and keep `core_num` / `sync_start` on the Spmd wrapper |
 | Parameters copied to all three functions | Simplifies wiring; DCE removes unused params in downstream passes |
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
 | Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |

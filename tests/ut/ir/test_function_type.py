@@ -24,6 +24,7 @@ def test_function_type_enum():
         ir.FunctionType.AIC,
         ir.FunctionType.AIV,
         ir.FunctionType.Group,
+        ir.FunctionType.Spmd,
     ]
     assert len(all_types) == len(set(all_types))
 
@@ -60,6 +61,10 @@ def test_function_constructor_with_type():
     # Create function with Group type
     func_group = ir.Function("test_group", params, return_types, body, span, ir.FunctionType.Group)
     assert func_group.func_type == ir.FunctionType.Group
+
+    # Create function with Spmd type
+    func_spmd = ir.Function("test_spmd", params, return_types, body, span, ir.FunctionType.Spmd)
+    assert func_spmd.func_type == ir.FunctionType.Spmd
 
 
 def test_ir_builder_with_function_type():
@@ -156,6 +161,16 @@ def test_function_type_python_print():
     printed_group = func_group.as_python("pl")
     assert "@pl.function(type=pl.FunctionType.Group)" in printed_group
 
+    # Spmd function should print type parameter
+    with ib.function("spmd_func", span=span, type=ir.FunctionType.Spmd) as f:
+        x = f.param("x", ir.ScalarType(dtype), span=span)
+        f.return_type(ir.ScalarType(dtype))
+        ib.return_stmt(x, span=span)
+
+    func_spmd = f.get_result()
+    printed_spmd = func_spmd.as_python("pl")
+    assert "@pl.function(type=pl.FunctionType.Spmd)" in printed_spmd
+
 
 def test_function_type_decorator_parsing():
     """Test parsing functions with type parameter in decorator."""
@@ -208,6 +223,14 @@ def test_function_type_decorator_parsing():
     assert group_func.name == "group_func"
     assert group_func.func_type == ir.FunctionType.Group
 
+    # Test Spmd
+    @pl.function(type=pl.FunctionType.Spmd)
+    def spmd_func(x: pl.Tensor[[4], pl.INT64]) -> pl.Tensor[[4], pl.INT64]:
+        return x
+
+    assert spmd_func.name == "spmd_func"
+    assert spmd_func.func_type == ir.FunctionType.Spmd
+
 
 def test_function_type_serialization():
     """Test that function type is correctly serialized and deserialized for all non-Opaque types."""
@@ -221,6 +244,7 @@ def test_function_type_serialization():
         ir.FunctionType.AIC,
         ir.FunctionType.AIV,
         ir.FunctionType.Group,
+        ir.FunctionType.Spmd,
     ]
 
     for func_type in non_opaque_types:
@@ -291,6 +315,7 @@ def test_function_type_language_export():
     assert pl.FunctionType.AIC is ir.FunctionType.AIC
     assert pl.FunctionType.AIV is ir.FunctionType.AIV
     assert pl.FunctionType.Group is ir.FunctionType.Group
+    assert pl.FunctionType.Spmd is ir.FunctionType.Spmd
 
 
 def test_is_incore_type():
@@ -301,6 +326,7 @@ def test_is_incore_type():
     assert not ir.is_incore_type(ir.FunctionType.Opaque)
     assert not ir.is_incore_type(ir.FunctionType.Orchestration)
     assert not ir.is_incore_type(ir.FunctionType.Group)
+    assert not ir.is_incore_type(ir.FunctionType.Spmd)
 
 
 if __name__ == "__main__":

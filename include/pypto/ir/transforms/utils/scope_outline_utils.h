@@ -12,7 +12,6 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
-#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -29,6 +28,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -205,14 +205,15 @@ class ScopeOutliner : public IRMutator {
   ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                 const std::unordered_map<const Var*, VarPtr>& var_objects,
                 const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                FunctionType outlined_func_type, std::string name_suffix)
+                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr)
       : func_name_(std::move(func_name)),
         var_types_(var_types),
         var_objects_(var_objects),
         known_names_(known_names),
         target_scope_kind_(target_scope_kind),
         outlined_func_type_(outlined_func_type),
-        name_suffix_(std::move(name_suffix)) {}
+        name_suffix_(std::move(name_suffix)),
+        program_(std::move(program)) {}
 
   [[nodiscard]] const std::vector<FunctionPtr>& GetOutlinedFunctions() const { return outlined_functions_; }
 
@@ -347,9 +348,9 @@ class ScopeOutliner : public IRMutator {
     body_collector.VisitStmt(op->body_);
 
     // Inputs: variables used but not defined in the scope.
-    // Look up the VarPtr from var_objects_ (outer symbol table) for each input.
+    // Iterate in first-encounter order to preserve the callee's parameter ordering.
     std::vector<VarPtr> input_vars;
-    for (const Var* var_ptr : body_collector.var_uses) {
+    for (const Var* var_ptr : body_collector.var_uses_ordered) {
       if (!body_collector.var_defs.count(var_ptr)) {
         auto obj_it = var_objects_.find(var_ptr);
         CHECK(obj_it != var_objects_.end())
@@ -357,8 +358,6 @@ class ScopeOutliner : public IRMutator {
         input_vars.push_back(obj_it->second);
       }
     }
-    std::sort(input_vars.begin(), input_vars.end(),
-              [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
     // Outputs: variables defined in the scope AND used after it
     std::vector<VarPtr> output_vars;
@@ -368,7 +367,7 @@ class ScopeOutliner : public IRMutator {
     VarCollector scope_var_collector;
     scope_var_collector.VisitStmt(op->body_);
 
-    for (const Var* var_ptr : body_collector.var_defs) {
+    for (const Var* var_ptr : body_collector.var_defs_ordered) {
       if (used_after.count(var_ptr)) {
         auto scope_it = scope_var_collector.var_objects.find(var_ptr);
         CHECK(scope_it != scope_var_collector.var_objects.end())
@@ -401,9 +400,6 @@ class ScopeOutliner : public IRMutator {
         store_body_ptrs[ext_it->second.get()] = var_ptr;
       }
     }
-
-    std::sort(output_vars.begin(), output_vars.end(),
-              [](const VarPtr& a, const VarPtr& b) { return a->name_hint_ < b->name_hint_; });
 
     // Recursively transform the scope body (handles nested scopes).
     // Save/restore state so nested scopes get their own hierarchical names and counters.
@@ -443,14 +439,18 @@ class ScopeOutliner : public IRMutator {
     required_outputs_ = saved_required_outputs;
     store_target_renames_ = saved_renames;
 
-    // Create fresh parameters for the outlined function
+    // Create fresh parameters for the outlined function.
+    // Infer param directions from the inner callee when possible (requires program_).
+    std::vector<ParamDirection> inferred_directions =
+        InferParamDirections(input_vars, op->body_, store_output_set);
     std::vector<VarPtr> input_params;
     std::vector<ParamDirection> input_param_directions;
     std::unordered_map<const Var*, VarPtr> var_substitution_map;
-    for (const auto& input_var : input_vars) {
+    for (size_t i = 0; i < input_vars.size(); ++i) {
+      const auto& input_var = input_vars[i];
       auto param_var = std::make_shared<Var>(input_var->name_hint_, input_var->GetType(), op->span_);
       input_params.push_back(param_var);
-      input_param_directions.push_back(ParamDirection::In);
+      input_param_directions.push_back(inferred_directions[i]);
       var_substitution_map[input_var.get()] = param_var;
     }
 
@@ -535,10 +535,16 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function (propagate level/role from ScopeStmt, convert split to attrs)
+    // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)
     std::vector<std::pair<std::string, std::any>> outlined_attrs;
     if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
       outlined_attrs.emplace_back("split", static_cast<int>(op->split_.value()));
+    }
+    if (op->core_num_.has_value()) {
+      outlined_attrs.emplace_back("core_num", *op->core_num_);
+    }
+    if (op->sync_start_.has_value() && *op->sync_start_) {
+      outlined_attrs.emplace_back("sync_start", true);
     }
     auto outlined_func = std::make_shared<Function>(
         outlined_func_name, input_params, input_param_directions, return_types, outlined_body, op->span_,
@@ -691,6 +697,73 @@ class ScopeOutliner : public IRMutator {
     return name + "_";
   }
 
+  /// Infer parameter directions for the outlined function by examining the scope body.
+  ///
+  /// Strategy:
+  ///   1. Find the first function call in the scope body
+  ///   2. Look up the callee's param_directions_ via program_
+  ///   3. Map input_vars to callee args by Var pointer identity
+  ///   4. Copy callee directions; store targets get InOut; rest default to In
+  std::vector<ParamDirection> InferParamDirections(
+      const std::vector<VarPtr>& input_vars, const StmtPtr& body,
+      const std::unordered_set<const Var*>& store_output_set) const {
+    std::vector<ParamDirection> directions(input_vars.size(), ParamDirection::In);
+
+    // Mark store targets as InOut
+    for (size_t i = 0; i < input_vars.size(); ++i) {
+      if (store_output_set.count(input_vars[i].get())) {
+        directions[i] = ParamDirection::InOut;
+      }
+    }
+
+    if (!program_) return directions;
+
+    // Collect all GlobalVar function calls in the body to infer directions across all of them.
+    class CallFinder : public IRVisitor {
+     public:
+      std::vector<CallPtr> found_calls;
+      void VisitExpr_(const CallPtr& call) override {
+        if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+          found_calls.push_back(call);
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+
+    CallFinder finder;
+    finder.VisitStmt(body);
+    if (finder.found_calls.empty()) return directions;
+
+    // Build input_var pointer → index map
+    std::unordered_map<const Var*, size_t> var_to_idx;
+    for (size_t i = 0; i < input_vars.size(); ++i) {
+      var_to_idx[input_vars[i].get()] = i;
+    }
+
+    // Merge directions from all calls, preferring Out/InOut over In
+    for (const auto& call : finder.found_calls) {
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+      if (!gv) continue;
+      auto callee = program_->GetFunction(gv->name_);
+      if (!callee) continue;
+      const auto& call_args = call->args_;
+      const auto& callee_dirs = callee->param_directions_;
+      for (size_t arg_idx = 0; arg_idx < call_args.size() && arg_idx < callee_dirs.size(); ++arg_idx) {
+        auto arg_var = As<Var>(call_args[arg_idx]);
+        if (!arg_var) continue;
+        auto it = var_to_idx.find(arg_var.get());
+        if (it == var_to_idx.end()) continue;
+        // Prefer Out/InOut over In
+        ParamDirection d = callee_dirs[arg_idx];
+        if (d == ParamDirection::Out || d == ParamDirection::InOut) {
+          directions[it->second] = d;
+        }
+      }
+    }
+
+    return directions;
+  }
+
   std::string func_name_;
   std::unordered_map<const Var*, TypePtr> var_types_;
   std::unordered_map<const Var*, VarPtr> var_objects_;
@@ -702,6 +775,7 @@ class ScopeOutliner : public IRMutator {
   ScopeKind target_scope_kind_;
   FunctionType outlined_func_type_;
   std::string name_suffix_;
+  ProgramPtr program_;
   int scope_counter_ = 0;
   std::vector<FunctionPtr> outlined_functions_;
 };

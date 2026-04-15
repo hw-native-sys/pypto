@@ -2287,8 +2287,15 @@ class ASTParser:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keywords: 'name_hint'",
+                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(core_num=4):",
                     )
+            scope_kind = scope_kind_map[func_attr]
+            span = self.span_tracker.get_span(stmt)
+            self._parse_scope_body(stmt, scope_kind, span, name_hint=name_hint)
+            return
+        elif func_attr == "spmd":
+            self._parse_spmd_scope(stmt, context_expr, scope_kind_map)
+            return
         elif context_expr.args or context_expr.keywords:
             raise ParserSyntaxError(
                 f"pl.{func_attr}() does not accept arguments",
@@ -2298,6 +2305,97 @@ class ASTParser:
         scope_kind = scope_kind_map[func_attr]
         span = self.span_tracker.get_span(stmt)
         self._parse_scope_body(stmt, scope_kind, span, split=split_mode, name_hint=name_hint)
+
+    def _parse_spmd_scope(
+        self,
+        stmt: ast.With,
+        context_expr: ast.Call,
+        scope_kind_map: dict[str, "ir.ScopeKind"],
+    ) -> None:
+        """Parse pl.spmd() context manager into a ScopeStmt(Spmd)."""
+        if context_expr.args:
+            raise ParserSyntaxError(
+                "pl.spmd() does not accept positional arguments",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.spmd(core_num=4):'",
+            )
+        core_num = None
+        sync_start = None
+        name_hint = ""
+        for kw in context_expr.keywords:
+            if kw.arg == "name_hint":
+                name_hint = self._parse_scope_name_hint(kw.value, "pl.spmd()")
+            elif kw.arg == "core_num":
+                if (
+                    not isinstance(kw.value, ast.Constant)
+                    or not isinstance(kw.value.value, int)
+                    or isinstance(kw.value.value, bool)
+                ):
+                    raise ParserSyntaxError(
+                        "core_num must be an integer literal",
+                        span=self.span_tracker.get_span(stmt),
+                        hint="Use 'with pl.spmd(core_num=8):'",
+                    )
+                if kw.value.value <= 0:
+                    raise ParserSyntaxError(
+                        f"core_num must be a positive integer, got {kw.value.value}",
+                        span=self.span_tracker.get_span(stmt),
+                        hint="Use 'with pl.spmd(core_num=8):'",
+                    )
+                core_num = kw.value.value
+            elif kw.arg == "sync_start":
+                if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
+                    raise ParserSyntaxError(
+                        "sync_start must be a boolean literal (True/False)",
+                        span=self.span_tracker.get_span(stmt),
+                        hint="Use 'with pl.spmd(core_num=4, sync_start=True):'",
+                    )
+                sync_start = kw.value.value
+            else:
+                raise ParserSyntaxError(
+                    f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
+                    span=self.span_tracker.get_span(stmt),
+                    hint="Supported keywords: 'core_num', 'sync_start', 'name_hint'",
+                )
+        if core_num is None:
+            raise ParserSyntaxError(
+                "pl.spmd() requires core_num argument",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.spmd(core_num=4):'",
+            )
+        # Validate body is exactly one statement that is a function call
+        spmd_hint = (
+            "The SPMD scope should wrap a single function call: "
+            "'with pl.spmd(core_num=4):\\n    out = self.kernel(a, b, out)'"
+        )
+        if len(stmt.body) != 1:
+            raise ParserSyntaxError(
+                f"pl.spmd() body must contain exactly one statement, got {len(stmt.body)}",
+                span=self.span_tracker.get_span(stmt),
+                hint=spmd_hint,
+            )
+        body_stmt = stmt.body[0]
+        is_call = (
+            (isinstance(body_stmt, ast.Assign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.AnnAssign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.Expr) and isinstance(body_stmt.value, ast.Call))
+        )
+        if not is_call:
+            raise ParserSyntaxError(
+                "pl.spmd() body statement must be a function call",
+                span=self.span_tracker.get_span(stmt),
+                hint=spmd_hint,
+            )
+        scope_kind = scope_kind_map["spmd"]
+        span = self.span_tracker.get_span(stmt)
+        self._parse_scope_body(
+            stmt,
+            scope_kind,
+            span,
+            name_hint=name_hint,
+            core_num=core_num,
+            sync_start=sync_start,
+        )
 
     def _parse_scope_body(
         self,
@@ -2309,9 +2407,20 @@ class ASTParser:
         role: "ir.Role | None" = None,
         split: "ir.SplitMode | None" = None,
         name_hint: str = "",
+        core_num: int | None = None,
+        sync_start: bool | None = None,
     ) -> None:
         """Build a scope statement from a with-statement body."""
-        with self.builder.scope(scope_kind, span, level=level, role=role, split=split, name_hint=name_hint):
+        with self.builder.scope(
+            scope_kind,
+            span,
+            level=level,
+            role=role,
+            split=split,
+            name_hint=name_hint,
+            core_num=core_num,
+            sync_start=sync_start,
+        ):
             with self._scope_kind_context(scope_kind):
                 self.scope_manager.enter_scope("scope")
                 self._parse_body_siblings(stmt.body)
@@ -2396,6 +2505,7 @@ class ASTParser:
             "incore": ir.ScopeKind.InCore,
             "auto_incore": ir.ScopeKind.AutoInCore,
             "cluster": ir.ScopeKind.Cluster,
+            "spmd": ir.ScopeKind.Spmd,
         }
 
         if isinstance(context_expr, ast.Call):
