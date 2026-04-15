@@ -139,7 +139,10 @@ class ChunkedLoopProgram:
             _ctx_len = pl.tensor.read(seq_lens, [b])
         return x
 """
-        with pytest.raises(ParserSyntaxError, match="only valid inside with pl.auto_incore"):
+        with pytest.raises(
+            ParserSyntaxError,
+            match=r"chunk=\.\.\. loops are only valid inside with pl\.at",
+        ):
             pl.parse_program(code)
 
     def test_unknown_tensor_operation(self):
