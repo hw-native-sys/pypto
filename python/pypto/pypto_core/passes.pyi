@@ -522,6 +522,8 @@ __all__ = [
     "create_function_pass",
     "create_program_pass",
     "stmt_dependency_analysis",
+    "partial_unroll_tile_loops",
+    "reorder_unrolled_io",
 ]
 
 class PassProperties:

@@ -48,19 +48,20 @@ for i in pl.range(64, unroll=4):
 - 主循环终点为 `start + (T // F) * F * step`。
 - 若 `T % F != 0`，再发射一个**尾部分支**：trip-1 `ForStmt`（标记 `unroll_replicated = T % F`），内含 `T % F` 份克隆体，偏移为 `start + (T // F) * F * step + j * step`，`j ∈ [0, T%F)`。余数已知，不需要运行时分派。
 
-### 动态边界 —— `start` / `stop` 为运行时 Expr（`step` 仍为静态）
+### 动态边界 —— `start` / `stop` 为运行时 Expr（`step` 仍为静态且为正）
 
-- 令 `main_end = ((stop - start) / (F*step)) * (F*step) + start`，以 `AssignStmt` 绑定为新的 SSA 变量。
+- 计算总迭代数 `trip_iters = ceil_div(stop - start, step)`。`step == 1` 时退化为 `stop - start`，Pass 直接发射简化形式。
+- 令 `main_iters = trip_iters / factor`（向下取整），并把 `main_end = start + main_iters * (factor * step)` 以 `AssignStmt` 绑定为 SSA 变量 `unroll_main_end`。
 - 主循环 `for i in range(start, main_end, F*step)`。
-- 余数通过 `rem = stop - main_end` 经由级联 IfStmt 分派：
+- 以 SSA 变量 `unroll_rem` 绑定 `rem_iters = trip_iters - main_iters * factor`（`step == 1` 时等价于 `stop - main_end`，Pass 直接发射该简化形式）。通过级联 IfStmt 根据迭代数分派：
 
   ```text
-  if rem == 1:    <1 份克隆>                         # 最外层
-  else if rem == 2: <2 份克隆，unroll_replicated=2>
-  else if rem == 3: <3 份克隆，unroll_replicated=3>
+  if rem_iters == 1:    <1 份克隆>                         # 最外层
+  else if rem_iters == 2: <2 份克隆，unroll_replicated=2>
+  else if rem_iters == 3: <3 份克隆，unroll_replicated=3>
   # ...
-  else if rem == F-1: <F-1 份克隆>
-  # rem == 0 不匹配任何分支，跳过尾部。
+  else if rem_iters == F-1: <F-1 份克隆>
+  # rem_iters == 0 不匹配任何分支，跳过尾部。
   ```
 
   每个分支的 body 为一个 trip-1 `ForStmt`，带 `unroll_replicated = k` 标记，因此 `ReorderUnrolledIO` 以与主循环相同的方式对每个分支内部进行重排。SSA 依然干净：每个分支自包含，任何条件定义的变量都不会逃出其 IfStmt。
@@ -70,8 +71,10 @@ for i in pl.range(64, unroll=4):
 | 约束 | 原因 |
 | ---- | ---- |
 | `step` 必须为编译期整数常量 | 主循环步长及各副本偏移均依赖 `factor * step` 为整数 |
+| 动态边界要求 `step > 0` | 动态 trip 计算公式假设正步长；负步长需使用静态边界 |
 | 不允许 `iter_args` / `init_values` | 跨副本的循环携带状态需要 SSA 重命名，首版未实现 |
 | `unroll` 与 `chunk` 在 `pl.range` 中互斥 | 二者优化方向不同，组合使用语义模糊且无明显场景 |
+| `unroll=` 仅支持 `pl.range()` | 该特性作用域限定于 `pl.range()`；`pl.parallel()` / `pl.unroll()` 语义不同 |
 
 ## 示例
 

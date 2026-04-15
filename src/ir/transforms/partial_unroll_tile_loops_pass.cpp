@@ -256,23 +256,44 @@ class PartialUnrollMutator : public IRMutator {
   /**
    * @brief Dynamic lowering: start and/or stop are runtime Exprs. Emits:
    *
-   *   main_end = ((stop - start) / (F*step)) * (F*step) + start
+   *   trip_iters    = ceil_div(stop - start, step)
+   *   main_iters    = trip_iters / factor                       (compile-time: `/ factor`)
+   *   main_end      = start + main_iters * (factor * step)      (SSA-bound to `unroll_main_end`)
    *   for i in range(start, main_end, F*step) [unroll_replicated=F]: <F clones>
-   *   rem = stop - main_end
-   *   if rem == 1: <1 clone>      # outermost
-   *   else if rem == 2: <2 clones>
+   *   rem_iters     = trip_iters - main_iters * factor          (SSA-bound to `unroll_rem`)
+   *   if rem_iters == 1: <1 clone>      # outermost
+   *   else if rem_iters == 2: <2 clones>
    *   else ...
-   *   else if rem == F-1: <F-1 clones>
-   *   # when rem == 0, no branch matches and the tail is skipped.
+   *   else if rem_iters == F-1: <F-1 clones>
+   *   # rem_iters == 0 matches no branch → tail is skipped.
+   *
+   * Dynamic bounds require step > 0; negative-step dynamic ranges are not in
+   * the first-cut scope (static bounds handle negative step via
+   * ComputeStaticTripCount).
    */
   StmtPtr LowerDynamic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t step) {
     Span sp = op->span_;
+    CHECK(step > 0) << "PartialUnrollTileLoops: dynamic bounds require a positive step, got " << step
+                    << ". Use static bounds for negative-step loops.";
 
-    // main_end = ((stop - start) / (F*step)) * (F*step) + start
-    ExprPtr chunk = MakeConstIndex(factor * step, sp);
+    // trip_iters = ceil_div(stop - start, step). For step == 1 the ceil_div
+    // collapses to (stop - start), so skip the `+ (step-1)` / `// step` wrapping
+    // to keep the emitted IR minimal.
     ExprPtr span_expr = MakeSub(op->stop_, op->start_, sp);
-    ExprPtr num_chunks = MakeFloorDiv(span_expr, chunk, sp);
-    ExprPtr scaled = MakeMul(num_chunks, chunk, sp);
+    ExprPtr trip_expr;
+    if (step == 1) {
+      trip_expr = span_expr;
+    } else {
+      ExprPtr step_expr = MakeConstIndex(step, sp);
+      ExprPtr adjusted = MakeAdd(span_expr, MakeConstIndex(step - 1, sp), sp);
+      trip_expr = MakeFloorDiv(adjusted, step_expr, sp);
+    }
+
+    ExprPtr factor_expr = MakeConstIndex(factor, sp);
+    ExprPtr main_iters_expr = MakeFloorDiv(trip_expr, factor_expr, sp);
+
+    ExprPtr chunk = MakeConstIndex(factor * step, sp);
+    ExprPtr scaled = MakeMul(main_iters_expr, chunk, sp);
     ExprPtr main_end_value = MakeAdd(op->start_, scaled, sp);
 
     VarPtr main_end_var =
@@ -284,9 +305,14 @@ class PartialUnrollMutator : public IRMutator {
                                       /*main_start=*/op->start_,
                                       /*main_stop=*/main_end_var);
 
-    // rem = stop - main_end
+    // rem_iters = trip_iters - main_iters * factor. For step == 1 this equals
+    // stop - main_end (since trip == stop - start and main_iters*factor*step ==
+    // main_end - start collapse), which keeps the emitted IR simple for the
+    // common case.
     VarPtr rem_var = std::make_shared<Var>("unroll_rem", std::make_shared<ScalarType>(DataType::INDEX), sp);
-    auto rem_assign = std::make_shared<AssignStmt>(rem_var, MakeSub(op->stop_, main_end_var, sp), sp);
+    ExprPtr rem_value = (step == 1) ? MakeSub(op->stop_, main_end_var, sp)
+                                    : MakeSub(trip_expr, MakeMul(main_iters_expr, factor_expr, sp), sp);
+    auto rem_assign = std::make_shared<AssignStmt>(rem_var, rem_value, sp);
 
     // Build the cascade from innermost (k = factor-1) outward so that each outer
     // IfStmt can point at the previously-built IfStmt as its else branch.

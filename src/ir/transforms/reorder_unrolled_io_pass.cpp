@@ -127,20 +127,13 @@ class ReorderUnrolledIOMutator : public IRMutator {
     std::vector<IOCategory> cats(N);
     for (size_t i = 0; i < N; ++i) cats[i] = CategorizeStmt(stmts[i], io_ops_);
 
-    // Per-stmt count of unsatisfied predecessors. Only count predecessors that
-    // are themselves nodes in this region (the graph may include external preds
-    // for region-leaving SSA edges).
-    std::unordered_map<const Stmt*, size_t> stmt_index;
-    stmt_index.reserve(N);
-    for (size_t i = 0; i < N; ++i) stmt_index[stmts[i].get()] = i;
-
+    // Per-stmt count of unsatisfied predecessors. BuildStmtDependencyGraph
+    // only records within-region edges (last_def is populated from stmts in
+    // this region), so every predecessor counted here is a sibling statement.
     std::vector<size_t> remaining(N, 0);
     for (size_t i = 0; i < N; ++i) {
       auto it = graph.predecessors.find(stmts[i].get());
-      if (it == graph.predecessors.end()) continue;
-      for (const auto* pred : it->second) {
-        if (stmt_index.count(pred)) ++remaining[i];
-      }
+      if (it != graph.predecessors.end()) remaining[i] = it->second.size();
     }
 
     std::vector<bool> emitted(N, false);

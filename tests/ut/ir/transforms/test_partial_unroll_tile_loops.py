@@ -173,6 +173,52 @@ class TestPartialUnrollMechanics:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_dynamic_stop_with_nonunit_step_uses_iteration_count(self):
+        """Dynamic bounds with step != 1 must dispatch on iteration count, not index span.
+
+        For ``range(0, n, 2)`` with factor=4, trip_iters = ceil_div(n, 2). The
+        main loop runs ``trip_iters // 4`` times with stride ``8``; the tail
+        cascades on ``rem_iters = trip_iters - main_iters * 4``, not on
+        ``stop - main_end`` (which would be in index units and overshoot)."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]):
+                for i in pl.range(0, n, 2, attrs={"unroll_factor": 4}):
+                    y: pl.Scalar[pl.INDEX] = i  # noqa: F841
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]):
+                # trip_iters = ceil_div(n - 0, 2) = (n - 0 + 1) // 2
+                # main_iters = trip_iters // 4
+                # main_end   = 0 + main_iters * (4 * 2) = 0 + main_iters * 8
+                unroll_main_end: pl.Scalar[pl.INDEX] = 0 + (n - 0 + 1) // 2 // 4 * 8
+                for i in pl.range(0, unroll_main_end, 8, attrs={"unroll_replicated": 4}):
+                    y: pl.Scalar[pl.INDEX] = i  # noqa: F841
+                    y_1: pl.Scalar[pl.INDEX] = i + 2  # noqa: F841
+                    y_2: pl.Scalar[pl.INDEX] = i + 4  # noqa: F841
+                    y_3: pl.Scalar[pl.INDEX] = i + 6  # noqa: F841
+                # rem_iters = trip_iters - main_iters * 4 (iteration units, not index units)
+                unroll_rem: pl.Scalar[pl.INDEX] = (n - 0 + 1) // 2 - (n - 0 + 1) // 2 // 4 * 4
+                if unroll_rem == 1:
+                    for _tail_iter_1 in pl.range(0, 1, 1, attrs={"unroll_replicated": 1}):
+                        y_4: pl.Scalar[pl.INDEX] = unroll_main_end  # noqa: F841
+                elif unroll_rem == 2:
+                    for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
+                        y_5: pl.Scalar[pl.INDEX] = unroll_main_end  # noqa: F841
+                        y_6: pl.Scalar[pl.INDEX] = unroll_main_end + 2  # noqa: F841
+                elif unroll_rem == 3:
+                    for _tail_iter_3 in pl.range(0, 1, 1, attrs={"unroll_replicated": 3}):
+                        y_7: pl.Scalar[pl.INDEX] = unroll_main_end  # noqa: F841
+                        y_8: pl.Scalar[pl.INDEX] = unroll_main_end + 2  # noqa: F841
+                        y_9: pl.Scalar[pl.INDEX] = unroll_main_end + 4  # noqa: F841
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_iter_args_rejected_with_clear_message(self):
         """Loops with iter_args must be rejected — partial unroll cannot handle loop-carried state.
 

@@ -48,19 +48,20 @@ With trip count `T = (stop - start) / step`:
 - Main loop stops at `start + (T // F) * F * step`.
 - If `T % F != 0`, a single **tail branch** is emitted: a trip-1 `ForStmt` tagged `unroll_replicated = T % F`, containing `T % F` cloned bodies at offsets `start + (T // F) * F * step + j * step` for `j ∈ [0, T%F)`. No runtime dispatch is needed — the remainder count is known.
 
-### Dynamic bounds — `start` and/or `stop` are runtime Exprs (`step` still static)
+### Dynamic bounds — `start` and/or `stop` are runtime Exprs (`step` still static, positive)
 
-- Let `main_end = ((stop - start) / (F*step)) * (F*step) + start` materialized as a fresh SSA `AssignStmt`.
+- Compute the total trip count as `trip_iters = ceil_div(stop - start, step)`. When `step == 1` this collapses to `stop - start` and the pass emits the shorter form.
+- Let `main_iters = trip_iters / factor` (floor-div) and materialize `main_end = start + main_iters * (factor * step)` as a fresh SSA `AssignStmt` (named `unroll_main_end`).
 - Main loop is `for i in range(start, main_end, F*step)`.
-- Remainder is dispatched by `rem = stop - main_end` through a cascaded IfStmt chain:
+- Materialize `rem_iters = trip_iters - main_iters * factor` as a fresh SSA `AssignStmt` (named `unroll_rem`). When `step == 1` this is equivalent to `stop - main_end`, and the pass emits that shorter form. The remainder is dispatched through a cascaded IfStmt chain:
 
   ```text
-  if rem == 1:    <1 clone>                      # outermost
-  else if rem == 2: <2 clones marked unroll_replicated=2>
-  else if rem == 3: <3 clones marked unroll_replicated=3>
+  if rem_iters == 1:    <1 clone>                      # outermost
+  else if rem_iters == 2: <2 clones marked unroll_replicated=2>
+  else if rem_iters == 3: <3 clones marked unroll_replicated=3>
   # ...
-  else if rem == F-1: <F-1 clones>
-  # rem == 0 falls through — no tail work.
+  else if rem_iters == F-1: <F-1 clones>
+  # rem_iters == 0 falls through — no tail work.
   ```
 
   Each branch's body is a trip-1 `ForStmt` tagged `unroll_replicated = k`, so `ReorderUnrolledIO` reorders each branch internally the same way it does the main loop. SSA stays clean: each branch is self-contained; no conditionally-defined var escapes its IfStmt.
@@ -70,8 +71,10 @@ With trip count `T = (stop - start) / step`:
 | Constraint | Reason |
 | ---------- | ------ |
 | `step` must be a compile-time integer constant | Main loop's stride and per-clone offsets both require `factor * step` as an integer |
+| Dynamic bounds require `step > 0` | The dynamic trip-count formula assumes positive step; negative-step ranges must use static bounds |
 | `iter_args` / `init_values` not allowed | Loop-carried state across replicated copies needs SSA-aware renaming not yet implemented |
 | `unroll` and `chunk` are mutually exclusive on `pl.range` | Different optimization axes; combining them adds semantic ambiguity without a clear use case |
+| `unroll=` only on `pl.range()` | Scoped feature; `pl.parallel()` / `pl.unroll()` have different semantics |
 
 ## Examples
 

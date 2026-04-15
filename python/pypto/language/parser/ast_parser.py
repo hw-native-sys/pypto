@@ -1190,6 +1190,12 @@ class ASTParser:
         unroll_expr = range_args.get("unroll")
         unroll_factor: int | None = None
         if unroll_expr is not None:
+            if iterator_type != "range":
+                raise ParserSyntaxError(
+                    f"unroll= is only supported on pl.range(), not pl.{iterator_type}()",
+                    span=self.span_tracker.get_span(iter_call),
+                    hint="Move unroll= to pl.range(), or use pl.unroll() for full unrolling.",
+                )
             if chunk_expr is not None:
                 raise ParserSyntaxError(
                     "unroll= and chunk= are mutually exclusive on pl.range()",
