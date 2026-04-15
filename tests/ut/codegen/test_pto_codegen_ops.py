@@ -683,6 +683,35 @@ class TestBroadcastOpsCodegen:
         else:
             raise AssertionError("no pto.tcolexpand ins(...) line in MLIR")
 
+    def test_row_expand_codegen(self):
+        """tile.row_expand(target, row_vec) should emit pto.trowexpand with only row_vec in ins()."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                row_vec_tensor: pl.Tensor[[16, 1], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                row_tile: pl.Tile[[16, 1], pl.FP32] = pl.load(row_vec_tensor, [0, 0], [16, 1])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.row_expand(src_tile, row_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.trowexpand" in mlir, f"row_expand should generate pto.trowexpand, got:\n{mlir}"
+        # ptoas expects unary ins; two SSA values look like "ins(%a, %b : ...)".
+        for line in mlir.splitlines():
+            if "pto.trowexpand" in line and "ins(" in line:
+                after_ins = line.split("ins(", 1)[1]
+                value_list = after_ins.split(" : ", 1)[0]
+                assert "," not in value_list, f"trowexpand ins should be single SSA operand, got: {line!r}"
+                break
+        else:
+            raise AssertionError("no pto.trowexpand ins(...) line in MLIR")
+
 
 class TestTileSliceCodegen:
     """Tests for tile.slice PTO code generation (pto.textract)."""

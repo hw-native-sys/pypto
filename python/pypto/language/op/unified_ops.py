@@ -231,13 +231,13 @@ def col_expand_mul(lhs: T, rhs: T) -> T:
     _raise_type_dispatch_error("col_expand_mul", lhs, rhs)
 
 
-def row_expand(input: T) -> T:
-    """Row-wise broadcast: dst[i, j] = src[i, 0], dispatched by input type."""
-    if isinstance(input, Tensor):
-        return _tensor.row_expand(input)
-    if isinstance(input, Tile):
-        return _tile.row_expand(input)
-    raise TypeError(f"row_expand: expected Tensor or Tile, got {type(input).__name__}")
+def row_expand(lhs: T, rhs: T) -> T:
+    """Row-wise expansion, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.row_expand(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.row_expand(lhs, rhs)
+    _raise_type_dispatch_error("row_expand", lhs, rhs)
 
 
 def row_expand_add(lhs: T, rhs: T) -> T:

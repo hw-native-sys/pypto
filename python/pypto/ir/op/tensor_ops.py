@@ -506,18 +506,19 @@ def row_min(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_min", [input], {}, actual_span)
 
 
-def row_expand(input: Expr, span: Span | None = None) -> Call:
-    """Row-wise broadcast: dst[i, j] = src[i, 0].
+def row_expand(target: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Row-wise expansion: expand row_vec [M, 1] to target shape [M, N].
 
     Args:
-        input: Input tensor (TensorType [M, N])
+        target: Target tensor defining output shape (TensorType [M, N])
+        row_vec: Row vector to expand (TensorType [M, 1])
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise first-element broadcast
+        Call expression for row-wise expansion
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.row_expand", [input], {}, actual_span)
+    return _ir_core.create_op_call("tensor.row_expand", [target, row_vec], {}, actual_span)
 
 
 def row_expand_mul(tensor: Expr, row_vec: Expr, span: Span | None = None) -> Call:

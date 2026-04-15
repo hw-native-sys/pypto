@@ -1240,10 +1240,13 @@ def test_tensor_row_expand():
     span = ir.Span.unknown()
     dim64 = ir.ConstInt(64, DataType.INT32, span)
     dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
     tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    row_type = ir.TensorType([dim64, dim1], DataType.FP16)
     tensor_var = ir.Var("t", tensor_type, span)
+    row_var = ir.Var("rv", row_type, span)
 
-    call = ir.op.tensor.row_expand(tensor_var)
+    call = ir.op.tensor.row_expand(tensor_var, row_var)
 
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.row_expand"

@@ -673,7 +673,7 @@ class TestTileBroadcastOps:
         assert "tile.row_expand_mul" in ir_str
 
     def test_tile_row_expand(self):
-        """Test tile.row_expand operator - broadcast first element of each row across the row."""
+        """Test tile.row_expand operator - expand row vector to target tile shape."""
 
         @pl.program
         class Program:
@@ -681,10 +681,12 @@ class TestTileBroadcastOps:
             def main(
                 self,
                 tile: pl.Tensor[[128, 128], pl.FP32],
+                row: pl.Tensor[[128, 128], pl.FP32],
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand(tile_a)
+                tile_row: pl.Tile[[32, 1], pl.FP32] = pl.load(row, [0, 0], [32, 1])
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.row_expand(tile_a, tile_row)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 

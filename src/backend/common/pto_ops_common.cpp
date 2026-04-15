@@ -190,6 +190,30 @@ static std::string MakeColExpandCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+// pto.trowexpand takes only the row vector in ins(); output shape comes from outs().
+// IR tile.row_expand(target, row_vec) keeps target for shape/type inference only.
+static std::string MakeRowExpandCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.row_expand requires 2 arguments, got " << op->args_.size();
+  const ir::ExprPtr& row_vec = op->args_[1];
+  std::string operand = codegen.GetExprAsCode(row_vec);
+  std::string in_type = codegen.GetExprTypeAnnotation(row_vec);
+  std::string result_target = codegen.GetCurrentResultTarget();
+  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  std::ostringstream oss;
+  oss << "pto.trowexpand ins(" << operand;
+  if (!in_type.empty()) {
+    oss << " : " << in_type;
+  }
+  oss << ") outs(" << result_target;
+  if (!result_type.empty()) {
+    oss << " : " << result_type;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for StoreFP
 static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
@@ -1224,7 +1248,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_sum",         "pto.trowsum",          2},
     {"tile.row_max",         "pto.trowmax",          2},
     {"tile.row_min",         "pto.trowmin",          2},
-    {"tile.row_expand",      "pto.trowexpand",       1},
     {"tile.col_sum",         "pto.tcolsum",          1},
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
@@ -1335,6 +1358,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.col_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeColExpandCodegenPTO(op, codegen);
+  });
+  reg("tile.row_expand", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeRowExpandCodegenPTO(op, codegen);
   });
   reg("tile.store_fp", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeStoreFPCodegenPTO("pto.tstore.fp", op, codegen);

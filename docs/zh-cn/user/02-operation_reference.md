@@ -143,7 +143,7 @@
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
-| `row_expand` | `(src: Tile) -> Tile` | 将 `src[i,0]` 广播到每行 |
+| `row_expand` | `(target: Tile, row_vec: Tile) -> Tile` | 将 `row_vec[M,1]` 扩展到 `target[M,N]` |
 | `row_expand_add` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile + row_vec[M,1]` 广播 |
 | `row_expand_sub` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile - row_vec` 广播 |
 | `row_expand_mul` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile * row_vec` 广播 |

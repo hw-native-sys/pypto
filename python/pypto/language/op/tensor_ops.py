@@ -468,17 +468,19 @@ def row_min(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def row_expand(input: Tensor) -> Tensor:
-    """Row-wise broadcast: dst[i, j] = src[i, 0].
+def row_expand(target: Tensor, row_vec: Tensor) -> Tensor:
+    """Row-wise expansion: expand row_vec [M, 1] to target shape [M, N].
 
     Args:
-        input: Input tensor (TensorType [M, N])
+        target: Target tensor defining output shape (TensorType [M, N])
+        row_vec: Row vector to expand (TensorType [M, 1])
 
     Returns:
         Tensor wrapping the row_expand operation
     """
-    input_expr = input.unwrap()
-    call_expr = _ir_ops.row_expand(input_expr)
+    target_expr = target.unwrap()
+    row_vec_expr = row_vec.unwrap()
+    call_expr = _ir_ops.row_expand(target_expr, row_vec_expr)
     return Tensor(expr=call_expr)
 
 

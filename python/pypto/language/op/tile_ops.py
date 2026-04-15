@@ -869,18 +869,17 @@ def maximum(lhs: Tile, rhs: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def row_expand(src: Tile) -> Tile:
-    """Broadcast the first element of each source row across the destination row.
-
-    For each element (i, j): dst[i, j] = src[i, 0].
+def row_expand(target: Tile, row_vec: Tile) -> Tile:
+    """Expand row vector to target shape.
 
     Args:
-        src: Input tile [M, N]
+        target: Target tile defining output shape [M, N]
+        row_vec: Row vector to expand [M, 1]
 
     Returns:
         Tile wrapping the row_expand operation
     """
-    call_expr = _ir_ops.row_expand(src.unwrap())
+    call_expr = _ir_ops.row_expand(target.unwrap(), row_vec.unwrap())
     return Tile(expr=call_expr)
 
 

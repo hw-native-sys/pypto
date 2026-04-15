@@ -148,7 +148,7 @@ Transfer data between memory hierarchy levels.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
-| `row_expand` | `(src: Tile) -> Tile` | Broadcast `src[i,0]` across each row |
+| `row_expand` | `(target: Tile, row_vec: Tile) -> Tile` | Expand `row_vec[M,1]` to `target[M,N]` |
 | `row_expand_add` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile + row_vec[M,1]` broadcast |
 | `row_expand_sub` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile - row_vec` broadcast |
 | `row_expand_mul` | `(tile: Tile, row_vec: Tile) -> Tile` | `tile * row_vec` broadcast |

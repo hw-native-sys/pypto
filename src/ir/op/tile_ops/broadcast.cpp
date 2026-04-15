@@ -152,25 +152,15 @@ TypePtr DeduceTileExpandScalarType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.row_expand")
     .set_op_category("TileOp")
-    .set_description(
-        "Broadcast first element of each source row across the destination row: dst[i,j] = src[i,0]")
-    .add_argument("src", "Input tile (TileType, 2D [M, N])")
+    .set_description("Expand row tile [rows, 1] to target shape [rows, cols]")
+    .add_argument("target", "Target tile defining output shape (TileType)")
+    .add_argument("row_vec", "Row vector to expand (TileType, shape [rows, 1])")
     .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 1) << "The operator tile.row_expand requires exactly 1 argument, but got "
-                              << args.size();
-      auto tile_type = As<TileType>(args[0]->GetType());
-      CHECK(tile_type) << "The operator tile.row_expand requires argument to be a TileType, but got "
-                       << args[0]->GetType()->TypeName();
-      CHECK(tile_type->shape_.size() >= 2)
-          << "The operator tile.row_expand requires input tile"
-          << " to have at least 2 dimensions, but got " << tile_type->shape_.size() << " dimensions";
-      TileView tile_view;
-      tile_view.valid_shape = tile_type->shape_;
-      InheritTileViewLayout(tile_view, tile_type);
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
+      return DeduceTileRowExpandType(args, kwargs, "tile.row_expand");
     });
 
 REGISTER_OP("tile.row_expand_sub")

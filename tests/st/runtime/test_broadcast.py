@@ -19,6 +19,8 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 
+MN_CASES: list[tuple[int, int]] = [(8, 16), (16, 16), (16, 8)]
+
 
 class TestTileRowExpand(PTOTestCase):
     """Test case for tile.row_expand."""
@@ -35,7 +37,7 @@ class TestTileRowExpand(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("x", [self.M, self.N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("row_vec", [self.M, 1], DataType.FP32, init_value=torch.randn),
             TensorSpec("y", [self.M, self.N], DataType.FP32, is_output=True),
         ]
 
@@ -47,27 +49,28 @@ class TestTileRowExpand(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def row_expand_kernel(
                 self,
-                x: pl.Tensor[[M, N], pl.FP32],
+                row_vec: pl.Tensor[[M, 1], pl.FP32],
                 y: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile: pl.Tile[[M, N], pl.FP32] = pl.load(x, [0, 0], [M, N])
-                expanded: pl.Tile[[M, N], pl.FP32] = pl.tile.row_expand(tile)
+                row_tile: pl.Tile[[M, 1], pl.FP32] = pl.load(row_vec, [0, 0], [M, 1])
+                target_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.create([M, N], dtype=pl.FP32)
+                expanded: pl.Tile[[M, N], pl.FP32] = pl.tile.row_expand(target_tile, row_tile)
                 out: pl.Tensor[[M, N], pl.FP32] = pl.store(expanded, [0, 0], y)
                 return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                x: pl.Tensor[[M, N], pl.FP32],
+                row_vec: pl.Tensor[[M, 1], pl.FP32],
                 y: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                y = self.row_expand_kernel(x, y)
+                y = self.row_expand_kernel(row_vec, y)
                 return y
 
         return TileRowExpandProgram
 
     def compute_expected(self, tensors, params=None):
-        tensors["y"][:] = tensors["x"][:, :1].repeat(1, self.N)
+        tensors["y"][:] = tensors["row_vec"].repeat(1, self.N)
 
 
 class TestTileColExpand(PTOTestCase):
@@ -85,7 +88,6 @@ class TestTileColExpand(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("target", [self.M, self.N], DataType.FP32, init_value=torch.randn),
             TensorSpec("col_vec", [1, self.N], DataType.FP32, init_value=torch.randn),
             TensorSpec("y", [self.M, self.N], DataType.FP32, is_output=True),
         ]
@@ -98,12 +100,11 @@ class TestTileColExpand(PTOTestCase):
             @pl.function(type=pl.FunctionType.InCore)
             def col_expand_kernel(
                 self,
-                target: pl.Tensor[[M, N], pl.FP32],
                 col_vec: pl.Tensor[[1, N], pl.FP32],
                 y: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                target_tile: pl.Tile[[M, N], pl.FP32] = pl.load(target, [0, 0], [M, N])
                 col_tile: pl.Tile[[1, N], pl.FP32] = pl.load(col_vec, [0, 0], [1, N])
+                target_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.create([M, N], dtype=pl.FP32)
                 expanded: pl.Tile[[M, N], pl.FP32] = pl.tile.col_expand(target_tile, col_tile)
                 out: pl.Tensor[[M, N], pl.FP32] = pl.store(expanded, [0, 0], y)
                 return out
@@ -111,11 +112,10 @@ class TestTileColExpand(PTOTestCase):
             @pl.function(type=pl.FunctionType.Orchestration)
             def orchestrator(
                 self,
-                target: pl.Tensor[[M, N], pl.FP32],
                 col_vec: pl.Tensor[[1, N], pl.FP32],
                 y: pl.Out[pl.Tensor[[M, N], pl.FP32]],
             ) -> pl.Tensor[[M, N], pl.FP32]:
-                y = self.col_expand_kernel(target, col_vec, y)
+                y = self.col_expand_kernel(col_vec, y)
                 return y
 
         return TileColExpandProgram
@@ -127,16 +127,18 @@ class TestTileColExpand(PTOTestCase):
 class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
+    @pytest.mark.parametrize("m, n", MN_CASES)
     @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_row_expand(self, test_runner, backend):
+    def test_tile_row_expand(self, test_runner, backend, m, n):
         """Test tile.row_expand across platforms."""
-        result = test_runner.run(TestTileRowExpand(backend_type=backend))
+        result = test_runner.run(TestTileRowExpand(m=m, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.parametrize("m, n", MN_CASES)
     @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_col_expand(self, test_runner, backend):
+    def test_tile_col_expand(self, test_runner, backend, m, n):
         """Test tile.col_expand across platforms."""
-        result = test_runner.run(TestTileColExpand(backend_type=backend))
+        result = test_runner.run(TestTileColExpand(m=m, n=n, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
 

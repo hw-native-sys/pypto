@@ -1359,20 +1359,19 @@ def gemv_bias(lhs: Expr, rhs: Expr, bias: Expr, span: Span | None = None) -> Cal
 # ============================================================================
 
 
-def row_expand(src: Expr, span: Span | None = None) -> Call:
-    """Broadcast the first element of each source row across the destination row.
-
-    For each element (i, j) in the valid region: dst[i, j] = src[i, 0].
+def row_expand(target: Expr, row_vec: Expr, span: Span | None = None) -> Call:
+    """Expand row vector [rows, 1] to target shape [rows, cols].
 
     Args:
-        src: Input tile (TileType [M, N])
+        target: Target tile defining output shape (TileType [M, N])
+        row_vec: Row vector to expand (TileType [M, 1])
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for row-wise first-element broadcast
+        Call expression for row-wise expansion
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.row_expand", [src], {}, actual_span)
+    return _ir_core.create_op_call("tile.row_expand", [target, row_vec], {}, actual_span)
 
 
 def row_expand_sub(tile: Expr, row_vec: Expr, span: Span | None = None) -> Call:

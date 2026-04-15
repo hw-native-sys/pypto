@@ -143,19 +143,6 @@ TypePtr DeduceTensorColExpandType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(tensor_shape, *result_dtype);
 }
 
-TypePtr DeduceTensorRowExpandSingleType(const std::vector<ExprPtr>& args,
-                                        const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name) {
-  CHECK(args.size() == 1) << "The operator " << op_name << " requires exactly 1 argument, but got "
-                          << args.size();
-
-  auto tensor_type = As<TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
-
-  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
-}
-
 TypePtr DeduceTensorExpandScalarType(const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                                      const std::string& op_name) {
@@ -209,11 +196,12 @@ REGISTER_OP("tensor.col_expand_mul")
 
 REGISTER_OP("tensor.row_expand")
     .set_op_category("TensorOp")
-    .set_description("Row-wise broadcast: dst[i,j] = src[i,0]")
-    .add_argument("src", "Input tensor (TensorType [M, N])")
+    .set_description("Row-wise expansion: expand row_vec [M,1] to target shape [M,N]")
+    .add_argument("target", "Target tensor defining output shape (TensorType [M, N])")
+    .add_argument("row_vec", "Row vector (TensorType [M, 1])")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorRowExpandSingleType(args, kwargs, "tensor.row_expand");
+      return DeduceTensorRowExpandType(args, kwargs, "tensor.row_expand");
     });
 
 REGISTER_OP("tensor.row_expand_add")

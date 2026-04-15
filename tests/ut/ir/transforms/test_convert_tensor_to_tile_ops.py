@@ -1155,16 +1155,18 @@ class TestConvertTensorToTileOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
-                y: pl.Tensor[[32, 64], pl.FP16] = pl.row_expand(x)
+                y: pl.Tensor[[32, 64], pl.FP16] = pl.row_expand(x, rv)
                 return y
 
             @pl.function
             def main(
                 self,
                 x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
-                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x)
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, rv)
                 return y
 
         @pl.program
@@ -1173,10 +1175,12 @@ class TestConvertTensorToTileOps:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
                 out_0: pl.Out[pl.Tensor[[32, 64], pl.FP16]],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 x_tile: pl.Tile[[32, 64], pl.FP16] = pl.load(x, [0, 0], [32, 64])
-                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand(x_tile)
+                rv_tile: pl.Tile[[32, 1], pl.FP16] = pl.load(rv, [0, 0], [32, 1])
+                y_tile: pl.Tile[[32, 64], pl.FP16] = pl.tile.row_expand(x_tile, rv_tile)
                 out_0_store: pl.Tensor[[32, 64], pl.FP16] = pl.store(y_tile, [0, 0], out_0)
                 return out_0_store
 
@@ -1184,9 +1188,10 @@ class TestConvertTensorToTileOps:
             def main(
                 self,
                 x: pl.Tensor[[32, 64], pl.FP16],
+                rv: pl.Tensor[[32, 1], pl.FP16],
             ) -> pl.Tensor[[32, 64], pl.FP16]:
                 out_0: pl.Tensor[[32, 64], pl.FP16] = pl.create_tensor([32, 64], dtype=pl.FP16)
-                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, out_0)
+                y: pl.Tensor[[32, 64], pl.FP16] = self.main_incore_0(x, rv, out_0)
                 return y
 
         After = passes.convert_tensor_to_tile_ops()(Before)

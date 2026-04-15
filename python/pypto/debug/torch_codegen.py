@@ -129,6 +129,14 @@ def _identity() -> OpHandler:
     return lambda a, _kw: a[0]
 
 
+def _expand_as_target() -> OpHandler:
+    # row_expand/col_expand in IR deduce promoted dtype from both operands.
+    # Materialize expanded view to avoid aliasing issues with zero-stride expands.
+    return lambda a, _kw: (
+        f"{a[1]}.expand_as({a[0]}).clone().to(torch.promote_types({a[0]}.dtype, {a[1]}.dtype))"
+    )
+
+
 def _noop(comment: str = "") -> OpHandler:
     return lambda _a, _kw: f"None  # {comment}" if comment else "None"
 
@@ -269,8 +277,8 @@ def _register_ops() -> None:
         m[f"{prefix}.col_expand_mul"] = _binop("*")
         m[f"{prefix}.col_expand_sub"] = _binop("-")
         m[f"{prefix}.col_expand_div"] = _binop("/")
-        m[f"{prefix}.col_expand"] = _identity()
-        m[f"{prefix}.row_expand"] = _identity()
+        m[f"{prefix}.col_expand"] = _expand_as_target()
+        m[f"{prefix}.row_expand"] = _expand_as_target()
         m[f"{prefix}.expands"] = lambda a, _kw: f"torch.full_like({a[0]}, {a[1]})"
 
     # --- Tensor-only ops ---
