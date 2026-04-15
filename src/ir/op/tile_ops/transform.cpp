@@ -427,7 +427,17 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
     }
   }
 
-  return std::make_shared<TileType>(input_type->shape_, input_type->dtype_);
+  // Inherit tile_view (with valid_shape = input shape) and memory_space from input,
+  // same pattern as tile.assemble — ensures tile.store can read valid_shape downstream.
+  TileView tile_view;
+  if (input_type->tile_view_.has_value()) {
+    tile_view = *input_type->tile_view_;
+  }
+  if (tile_view.valid_shape.empty()) {
+    tile_view.valid_shape = input_type->shape_;
+  }
+  return std::make_shared<TileType>(input_type->shape_, input_type->dtype_, std::nullopt, tile_view,
+                                    input_type->memory_space_);
 }
 
 REGISTER_OP("tile.scatter_update")
@@ -444,6 +454,7 @@ REGISTER_OP("tile.scatter_update")
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterUpdateType(args, kwargs);
