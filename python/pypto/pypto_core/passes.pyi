@@ -13,7 +13,7 @@ from enum import Enum
 from types import TracebackType
 from typing import overload
 
-from pypto.pypto_core.ir import Function, Program, Span
+from pypto.pypto_core.ir import Function, Program, Span, Stmt
 
 class IRProperty(Enum):
     """Verifiable IR properties."""
@@ -416,6 +416,24 @@ class PropertyVerifierRegistry:
 def run_verifier(properties: IRPropertySet | None = None) -> Pass:
     """Create a verifier pass. Defaults to get_default_verify_properties() if None."""
 
+class stmt_dependency_analysis:
+    """Statement dependency analysis and InOut-use discipline check (RFC #1026 Phase 1)."""
+
+    class StmtDependencyGraph:
+        """Dataflow dependency graph over a region's top-level statements."""
+
+        stmts: list[Stmt]
+        def get_predecessors(self, stmt: Stmt) -> list[Stmt]:
+            """Return the predecessor stmts of the given stmt in region order."""
+
+    @staticmethod
+    def build_stmt_dependency_graph(region: Stmt) -> StmtDependencyGraph:
+        """Build a dataflow dependency graph over a region's top-level stmts."""
+
+    @staticmethod
+    def check_inout_use_discipline(region: Stmt, program: Program) -> list[Diagnostic]:
+        """Check that no InOut/Out-passed var is read after its mutating call."""
+
 __all__ = [
     "IRProperty",
     "IRPropertySet",
@@ -478,6 +496,7 @@ __all__ = [
     "PassProperties",
     "create_function_pass",
     "create_program_pass",
+    "stmt_dependency_analysis",
 ]
 
 class PassProperties:

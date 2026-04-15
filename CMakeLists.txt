@@ -172,6 +172,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/tpop_chain_normalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
+    src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp
     src/ir/transforms/visitor.cpp
 
