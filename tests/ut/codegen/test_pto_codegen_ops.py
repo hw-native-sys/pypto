@@ -947,5 +947,178 @@ class TestConstDtypeCodegen:
         assert "0.00000000000000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
 
 
+class TestTileScatterUpdateCodegen:
+    """Tests for tile.scatter_update PTO code generation.
+
+    tile.scatter_update(input, index, src) should update the input tile in place.
+    PTO codegen lowers this to nested scf.for loops plus pto.tgetval/pto.tsetval.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_scatter_update_emits_scf_for(self):
+        """tile.scatter_update should generate a scf.for loop over b*s iterations."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[16, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 4], pl.INT32],
+                src_t: pl.Tensor[[8, 32], pl.FP32],
+                dst_t: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
+                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
+                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        assert "scf.for" in mlir, f"scatter_update should generate scf.for loop, got:\n{mlir}"
+
+    def test_tile_scatter_update_emits_tgetval_and_tsetval(self):
+        """tile.scatter_update should emit pto.tgetval (read src element) and pto.tsetval (write to dst)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[16, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 4], pl.INT32],
+                src_t: pl.Tensor[[8, 32], pl.FP32],
+                dst_t: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
+                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
+                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgetval" in mlir, f"scatter_update should emit pto.tgetval, got:\n{mlir}"
+        assert "pto.tsetval" in mlir, f"scatter_update should emit pto.tsetval, got:\n{mlir}"
+
+    def test_tile_scatter_update_loop_bound(self):
+        """scf.for upper bound should equal b*s (here 2*4=8)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[16, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 4], pl.INT32],
+                src_t: pl.Tensor[[8, 32], pl.FP32],
+                dst_t: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
+                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
+                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        # b=2, s=4 → b*s=8; constant "8" should appear as loop upper bound
+        assert "8" in mlir, f"Expected loop bound 8 (b*s=2*4) in MLIR:\n{mlir}"
+
+    def test_tile_scatter_update_index_cast(self):
+        """arith.index_cast should be emitted to convert i32 index to index type."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[16, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 4], pl.INT32],
+                src_t: pl.Tensor[[8, 32], pl.FP32],
+                dst_t: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
+                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
+                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        assert "arith.index_cast" in mlir, f"Expected arith.index_cast in MLIR:\n{mlir}"
+
+    def test_tile_scatter_update_is_inplace(self):
+        """tile.scatter_update should reuse the input tile buffer instead of copying it."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[16, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 4], pl.INT32],
+                src_t: pl.Tensor[[8, 32], pl.FP32],
+                dst_t: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
+                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
+                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
+                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tmov" not in mlir, f"scatter_update should update in place, got:\n{mlir}"
+        assert "result = pto.alloc_tile" not in mlir, (
+            f"scatter_update result should alias input tile, got:\n{mlir}"
+        )
+
+    def test_tile_scatter_update_avoids_runtime_treshape(self):
+        """tile.scatter_update should access original 2D tile buffers directly."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                input_t: pl.Tensor[[32, 32], pl.FP32],
+                index_t: pl.Tensor[[2, 8], pl.INT32],
+                src_t: pl.Tensor[[16, 32], pl.FP32],
+                dst_t: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                input_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(input_t, [0, 0], [32, 32])
+                index_tile: pl.Tile[[2, 8], pl.INT32] = pl.load(index_t, [0, 0], [2, 8])
+                src_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(src_t, [0, 0], [16, 32])
+                result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
+                    input_tile, index_tile, src_tile, dim=-2
+                )
+                return pl.store(result, [0, 0], dst_t)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.treshape" not in mlir, f"scatter_update should not emit runtime treshape, got:\n{mlir}"
+        assert "rows=2, cols=8" in mlir, f"Expected original index tile shape in MLIR:\n{mlir}"
+        assert "rows=16, cols=32" in mlir, f"Expected original src tile shape in MLIR:\n{mlir}"
+        assert "rows=32, cols=32" in mlir, f"Expected original dst tile shape in MLIR:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
