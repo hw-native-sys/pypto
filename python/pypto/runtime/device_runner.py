@@ -526,21 +526,22 @@ def validate_golden(
         expected = golden[name].cpu()
         logger.info(f"Comparing {name}: shape={actual.shape}, dtype={actual.dtype}")
 
-        if actual.numel() > 0:
-            flat_actual = actual.flatten()
-            flat_expected = expected.flatten()
-            n_show = min(10, flat_actual.numel())
-            logger.debug(f"  First {n_show} actual:   {flat_actual[:n_show].tolist()}")
-            logger.debug(f"  First {n_show} expected: {flat_expected[:n_show].tolist()}")
-
         if not torch.allclose(actual, expected, rtol=rtol, atol=atol):
             close_mask = torch.isclose(actual, expected, rtol=rtol, atol=atol)
-            mismatches = (~close_mask).sum().item()
-            total = actual.numel()
+            mismatch_indices = torch.where(~close_mask.flatten())[0]
+            flat_actual = actual.flatten()
+            flat_expected = expected.flatten()
+            n_show = min(20, mismatch_indices.numel())
+            idx = mismatch_indices[:n_show]
+            lines = [
+                f"    [{i.item()}] actual={flat_actual[i].item()}, expected={flat_expected[i].item()}"
+                for i in idx
+            ]
             raise AssertionError(
                 f"Output '{name}' does not match golden.\n"
-                f"Mismatched elements: {mismatches}/{total}\n"
-                f"rtol={rtol}, atol={atol}"
+                f"Mismatched elements: {mismatch_indices.numel()}/{actual.numel()}\n"
+                f"rtol={rtol}, atol={atol}\n"
+                f"First {n_show} mismatches:\n" + "\n".join(lines)
             )
 
         matched = torch.isclose(actual, expected, rtol=rtol, atol=atol).sum().item()
