@@ -204,11 +204,14 @@ class InOutUseDisciplineChecker : public IRVisitor {
 
     // Back-edge modelling: any kill in the body is reachable from iteration N
     // to iteration N+1's start, so the killed var must be dead at body entry
-    // for subsequent iterations' reads to be flagged. Exclude vars that are
-    // re-bound each iteration: iter_args (back-edge re-defines them) and any
-    // var with an AssignStmt LHS inside the body (the assignment re-defines
-    // before any read could see the dead pre-call value).
-    auto exclude = CollectRebindings(op);
+    // for subsequent iterations' reads to be flagged. Exclude only iter_args,
+    // which the loop header explicitly re-defines on each back-edge. Do not
+    // exclude arbitrary AssignStmt LHS vars in the body: such a rebind may be
+    // conditional or may occur after a read earlier in the iteration, and
+    // excluding them would hide real dead-use reports. When a rebind does
+    // execute before any read, `VisitStmt_(AssignStmtPtr)` erases the var
+    // from `dead_` at that point, so no false positive results.
+    auto exclude = CollectIterArgs(op);
     CollectKillsInto(op->body_, dead_, dead_origin_, exclude);
     VisitStmt(op->body_);
     // After the loop completes, iter_args go out of scope. Their dead state
@@ -229,7 +232,7 @@ class InOutUseDisciplineChecker : public IRVisitor {
       if (ia->initValue_) VisitExpr(ia->initValue_);
     }
     // `iter_args_` and `return_vars_` are definitions — skip them.
-    auto exclude = CollectRebindings(op);
+    auto exclude = CollectIterArgs(op);
     CollectKillsInto(op->body_, dead_, dead_origin_, exclude);
     VisitStmt(op->body_);
     for (const auto& ia : op->iter_args_) {
@@ -241,36 +244,16 @@ class InOutUseDisciplineChecker : public IRVisitor {
   }
 
  private:
-  /// Collect vars that are re-bound each iteration of the given loop:
-  ///   - iter_args (re-defined via the back-edge)
-  ///   - any var that appears as an AssignStmt LHS in the body
-  /// These vars should NOT be added to the back-edge dead set, because the
-  /// re-binding gives reads in the next iteration a fresh value.
+  /// Collect the loop's iter_args — vars re-defined by the loop header on each
+  /// back-edge. These must be excluded from the back-edge dead set because the
+  /// header re-binds them before any body statement can observe a dead value.
   template <typename LoopPtr>
-  std::unordered_set<const Var*> CollectRebindings(const LoopPtr& op) const {
+  std::unordered_set<const Var*> CollectIterArgs(const LoopPtr& op) const {
     std::unordered_set<const Var*> result;
     for (const auto& ia : op->iter_args_) {
       if (ia) result.insert(ia.get());
     }
-    if (op->body_) CollectAssignedVars(op->body_, result);
     return result;
-  }
-
-  /// Walk a subtree and add every AssignStmt's LHS var to `out`.
-  void CollectAssignedVars(const StmtPtr& stmt, std::unordered_set<const Var*>& out) const {
-    class Walker : public IRVisitor {
-     public:
-      explicit Walker(std::unordered_set<const Var*>& out) : out_(out) {}
-      void VisitStmt_(const AssignStmtPtr& op) override {
-        if (op->var_) out_.insert(op->var_.get());
-        IRVisitor::VisitStmt_(op);
-      }
-
-     private:
-      std::unordered_set<const Var*>& out_;
-    };
-    Walker w(out);
-    w.VisitStmt(stmt);
   }
 
   /// Pre-scan a subtree and merge every var it would mark InOut/Out-dead into
