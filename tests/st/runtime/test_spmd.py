@@ -19,6 +19,7 @@ Tests cover:
   - Three sequential SPMD submissions (add, mul, sub pipeline)
   - Escalating core_num dispatch (4 -> 8 -> 12 -> 16 -> 24 blocks)
   - MixedKernel SPMD: matmul + bias add (cube + vector → AIC + AIV split)
+  - sync_start=True: single submission and mixed (baseline + sync_start) submissions
 """
 
 from typing import Any
@@ -279,6 +280,90 @@ class SPMDMixedKernelProgram:
         return out
 
 
+# sync_start test: mirrors simpler spmd_sync_start test pattern
+# Tasks: (core_num, base_block_offset) – T0 is baseline, T1/T2/T3 use sync_start=True
+SYNC_TASKS = [(2, 0), (8, 2), (2, 10), (12, 12)]
+SYNC_TILE = 128
+SYNC_TOTAL_BLOCKS = sum(cn for cn, _ in SYNC_TASKS)  # 24
+SYNC_TOTAL_ROWS = SYNC_TOTAL_BLOCKS * SYNC_TILE  # 3072
+
+
+@pl.program
+class SPMDSyncStartProgram:
+    """Single SPMD submission with sync_start=True: elementwise add over 4 blocks."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def spmd_add(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        b: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        block_idx = pl.tile.get_block_idx()
+        offset = block_idx * 128
+        tile_a = pl.load(a, [offset, 0], [128, 128])
+        tile_b = pl.load(b, [offset, 0], [128, 128])
+        tile_c = pl.add(tile_a, tile_b)
+        out = pl.store(tile_c, [offset, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        b: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.spmd(core_num=4, sync_start=True):
+            out = self.spmd_add(a, b, out)
+        return out
+
+
+@pl.program
+class SPMDSyncStartMixedProgram:
+    """4 SPMD submissions mirroring the simpler spmd_sync_start test.
+
+    T0: core_num=2,  base=0,  sync_start=False  (baseline, no sync)
+    T1: core_num=8,  base=2,  sync_start=True
+    T2: core_num=2,  base=10, sync_start=True
+    T3: core_num=12, base=12, sync_start=True
+    Total: 24 blocks, output [3072, 128]
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_add(
+        self,
+        a: pl.Tensor[[3072, 128], pl.FP32],
+        b: pl.Tensor[[3072, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[3072, 128], pl.FP32]],
+        base_offset: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[3072, 128], pl.FP32]:
+        block_idx = pl.tile.get_block_idx()
+        offset = (block_idx + base_offset) * 128
+        tile_a = pl.load(a, [offset, 0], [128, 128])
+        tile_b = pl.load(b, [offset, 0], [128, 128])
+        tile_c = pl.add(tile_a, tile_b)
+        out = pl.store(tile_c, [offset, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[3072, 128], pl.FP32],
+        b: pl.Tensor[[3072, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[3072, 128], pl.FP32]],
+    ) -> pl.Tensor[[3072, 128], pl.FP32]:
+        with pl.spmd(core_num=2):  # T0: baseline
+            out = self.kernel_add(a, b, out, 0)
+        with pl.spmd(core_num=8, sync_start=True):  # T1
+            out = self.kernel_add(a, b, out, 2)
+        with pl.spmd(core_num=2, sync_start=True):  # T2
+            out = self.kernel_add(a, b, out, 10)
+        with pl.spmd(core_num=12, sync_start=True):  # T3
+            out = self.kernel_add(a, b, out, 12)
+        return out
+
+
 # --- Test Cases ---
 
 
@@ -409,6 +494,50 @@ class SPMDMixedKernelTestCase(_BaseSPMDTestCase):
         tensors["out"][:] = torch.matmul(tensors["a"], tensors["b"]) + tensors["bias"]
 
 
+class SPMDSyncStartSingleTestCase(_BaseSPMDTestCase):
+    """SPMD single submit with sync_start=True: elementwise add, 4 blocks × [128, 128]."""
+
+    def get_name(self) -> str:
+        return "spmd_sync_start_single_512x128"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [TOTAL_ROWS, TILE_COLS], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDSyncStartProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["a"] + tensors["b"]
+
+
+class SPMDSyncStartMixedTestCase(_BaseSPMDTestCase):
+    """4 SPMD submissions: T0 baseline + T1/T2/T3 with sync_start=True.
+
+    Mirrors the simpler spmd_sync_start test: tasks (2, 0), (8, 2), (2, 10), (12, 12).
+    All compute a + b over non-overlapping row slices of a [3072, 128] tensor.
+    """
+
+    def get_name(self) -> str:
+        return "spmd_sync_start_mixed_3072x128"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [SYNC_TOTAL_ROWS, SYNC_TILE], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [SYNC_TOTAL_ROWS, SYNC_TILE], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [SYNC_TOTAL_ROWS, SYNC_TILE], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDSyncStartMixedProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["a"] + tensors["b"]
+
+
 # --- Tests ---
 
 
@@ -443,6 +572,14 @@ class TestSPMDOperations:
     def test_spmd_mixed_kernel(self, test_runner):
         """SPMD MixedKernel: matmul + bias (cube + vector → AIC + AIV split)."""
         self._run_case(test_runner, SPMDMixedKernelTestCase())
+
+    def test_spmd_sync_start_single(self, test_runner):
+        """Single SPMD with sync_start=True: verifies the flag is accepted and produces correct output."""
+        self._run_case(test_runner, SPMDSyncStartSingleTestCase())
+
+    def test_spmd_sync_start_mixed(self, test_runner):
+        """4 submissions: T0 baseline + T1/T2/T3 with sync_start=True, mirroring the simpler sync_start test."""
+        self._run_case(test_runner, SPMDSyncStartMixedTestCase())
 
 
 if __name__ == "__main__":
