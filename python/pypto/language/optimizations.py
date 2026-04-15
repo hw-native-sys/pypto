@@ -43,9 +43,13 @@ class Optimization:
 class Split(Optimization):
     """Cross-core data-transfer split hint.
 
-    Consumed by the ``ExpandMixedKernel`` pass via the outlined function's
-    ``SplitMode`` metadata. Lowers the enclosing ``pl.at`` scope to
-    ``ScopeKind::InCore`` with ``split_=mode``.
+    Sets ``ScopeStmt::split_`` on the enclosing ``pl.at`` scope; that metadata
+    is consumed by the ``ExpandMixedKernel`` pass via the outlined function's
+    ``SplitMode``. The split hint is independent of the resulting scope kind:
+
+    - ``optimizations=[pl.split(mode)]`` → ``ScopeKind::InCore`` (split metadata).
+    - ``optimizations=[pl.auto_chunk, pl.split(mode)]`` → ``ScopeKind::AutoInCore``
+      (split metadata still attached).
 
     Args:
         mode: Split mode (``SplitMode.UP_DOWN`` or ``SplitMode.LEFT_RIGHT``).
@@ -72,11 +76,20 @@ def split(mode: SplitMode) -> Split:
     """Create a ``Split`` optimization entry.
 
     Args:
-        mode: Split mode (``SplitMode.UP_DOWN`` or ``SplitMode.LEFT_RIGHT``).
+        mode: Split mode. Must be ``SplitMode.UP_DOWN`` or
+            ``SplitMode.LEFT_RIGHT``. ``SplitMode.NONE`` is rejected — omit
+            the entry instead to indicate "no split".
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
+
+    Raises:
+        ValueError: if ``mode`` is ``SplitMode.NONE``.
     """
+    if mode == SplitMode.NONE:
+        raise ValueError(
+            "pl.split(pl.SplitMode.NONE) is not supported; omit the entry instead to indicate 'no split'."
+        )
     return Split(mode=mode)
 
 

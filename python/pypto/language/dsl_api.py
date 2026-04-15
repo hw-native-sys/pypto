@@ -787,9 +787,11 @@ def at(
     Args:
         level: Target hierarchy level (e.g. pl.Level.HOST, pl.Level.CORE_GROUP).
         role: Function role (Orchestrator or Worker). Default: None.
-        optimizations: Optional list of optimization entries. Each entry is
-            an instance of :class:`Optimization` (e.g. ``pl.split(mode)`` or
-            ``pl.auto_chunk``). Entries are independent and may be combined.
+        optimizations: Optional list literal of optimization entries. Each
+            entry must be one of ``pl.auto_chunk`` or ``pl.split(mode)`` —
+            written inline at the call site, since the DSL parser inspects
+            the AST and does not accept dynamically built variables here.
+            Entries are independent and may be combined.
         optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
             ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
         split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.

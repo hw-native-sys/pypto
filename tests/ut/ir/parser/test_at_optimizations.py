@@ -347,6 +347,18 @@ def test_split_none_in_list_errors():
             return y
 
 
+def test_split_factory_rejects_none_at_runtime():
+    """pl.split() also rejects SplitMode.NONE at construction time.
+
+    The parser-level check above catches DSL source. This factory-level
+    check guards runtime construction (e.g., in scripts that build Split
+    instances directly), per the project rule that DSL helpers should
+    validate user input rather than relying on backend C++ checks.
+    """
+    with pytest.raises(ValueError, match=r"SplitMode\.NONE"):
+        pl.split(pl.SplitMode.NONE)
+
+
 def test_auto_chunk_on_non_core_group_errors():
     """pl.auto_chunk is only valid at CORE_GROUP."""
     with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):

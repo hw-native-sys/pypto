@@ -2031,7 +2031,9 @@ class ASTParser:
 
         if requests_auto_chunk and not is_core_group:
             raise ParserSyntaxError(
-                "pl.auto_chunk is only supported with level=pl.Level.CORE_GROUP",
+                "auto-chunk optimization is only supported with level=pl.Level.CORE_GROUP "
+                "(via optimizations=[pl.auto_chunk] or the deprecated "
+                "optimization=pl.chunked_loop_optimizer)",
                 span=span,
                 hint="Use pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]) "
                 "for an AutoInCore scope.",
@@ -2039,7 +2041,8 @@ class ASTParser:
 
         if split_mode is not None and not is_core_group:
             raise ParserSyntaxError(
-                "pl.split(...) is only supported with level=pl.Level.CORE_GROUP",
+                "split mode is only supported with level=pl.Level.CORE_GROUP "
+                "(via optimizations=[pl.split(...)] or the deprecated split= kwarg)",
                 span=span,
                 hint="Use pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]).",
             )
