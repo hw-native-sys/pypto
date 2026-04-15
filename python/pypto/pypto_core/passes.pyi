@@ -427,12 +427,20 @@ class stmt_dependency_analysis:
             """Return the predecessor stmts of the given stmt in region order."""
 
     @staticmethod
-    def build_stmt_dependency_graph(region: Stmt) -> StmtDependencyGraph:
-        """Build a dataflow dependency graph over a region's top-level stmts."""
+    def build_stmt_dependency_graph(region: Stmt, program: Program | None = None) -> StmtDependencyGraph:
+        """Build a dataflow dependency graph over a region's top-level stmts.
+
+        When `program` is provided, the InOut-use discipline is checked first
+        and any violation raises `pypto.Error` (VerificationError).
+        """
 
     @staticmethod
-    def check_inout_use_discipline(region: Stmt, program: Program) -> list[Diagnostic]:
-        """Check that no InOut/Out-passed var is read after its mutating call."""
+    def check_inout_use_discipline(region: Stmt, program: Program) -> None:
+        """Enforce the InOut-use discipline.
+
+        Raises `pypto.Error` (VerificationError) on any violation so
+        compilation halts rather than proceeding with unsound IR.
+        """
 
 __all__ = [
     "IRProperty",

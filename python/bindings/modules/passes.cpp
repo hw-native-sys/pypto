@@ -454,10 +454,15 @@ void BindPass(nb::module_& m) {
           nb::arg("stmt"), "Return the predecessor stmts of the given stmt in region order");
 
   dep_analysis.def("build_stmt_dependency_graph", &stmt_dep::BuildStmtDependencyGraph, nb::arg("region"),
-                   "Build a dataflow dependency graph over a region's top-level stmts");
+                   nb::arg("program").none() = nb::none(),
+                   "Build a dataflow dependency graph over a region's top-level stmts. "
+                   "When `program` is provided, the InOut-use discipline is checked first "
+                   "and any violation raises pypto.Error (VerificationError).");
 
   dep_analysis.def("check_inout_use_discipline", &stmt_dep::CheckInOutUseDiscipline, nb::arg("region"),
-                   nb::arg("program"), "Check that no InOut/Out-passed var is read after its mutating call");
+                   nb::arg("program"),
+                   "Enforce the InOut-use discipline; raises pypto.Error (VerificationError) "
+                   "on any violation so compilation halts rather than proceeding with unsound IR.");
 }
 
 }  // namespace python

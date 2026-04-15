@@ -170,8 +170,15 @@ class TestStmtDependencyGraph:
 # =============================================================================
 
 
+def _assert_violation(body, program, expected_var: str) -> None:
+    """The discipline check must raise, and the error message must name the var."""
+    with pytest.raises(Exception, match="InOutUseDiscipline") as excinfo:
+        dep_analysis.check_inout_use_discipline(body, program)
+    assert f"'{expected_var}'" in str(excinfo.value)
+
+
 class TestInOutUseDiscipline:
-    """Tests for `check_inout_use_discipline`."""
+    """Tests for `check_inout_use_discipline` — violations raise and halt compilation."""
 
     def test_clean_when_return_value_is_used(self):
         """Well-formed: reads after the call go through the returned var."""
@@ -190,11 +197,11 @@ class TestInOutUseDiscipline:
                 return y
 
         body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert diags == []
+        # No exception → clean. Explicit `is None` for pyright.
+        assert dep_analysis.check_inout_use_discipline(body, P) is None
 
     def test_rejects_post_inout_read(self):
-        """A read of the InOut-passed var after the call is flagged."""
+        """A read of the InOut-passed var after the call halts compilation."""
 
         @pl.program
         class P:
@@ -209,12 +216,7 @@ class TestInOutUseDiscipline:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # VIOLATION
                 return y
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert len(diags) >= 1
-        assert all(d.severity == passes.DiagnosticSeverity.Error for d in diags)
-        assert all(d.rule_name == "InOutUseDiscipline" for d in diags)
-        assert all("'x'" in d.message for d in diags)
+        _assert_violation(_seq_body(P, "main"), P, "x")
 
     def test_out_direction_treated_like_inout(self):
         """Out params cause the same 'dead for read' behavior as InOut."""
@@ -232,13 +234,10 @@ class TestInOutUseDiscipline:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # VIOLATION: Out is like InOut
                 return y
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert len(diags) >= 1
-        assert all("'x'" in d.message for d in diags)
+        _assert_violation(_seq_body(P, "main"), P, "x")
 
     def test_rejects_read_in_nested_if_branch(self):
-        """A read in an `if` body after the call is still reachable → violation."""
+        """A read in an `if` body after the call is still reachable → raises."""
 
         @pl.program
         class P:
@@ -256,13 +255,10 @@ class TestInOutUseDiscipline:
                     y: pl.Tensor[[64], pl.FP32] = pl.mul(T_new, T_new)
                 return y
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert len(diags) >= 1
-        assert all("'x'" in d.message for d in diags)
+        _assert_violation(_seq_body(P, "main"), P, "x")
 
     def test_rejects_read_in_for_body(self):
-        """A read inside a for body after the call is a violation."""
+        """A read inside a for body after the call raises."""
 
         @pl.program
         class P:
@@ -274,17 +270,20 @@ class TestInOutUseDiscipline:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 T_new: pl.Tensor[[64], pl.FP32] = self.mutate(x)
-                for i, (acc,) in pl.range(0, 4, 1, init_values=(T_new,)):
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(T_new,)):  # noqa: F841
                     acc = pl.yield_(pl.add(acc, x))  # VIOLATION reading x
                 return acc
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert len(diags) >= 1
-        assert all("'x'" in d.message for d in diags)
+        _assert_violation(_seq_body(P, "main"), P, "x")
 
     def test_sibling_if_branch_does_not_bleed(self):
-        """Call in then-branch; read of same var in else-branch is NOT a violation."""
+        """Call in then-branch; read of same var in else-branch is NOT a violation.
+
+        Without branch-scoping, the then-branch's InOut mark would persist when
+        the visitor enters the else-branch and the pl.add(x, x) in the else
+        would be flagged. With scoping, the else sees a clean dead-set.
+        The return goes through `y`, not `x`, so no post-if read of x occurs.
+        """
 
         @pl.program
         class P:
@@ -294,24 +293,20 @@ class TestInOutUseDiscipline:
                 return r
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+                cond: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
                 if cond:
-                    y_then: pl.Tensor[[64], pl.FP32] = self.mutate(x)  # noqa: F841
+                    a: pl.Tensor[[64], pl.FP32] = self.mutate(x)  # noqa: F841
                 else:
-                    # x is only "dead" in the then-branch; reading here is OK.
-                    y_else: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # noqa: F841
-                # At runtime, only one branch executed; this read is not
-                # guaranteed to follow the mutating call.
-                return x
+                    # x was never passed InOut on this CFG path; safe to read.
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # noqa: F841
+                return y
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        # The `return x` after the if is reachable from the mutating call on
-        # the then-path, so it IS a violation. But the read inside the
-        # else-branch must not be flagged: before the if-branch-scoping fix we
-        # saw extra diagnostics for the else-branch read; with scoping, only
-        # the post-if `return x` is flagged.
-        assert len(diags) <= 1
+        assert dep_analysis.check_inout_use_discipline(_seq_body(P, "main"), P) is None
 
     def test_self_read_in_call_args_is_allowed(self):
         """`f(T, inout=T)` — reading T as an arg on the same call is legal."""
@@ -334,17 +329,11 @@ class TestInOutUseDiscipline:
                 T_new: pl.Tensor[[64], pl.FP32] = self.mutate(x, x)
                 return T_new
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert diags == []
+        assert dep_analysis.check_inout_use_discipline(_seq_body(P, "main"), P) is None
 
     def test_builtin_ops_do_not_kill_vars(self):
         """Built-in ops (tile.*/tensor.*) don't contribute to the dead set."""
 
-        # A program that only uses built-in ops — no user function with InOut
-        # params. The validator must accept it cleanly, even if the same tensor
-        # appears on multiple stmts. Mode B (physical aliasing) is out of scope
-        # for this analysis.
         @pl.program
         class P:
             @pl.function
@@ -354,9 +343,26 @@ class TestInOutUseDiscipline:
                 c: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
                 return c
 
-        body = _seq_body(P, "main")
-        diags = dep_analysis.check_inout_use_discipline(body, P)
-        assert diags == []
+        assert dep_analysis.check_inout_use_discipline(_seq_body(P, "main"), P) is None
+
+    def test_build_graph_raises_on_violation(self):
+        """`build_stmt_dependency_graph` must also abort on discipline violations."""
+
+        @pl.program
+        class P:
+            @pl.function
+            def mutate(self, T: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = pl.add(T, T)
+                return r
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                T_new: pl.Tensor[[64], pl.FP32] = self.mutate(x)  # noqa: F841
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # VIOLATION
+                return y
+
+        with pytest.raises(Exception, match="InOutUseDiscipline"):
+            dep_analysis.build_stmt_dependency_graph(_seq_body(P, "main"), P)
 
 
 if __name__ == "__main__":

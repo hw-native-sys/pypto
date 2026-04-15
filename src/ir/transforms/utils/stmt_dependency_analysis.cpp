@@ -27,6 +27,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/verifier/property_verifier_registry.h"
 
 namespace pypto {
 namespace ir {
@@ -36,7 +37,9 @@ namespace stmt_dep {
 // BuildStmtDependencyGraph
 // ---------------------------------------------------------------------------
 
-StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region) {
+StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program) {
+  if (program) CheckInOutUseDiscipline(region, program);
+
   StmtDependencyGraph graph;
   if (!region) return graph;
 
@@ -172,11 +175,15 @@ class InOutUseDisciplineChecker : public IRVisitor {
 
 }  // namespace
 
-std::vector<Diagnostic> CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program) {
-  if (!region) return {};
+void CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program) {
+  if (!region) return;
   InOutUseDisciplineChecker checker(program);
   checker.VisitStmt(region);
-  return checker.TakeDiagnostics();
+  auto diagnostics = checker.TakeDiagnostics();
+  if (diagnostics.empty()) return;
+
+  std::string report = PropertyVerifierRegistry::GenerateReport(diagnostics);
+  throw VerificationError(report, std::move(diagnostics));
 }
 
 }  // namespace stmt_dep

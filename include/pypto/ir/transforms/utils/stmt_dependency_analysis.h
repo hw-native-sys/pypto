@@ -16,7 +16,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 
@@ -50,22 +49,6 @@ struct StmtDependencyGraph {
 };
 
 /**
- * @brief Build the statement dependency graph for a region.
- *
- * Pure dataflow analysis over SSA def-use. Does not check the InOut-use
- * discipline; callers that need soundness should call CheckInOutUseDiscipline
- * first and refuse to proceed on any violation.
- *
- * Complexity: O(N * avg_fanout) where N is the number of statements in the
- * region — a single pass with per-stmt use/def collection.
- *
- * @param region The region (typically a SeqStmts) to analyze. If `region` is
- *               not a SeqStmts, the graph has a single node and no edges.
- * @return Dependency graph with nodes and predecessor edges.
- */
-StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region);
-
-/**
  * @brief Check that the InOut-use discipline (RFC #1026) holds over a region.
  *
  * The discipline: for any user-function call that passes variable `v` as an
@@ -80,12 +63,38 @@ StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region);
  * here; their memory mutations are handled separately (Mode B in RFC #1026)
  * and are out of scope for this dataflow analysis.
  *
+ * Aborts compilation on any violation: a violating region breaks the
+ * dataflow-soundness precondition that `BuildStmtDependencyGraph` relies on,
+ * so any downstream analysis would silently return wrong answers. Throwing
+ * is strictly preferable to returning unsound results.
+ *
  * @param region The region to validate (typically a SeqStmts).
  * @param program The program — used to resolve Call::op_ to a Function and
  *                look up param_directions_.
- * @return A list of Diagnostics; empty iff the discipline holds.
+ * @throws pypto::VerificationError if any violation is found; the error
+ *         carries the full set of diagnostics with precise source locations.
  */
-std::vector<Diagnostic> CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program);
+void CheckInOutUseDiscipline(const StmtPtr& region, const ProgramPtr& program);
+
+/**
+ * @brief Build the statement dependency graph for a region.
+ *
+ * Dataflow analysis over SSA def-use. Runs `CheckInOutUseDiscipline` first
+ * (when a program is supplied) so callers always receive a sound graph.
+ *
+ * Complexity: O(N * avg_fanout) where N is the number of statements in the
+ * region — a single pass with per-stmt use/def collection, in addition to
+ * the linear discipline walk.
+ *
+ * @param region The region (typically a SeqStmts) to analyze. If `region` is
+ *               not a SeqStmts, the graph has a single node and no edges.
+ * @param program The program used by the discipline check to resolve callees.
+ *                If null, the discipline check is skipped — useful only for
+ *                self-contained analyses where no user-function calls exist.
+ * @return Dependency graph with nodes and predecessor edges.
+ * @throws pypto::VerificationError if the discipline check rejects the region.
+ */
+StmtDependencyGraph BuildStmtDependencyGraph(const StmtPtr& region, const ProgramPtr& program = nullptr);
 
 }  // namespace stmt_dep
 }  // namespace ir
