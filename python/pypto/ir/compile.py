@@ -90,7 +90,7 @@ def compile(  # noqa: PLR0913
         >>> str(compiled)               # backward-compat: returns output dir path
         >>> compiled(a, b, c)           # in-place style
         >>> c = compiled(a, b)          # return style
-        >>> compiled(a, b, c, device=1) # specify device at call time
+        >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
     _backend_core.set_backend_type(backend_type)
 

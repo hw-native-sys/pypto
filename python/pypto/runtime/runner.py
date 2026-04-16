@@ -616,11 +616,22 @@ def execute_compiled(
 
     chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
-    # Build orch args directly from user tensors
+    # Build orch args directly from user tensors.
+    # Tensors must be CPU and contiguous so that device execution writes
+    # results back into the caller's buffers (in-place semantics).
     orch_args = ChipStorageTaskArgs()
-    for tensor in tensors:
-        tensor_contiguous = tensor.cpu().contiguous()
-        orch_args.add_tensor(make_tensor_arg(tensor_contiguous))
+    for i, tensor in enumerate(tensors):
+        if not tensor.is_contiguous():
+            raise ValueError(
+                f"Tensor at position {i} is not contiguous. "
+                f"Call .contiguous() before passing to execute_compiled()."
+            )
+        if tensor.device.type != "cpu":
+            raise ValueError(
+                f"Tensor at position {i} is on {tensor.device}, expected CPU. "
+                f"Call .cpu() before passing to execute_compiled()."
+            )
+        orch_args.add_tensor(make_tensor_arg(tensor))
 
     # Snapshot profiling state before execution
     if runtime_profiling:

@@ -16,13 +16,6 @@ runs it with test tensors, and compares the output to the golden reference.
 import pytest
 import torch
 from pypto.debug import torch_codegen
-from pypto.runtime.tensor_spec import TensorSpec
-
-
-def _build_tensors(specs: list[TensorSpec]) -> dict[str, torch.Tensor]:
-    """Initialize tensors from TensorSpec list."""
-    return {spec.name: spec.create_tensor() for spec in specs}
-
 
 # ---------------------------------------------------------------------------
 # Paged attention (static shapes, config tensor)
@@ -33,7 +26,7 @@ def test_paged_attention_codegen_vs_golden():
     """Torch codegen of paged attention should match the golden reference."""
     from examples.models.paged_attention import (  # noqa: PLC0415
         build_paged_attention_program,
-        build_tensor_specs,
+        build_tensors,
         golden,
     )
 
@@ -49,7 +42,8 @@ def test_paged_attention_codegen_vs_golden():
     )
     code = torch_codegen(program, check_shapes=True)
 
-    specs = build_tensor_specs(
+    torch.manual_seed(42)
+    query, key_cache, value_cache, block_table, context_lens, out, config = build_tensors(
         batch=batch,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -58,9 +52,15 @@ def test_paged_attention_codegen_vs_golden():
         context_len=context_len,
         scale=scale,
     )
-
-    torch.manual_seed(42)
-    tensors = _build_tensors(specs)
+    tensors = {
+        "query": query,
+        "key_cache": key_cache,
+        "value_cache": value_cache,
+        "block_table": block_table,
+        "context_lens": context_lens,
+        "out": out,
+        "config": config,
+    }
 
     golden_tensors = {k: v.clone() for k, v in tensors.items()}
     golden(golden_tensors)
@@ -93,7 +93,7 @@ def test_dynamic_paged_attention_codegen_vs_golden():
     """Torch codegen of dynamic paged attention should match the golden reference."""
     from examples.models.paged_attention_dynamic import (  # noqa: PLC0415
         build_dynamic_paged_attention_program,
-        build_tensor_specs,
+        build_tensors,
         golden,
     )
 
@@ -107,7 +107,8 @@ def test_dynamic_paged_attention_codegen_vs_golden():
     )
     code = torch_codegen(program, check_shapes=True)
 
-    specs = build_tensor_specs(
+    torch.manual_seed(42)
+    query, key_cache, value_cache, block_table, context_lens, out = build_tensors(
         batch=batch,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -115,9 +116,14 @@ def test_dynamic_paged_attention_codegen_vs_golden():
         max_num_blocks_per_req=max_num_blocks_per_req,
         context_len=context_len,
     )
-
-    torch.manual_seed(42)
-    tensors = _build_tensors(specs)
+    tensors = {
+        "query": query,
+        "key_cache": key_cache,
+        "value_cache": value_cache,
+        "block_table": block_table,
+        "context_lens": context_lens,
+        "out": out,
+    }
 
     golden_tensors = {k: v.clone() for k, v in tensors.items()}
     golden(golden_tensors)

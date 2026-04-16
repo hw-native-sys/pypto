@@ -11,28 +11,17 @@
 PyPTO runtime module.
 
 Provides utilities for compiling a ``@pl.program`` and running it on an
-Ascend NPU (or simulator) with result validation against a user-supplied
-golden reference function.
+Ascend NPU (or simulator).
 
 Example::
 
     import torch
-    from pypto.runtime import run, RunConfig, TensorSpec
+    from pypto.runtime import run, RunConfig
 
-    def golden(tensors, params):
-        tensors["out"][:] = tensors["a"] + tensors["b"]
-
-    result = run(
-        program=MyProgram,
-        tensor_specs=[
-            TensorSpec("a",   [128, 128], torch.float32, init_value=2.0),
-            TensorSpec("b",   [128, 128], torch.float32, init_value=3.0),
-            TensorSpec("out", [128, 128], torch.float32, is_output=True),
-        ],
-        golden=golden,
-        config=RunConfig(platform="a2a3sim"),
-    )
-    print(result)
+    a = torch.full((128, 128), 2.0)
+    b = torch.full((128, 128), 3.0)
+    c = torch.zeros(128, 128)
+    compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
 from .runner import RunConfig, RunResult, compile_program, execute_compiled, run

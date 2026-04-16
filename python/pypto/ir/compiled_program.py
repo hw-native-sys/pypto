@@ -49,6 +49,9 @@ _DATATYPE_TO_TORCH: dict[str, torch.dtype] = {
     "int32": torch.int32,
     "int64": torch.int64,
     "uint8": torch.uint8,
+    "uint16": torch.uint16,
+    "uint32": torch.uint32,
+    "uint64": torch.uint64,
     "bool": torch.bool,
     "index": torch.int64,
 }
@@ -103,13 +106,17 @@ def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int],
     for i, (param, direction) in enumerate(zip(orch_func.params, orch_func.param_directions, strict=True)):
         param_type = param.type
         shape: list[int] | None = None
-        dtype = DataType.INT64  # fallback for unknown types
 
         if isinstance(param_type, ShapedType):
             dtype = param_type.dtype
             shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
         elif isinstance(param_type, ScalarType):
             dtype = param_type.dtype
+        else:
+            raise TypeError(
+                f"Unsupported parameter type for {param.name_hint!r}: {type(param_type).__name__}. "
+                f"Expected ShapedType or ScalarType."
+            )
 
         param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
 
