@@ -43,6 +43,11 @@ namespace {
 
 constexpr const char* kUnrollFactorAttr = "unroll_factor";
 
+/// Legacy attribute name once emitted by this pass (RFC #1048 removed it).
+/// Stripped defensively when seen on input so legacy IR (e.g. deserialized
+/// from an older compiler) doesn't carry the now-meaningless marker forward.
+constexpr const char* kLegacyUnrollReplicatedAttr = "unroll_replicated";
+
 /// Extract a compile-time integer from a ConstInt or Neg(ConstInt) expression.
 int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(expr)) {
@@ -92,12 +97,13 @@ ExprPtr OffsetIndex(const ExprPtr& base, int64_t offset_val, const Span& span) {
   return MakeAdd(base, MakeConstIndex(offset_val, span), span);
 }
 
-/// Copy `original` while stripping `kUnrollFactorAttr`.
+/// Copy `original` while stripping `kUnrollFactorAttr` and the legacy
+/// `kLegacyUnrollReplicatedAttr` (in case it survived from older serialized IR).
 Attrs StripUnrollFactorAttr(const Attrs& original) {
   Attrs out;
   out.reserve(original.size());
   for (const auto& [k, v] : original) {
-    if (k == kUnrollFactorAttr) continue;
+    if (k == kUnrollFactorAttr || k == kLegacyUnrollReplicatedAttr) continue;
     out.emplace_back(k, v);
   }
   return out;

@@ -116,7 +116,9 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                # Store placed before load in source — the pass should reorder.
+                # Interleaved load/store — the second load (`tb`) appears after
+                # the first store (`ta`), so the pass should pull `tb` up ahead
+                # of that store.
                 ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                 pl.tile.store(ta, [0, 0], out)
                 tb: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
