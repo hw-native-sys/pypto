@@ -187,11 +187,6 @@ def _make_range_iterator(
             raise ValueError(f"{func_name}() unroll factor must be a positive integer, got {unroll_factor!r}")
         if chunk is not None:
             raise ValueError(f"{func_name}() unroll= and chunk= are mutually exclusive")
-        if init_values is not None:
-            raise ValueError(
-                f"{func_name}() unroll= cannot be combined with init_values= "
-                "(partial unroll does not yet support loop-carried state)"
-            )
     kwargs = {
         "init_values": init_values,
         "chunk": chunk,

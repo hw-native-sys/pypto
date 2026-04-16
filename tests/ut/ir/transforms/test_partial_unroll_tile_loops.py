@@ -219,25 +219,146 @@ class TestPartialUnrollMechanics:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_iter_args_rejected_with_clear_message(self):
-        """Loops with iter_args must be rejected — partial unroll cannot handle loop-carried state.
+    def test_iter_args_clean_divide_threads_state_through_clones(self):
+        """Loop-carried scalar threads sequentially through 4 replicated clones.
 
-        ``x = pl.add(x, 1.0)`` inside the loop produces iter_args only after
-        ``ConvertToSSA`` lifts the reassignment; run that first so the pass
-        actually sees the iter_args it must reject."""
+        Each clone consumes the previous clone's yielded value as its iter_arg
+        substitute; the last clone's yield feeds the outer loop's next iteration."""
 
         @pl.program
         class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 8, 1, attrs={"unroll_factor": 4}):
-                    x = pl.add(x, 1.0)
-                return x
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                for i, (a,) in pl.range(0, 8, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    r = pl.yield_(b)
+                return r
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            ssa_program = passes.convert_to_ssa()(Before)
-            with pytest.raises(ValueError, match="iter_args"):
-                passes.partial_unroll_tile_loops()(ssa_program)
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                for i, (a,) in pl.range(0, 8, 4, init_values=(s0,), attrs={"unroll_replicated": 4}):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    b_1: pl.Scalar[pl.INDEX] = b + (i + 1)
+                    b_2: pl.Scalar[pl.INDEX] = b_1 + (i + 2)
+                    b_3: pl.Scalar[pl.INDEX] = b_2 + (i + 3)
+                    r = pl.yield_(b_3)
+                return r
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_iter_args_with_remainder_forwards_state_to_tail(self):
+        """Main loop's return_var seeds the tail's iter_arg; tail's return_var replaces
+        the original loop's return_var so downstream uses remain valid."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                for i, (a,) in pl.range(0, 10, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    r = pl.yield_(b)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                for i, (a,) in pl.range(0, 8, 4, init_values=(s0,), attrs={"unroll_replicated": 4}):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    b_1: pl.Scalar[pl.INDEX] = b + (i + 1)
+                    b_2: pl.Scalar[pl.INDEX] = b_1 + (i + 2)
+                    b_3: pl.Scalar[pl.INDEX] = b_2 + (i + 3)
+                    r_main = pl.yield_(b_3)
+                for _tail_iter_2, (a,) in pl.range(
+                    0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 2}
+                ):
+                    b_4: pl.Scalar[pl.INDEX] = a + 8
+                    b_5: pl.Scalar[pl.INDEX] = b_4 + 9
+                    r = pl.yield_(b_5)
+                return r
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_iter_args_dynamic_cascade_threads_through_every_level(self):
+        """Dynamic cascade: every IfStmt carries return_vars matching the iter_arg
+        types, every branch ends with a YieldStmt, and the innermost else yields
+        the main-loop return_var so ``rem == 0`` is a no-op fall-through."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                s0: pl.Scalar[pl.INDEX],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                for i, (a,) in pl.range(0, n, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    r = pl.yield_(b)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                s0: pl.Scalar[pl.INDEX],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                unroll_main_end: pl.Scalar[pl.INDEX] = 0 + (n - 0) // 4 * 4
+                for i, (a,) in pl.range(
+                    0, unroll_main_end, 4, init_values=(s0,), attrs={"unroll_replicated": 4}
+                ):
+                    b: pl.Scalar[pl.INDEX] = a + i
+                    b_1: pl.Scalar[pl.INDEX] = b + (i + 1)
+                    b_2: pl.Scalar[pl.INDEX] = b_1 + (i + 2)
+                    b_3: pl.Scalar[pl.INDEX] = b_2 + (i + 3)
+                    r_main = pl.yield_(b_3)
+                unroll_rem: pl.Scalar[pl.INDEX] = n - unroll_main_end
+                # Each IfStmt level carries its own return_vars and yield — the
+                # cascade is nested (not elif/else), because every inner IfStmt
+                # is the enclosing one's else body together with a trailing yield
+                # that feeds the outer return_var.
+                if unroll_rem == 1:
+                    for _tail_iter_1, (a,) in pl.range(
+                        0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 1}
+                    ):
+                        b_4: pl.Scalar[pl.INDEX] = a + unroll_main_end
+                        r_tail1 = pl.yield_(b_4)
+                    r = pl.yield_(r_tail1)
+                else:
+                    if unroll_rem == 2:
+                        for _tail_iter_2, (a,) in pl.range(
+                            0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 2}
+                        ):
+                            b_5: pl.Scalar[pl.INDEX] = a + unroll_main_end
+                            b_6: pl.Scalar[pl.INDEX] = b_5 + (unroll_main_end + 1)
+                            r_tail2 = pl.yield_(b_6)
+                        r_rem2 = pl.yield_(r_tail2)
+                    else:
+                        if unroll_rem == 3:
+                            for _tail_iter_3, (a,) in pl.range(
+                                0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 3}
+                            ):
+                                b_7: pl.Scalar[pl.INDEX] = a + unroll_main_end
+                                b_8: pl.Scalar[pl.INDEX] = b_7 + (unroll_main_end + 1)
+                                b_9: pl.Scalar[pl.INDEX] = b_8 + (unroll_main_end + 2)
+                                r_tail3 = pl.yield_(b_9)
+                            r_rem3 = pl.yield_(r_tail3)
+                        else:
+                            r_rem3 = pl.yield_(r_main)
+                        r_rem2 = pl.yield_(r_rem3)
+                    r = pl.yield_(r_rem2)
+                return r
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

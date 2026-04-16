@@ -1202,15 +1202,6 @@ class ASTParser:
                     span=self.span_tracker.get_span(iter_call),
                     hint="Use unroll= for ping-pong replication or chunk= for chunked iteration, not both.",
                 )
-            if range_args["init_values"]:
-                raise ParserSyntaxError(
-                    "unroll= cannot be combined with init_values=",
-                    span=self.span_tracker.get_span(iter_call),
-                    hint=(
-                        "Partial unroll does not yet support loop-carried state. "
-                        "Drop init_values= or remove unroll=."
-                    ),
-                )
             if not _is_const_int(unroll_expr):
                 raise ParserSyntaxError(
                     "unroll must be a compile-time constant positive integer",

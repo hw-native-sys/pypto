@@ -72,9 +72,14 @@ for i in pl.range(64, unroll=4):
 | ---- | ---- |
 | `step` 必须为编译期整数常量 | 主循环步长及各副本偏移均依赖 `factor * step` 为整数 |
 | 动态边界要求 `step > 0` | 动态 trip 计算公式假设正步长；负步长需使用静态边界 |
-| 不允许 `iter_args` / `init_values` | 跨副本的循环携带状态需要 SSA 重命名，首版未实现 |
 | `unroll` 与 `chunk` 在 `pl.range` 中互斥 | 二者优化方向不同，组合使用语义模糊且无明显场景 |
 | `unroll=` 仅支持 `pl.range()` | 该特性作用域限定于 `pl.range()`；`pl.parallel()` / `pl.unroll()` 语义不同 |
+
+### 循环携带状态（`iter_args`）
+
+支持 `iter_args` / `init_values`。循环携带状态按顺序穿过 `F` 个副本：第 `k` 个副本以上一副本的 `YieldStmt` 表达式作为其 iter-arg 的替换值，仅最后一个副本保留 `YieldStmt` 以传递给主循环下一次外层迭代。若存在尾部分支，主循环的 `return_vars` 使用新的 SSA 名字，作为尾部分支 `iter_args` 的初值；尾部分支则继承原外层循环的 `return_vars`，确保下游引用有效。
+
+动态边界下，级联中的每个 `IfStmt` 都携带与 iter-arg 类型一致的 `return_vars`，每个分支均以 `YieldStmt` 结尾。最内层 `else` 直接 yield 主循环的 `return_vars` —— 即 `rem == 0` 时的空操作回退。
 
 ## 示例
 
@@ -96,6 +101,28 @@ for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
 for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
     tile_x_4 = pl.tile.load(input_a, [8 * 128], [128]); pl.tile.store(tile_x_4, [8 * 128], output)
     tile_x_5 = pl.tile.load(input_a, [9 * 128], [128]); pl.tile.store(tile_x_5, [9 * 128], output)
+```
+
+### 静态带 `iter_args` —— 循环累加（`N=10`、`F=4`）
+
+```python
+# 变换前
+for i, (a,) in pl.range(0, 10, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+    b = a + i
+    r = pl.yield_(b)
+
+# 变换后：主循环按 a → b → b_1 → b_2 → b_3 串接，尾部分支以 r_main 作为 a_tail 的初值
+for i, (a,) in pl.range(0, 8, 4, init_values=(s0,), attrs={"unroll_replicated": 4}):
+    b = a + i
+    b_1 = b + (i + 1)
+    b_2 = b_1 + (i + 2)
+    b_3 = b_2 + (i + 3)
+    r_main = pl.yield_(b_3)
+
+for _tail_iter_2, (a,) in pl.range(0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 2}):
+    b_4 = a + 8
+    b_5 = b_4 + 9
+    r = pl.yield_(b_5)
 ```
 
 ### 动态 —— 运行时 `n`

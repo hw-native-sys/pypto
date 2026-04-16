@@ -72,9 +72,14 @@ With trip count `T = (stop - start) / step`:
 | ---------- | ------ |
 | `step` must be a compile-time integer constant | Main loop's stride and per-clone offsets both require `factor * step` as an integer |
 | Dynamic bounds require `step > 0` | The dynamic trip-count formula assumes positive step; negative-step ranges must use static bounds |
-| `iter_args` / `init_values` not allowed | Loop-carried state across replicated copies needs SSA-aware renaming not yet implemented |
 | `unroll` and `chunk` are mutually exclusive on `pl.range` | Different optimization axes; combining them adds semantic ambiguity without a clear use case |
 | `unroll=` only on `pl.range()` | Scoped feature; `pl.parallel()` / `pl.unroll()` have different semantics |
+
+### Loop-carried state (`iter_args`)
+
+`iter_args` / `init_values` are supported. Loop-carried state threads sequentially through the `F` replicated clones: clone `k` consumes the previous clone's yielded expressions as its iter-arg substitutes, and only the last clone's `YieldStmt` is kept to feed the next outer iteration. When a tail follows, the main loop's `return_vars` become fresh SSA names that seed the tail's `iter_args`; the tail inherits the original outer loop's `return_vars` so downstream references stay valid.
+
+Under dynamic bounds, every `IfStmt` in the cascade carries `return_vars` matching the iter-arg types and every branch ends with a `YieldStmt`. The innermost `else` yields the main-loop `return_vars` unchanged — that is the `rem == 0` no-op fall-through.
 
 ## Examples
 
@@ -96,6 +101,28 @@ for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
 for _tail_iter_2 in pl.range(0, 1, 1, attrs={"unroll_replicated": 2}):
     tile_x_4 = pl.tile.load(input_a, [8 * 128], [128]); pl.tile.store(tile_x_4, [8 * 128], output)
     tile_x_5 = pl.tile.load(input_a, [9 * 128], [128]); pl.tile.store(tile_x_5, [9 * 128], output)
+```
+
+### Static with `iter_args` — loop-carried accumulator (`N=10`, `F=4`)
+
+```python
+# Before
+for i, (a,) in pl.range(0, 10, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+    b = a + i
+    r = pl.yield_(b)
+
+# After: main loop threads a → b → b_1 → b_2 → b_3, then tail seeds a_tail from r_main
+for i, (a,) in pl.range(0, 8, 4, init_values=(s0,), attrs={"unroll_replicated": 4}):
+    b = a + i
+    b_1 = b + (i + 1)
+    b_2 = b_1 + (i + 2)
+    b_3 = b_2 + (i + 3)
+    r_main = pl.yield_(b_3)
+
+for _tail_iter_2, (a,) in pl.range(0, 1, 1, init_values=(r_main,), attrs={"unroll_replicated": 2}):
+    b_4 = a + 8
+    b_5 = b_4 + 9
+    r = pl.yield_(b_5)
 ```
 
 ### Dynamic — runtime stop `n`

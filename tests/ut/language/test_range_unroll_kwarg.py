@@ -64,6 +64,22 @@ class TestRangeUnrollKwargParser:
 
         assert "unroll_factor" not in dict(_outer_for(P).attrs)
 
+    def test_unroll_with_init_values_parses(self):
+        """``unroll=`` composes with ``init_values=`` — loop-carried state is supported."""
+
+        @pl.program
+        class P:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(8, init_values=(x,), unroll=2):
+                    acc = pl.add(acc, 1.0)
+                    acc_rv = pl.yield_(acc)
+                return acc_rv
+
+        for_stmt = _outer_for(P)
+        assert dict(for_stmt.attrs).get("unroll_factor") == 2
+        assert len(for_stmt.iter_args) == 1
+
 
 class TestRangeUnrollKwargRejection:
     """The parser must reject invalid combinations with clear errors."""
@@ -101,18 +117,6 @@ class TestRangeUnrollKwargRejection:
                         for i in pl.range(8, chunk=4, unroll=2):
                             x = pl.add(x, 1.0)
                     return x
-
-    def test_unroll_with_init_values_rejected(self):
-        with pytest.raises(Exception, match=r"unroll= cannot be combined with init_values="):
-
-            @pl.program
-            class _P:
-                @pl.function
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i, (acc,) in pl.range(8, init_values=(x,), unroll=2):
-                        acc = pl.add(acc, 1.0)
-                        pl.yield_(acc)
-                    return acc
 
     def test_unroll_runtime_value_rejected(self):
         """Non-constant ``unroll`` is rejected by the parser (must be a literal int)."""
