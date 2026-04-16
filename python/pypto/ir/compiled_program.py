@@ -49,12 +49,15 @@ _DATATYPE_TO_TORCH: dict[str, torch.dtype] = {
     "int32": torch.int32,
     "int64": torch.int64,
     "uint8": torch.uint8,
-    "uint16": torch.uint16,
-    "uint32": torch.uint32,
-    "uint64": torch.uint64,
     "bool": torch.bool,
     "index": torch.int64,
 }
+# uint16/32/64 were added in PyTorch 2.3; register only if available
+for _name in ("uint16", "uint32", "uint64"):
+    _torch_dtype = getattr(torch, _name, None)
+    if _torch_dtype is not None:
+        _DATATYPE_TO_TORCH[_name] = _torch_dtype
+del _name, _torch_dtype
 
 
 def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
@@ -120,7 +123,10 @@ def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int],
 
         param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
 
-        if direction in (ParamDirection.Out, ParamDirection.InOut):
+        # Only pure Out params can be auto-allocated in return-style calls.
+        # InOut params require an initial value from the caller, so they must
+        # be passed explicitly like inputs.
+        if direction == ParamDirection.Out:
             output_indices.append(i)
 
     return param_infos, output_indices, list(orch_func.return_types)
@@ -238,7 +244,7 @@ class CompiledProgram:
 
     @property
     def output_indices(self) -> list[int]:
-        """Indices of output (Out/InOut) parameters."""
+        """Indices of pure Out parameters (eligible for auto-allocation)."""
         _, out_idx, _ = self._get_metadata()
         return list(out_idx)
 

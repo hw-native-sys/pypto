@@ -260,11 +260,13 @@ def run(
         strategy=config.strategy,
         backend_type=config.backend_type,
         dump_passes=config.dump_passes,
+        warning_level=config.warning_level,
+        disabled_warnings=config.disabled_warnings,
         platform=config.platform,
         profiling=config.compile_profiling,
     )
 
-    if tensors:
+    if tensors and not config.codegen_only:
         compiled(*tensors, config=config)
 
     return compiled

@@ -25,6 +25,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import pypto.language as pl
 import pytest
 import torch
 from examples.kernels.elementwise import TileAddProgram, TileMulProgram
@@ -32,6 +33,42 @@ from pypto import ir
 from pypto.ir.compiled_program import CompiledProgram
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output" / "test_compiled_program"
+
+
+@pl.program
+class TileAddInOutProgram:
+    """Program with both InOut and Out params.
+
+    - ``a``: input
+    - ``acc``: InOut — initial value provided by caller, updated in-place
+    - ``out``: pure Out — can be auto-allocated in return-style calls
+
+    Computes: acc += a; out = acc
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def tile_add_acc(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        acc: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[128, 128], pl.FP32], pl.Tensor[[128, 128], pl.FP32]]:
+        a_tile = pl.load(a, [0, 0], [128, 128])
+        acc_tile = pl.load(acc, [0, 0], [128, 128])
+        sum_tile = pl.add(a_tile, acc_tile)
+        acc_new = pl.store(sum_tile, [0, 0], acc)
+        out_new = pl.store(sum_tile, [0, 0], out)
+        return acc_new, out_new
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        acc: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        _, out_ret = self.tile_add_acc(a, acc, out)
+        return out_ret
 
 
 @pytest.fixture(scope="session")
@@ -151,6 +188,49 @@ class TestCompiledProgramCallable:
         assert compiled.param_names == ["a", "b", "out_c"]
         assert compiled.output_indices == [2]
         assert compiled.has_return is True
+
+    def test_inout_param_excluded_from_output_indices(self, output_root):
+        """InOut params must not appear in output_indices (no auto-allocation).
+
+        Program has params (a: In, acc: InOut, out: Out). Only ``out`` is
+        auto-allocated in return-style calls.
+        """
+        compiled = ir.compile(
+            TileAddInOutProgram,
+            output_dir=str(output_root / "add_inout_meta"),
+        )
+        assert compiled.param_names == ["a", "acc", "out"]
+        # Only pure Out (index 2) is auto-allocated; InOut (index 1) is not
+        assert compiled.output_indices == [2]
+        assert compiled.has_return is True
+
+    def test_inout_return_style_preserves_acc_initial(self, output_root, test_config):
+        """Return-style with InOut: caller supplies ``a`` and ``acc``; ``out`` is auto-allocated.
+
+        Verifies that InOut ``acc`` keeps its caller-provided initial value
+        (not silently zero-allocated like a pure Out).
+        """
+        compiled = ir.compile(
+            TileAddInOutProgram,
+            output_dir=str(output_root / "add_inout_return"),
+            platform=test_config.platform,
+        )
+
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        acc = torch.full((128, 128), 10.0, dtype=torch.float32)  # Initial value
+
+        # Return-style: pass In + InOut (2 args), Out is allocated & returned
+        out = compiled(a, acc, config=test_config)
+
+        expected = torch.full((128, 128), 12.0, dtype=torch.float32)
+        # acc was in-place updated: 10 + 2 = 12
+        assert torch.allclose(acc, expected, rtol=1e-5, atol=1e-5), (
+            f"InOut acc not updated: max diff = {(acc - expected).abs().max().item()}"
+        )
+        # out was allocated & returned, and equals acc
+        assert out is not None
+        assert isinstance(out, torch.Tensor)
+        assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

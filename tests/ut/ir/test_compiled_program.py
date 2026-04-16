@@ -60,6 +60,25 @@ def _make_single_function_program() -> ir.Program:
     return ir.Program([incore], "SingleFnProgram", span)
 
 
+def _make_program_with_inout() -> ir.Program:
+    """Build a Program with an InOut parameter: a (In), acc (InOut), out (Out)."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([128, 128], DataType.FP32)
+
+    a_var = ir.Var("a", tensor_type, span)
+    acc_var = ir.Var("acc", tensor_type, span)
+    out_var = ir.Var("out", tensor_type, span)
+
+    params = [
+        (a_var, ir.ParamDirection.In),
+        (acc_var, ir.ParamDirection.InOut),
+        (out_var, ir.ParamDirection.Out),
+    ]
+    body = ir.SeqStmts([], span)
+    orch = ir.Function("orchestrator", params, [], body, span, ir.FunctionType.Orchestration)
+    return ir.Program([orch], "InOutProgram", span)
+
+
 class TestCompiledProgramBackwardCompat:
     """Verify CompiledProgram behaves like a path string for backward compat."""
 
@@ -138,6 +157,18 @@ class TestExtractParamInfos:
         infos, _, _ = _extract_param_infos(prog)
         assert len(infos) == 1
         assert infos[0].name == "x"
+
+    def test_inout_not_in_output_indices(self):
+        """InOut params require caller-provided initial values; they must not
+        be auto-allocated in return-style calls."""
+        prog = _make_program_with_inout()
+        infos, out_idx, _ = _extract_param_infos(prog)
+        assert len(infos) == 3
+        assert infos[0].direction == ir.ParamDirection.In
+        assert infos[1].direction == ir.ParamDirection.InOut
+        assert infos[2].direction == ir.ParamDirection.Out
+        # Only pure Out (index 2) should be auto-allocated
+        assert out_idx == [2]
 
 
 class TestCompiledProgramMetadata:
