@@ -341,6 +341,63 @@ const Var* VarLineageCollector::ResolveExpr(const ExprPtr& expr) const {
 }
 
 // ---------------------------------------------------------------------------
+// CallSiteDirectionResolver
+// ---------------------------------------------------------------------------
+
+CallSiteDirectionResolver::CallSiteDirectionResolver(
+    ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
+    const std::vector<VarPtr>& params)
+    : program_(std::move(program)), buffer_roots_(buffer_roots) {
+  for (const auto& p : params) {
+    param_vars_.insert(p.get());
+  }
+}
+
+bool CallSiteDirectionResolver::IsLocallyAllocated(const Var* var) const {
+  auto it = buffer_roots_.find(var);
+  if (it == buffer_roots_.end()) return false;
+  const Var* root = it->second;
+  return param_vars_.count(root) == 0;
+}
+
+void CallSiteDirectionResolver::VisitExpr_(const CallPtr& call) {
+  if (IsBuiltinOp(call->op_->name_)) {
+    IRVisitor::VisitExpr_(call);
+    return;
+  }
+
+  auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+  if (!callee) {
+    IRVisitor::VisitExpr_(call);
+    return;
+  }
+
+  std::vector<ParamDirection> effective_dirs = callee->param_directions_;
+  if (callee->func_type_ == FunctionType::Group) {
+    effective_dirs = ComputeGroupEffectiveDirections(callee, program_);
+  }
+
+  bool has_override = false;
+  for (size_t i = 0; i < call->args_.size() && i < effective_dirs.size(); ++i) {
+    if (effective_dirs[i] != ParamDirection::Out) continue;
+
+    auto arg_var = AsVarLike(call->args_[i]);
+    if (!arg_var) continue;
+
+    if (IsLocallyAllocated(arg_var.get())) {
+      effective_dirs[i] = ParamDirection::InOut;
+      has_override = true;
+    }
+  }
+
+  if (has_override) {
+    call_site_directions[call.get()] = std::move(effective_dirs);
+  }
+
+  IRVisitor::VisitExpr_(call);
+}
+
+// ---------------------------------------------------------------------------
 // ComputeGroupEffectiveDirections
 // ---------------------------------------------------------------------------
 

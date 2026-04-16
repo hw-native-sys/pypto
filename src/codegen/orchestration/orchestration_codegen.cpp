@@ -178,6 +178,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
+  void SetCallSiteDirections(std::unordered_map<const Call*, std::vector<ParamDirection>> directions) {
+    call_site_directions_ = std::move(directions);
+  }
+
   void SetInitialIndent(int indent) { indent_ = indent; }
 
   std::string GetGeneratedCode() const { return code_.str(); }
@@ -650,6 +654,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << ") for callee '" << inner_callee->name_ << "'";
 
         ParamDirection dir = inner_callee->param_directions_[inner_idx];
+
+        // Apply call-site direction override: if the outer call has an override
+        // (e.g., Out→InOut for locally allocated tensors), use it.
+        auto cs_it = call_site_directions_.find(outer_call.get());
+        if (cs_it != call_site_directions_.end() && outer_idx < cs_it->second.size()) {
+          ParamDirection call_site_dir = cs_it->second[outer_idx];
+          if (dir == ParamDirection::Out && call_site_dir == ParamDirection::InOut) {
+            dir = ParamDirection::InOut;
+          }
+        }
+
         switch (dir) {
           case ParamDirection::Out:
             params.push_back({ParamKind::Output, ext_name});
@@ -839,7 +854,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
 
-    auto params = BuildTaskParams(call, callee_func);
+    auto params = BuildTaskParams(call, callee_func, LookupCallSiteDirections(call));
 
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -1105,6 +1120,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::map<const Call*, std::string> call_to_tuple_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
+  std::unordered_map<const Call*, std::vector<ParamDirection>> call_site_directions_;
+
+  const std::vector<ParamDirection>* LookupCallSiteDirections(const CallPtr& call) const {
+    auto it = call_site_directions_.find(call.get());
+    return it != call_site_directions_.end() ? &it->second : nullptr;
+  }
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -1123,6 +1144,13 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   VarLineageCollector lineage(program);
   lineage.Initialize(func->params_);
   lineage.VisitStmt(func->body_);
+
+  BufferRootCollector root_collector(program);
+  root_collector.Initialize(func->params_);
+  root_collector.VisitStmt(func->body_);
+
+  CallSiteDirectionResolver direction_resolver(program, root_collector.buffer_roots, func->params_);
+  direction_resolver.VisitStmt(func->body_);
 
   std::unordered_map<const Var*, std::string> emit_name_map;
   std::set<std::string> param_name_set;
@@ -1163,6 +1191,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
+  stmt_codegen.SetCallSiteDirections(std::move(direction_resolver.call_site_directions));
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);
 

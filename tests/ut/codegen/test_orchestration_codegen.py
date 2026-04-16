@@ -128,7 +128,7 @@ class TestOrchestration:
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_output(c);
+                    params_t0.add_inout(c);
                     pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
@@ -380,20 +380,20 @@ class TestOrchestration:
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_output(c);
+                    params_t0.add_inout(c);
                     pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
                     Arg params_t1;
                     params_t1.add_input(c);
-                    params_t1.add_output(d);
+                    params_t1.add_inout(d);
                     params_t1.add_scalar(to_u64(1.000000f));
                     pto2_rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
                     Arg params_t2;
                     params_t2.add_input(c);
-                    params_t2.add_output(e);
+                    params_t2.add_inout(e);
                     params_t2.add_scalar(to_u64(2.000000f));
                     pto2_rt_submit_aiv_task(1, params_t2);
 
@@ -401,7 +401,7 @@ class TestOrchestration:
                     Arg params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
-                    params_t3.add_output(g);
+                    params_t3.add_inout(g);
                     pto2_rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
@@ -1235,7 +1235,7 @@ class TestOrchestration:
         code = _generate_orch_code(transformed)
 
         assert "Tensor row = ext_out.view(row_shapes, row_offsets);" in code
-        assert "params_t0.add_output(row)" in code
+        assert "params_t0.add_inout(row)" in code
         assert "Tensor row = make_tensor(" not in code
         assert "memcpy(" not in code
         assert "ext_out = out;" not in code
@@ -1402,8 +1402,8 @@ class TestOrchestration:
         assert code.count("TensorCreateInfo ret0__out_ci(") == 1
         assert code.count("TensorCreateInfo ret0__out_1_ci(") == 1
         assert "alloc_tensors(ret0__out_ci, ret0__out_1_ci)" in code
-        assert "params_t0.add_output(ret0__out)" in code
-        assert "params_t1.add_output(ret0__out_1)" in code
+        assert "params_t0.add_inout(ret0__out)" in code
+        assert "params_t1.add_inout(ret0__out_1)" in code
         assert "const Tensor& first = ret0__out;" in code
         assert "const Tensor& second = ret0__out_1;" in code
 
@@ -2048,6 +2048,109 @@ class TestUnregisteredOpError:
 
         with pytest.raises(RuntimeError, match="Misplaced tensor op.*tensor.full"):
             codegen.generate_orchestration(program, orch_func)
+
+
+class TestCallSiteDirectionResolver:
+    """Test that locally allocated tensors get add_inout instead of add_output.
+
+    Issue #1022: when a tensor is pre-allocated via alloc_tensors and then
+    passed as Out to multiple InCore tasks in separate loops, the codegen
+    must use add_inout (not add_output) to establish WAW dependencies.
+    """
+
+    def test_alloc_tensor_two_loops_gets_inout(self):
+        """Two loops writing to the same alloc_tensors buffer must use add_inout."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TwoLoopAllocProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def task_init(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                buf: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], buf)
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def task_compute(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                buf: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], buf)
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def task_read(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buf: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                for _i in pl.range(4):
+                    buf = self.task_init(x, buf)
+                for _i in pl.range(4):
+                    buf = self.task_compute(x, buf)
+                out = self.task_read(buf, out)
+                return out
+
+        code = _generate_orch_code(TwoLoopAllocProgram)
+
+        assert "add_inout(buf)" in code, (
+            "Locally allocated tensor 'buf' passed as Out must generate "
+            "add_inout (not add_output) to establish WAW dependencies. "
+            f"Generated code:\n{code}"
+        )
+        assert "add_output(buf)" not in code, (
+            f"Locally allocated tensor 'buf' must NOT use add_output. Generated code:\n{code}"
+        )
+
+    def test_external_tensor_keeps_add_output(self):
+        """Function parameter tensors with Out direction keep add_output."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ExternalOutProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out = self.kernel(a, out)
+                return out
+
+        code = _generate_orch_code(ExternalOutProgram)
+
+        assert "add_output(ext_out)" in code, (
+            f"External (parameter) tensor should keep add_output. Generated code:\n{code}"
+        )
 
 
 if __name__ == "__main__":
