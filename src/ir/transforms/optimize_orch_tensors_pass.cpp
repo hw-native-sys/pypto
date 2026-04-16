@@ -62,6 +62,27 @@ std::string GetCallFuncName(const CallPtr& call) {
   return gvar ? gvar->name_ : "";
 }
 
+/// Compute row-major strides from a shape: [D1*D2*...*Dn, D2*...*Dn, ..., 1].
+/// Returns empty vector if any dimension is not a ConstInt.
+std::vector<ExprPtr> ComputeRowMajorStrides(const std::vector<ExprPtr>& shape) {
+  std::vector<int64_t> dims;
+  dims.reserve(shape.size());
+  for (const auto& dim : shape) {
+    auto ci = As<ConstInt>(dim);
+    if (!ci) return {};
+    dims.push_back(ci->value_);
+  }
+
+  size_t ndim = dims.size();
+  std::vector<ExprPtr> strides(ndim);
+  int64_t product = 1;
+  for (size_t i = ndim; i > 0; --i) {
+    strides[i - 1] = std::make_shared<ConstInt>(product, DataType::INDEX, Span::unknown());
+    product *= dims[i - 1];
+  }
+  return strides;
+}
+
 /// Info about an InCore function's Out params and their return mappings.
 struct OutParamReturnMapping {
   size_t param_index;   ///< Position in param list
@@ -951,24 +972,8 @@ class AssembleParentStridesOptimizer {
     return analyzer.result();
   }
 
-  /// Compute row-major strides from a shape: [D1*D2*...*Dn, D2*...*Dn, ..., 1].
   static std::vector<ExprPtr> ComputeStrides(const std::vector<ExprPtr>& shape) {
-    std::vector<int64_t> dims;
-    dims.reserve(shape.size());
-    for (const auto& dim : shape) {
-      auto ci = As<ConstInt>(dim);
-      if (!ci) return {};
-      dims.push_back(ci->value_);
-    }
-
-    size_t ndim = dims.size();
-    std::vector<ExprPtr> strides(ndim);
-    int64_t product = 1;
-    for (size_t i = ndim; i > 0; --i) {
-      strides[i - 1] = std::make_shared<ConstInt>(product, DataType::INDEX, Span::unknown());
-      product *= dims[i - 1];
-    }
-    return strides;
+    return ComputeRowMajorStrides(shape);
   }
 
   // -- Mutation: IRMutator that propagates updated param types through tile.store --
@@ -1458,6 +1463,191 @@ class AssembleLoopRewriter {
   }
 };
 
+// ============================================================================
+// Pattern 4: SliceInputStridesOptimizer
+//
+// Cross-function analysis: scans orchestration for
+//   tensor.slice(parent, size, offset)
+// where the slice result is passed as an In argument to an InCore call.
+// Records the parent tensor's shape. Then updates the InCore function's
+// In param TensorType to carry parent-derived strides via TensorView.
+// ============================================================================
+
+class SliceInputStridesOptimizer {
+ public:
+  ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    auto input_shapes = Analyze(program, incore_names);
+    if (input_shapes.empty()) return program;
+
+    std::vector<FunctionPtr> new_functions;
+    for (const auto& [gvar, func] : program->functions_) {
+      new_functions.push_back(func);
+    }
+
+    Apply(new_functions, incore_names, input_shapes);
+
+    return std::make_shared<Program>(new_functions, program->name_, program->span_);
+  }
+
+ private:
+  // func_name -> { param_index -> parent_shape }
+  using InputShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
+
+  // Sentinel: when a param_index maps to this, the parent shapes from
+  // different call sites disagree and the optimization must be skipped.
+  static const std::vector<ExprPtr>& ConflictMarker() {
+    static const std::vector<ExprPtr> marker;
+    return marker;
+  }
+
+  static bool ShapesMatch(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+      auto ca = As<ConstInt>(a[i]);
+      auto cb = As<ConstInt>(b[i]);
+      if (!ca || !cb || ca->value_ != cb->value_) return false;
+    }
+    return true;
+  }
+
+  class SliceAnalyzer : public IRVisitor {
+   public:
+    SliceAnalyzer(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names)
+        : program_(program), incore_names_(incore_names) {}
+
+    const InputShapeMap& result() const { return result_; }
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (!call) return;
+
+      // Track tensor.slice(parent, size, offset) results
+      if (!std::dynamic_pointer_cast<const GlobalVar>(call->op_) && call->op_->name_ == "tensor.slice" &&
+          call->args_.size() >= 3) {
+        auto parent_var = AsVarLike(call->args_[0]);
+        if (parent_var) {
+          auto parent_tensor_type = As<TensorType>(parent_var->GetType());
+          if (parent_tensor_type) {
+            var_to_parent_shape_[op->var_.get()] = parent_tensor_type->shape_;
+          }
+        }
+        return;
+      }
+
+      // Check InCore calls: map sliced In arguments to parent shapes
+      auto fname = GetCallFuncName(call);
+      if (!incore_names_.count(fname)) return;
+
+      auto incore_func = FindFunction(program_, fname);
+      if (!incore_func) return;
+
+      for (size_t i = 0; i < call->args_.size() && i < incore_func->param_directions_.size(); ++i) {
+        if (incore_func->param_directions_[i] != ParamDirection::In) continue;
+
+        auto arg_var = AsVarLike(call->args_[i]);
+        if (!arg_var) continue;
+
+        auto it = var_to_parent_shape_.find(arg_var.get());
+        if (it == var_to_parent_shape_.end()) continue;
+
+        auto& entry = result_[fname][i];
+        if (entry.empty() && &entry != &ConflictMarker()) {
+          entry = it->second;
+        } else if (!entry.empty() && !ShapesMatch(entry, it->second)) {
+          entry.clear();  // conflict — different parent shapes at different call sites
+        }
+      }
+    }
+
+   private:
+    const ProgramPtr& program_;
+    const std::unordered_set<std::string>& incore_names_;
+    std::unordered_map<const Var*, std::vector<ExprPtr>> var_to_parent_shape_;
+    InputShapeMap result_;
+  };
+
+  InputShapeMap Analyze(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
+    SliceAnalyzer analyzer(program, incore_names);
+    for (const auto& [gvar, func] : program->functions_) {
+      if (incore_names.count(func->name_)) continue;
+      analyzer.VisitStmt(func->body_);
+    }
+    return analyzer.result();
+  }
+
+  class InParamSubstitutionMutator : public IRMutator {
+   public:
+    void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) { subs_[old_ptr] = new_var; }
+
+   protected:
+    ExprPtr VisitExpr_(const VarPtr& op) override {
+      auto it = subs_.find(op.get());
+      if (it != subs_.end()) return it->second;
+      return op;
+    }
+
+   private:
+    std::unordered_map<const Var*, VarPtr> subs_;
+  };
+
+  void Apply(std::vector<FunctionPtr>& functions, const std::unordered_set<std::string>& incore_names,
+             const InputShapeMap& input_shapes) {
+    for (auto& func : functions) {
+      if (!incore_names.count(func->name_)) continue;
+
+      auto is_it = input_shapes.find(func->name_);
+      if (is_it == input_shapes.end()) continue;
+      const auto& param_idx_to_shape = is_it->second;
+
+      bool changed = false;
+      std::vector<VarPtr> new_params = func->params_;
+
+      for (const auto& [param_idx, parent_shape] : param_idx_to_shape) {
+        if (parent_shape.empty()) continue;  // conflict marker
+        if (param_idx >= func->params_.size()) continue;
+
+        auto full_strides = ComputeRowMajorStrides(parent_shape);
+        if (full_strides.empty()) continue;
+
+        auto tensor_type = As<TensorType>(func->params_[param_idx]->GetType());
+        if (!tensor_type) continue;
+
+        // Skip params that already have explicit strides
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) continue;
+
+        size_t in_rank = tensor_type->shape_.size();
+        if (in_rank > full_strides.size()) continue;
+        std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),
+                                     full_strides.end());
+
+        TensorView view(std::move(strides), TensorLayout::ND);
+        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
+                                                     tensor_type->memref_, std::move(view));
+        auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,
+                                               func->params_[param_idx]->span_);
+
+        changed = true;
+        new_params[param_idx] = new_param;
+      }
+
+      if (!changed) continue;
+
+      InParamSubstitutionMutator mutator;
+      for (size_t i = 0; i < func->params_.size(); ++i) {
+        if (new_params[i].get() != func->params_[i].get()) {
+          mutator.AddSubstitution(func->params_[i].get(), new_params[i]);
+        }
+      }
+      auto new_body = mutator.VisitStmt(func->body_);
+
+      func = std::make_shared<Function>(func->name_, new_params, func->param_directions_, func->return_types_,
+                                        new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                        func->attrs_);
+    }
+  }
+};
+
 }  // namespace
 
 // ============================================================================
@@ -1484,7 +1674,10 @@ Pass OptimizeOrchTensors() {
     auto p2 = AssembleParentStridesOptimizer().Run(p1, incore_names);
 
     // Pattern 3: Assemble-loop rewrite (sees Pattern 2 results)
-    return AssembleLoopRewriter().Run(p2, incore_names);
+    auto p3 = AssembleLoopRewriter().Run(p2, incore_names);
+
+    // Pattern 4: Slice input strides (propagate parent strides to In params)
+    return SliceInputStridesOptimizer().Run(p3, incore_names);
   };
 
   return CreateProgramPass(pass_func, "OptimizeOrchTensors", kOptimizeOrchTensorsProperties);

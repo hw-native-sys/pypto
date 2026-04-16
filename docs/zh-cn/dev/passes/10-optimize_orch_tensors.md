@@ -29,7 +29,7 @@ program_opt = opt_pass(program)
 
 ## 优化模式
 
-本 pass 按顺序应用三个模式。每个模式可以看到前一个模式的结果。
+本 pass 按顺序应用四个模式。每个模式可以看到前一个模式的结果。
 
 ### 模式 1：迭代参数复用（IterArgReuseOptimizer）
 
@@ -59,6 +59,12 @@ for i in pl.range(N, init_values=[init_buf]):
 **问题**：当编排函数通过 `tensor.assemble` 将 InCore 结果分散到更大的张量时，InCore 函数的 `tile.store` 不知道父张量的步长，可能导致次优的内存布局。
 
 **方案**：分析编排函数中的 `tensor.assemble(parent, incore_result, offset)` 模式，将父张量的形状作为 `TensorView` 步长附加到 InCore 函数的 `Out` 参数类型上，使 `tile.store` 能使用正确的内存布局。
+
+### 模式 4：切片输入步长（SliceInputStridesOptimizer）
+
+**问题**：当编排函数将切片张量（`tensor.slice`）作为 `In` 参数传递给 InCore 函数时，InCore 函数的参数使用连续步长（从自身形状计算），而非父张量的步长。当切片是父张量的非连续视图时，这会导致错误的内存访问。
+
+**方案**：分析编排函数中的 `tensor.slice(parent, size, offset)` 模式。当切片结果作为 `In` 参数传递给 InCore 调用时，将父张量形状推导出的步长通过 `TensorView` 附加到 InCore 函数的 `In` 参数类型上，使 `tile.load` 能使用正确的内存布局。
 
 ### 模式 3：Assemble 循环重写（AssembleLoopRewriter）
 
@@ -136,13 +142,15 @@ class After:
 | ---- | ---- |
 | `IterArgReuseOptimizer` | 模式 1 — 合并 Out 参数到 In 参数以复用循环携带缓冲区 |
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
+| `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
+| `ComputeRowMajorStrides` | 共享辅助函数 — 从形状计算行主序步长 |
 
 ## 作用范围
 
 | 函数类型 | 操作 |
 | -------- | ---- |
-| InCore | 参数/函数体重写（模式 1、3） |
+| InCore | 参数/函数体重写（模式 1、3、4） |
 | Orchestration / Opaque | 调用点重写（模式 1、2） |
 | Group | 不变 |

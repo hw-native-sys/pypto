@@ -29,7 +29,7 @@ program_opt = opt_pass(program)
 
 ## Patterns
 
-The pass applies three patterns in sequence. Each pattern sees the results of the previous one.
+The pass applies four patterns in sequence. Each pattern sees the results of the previous one.
 
 ### Pattern 1: Iter-Arg Reuse (IterArgReuseOptimizer)
 
@@ -59,6 +59,12 @@ for i in pl.range(N, init_values=[init_buf]):
 **Problem**: When orchestration scatters InCore results into a larger tensor via `tensor.assemble`, the InCore function's `tile.store` doesn't know the parent tensor's strides, which can lead to suboptimal memory layout.
 
 **Solution**: Analyze `tensor.assemble(parent, incore_result, offset)` patterns in orchestration. Attach the parent tensor's shape as `TensorView` strides on the InCore function's `Out` param type, so `tile.store` can use the correct memory layout.
+
+### Pattern 4: Slice Input Strides (SliceInputStridesOptimizer)
+
+**Problem**: When orchestration passes a sliced tensor (`tensor.slice`) as an `In` argument to an InCore function, the InCore function's parameter has contiguous strides (computed from its own shape), not the parent tensor's strides. This causes incorrect memory access when the slice is a non-contiguous view of the parent.
+
+**Solution**: Analyze `tensor.slice(parent, size, offset)` patterns in orchestration. When a slice result is passed as an `In` argument to an InCore call, attach the parent tensor's shape-derived strides via `TensorView` on the InCore function's `In` param type, so `tile.load` uses the correct memory layout.
 
 ### Pattern 3: Assemble-Loop Rewrite (AssembleLoopRewriter)
 
@@ -136,13 +142,15 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | --------- | ---- |
 | `IterArgReuseOptimizer` | Pattern 1 — merges Out params into In params for loop-carried buffers |
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
+| `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
+| `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 
 ## Scope
 
 | Function type | Action |
 | ------------- | ------ |
-| InCore | Params/body rewritten (Patterns 1, 3) |
+| InCore | Params/body rewritten (Patterns 1, 3, 4) |
 | Orchestration / Opaque | Call sites rewritten (Patterns 1, 2) |
 | Group | Unchanged |

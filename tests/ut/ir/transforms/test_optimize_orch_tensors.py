@@ -693,6 +693,247 @@ class TestAssembleLoopRewrite:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestSliceInputStrides:
+    """Pattern 4: Attach parent-derived strides to In params for slice patterns."""
+
+    def test_in_param_gets_parent_stride_from_slice(self):
+        """When orch slices a 2D parent and passes result to InCore In param, param gets parent strides."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                mb: pl.Scalar[pl.INDEX],
+                nb: pl.Scalar[pl.INDEX],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a__tile: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                ret0__store: pl.Tensor[[32, 32], pl.FP32] = pl.store(a__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for mb in pl.range(0, 128, 32):
+                    for nb, (c_iter,) in pl.range(0, 128, 32, init_values=(c,)):
+                        chunk: pl.Tensor[[32, 32], pl.FP32] = pl.slice(data, [32, 32], [mb, nb])
+                        ret0__out: pl.Tensor[[32, 32], pl.FP32] = pl.create_tensor([32, 32], dtype=pl.FP32)
+                        result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(chunk, mb, nb, ret0__out)
+                        c_next: pl.Tensor[[128, 128], pl.FP32] = pl.assemble(c_iter, result, [mb, nb])
+                        c_rv = pl.yield_(c_next)
+                return c_rv
+
+        # fmt: off
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[  # noqa: E501
+                    [32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ],
+                mb: pl.Scalar[pl.INDEX],
+                nb: pl.Scalar[pl.INDEX],
+                ret0__out: pl.Out[  # noqa: E501
+                    pl.Tensor[[32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]
+                ],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                a__tile: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                ret0__store: pl.Tensor[  # noqa: E501
+                    [32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ] = pl.store(a__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                for mb in pl.range(0, 128, 32):
+                    for nb, (c_iter,) in pl.range(0, 128, 32, init_values=(c,)):
+                        chunk: pl.Tensor[[32, 32], pl.FP32] = pl.slice(data, [32, 32], [mb, nb])
+                        ret0__out: pl.Tensor[[32, 32], pl.FP32] = pl.create_tensor(
+                            [32, 32], dtype=pl.FP32
+                        )
+                        result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(
+                            chunk, mb, nb, ret0__out
+                        )
+                        c_next: pl.Tensor[[128, 128], pl.FP32] = pl.assemble(
+                            c_iter, result, [mb, nb]
+                        )
+                        c_rv = pl.yield_(c_next)
+                return c_rv
+        # fmt: on
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_3d_parent_in_param_gets_trailing_stride(self):
+        """When parent tensor is 3D and input slice is 2D, only trailing strides are applied."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def proj_incore_0(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x__tile: pl.Tile[[16, 64], pl.FP32] = pl.load(x, [0, 0], [16, 64])
+                ret0__store: pl.Tensor[[16, 64], pl.FP32] = pl.store(x__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def proj(
+                self,
+                data: pl.Tensor[[4, 128, 5120], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                chunk: pl.Tensor[[16, 64], pl.FP32] = pl.slice(data, [16, 64], [0, 0, 0])
+                ret0__out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.proj_incore_0(chunk, ret0__out)
+                return result
+
+        # fmt: off
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def proj_incore_0(
+                self,
+                x: pl.Tensor[  # noqa: E501
+                    [16, 64], pl.FP32, pl.TensorView(stride=[5120, 1], layout=pl.TensorLayout.ND)
+                ],
+                ret0__out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x__tile: pl.Tile[[16, 64], pl.FP32] = pl.load(x, [0, 0], [16, 64])
+                ret0__store: pl.Tensor[[16, 64], pl.FP32] = pl.store(
+                    x__tile, [0, 0], ret0__out
+                )
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def proj(
+                self,
+                data: pl.Tensor[[4, 128, 5120], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                chunk: pl.Tensor[[16, 64], pl.FP32] = pl.slice(data, [16, 64], [0, 0, 0])
+                ret0__out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor(
+                    [16, 64], dtype=pl.FP32
+                )
+                result: pl.Tensor[[16, 64], pl.FP32] = self.proj_incore_0(chunk, ret0__out)
+                return result
+        # fmt: on
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_multiple_sliced_in_params(self):
+        """Multiple In params from different parents each get correct strides."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def gemm_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                b: pl.Tensor[[128, 64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a__tile: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [0, 0], [16, 128])
+                b__tile: pl.Tile[[128, 64], pl.FP32] = pl.load(b, [0, 0], [128, 64])
+                c__tile: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(a__tile, b__tile)
+                ret0__store: pl.Tensor[[16, 64], pl.FP32] = pl.store(c__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def gemm(
+                self,
+                attn_out: pl.Tensor[[16, 8192], pl.FP32],
+                wo: pl.Tensor[[8192, 8192], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a_chunk: pl.Tensor[[16, 128], pl.FP32] = pl.slice(attn_out, [16, 128], [0, 0])
+                w_chunk: pl.Tensor[[128, 64], pl.FP32] = pl.slice(wo, [128, 64], [0, 0])
+                ret0__out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.gemm_incore_0(a_chunk, w_chunk, ret0__out)
+                return result
+
+        # fmt: off
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def gemm_incore_0(
+                self,
+                a: pl.Tensor[  # noqa: E501
+                    [16, 128], pl.FP32, pl.TensorView(stride=[8192, 1], layout=pl.TensorLayout.ND)
+                ],
+                b: pl.Tensor[  # noqa: E501
+                    [128, 64], pl.FP32, pl.TensorView(stride=[8192, 1], layout=pl.TensorLayout.ND)
+                ],
+                ret0__out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a__tile: pl.Tile[[16, 128], pl.FP32] = pl.load(a, [0, 0], [16, 128])
+                b__tile: pl.Tile[[128, 64], pl.FP32] = pl.load(b, [0, 0], [128, 64])
+                c__tile: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(a__tile, b__tile)
+                ret0__store: pl.Tensor[[16, 64], pl.FP32] = pl.store(
+                    c__tile, [0, 0], ret0__out
+                )
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def gemm(
+                self,
+                attn_out: pl.Tensor[[16, 8192], pl.FP32],
+                wo: pl.Tensor[[8192, 8192], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                a_chunk: pl.Tensor[[16, 128], pl.FP32] = pl.slice(
+                    attn_out, [16, 128], [0, 0]
+                )
+                w_chunk: pl.Tensor[[128, 64], pl.FP32] = pl.slice(wo, [128, 64], [0, 0])
+                ret0__out: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor(
+                    [16, 64], dtype=pl.FP32
+                )
+                result: pl.Tensor[[16, 64], pl.FP32] = self.gemm_incore_0(
+                    a_chunk, w_chunk, ret0__out
+                )
+                return result
+        # fmt: on
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_non_sliced_in_param_unchanged(self):
+        """In params that are not from tensor.slice remain unchanged."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[32, 32], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                x__tile: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
+                ret0__store: pl.Tensor[[32, 32], pl.FP32] = pl.store(x__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                ret0__out: pl.Tensor[[32, 32], pl.FP32] = pl.create_tensor([32, 32], dtype=pl.FP32)
+                result: pl.Tensor[[32, 32], pl.FP32] = self.main_incore_0(data, ret0__out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Before)
+
+
 class TestEdgeCases:
     """Edge cases: pass should not modify programs that don't match any pattern."""
 
