@@ -733,8 +733,100 @@ void OpConversionRegistry::RegisterReductionOps() {
 void OpConversionRegistry::RegisterSortOps() {
   RegisterSimple("tensor.sort32", "tile.sort32");
   RegisterSimple("tensor.mrgsort_format1", "tile.mrgsort_format1");
-  RegisterSimple("tensor.mrgsort_format2", "tile.mrgsort_format2");
   RegisterSimple("tensor.gather_mask", "tile.gather_mask");
+
+  // tensor.mrgsort_format2: 2-4 srcs → tile.mrgsort_format2 with synthesized
+  // scratch tmp + executed tiles allocated locally in Vec memory.
+  //
+  // The tile-level op requires (srcs..., tmp, executed). We don't expose tmp/
+  // executed at the tensor level because:
+  //   - tmp shape equals the merged output shape (sum of src last dims) — we
+  //     can derive it; no user-visible value.
+  //   - executed is a small [1, 4] INT16 hardware status tile that the PTO
+  //     codegen actually materializes as a vector<4xi16> constant (the passed
+  //     tile is a plumbing-only placeholder). Its shape can't round-trip
+  //     through GM because 4 * 2 bytes = 8 bytes violates the 32-byte tile
+  //     row alignment PTO enforces.
+  //
+  // Inputs (srcs) are auto-bridged to Vec tiles by the framework (input_reqs).
+  std::unordered_map<size_t, InputSpaceReq> mrgsort2_input_reqs;
+  for (size_t i = 0; i < 4; ++i) {
+    mrgsort2_input_reqs[i] = {MemorySpace::Vec, std::nullopt};
+  }
+  RegisterCustom(
+      "tensor.mrgsort_format2",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() >= 2 && args.size() <= 4)
+            << "tensor.mrgsort_format2 conversion expects 2-4 src args, got " << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        // After the framework's input_reqs bridge, all srcs should be Vec tiles.
+        std::vector<std::shared_ptr<const TileType>> src_tile_types;
+        src_tile_types.reserve(args.size());
+        for (size_t i = 0; i < args.size(); ++i) {
+          auto tt = As<TileType>(args[i]->GetType());
+          CHECK(tt) << "tensor.mrgsort_format2 conversion expects bridged Vec tile at arg " << i;
+          src_tile_types.push_back(tt);
+        }
+        const auto& src0_tile = src_tile_types.front();
+
+        // tmp shape = same rank as src0, last dim = sum of all srcs' last dims.
+        std::vector<ExprPtr> tmp_shape(src0_tile->shape_.begin(), src0_tile->shape_.end() - 1);
+        int64_t const_sum = 0;
+        bool all_const = true;
+        for (const auto& st : src_tile_types) {
+          auto c = As<ConstInt>(st->shape_.back());
+          if (!c) {
+            all_const = false;
+            break;
+          }
+          const_sum += c->value_;
+        }
+        ExprPtr last_dim;
+        if (all_const) {
+          last_dim = std::make_shared<ConstInt>(const_sum, DataType::INDEX, span);
+        } else {
+          last_dim = src_tile_types[0]->shape_.back();
+          for (size_t i = 1; i < src_tile_types.size(); ++i) {
+            last_dim = std::make_shared<Add>(last_dim, src_tile_types[i]->shape_.back(),
+                                             DataType::INDEX, span);
+          }
+        }
+        tmp_shape.push_back(last_dim);
+
+        std::vector<StmtPtr> prologue;
+
+        // Synthesize tmp: tile.create(tmp_shape, dtype=src0.dtype, target_memory=Vec)
+        auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape, span);
+        std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
+            {"dtype", src0_tile->dtype_}, {"target_memory", MemorySpace::Vec}};
+        auto tmp_create = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_create_kwargs, span);
+        auto tmp_var = std::make_shared<Var>("mrgsort2_tmp", tmp_create->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_create, span));
+
+        // Synthesize executed: tile.create([1, 4], dtype=INT16, target_memory=Vec).
+        // PTO codegen ignores the actual tile content and emits a vector<4xi16>
+        // constant; this tile is needed solely to satisfy the tile op's arity.
+        std::vector<ExprPtr> exe_shape = {
+            std::make_shared<ConstInt>(1, DataType::INDEX, span),
+            std::make_shared<ConstInt>(4, DataType::INDEX, span),
+        };
+        auto exe_shape_tuple = std::make_shared<MakeTuple>(exe_shape, span);
+        std::vector<std::pair<std::string, std::any>> exe_create_kwargs = {
+            {"dtype", DataType(DataType::INT16)}, {"target_memory", MemorySpace::Vec}};
+        auto exe_create = op_reg.Create("tile.create", {exe_shape_tuple}, exe_create_kwargs, span);
+        auto exe_var = std::make_shared<Var>("mrgsort2_executed", exe_create->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(exe_var, exe_create, span));
+
+        // Assemble tile.mrgsort_format2 call: (src0..srcN-1, tmp, executed) + kwargs.
+        std::vector<ExprPtr> tile_args(args.begin(), args.end());
+        tile_args.push_back(tmp_var);
+        tile_args.push_back(exe_var);
+        auto mrgsort_call = op_reg.Create("tile.mrgsort_format2", tile_args, kwargs, span);
+        return ConversionResult{std::move(prologue), mrgsort_call};
+      },
+      std::move(mrgsort2_input_reqs));
 }
 
 // ============================================================================

@@ -2233,19 +2233,19 @@ def mrgsort(
     block_len: int | Expr | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Merge sort — format1 (single-list) or format2 (4-way merge).
+    """Merge sort — format1 (single-list) or format2 (2-4 way merge).
 
     Format1 (block_len form): sorts a tile containing multiple pre-sorted runs.
-    Format2 (4-way form): merges 4 pre-sorted input tiles into one sorted output.
+    Format2 (2-4 way form): merges 2, 3, or 4 pre-sorted input tiles.
 
     Args:
         src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
               For format2: first sorted input tile.
         src1: (format2) Second sorted input tile.
-        src2: (format2) Third sorted input tile.
-        src3: (format2) Fourth sorted input tile.
-        tmp: (format2) Temporary workspace tile.
-        executed: (format2) Exhaustion status tile (written by hardware).
+        src2: (format2, optional) Third sorted input tile (3-way or 4-way).
+        src3: (format2, optional) Fourth sorted input tile (4-way only).
+        tmp: (format2) Temporary workspace tile, must be passed as keyword arg for 2/3-way.
+        executed: (format2) Exhaustion status tile (written by hardware), keyword arg for 2/3-way.
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
         span: Optional source span for debugging.
@@ -2258,7 +2258,7 @@ def mrgsort(
         # format1: single-list merge sort (pto.tmrgsort format1)
         if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp, executed) "
                 "are mutually exclusive; do not pass format2 arguments with block_len"
             )
         # PTO ISA requires block_len as i32. The parser may emit ConstInt with INDEX dtype,
@@ -2270,16 +2270,28 @@ def mrgsort(
         else:
             block_len_expr = _ir_core.ConstInt(block_len, DataType.INT32, actual_span)
         return _ir_core.create_op_call("tile.mrgsort_format1", [src0, block_len_expr], {}, actual_span)
-    # format2: 4-way merge (pto.tmrgsort format2)
-    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+    # format2: 2-4 way merge (pto.tmrgsort format2)
+    if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, executed) for format2"
+            "or at least (src0, src1, tmp=<tile>, executed=<tile>) for format2"
+        )
+    if tmp is None or executed is None:
+        raise ValueError(
+            "mrgsort() format2 requires tmp and executed to be provided as keyword arguments; "
+            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)"
         )
     kwargs: dict[str, Any] = {"exhausted": exhausted}
-    return _ir_core.create_op_call(
-        "tile.mrgsort_format2", [src0, src1, src2, src3, tmp, executed], kwargs, actual_span
-    )
+    if src2 is None:
+        # 2-way merge
+        args = [src0, src1, tmp, executed]
+    elif src3 is None:
+        # 3-way merge
+        args = [src0, src1, src2, tmp, executed]
+    else:
+        # 4-way merge
+        args = [src0, src1, src2, src3, tmp, executed]
+    return _ir_core.create_op_call("tile.mrgsort_format2", args, kwargs, actual_span)
 
 
 def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None) -> Call:
@@ -2290,18 +2302,24 @@ def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None)
     return mrgsort(src0, block_len=block_len, span=span)
 
 
-def mrgsort_format2(
-    src0: Expr,
-    src1: Expr,
-    src2: Expr,
-    src3: Expr,
-    tmp: Expr,
-    executed: Expr,
-    exhausted: bool = False,
-    span: Span | None = None,
-) -> Call:
-    """4-way merge sort (format2). Used by the parser for roundtrip fidelity.
+def mrgsort_format2(*args: Expr, exhausted: bool = False, span: Span | None = None) -> Call:
+    """2-4 way merge sort (format2). Used by the parser for roundtrip fidelity.
 
-    Prefer ``mrgsort(src0, src1, src2, src3, tmp, executed)`` in user code.
+    Positional args: ``(src0, src1[, src2[, src3]], tmp, executed)``
+    The last 2 positional args are always ``tmp`` and ``executed``.
+
+    Prefer ``mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)`` in user code.
     """
-    return mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=exhausted, span=span)
+    if len(args) < 4 or len(args) > 6:
+        raise ValueError(
+            f"mrgsort_format2() requires 4-6 positional arguments "
+            f"(src0, src1[, src2[, src3]], tmp, executed), got {len(args)}"
+        )
+    srcs = args[:-2]
+    tmp = args[-2]
+    executed = args[-1]
+    src0 = srcs[0]
+    src1 = srcs[1]
+    src2 = srcs[2] if len(srcs) > 2 else None
+    src3 = srcs[3] if len(srcs) > 3 else None
+    return mrgsort(src0, src1, src2, src3, tmp=tmp, executed=executed, exhausted=exhausted, span=span)

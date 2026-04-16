@@ -1025,27 +1025,27 @@ def mrgsort(
     src1: Expr | None = None,
     src2: Expr | None = None,
     src3: Expr | None = None,
-    tmp: Expr | None = None,
-    executed: Expr | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Expr | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Merge sort — format1 (single-list) or format2 (4-way merge), tensor-level.
+    """Merge sort — format1 (single-list) or format2 (2-4 way merge), tensor-level.
 
     Tensor-level counterpart of ``tile.mrgsort``. Format1 sorts a tensor
     containing multiple pre-sorted runs of length ``block_len``. Format2 merges
-    4 pre-sorted input tensors into one sorted output.
+    2, 3, or 4 pre-sorted input tensors into one sorted output.
+
+    The scratch ``tmp`` and ``executed`` tiles required by the tile-level op are
+    synthesized automatically during ConvertTensorToTileOps as local Vec tiles —
+    users do not pass them at the tensor level.
 
     Args:
         src0: For format1: input tensor with pre-sorted runs (FP16 or FP32).
               For format2: first sorted input tensor.
         src1: (format2) Second sorted input tensor.
-        src2: (format2) Third sorted input tensor.
-        src3: (format2) Fourth sorted input tensor.
-        tmp: (format2) Temporary workspace tensor.
-        executed: (format2) Exhaustion status tensor (written by hardware).
+        src2: (format2, optional) Third sorted input tensor (3-way or 4-way).
+        src3: (format2, optional) Fourth sorted input tensor (4-way only).
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
         span: Optional source span for debugging.
@@ -1055,9 +1055,9 @@ def mrgsort(
     """
     actual_span = _get_span_or_capture(span)
     if block_len is not None:
-        if exhausted or any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if exhausted or any(arg is not None for arg in (src1, src2, src3)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ...) "
                 "are mutually exclusive; do not pass format2 arguments or exhausted=True with block_len"
             )
         if isinstance(block_len, _ir_core.ConstInt):
@@ -1067,15 +1067,20 @@ def mrgsort(
         else:
             block_len_expr = _ir_core.ConstInt(block_len, DataType.INT32, actual_span)
         return _ir_core.create_op_call("tensor.mrgsort_format1", [src0, block_len_expr], {}, actual_span)
-    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+    # format2: 2-4 way merge
+    if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, executed) for format2"
+            "or at least (src0, src1) for format2"
         )
     kwargs: dict[str, Any] = {"exhausted": exhausted}
-    return _ir_core.create_op_call(
-        "tensor.mrgsort_format2", [src0, src1, src2, src3, tmp, executed], kwargs, actual_span
-    )
+    if src2 is None:
+        args = [src0, src1]
+    elif src3 is None:
+        args = [src0, src1, src2]
+    else:
+        args = [src0, src1, src2, src3]
+    return _ir_core.create_op_call("tensor.mrgsort_format2", args, kwargs, actual_span)
 
 
 def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None) -> Call:
@@ -1086,21 +1091,23 @@ def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None)
     return mrgsort(src0, block_len=block_len, span=span)
 
 
-def mrgsort_format2(
-    src0: Expr,
-    src1: Expr,
-    src2: Expr,
-    src3: Expr,
-    tmp: Expr,
-    executed: Expr,
-    exhausted: bool = False,
-    span: Span | None = None,
-) -> Call:
-    """4-way merge sort (format2). Used by the parser for roundtrip fidelity.
+def mrgsort_format2(*args: Expr, exhausted: bool = False, span: Span | None = None) -> Call:
+    """2-4 way merge sort (format2). Used by the parser for roundtrip fidelity.
 
-    Prefer ``mrgsort(src0, src1, src2, src3, tmp, executed)`` in user code.
+    Positional args: ``(src0, src1[, src2[, src3]])``.
+
+    Prefer ``mrgsort(src0, src1[, src2[, src3]])`` in user code.
     """
-    return mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=exhausted, span=span)
+    if len(args) < 2 or len(args) > 4:
+        raise ValueError(
+            f"mrgsort_format2() requires 2-4 positional arguments "
+            f"(src0, src1[, src2[, src3]]), got {len(args)}"
+        )
+    src0 = args[0]
+    src1 = args[1]
+    src2 = args[2] if len(args) > 2 else None
+    src3 = args[3] if len(args) > 3 else None
+    return mrgsort(src0, src1, src2, src3, exhausted=exhausted, span=span)
 
 
 # ============================================================================

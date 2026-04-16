@@ -532,42 +532,61 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 }
 
 // Helper function for MrgSort format2: emits pto.tmrgsort
-// format2: ins(src0, src1, src2, src3 {exhausted = <bool>} : types...)
-//          outs(dst, tmp, executed : dst_type, tmp_type, vector<4xi16>)
+// Supports 2-4 way merge:
+//   2-way (4 args): ins(src0, src1 {exhausted} : types...) outs(dst, tmp, executed : ...)
+//   3-way (5 args): ins(src0, src1, src2 {exhausted} : types...) outs(dst, tmp, executed : ...)
+//   4-way (6 args): ins(src0, src1, src2, src3 {exhausted} : types...) outs(dst, tmp, executed : ...)
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 6) << "Operation:[" << pto_op_name
-                               << "] requires 6 arguments (src0, src1, src2, src3, tmp, executed), but got "
-                               << op->args_.size();
+  CHECK(op->args_.size() >= 4 && op->args_.size() <= 6)
+      << "Operation:[" << pto_op_name << "] requires 4-6 arguments (2-4 srcs + tmp + executed), but got "
+      << op->args_.size();
 
-  // ins: src0, src1, src2, src3 (args 0-3)
-  std::string src0 = codegen.GetExprAsCode(op->args_[0]);
-  std::string src1 = codegen.GetExprAsCode(op->args_[1]);
-  std::string src2 = codegen.GetExprAsCode(op->args_[2]);
-  std::string src3 = codegen.GetExprAsCode(op->args_[3]);
-  std::string s0t = codegen.GetExprTypeAnnotation(op->args_[0]);
-  std::string s1t = codegen.GetExprTypeAnnotation(op->args_[1]);
-  std::string s2t = codegen.GetExprTypeAnnotation(op->args_[2]);
-  std::string s3t = codegen.GetExprTypeAnnotation(op->args_[3]);
+  size_t n_srcs = op->args_.size() - 2;
 
-  // outs: dst (result target), tmp (arg4), executed (arg5)
+  // Collect ins: src tiles (args 0..n_srcs-1)
+  std::vector<std::string> srcs, src_types;
+  for (size_t i = 0; i < n_srcs; ++i) {
+    srcs.push_back(codegen.GetExprAsCode(op->args_[i]));
+    src_types.push_back(codegen.GetExprTypeAnnotation(op->args_[i]));
+  }
+
+  // outs: dst (result target), tmp (args[n_srcs]), executed (args[n_srcs+1])
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
-  std::string tmp = codegen.GetExprAsCode(op->args_[4]);
-  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[4]);
-  std::string executed = codegen.GetExprAsCode(op->args_[5]);
+  std::string tmp = codegen.GetExprAsCode(op->args_[n_srcs]);
+  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[n_srcs]);
+  std::string executed_vec = codegen.NewNamedTemp("executed_vec");
+  codegen.Emit(executed_vec + " = arith.constant dense<0> : vector<4xi16>");
 
   bool exhausted = op->GetKwarg<bool>("exhausted", false);
   std::string exhausted_attr = exhausted ? "{exhausted = true}" : "{exhausted = false}";
 
   std::ostringstream oss;
-  oss << pto_op_name << " ins(" << src0 << ", " << src1 << ", " << src2 << ", " << src3 << " "
-      << exhausted_attr;
-  if (!s0t.empty() || !s1t.empty() || !s2t.empty() || !s3t.empty()) {
-    oss << " : " << s0t << ", " << s1t << ", " << s2t << ", " << s3t;
+  oss << pto_op_name << " ins(";
+  for (size_t i = 0; i < n_srcs; ++i) {
+    if (i > 0) oss << ", ";
+    oss << srcs[i];
   }
-  oss << ") outs(" << dst << ", " << tmp << ", " << executed;
+  oss << " " << exhausted_attr;
+
+  bool has_types = false;
+  for (const auto& t : src_types) {
+    if (!t.empty()) {
+      has_types = true;
+      break;
+    }
+  }
+  if (has_types) {
+    oss << " : ";
+    for (size_t i = 0; i < n_srcs; ++i) {
+      if (i > 0) oss << ", ";
+      oss << src_types[i];
+    }
+  }
+
+  oss << ") outs(" << dst << ", " << tmp << ", " << executed_vec;
   if (!dst_type.empty() || !tmp_type.empty()) {
     oss << " : " << dst_type << ", " << tmp_type << ", vector<4xi16>";
   }

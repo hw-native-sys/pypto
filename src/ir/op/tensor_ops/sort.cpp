@@ -101,15 +101,22 @@ REGISTER_OP("tensor.sort32")
     });
 
 // ============================================================================
-// tensor.mrgsort_format2 — 4-way merge sort (tensor-level).
+// tensor.mrgsort_format2 — 2-4 way merge sort (tensor-level).
+//
+// Unlike the tile-level op, the tensor-level mrgsort_format2 only takes source
+// tiles: the `tmp` scratch and `executed` status tiles are synthesized as
+// local Vec tile.create calls during ConvertTensorToTileOps. This keeps tiny
+// scratch (e.g. 1×4 INT16 executed) off the GM boundary, where they would
+// otherwise hit PTO tile alignment constraints (Cols * sizeof(dtype) % 32 == 0).
 // ============================================================================
 
 TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
                                 const std::string& op_name) {
-  CHECK(args.size() == 6) << "The operator " << op_name
-                          << " requires 6 arguments (src0, src1, src2, src3, tmp, executed), but got "
-                          << args.size();
+  // Arg layout: (src0, ..., srcN-1)
+  //   2-way: 2 args, 3-way: 3 args, 4-way: 4 args
+  CHECK(args.size() >= 2 && args.size() <= 4)
+      << "The operator " << op_name << " requires 2-4 arguments (2-4 srcs), but got " << args.size();
 
   auto src0_type = As<TensorType>(args[0]->GetType());
   CHECK(src0_type) << "The operator " << op_name << " requires argument 0 to be a TensorType, but got "
@@ -117,8 +124,12 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
   CHECK(src0_type->dtype_ == DataType::FP16 || src0_type->dtype_ == DataType::FP32)
       << "The operator " << op_name << " requires src dtype to be FP16 or FP32, but got "
       << src0_type->dtype_.ToString();
+  CHECK(!src0_type->shape_.empty()) << "The operator " << op_name << " requires non-empty src shape";
 
-  for (size_t i = 1; i < 4; ++i) {
+  // All srcs must share dtype and rank.
+  std::vector<std::shared_ptr<const TensorType>> src_types;
+  src_types.push_back(src0_type);
+  for (size_t i = 1; i < args.size(); ++i) {
     auto src_type = As<TensorType>(args[i]->GetType());
     CHECK(src_type) << "The operator " << op_name << " requires argument " << i
                     << " to be a TensorType, but got " << args[i]->GetType()->TypeName();
@@ -126,29 +137,48 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name << " requires all src tensors to have matching dtype, but argument "
         << i << " has " << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString()
         << ")";
+    CHECK(src_type->shape_.size() == src0_type->shape_.size())
+        << "The operator " << op_name << " requires all src tensors to have matching rank";
+    src_types.push_back(src_type);
   }
 
-  auto tmp_type = As<TensorType>(args[4]->GetType());
-  CHECK(tmp_type) << "The operator " << op_name << " requires argument 4 (tmp) to be a TensorType, but got "
-                  << args[4]->GetType()->TypeName();
-
-  auto exc_type = As<TensorType>(args[5]->GetType());
-  CHECK(exc_type) << "The operator " << op_name
-                  << " requires argument 5 (executed) to be a TensorType, but got "
-                  << args[5]->GetType()->TypeName();
-
-  return std::make_shared<TensorType>(tmp_type->shape_, src0_type->dtype_);
+  // Output shape: same as src0 except the last dim is the sum of all srcs' last dims
+  // (matches the `tmp` shape required at tile-level: merged destination buffer).
+  std::vector<ExprPtr> out_shape(src0_type->shape_.begin(), src0_type->shape_.end() - 1);
+  ExprPtr last_dim;
+  int64_t const_sum = 0;
+  bool all_const = true;
+  for (const auto& st : src_types) {
+    auto c = As<ConstInt>(st->shape_.back());
+    if (!c) {
+      all_const = false;
+      break;
+    }
+    const_sum += c->value_;
+  }
+  if (all_const) {
+    last_dim = std::make_shared<ConstInt>(const_sum, DataType::INDEX, Span::unknown());
+  } else {
+    last_dim = src_types[0]->shape_.back();
+    for (size_t i = 1; i < src_types.size(); ++i) {
+      last_dim = std::make_shared<Add>(last_dim, src_types[i]->shape_.back(), DataType::INDEX,
+                                       Span::unknown());
+    }
+  }
+  out_shape.push_back(last_dim);
+  return std::make_shared<TensorType>(out_shape, src0_type->dtype_);
 }
 
 REGISTER_OP("tensor.mrgsort_format2")
     .set_op_category("TensorOp")
-    .set_description("Merge sort 4 sorted lists, format2 (tensor-level, maps to tile.mrgsort_format2)")
+    .set_description("Merge sort 2-4 sorted lists, format2 (tensor-level). "
+                     "Args: (src0, src1[, src2[, src3]]). "
+                     "The scratch tmp and executed tiles required by tile.mrgsort_format2 are "
+                     "synthesized during conversion — users do not pass them at the tensor level.")
     .add_argument("src0", "First sorted input tensor (FP16 or FP32)")
     .add_argument("src1", "Second sorted input tensor")
-    .add_argument("src2", "Third sorted input tensor")
-    .add_argument("src3", "Fourth sorted input tensor")
-    .add_argument("tmp", "Temporary workspace tensor")
-    .add_argument("executed", "Exhaustion status output tensor")
+    .add_argument("src2", "(3/4-way only) Third sorted input tensor")
+    .add_argument("src3", "(4-way only) Fourth sorted input tensor")
     .set_attr<bool>("exhausted")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

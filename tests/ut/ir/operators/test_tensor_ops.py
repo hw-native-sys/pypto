@@ -1910,28 +1910,22 @@ def test_tensor_mrgsort_format1_invalid_block_len():
 
 
 def test_tensor_mrgsort_format2():
-    """tensor.mrgsort(src0..src3, tmp, executed) emits tensor.mrgsort_format2."""
+    """tensor.mrgsort(src0..src3) emits tensor.mrgsort_format2 with summed last-dim shape."""
     span = ir.Span.unknown()
     d1 = ir.ConstInt(1, DataType.INT32, span)
     d128 = ir.ConstInt(128, DataType.INT32, span)
-    d4 = ir.ConstInt(4, DataType.INT32, span)
-    d512 = ir.ConstInt(512, DataType.INT32, span)
     src_t = ir.TensorType([d1, d128], DataType.FP32)
-    tmp_t = ir.TensorType([d1, d512], DataType.FP32)
-    exe_t = ir.TensorType([d4], DataType.INT32)
 
     srcs = [ir.Var(f"s{i}", src_t, span) for i in range(4)]
-    tmp = ir.Var("tmp", tmp_t, span)
-    exe = ir.Var("exe", exe_t, span)
 
-    call = ir.op.tensor.mrgsort(*srcs, tmp, exe)
+    call = ir.op.tensor.mrgsort(*srcs)
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.mrgsort_format2"
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
-    # Output shape matches tmp tensor's shape
+    # Output shape: last dim = sum of all src last dims (4 * 128 = 512)
     assert isinstance(result_type.shape[1], ir.ConstInt)
     assert result_type.shape[1].value == 512
 
@@ -1948,11 +1942,9 @@ def test_tensor_mrgsort_format2_dtype_mismatch():
     s1 = ir.Var("s1", src_fp16, span)
     s2 = ir.Var("s2", src_fp32, span)
     s3 = ir.Var("s3", src_fp32, span)
-    tmp = ir.Var("tmp", src_fp32, span)
-    exe = ir.Var("exe", src_fp32, span)
 
     with pytest.raises(Exception, match=r"matching dtype"):
-        ir.op.tensor.mrgsort(s0, s1, s2, s3, tmp, exe)
+        ir.op.tensor.mrgsort(s0, s1, s2, s3)
 
 
 def test_tensor_mrgsort_mixed_args_rejected():
