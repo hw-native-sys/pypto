@@ -90,7 +90,7 @@ from .op.system_ops import (
     tpush_to_aic,
     tpush_to_aiv,
 )
-from .op.tensor_ops import assemble, create_tensor, dim, full, scatter_update
+from .op.tensor_ops import assemble, create_tensor, dim, expand_clone, full, scatter_update
 from .op.tile_ops import (
     MemRefType,
     abs,
@@ -272,6 +272,7 @@ __all__ = [
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
+    "expand_clone",
     "expands",
     "neg",
     "recip",

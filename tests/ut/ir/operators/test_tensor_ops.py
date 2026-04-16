@@ -1557,6 +1557,92 @@ def test_tensor_expands():
     assert len(result_type.shape) == 2
 
 
+# =============================================================================
+# Tensor expand_clone tests
+# =============================================================================
+
+
+def test_tensor_expand_clone_dim0():
+    """Test tensor.expand_clone broadcasts dim0."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+
+    input_type = ir.TensorType([dim1, dim4, dim8], DataType.FP32)
+    target_type = ir.TensorType([dim2, dim4, dim8], DataType.FP32)
+    input_var = ir.Var("src", input_type, span)
+    target_var = ir.Var("dst", target_type, span)
+
+    call = ir.op.tensor.expand_clone(input_var, target_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.expand_clone"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+    for dim, expected in zip(result_type.shape, [2, 4, 8]):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == expected
+
+
+def test_tensor_expand_clone_dim1():
+    """Test tensor.expand_clone broadcasts dim1."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    input_type = ir.TensorType([dim4, dim1, dim8], DataType.FP32)
+    target_type = ir.TensorType([dim4, dim16, dim8], DataType.FP32)
+    input_var = ir.Var("src", input_type, span)
+    target_var = ir.Var("dst", target_type, span)
+
+    call = ir.op.tensor.expand_clone(input_var, target_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.expand_clone"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+    for dim, expected in zip(result_type.shape, [4, 16, 8]):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == expected
+
+
+def test_tensor_expand_clone_dim2():
+    """Test tensor.expand_clone broadcasts dim2."""
+    span = ir.Span.unknown()
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+
+    input_type = ir.TensorType([dim4, dim8, dim1], DataType.FP32)
+    target_type = ir.TensorType([dim4, dim8, dim16], DataType.FP32)
+    input_var = ir.Var("src", input_type, span)
+    target_var = ir.Var("dst", target_type, span)
+
+    call = ir.op.tensor.expand_clone(input_var, target_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.expand_clone"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+    for dim, expected in zip(result_type.shape, [4, 8, 16]):
+        assert isinstance(dim, ir.ConstInt)
+        assert dim.value == expected
+
+
 def test_tensor_concat():
     """Test tensor.concat - column-wise concatenation."""
     span = ir.Span.unknown()

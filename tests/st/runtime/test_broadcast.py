@@ -124,6 +124,87 @@ class TestTileColExpand(PTOTestCase):
         tensors["y"][:] = tensors["col_vec"].repeat(self.M, 1)
 
 
+class TestTensorExpandClone(PTOTestCase):
+    """Test case for tensor.expand_clone."""
+
+    __test__ = False
+
+    def __init__(
+        self,
+        b: int = 8,
+        n: int = 8,
+        k: int = 8,
+        broadcast_dim: int = 0,
+        *,
+        backend_type: BackendType | None = None,
+        config=None,
+    ):
+        super().__init__(config, backend_type=backend_type)
+        self.B = b
+        self.N = n
+        self.K = k
+        self.broadcast_dim = broadcast_dim
+
+    def get_name(self) -> str:
+        return f"tensor_expand_clone_d{self.broadcast_dim}_{self.B}x{self.N}x{self.K}"
+
+    def _input_shape(self) -> list[int]:
+        if self.broadcast_dim == -1:
+            return [self.B, self.N, self.K]
+        if self.broadcast_dim == 0:
+            return [1, self.N, self.K]
+        if self.broadcast_dim == 1:
+            return [self.B, 1, self.K]
+        if self.broadcast_dim == 2:
+            return [self.B, self.N, 1]
+        raise ValueError(f"Unsupported broadcast_dim: {self.broadcast_dim}")
+
+    def define_tensors(self) -> list[TensorSpec]:
+        input_shape = self._input_shape()
+        return [
+            TensorSpec("x", input_shape, DataType.FP32, init_value=torch.randn),
+            TensorSpec("y", [self.B, self.N, self.K], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        B, N, K = self.B, self.N, self.K
+        input_shape = self._input_shape()
+
+        @pl.program
+        class ExpandCloneProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def expand_clone_kernel(
+                self,
+                x: pl.Tensor[input_shape, pl.FP32],
+                y: pl.Out[pl.Tensor[[B, N, K], pl.FP32]],
+            ) -> pl.Tensor[[B, N, K], pl.FP32]:
+                out: pl.Tensor[[B, N, K], pl.FP32] = pl.expand_clone(x, y)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[input_shape, pl.FP32],
+                y: pl.Out[pl.Tensor[[B, N, K], pl.FP32]],
+            ) -> pl.Tensor[[B, N, K], pl.FP32]:
+                y = self.expand_clone_kernel(x, y)
+                return y
+
+        return ExpandCloneProgram
+
+    def compute_expected(self, tensors, params=None):
+        if self.broadcast_dim == -1:
+            tensors["y"][:] = tensors["x"]
+        elif self.broadcast_dim == 0:
+            tensors["y"][:] = tensors["x"].repeat(self.B, 1, 1)
+        elif self.broadcast_dim == 1:
+            tensors["y"][:] = tensors["x"].repeat(1, self.N, 1)
+        elif self.broadcast_dim == 2:
+            tensors["y"][:] = tensors["x"].repeat(1, 1, self.K)
+        else:
+            raise ValueError(f"Unsupported broadcast_dim: {self.broadcast_dim}")
+
+
 class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
@@ -139,6 +220,15 @@ class TestBroadcastOperations:
     def test_tile_col_expand(self, test_runner, backend, m, n):
         """Test tile.col_expand across platforms."""
         result = test_runner.run(TestTileColExpand(m=m, n=n, backend_type=backend))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("broadcast_dim", [-1, 0, 1, 2])
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    def test_tensor_expand_clone(self, test_runner, backend, broadcast_dim):
+        """Test tensor.expand_clone across platforms."""
+        if backend == BackendType.Ascend950 and broadcast_dim == 2:
+            pytest.skip("Skip broadcast_dim=2 for a5 backend due to pto-isa bug.")
+        result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, backend_type=backend))
         assert result.passed, f"Test failed: {result.error}"
 
 

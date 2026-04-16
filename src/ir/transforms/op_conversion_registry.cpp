@@ -31,8 +31,10 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -452,6 +454,173 @@ void OpConversionRegistry::RegisterMemoryOps() {
 
         CHECK(false) << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
+      });
+
+  RegisterCustom(
+      "tensor.expand_clone",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.expand_clone conversion expects 2 args (input, target)";
+
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+        const auto& target = args[1];
+
+        auto input_tensor_type = As<TensorType>(input->GetType());
+        CHECK(input_tensor_type) << "tensor.expand_clone conversion: input must be TensorType, but got "
+                                 << input->GetType()->TypeName();
+
+        auto target_tensor_type = As<TensorType>(target->GetType());
+        CHECK(target_tensor_type) << "tensor.expand_clone conversion: target must be TensorType, but got "
+                                  << target->GetType()->TypeName();
+
+        const auto& input_shape = input_tensor_type->shape_;
+        const auto& target_shape = target_tensor_type->shape_;
+
+        CHECK(input_shape.size() == 3)
+            << "tensor.expand_clone conversion: input rank must be 3, but got " << input_shape.size();
+        CHECK(target_shape.size() == input_shape.size())
+            << "tensor.expand_clone conversion: input rank (" << input_shape.size()
+            << ") must match target rank (" << target_shape.size() << ")";
+
+        int broadcast_dim = -1;
+        for (size_t i = 0; i < input_shape.size(); ++i) {
+          if (DimensionsEqual(input_shape[i], target_shape[i])) {
+            continue;
+          }
+          auto input_const = GetConstantDimension(input_shape[i]);
+          CHECK(input_const && *input_const == 1)
+              << "tensor.expand_clone conversion requires input dim " << i
+              << " to be 1 for broadcasting, but got " << PythonPrint(input_shape[i]);
+          CHECK(broadcast_dim < 0)
+              << "tensor.expand_clone conversion allows broadcasting in at most one dimension";
+          broadcast_dim = static_cast<int>(i);
+        }
+
+        std::vector<StmtPtr> prologue;
+
+        auto make_index_const = [&](int64_t value) -> ExprPtr {
+          return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+        };
+
+        auto make_tuple = [&](std::vector<ExprPtr> elems) -> ExprPtr {
+          return std::make_shared<MakeTuple>(std::move(elems), span);
+        };
+
+        auto load_tensor_tile = [&](const ExprPtr& tensor, const ExprPtr& offsets,
+                                    const std::vector<ExprPtr>& shape,
+                                    const std::vector<ExprPtr>& valid_shape, const std::string& name_hint,
+                                    std::vector<StmtPtr>& stmts) -> ExprPtr {
+          auto shapes = MakeShapeTuple(shape, span);
+          auto valid_shapes = MakeShapeTuple(valid_shape, span);
+          std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                       {"transpose", false}};
+          auto load_call =
+              op_reg.Create("tile.load", {tensor, offsets, shapes, valid_shapes}, load_kwargs, span);
+          auto load_var = std::make_shared<Var>(name_hint, load_call->GetType(), span);
+          stmts.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+          return load_var;
+        };
+
+        DataType input_dtype = input_tensor_type->dtype_;
+
+        std::vector<ExprPtr> input_valid_shape = input_shape;
+        if (input_tensor_type && input_tensor_type->tensor_view_.has_value() &&
+            !input_tensor_type->tensor_view_->valid_shape.empty()) {
+          input_valid_shape = input_tensor_type->tensor_view_->valid_shape;
+        }
+
+        ExprPtr zero = make_index_const(0);
+        ExprPtr one = make_index_const(1);
+
+        if (broadcast_dim < 0) {
+          ExprPtr input_tile = input;
+          auto offsets = MakeZeroOffsets(input_shape.size(), span);
+          input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input",
+                                        prologue);
+          auto store_call = op_reg.Create("tile.store", {input_tile, offsets, target}, span);
+          return ConversionResult{std::move(prologue), store_call};
+        }
+
+        if (broadcast_dim == 0) {
+          ExprPtr input_tile = input;
+          auto offsets = MakeZeroOffsets(input_tensor_type->shape_.size(), span);
+          input_tile = load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input",
+                                        prologue);
+
+          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
+          auto return_var = std::make_shared<Var>("expand_clone_d0_result", target_tensor_type, span);
+
+          auto loop_offsets = make_tuple({loop_var, zero, zero});
+          auto store_call = op_reg.Create("tile.store", {input_tile, loop_offsets, iter_arg}, span);
+          auto store_var = std::make_shared<Var>("expand_clone_d0_store", store_call->GetType(), span);
+
+          std::vector<StmtPtr> body_stmts;
+          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
+
+          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
+                                                    std::vector<IterArgPtr>{iter_arg}, body,
+                                                    std::vector<VarPtr>{return_var}, span);
+          prologue.push_back(for_stmt);
+          return ConversionResult{std::move(prologue), return_var};
+        }
+
+        if (broadcast_dim == 1) {
+          auto loop_var = std::make_shared<Var>("i", std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto iter_arg = std::make_shared<IterArg>("expand_clone_acc", target_tensor_type, target, span);
+          auto return_var = std::make_shared<Var>("expand_clone_d1_result", target_tensor_type, span);
+
+          auto loop_offsets = make_tuple({loop_var, zero, zero});
+          std::vector<ExprPtr> slice_shape = {one, one, input_valid_shape[2]};
+
+          std::vector<StmtPtr> body_stmts;
+          auto input_tile = load_tensor_tile(input, loop_offsets, slice_shape, slice_shape,
+                                             "expand_clone_d1_input", body_stmts);
+
+          std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_dtype},
+                                                                         {"target_memory", MemorySpace::Vec}};
+          auto create_shape = MakeShapeTuple({one, target_shape[1], target_shape[2]}, span);
+          auto create_call = op_reg.Create("tile.create", {create_shape}, create_kwargs, span);
+          auto create_var = std::make_shared<Var>("expand_clone_d1_target", create_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(create_var, create_call, span));
+
+          auto col_expand_call = op_reg.Create("tile.col_expand", {create_var, input_tile}, span);
+          auto col_expand_var =
+              std::make_shared<Var>("expand_clone_d1_col", col_expand_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(col_expand_var, col_expand_call, span));
+
+          auto store_call = op_reg.Create("tile.store", {col_expand_var, loop_offsets, iter_arg}, span);
+          auto store_var = std::make_shared<Var>("expand_clone_d1_store", store_call->GetType(), span);
+          body_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, span));
+          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{store_var}, span));
+
+          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+          auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, target_shape[0], one,
+                                                    std::vector<IterArgPtr>{iter_arg}, body,
+                                                    std::vector<VarPtr>{return_var}, span);
+          prologue.push_back(for_stmt);
+          return ConversionResult{std::move(prologue), return_var};
+        }
+
+        auto offsets = MakeZeroOffsets(target_shape.size(), span);
+        auto input_tile =
+            load_tensor_tile(input, offsets, input_shape, input_valid_shape, "expand_clone_input", prologue);
+
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_dtype},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_shape = MakeShapeTuple(target_shape, span);
+        auto create_call = op_reg.Create("tile.create", {create_shape}, create_kwargs, span);
+        auto create_var = std::make_shared<Var>("expand_clone_d2_target", create_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(create_var, create_call, span));
+
+        auto row_expand_call = op_reg.Create("tile.row_expand", {create_var, input_tile}, span);
+        auto row_expand_var = std::make_shared<Var>("expand_clone_d2_row", row_expand_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(row_expand_var, row_expand_call, span));
+        auto store_call = op_reg.Create("tile.store", {row_expand_var, offsets, target}, span);
+        return ConversionResult{std::move(prologue), store_call};
       });
 }
 

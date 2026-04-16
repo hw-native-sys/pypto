@@ -682,6 +682,25 @@ def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) 
     return _ir_core.create_op_call("tensor.expands", [target, scalar_expr], {}, actual_span)
 
 
+def expand_clone(
+    src: Expr,
+    target: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Expand tensor to new shape.
+
+    Args:
+        src: Source tensor expression
+        target: Target tensor defining output shape
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for tensor expand_clone
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.expand_clone", [src, target], {}, actual_span)
+
+
 def exp(input: Expr, span: Span | None = None) -> Call:
     """Element-wise exponential operation.
 

@@ -120,8 +120,8 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
       // Skip ops whose inputs are handled by their own converter (self-loading):
       // they create loads with specific offsets/spaces, so Phase-1 default Vec loads
       // would be redundant or wrong.
-      static const std::unordered_set<std::string> kSelfLoadingOps = {"tensor.slice", "tensor.assemble",
-                                                                      "tensor.read", "tensor.write"};
+      static const std::unordered_set<std::string> kSelfLoadingOps = {
+          "tensor.slice", "tensor.assemble", "tensor.read", "tensor.write", "tensor.expand_clone"};
       if (kSelfLoadingOps.count(call->op_->name_)) {
         IRVisitor::VisitStmt_(op);
         return;

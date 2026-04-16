@@ -498,8 +498,8 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       // [M, 1] column vectors: PTOAS always infers DN for shape [M, 1] with
       // degenerate strides, so force DN layout and emit strides [1, M].
       bool is_column_vector = false;
-      if (tensor_type->shape_.size() == 2) {
-        auto last_dim = As<ir::ConstInt>(tensor_type->shape_[1]);
+      if (tensor_type->shape_.size() == 2 || tensor_type->shape_.size() == 3) {
+        auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
         if (last_dim && last_dim->value_ == 1) {
           is_column_vector = true;
           layout_DN = true;

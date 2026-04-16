@@ -48,6 +48,7 @@ __all__ = [
     "col_expand_div",
     "col_expand_sub",
     "expands",
+    "expand_clone",
     "exp",
     "neg",
     "recip",
@@ -625,6 +626,22 @@ def expands(target: Tensor, scalar: int | float | Scalar) -> Tensor:
     target_expr = target.unwrap()
     scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
     call_expr = _ir_ops.expands(target_expr, scalar_expr)
+    return Tensor(expr=call_expr)
+
+
+def expand_clone(src: Tensor, target: Tensor) -> Tensor:
+    """Clone and expand input to target shape.
+
+    Args:
+        src: Source tensor
+        target: Target tensor defining output shape
+
+    Returns:
+        Tensor wrapping the expand_clone operation
+    """
+    src_expr = src.unwrap()
+    target_expr = target.unwrap()
+    call_expr = _ir_ops.expand_clone(src_expr, target_expr)
     return Tensor(expr=call_expr)
 
 
