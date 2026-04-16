@@ -58,6 +58,14 @@ static std::string CalculateTensorSizeExpr(const TensorTypePtr& tensor_type, Cod
   return oss.str();
 }
 
+static std::string EmitAsUint32(const ExprPtr& expr, CodegenBase& codegen) {
+  std::string str = codegen.GenerateExprString(expr);
+  if (As<ConstInt>(expr)) {
+    return str;
+  }
+  return "static_cast<uint32_t>(" + str + ")";
+}
+
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   // tensor.create emits TensorCreateInfo for runtime memory allocation via alloc_tensors().
   // The batched alloc_tensors call and const Tensor& binding are emitted by
@@ -72,7 +80,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(result_type->shape_[i]) << ")";
+    oss << EmitAsUint32(result_type->shape_[i], codegen);
   }
   oss << "};\n";
 
@@ -219,7 +227,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(shape_tuple->elements_[i]) << ")";
+    oss << EmitAsUint32(shape_tuple->elements_[i], codegen);
   }
   oss << "};\n";
 
@@ -227,7 +235,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "uint32_t " << result_var << "_offsets[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(offset_tuple->elements_[i]) << ")";
+    oss << EmitAsUint32(offset_tuple->elements_[i], codegen);
   }
   oss << "};\n";
 
