@@ -99,7 +99,7 @@ _PTO_ISA_SSH = "git@github.com:PTO-ISA/pto-isa.git"
 
 def _get_pto_isa_clone_path() -> Path:
     """Return the default path where PTO-ISA is cloned."""
-    return Path(__file__).parent.parent.parent.parent / "_deps" / "pto-isa"
+    return Path(__file__).parent.parent.parent.parent / "build_output" / "_deps" / "pto-isa"
 
 
 def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https") -> str | None:
@@ -119,13 +119,6 @@ def ensure_pto_isa_root(commit: str | None = None, clone_protocol: str = "https"
         return existing_root
 
     clone_path = _get_pto_isa_clone_path()
-    return _ensure_pto_isa_root_locked(clone_path, commit=commit, clone_protocol=clone_protocol)
-
-
-def _ensure_pto_isa_root_locked(
-    clone_path: Path, commit: str | None = None, clone_protocol: str = "https"
-) -> str | None:
-    """Inner logic for :func:`ensure_pto_isa_root`, called while holding the file lock."""
     include_dir = clone_path / "include"
 
     if not (clone_path.exists() and include_dir.exists() and include_dir.is_dir()):
