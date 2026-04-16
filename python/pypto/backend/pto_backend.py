@@ -307,14 +307,23 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
         lines.append("")
         var_names.append(param_name)
 
-    # Extract dynamic dimension values from tensor structs (shapes[] holds current view shape at runtime)
-    seen_dyn_vars: set[str] = set()
+    # Extract dynamic dimension values from tensor structs (shapes[] holds current view shape at runtime).
+    # Deduplicate by IR variable identity (same_as), not by name_hint, so that
+    # distinct Var objects sharing a cosmetic name are never incorrectly merged.
+    seen_dyn_vars: list[_ir_core.Var] = []
+    used_c_names: set[str] = set()
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
-            if isinstance(dim, _ir_core.Var) and dim.name_hint not in seen_dyn_vars:
+            if isinstance(dim, _ir_core.Var) and not any(dim.same_as(v) for v in seen_dyn_vars):
+                seen_dyn_vars.append(dim)
                 var_name = dim.name_hint
-                seen_dyn_vars.add(var_name)
+                if var_name in used_c_names:
+                    suffix = 1
+                    while f"{var_name}_{suffix}" in used_c_names:
+                        suffix += 1
+                    var_name = f"{var_name}_{suffix}"
+                used_c_names.add(var_name)
                 lines.append(f"    // Extract dynamic dim: {var_name}")
                 lines.append(
                     f"    int64_t {var_name} = static_cast<int64_t>"
