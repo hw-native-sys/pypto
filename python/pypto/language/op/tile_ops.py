@@ -1796,6 +1796,29 @@ def mrgsort(src0: Tile, *, block_len: int | Scalar) -> Tile: ...
 def mrgsort(
     src0: Tile,
     src1: Tile,
+    *,
+    tmp: Tile,
+    executed: Tile,
+    exhausted: bool = ...,
+) -> Tile: ...
+
+
+@overload
+def mrgsort(
+    src0: Tile,
+    src1: Tile,
+    src2: Tile,
+    *,
+    tmp: Tile,
+    executed: Tile,
+    exhausted: bool = ...,
+) -> Tile: ...
+
+
+@overload
+def mrgsort(
+    src0: Tile,
+    src1: Tile,
     src2: Tile,
     src3: Tile,
     tmp: Tile,
@@ -1815,15 +1838,22 @@ def mrgsort(
     *,
     block_len: int | Scalar | None = None,
 ) -> Tile:
-    """Merge sort — format1 (single-list) or format2 (4-way merge).
+    """Merge sort — format1 (single-list) or format2 (2-4 way merge).
 
     Format1: sorts a tile containing multiple pre-sorted runs of length block_len.
-    Format2: performs a 4-way merge of 4 pre-sorted input tiles.
+    Format2: merges 2, 3, or 4 pre-sorted input tiles into one sorted output.
 
     Format1 usage (keyword block_len):
         out = mrgsort(src, block_len=64)
 
-    Format2 usage (6 positional args):
+    Format2 2-way usage (keyword tmp and executed):
+        out = mrgsort(src0, src1, tmp=tmp_tile, executed=exec_tile)
+        out = mrgsort(src0, src1, tmp=tmp_tile, executed=exec_tile, exhausted=True)
+
+    Format2 3-way usage:
+        out = mrgsort(src0, src1, src2, tmp=tmp_tile, executed=exec_tile)
+
+    Format2 4-way usage (6 positional args):
         out = mrgsort(src0, src1, src2, src3, tmp, executed)
         out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
 
@@ -1831,10 +1861,12 @@ def mrgsort(
         src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
               For format2: first sorted input tile.
         src1: (format2) Second sorted input tile.
-        src2: (format2) Third sorted input tile.
-        src3: (format2) Fourth sorted input tile.
-        tmp: (format2) Temporary workspace tile.
-        executed: (format2) Exhaustion status tile (written by hardware).
+        src2: (format2, optional) Third sorted input tile (3-way or 4-way).
+        src3: (format2, optional) Fourth sorted input tile (4-way only).
+        tmp: (format2) Temporary workspace tile (same shape as output).
+              Pass as keyword arg for 2-way and 3-way.
+        executed: (format2) Exhaustion status tile written by hardware (shape [1, 4] INT16).
+                  Pass as keyword arg for 2-way and 3-way.
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
 
@@ -1845,25 +1877,30 @@ def mrgsort(
         # format1: single-list merge sort
         if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp, executed) "
                 "are mutually exclusive; do not pass format2 arguments with block_len"
             )
         block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
         call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
         return Tile(expr=call_expr)
-    # format2: 4-way merge
-    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+    # format2: 2-4 way merge
+    if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, executed) for format2"
+            "or at least (src0, src1, tmp=<tile>, executed=<tile>) for format2"
+        )
+    if tmp is None or executed is None:
+        raise ValueError(
+            "mrgsort() format2 requires tmp and executed; "
+            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),
         src1.unwrap(),
-        src2.unwrap(),
-        src3.unwrap(),
-        tmp.unwrap(),
-        executed.unwrap(),
-        exhausted,
+        src2.unwrap() if src2 is not None else None,
+        src3.unwrap() if src3 is not None else None,
+        tmp=tmp.unwrap(),
+        executed=executed.unwrap(),
+        exhausted=exhausted,
     )
     return Tile(expr=call_expr)

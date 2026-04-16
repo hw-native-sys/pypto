@@ -49,6 +49,10 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "i8";
   } else if (dtype == DataType::UINT8) {
     return "ui8";
+  } else if (dtype == DataType::INT16) {
+    return "i16";
+  } else if (dtype == DataType::UINT16) {
+    return "ui16";
   } else if (dtype == DataType::BOOL) {
     return "i1";
   } else {

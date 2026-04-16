@@ -334,6 +334,60 @@ class MrgSort1DynFP32Program:
         return val_output, idx_output
 
 
+@pl.program
+class MrgSort2WayFP32Program:
+    """Tensor-level sort32 + format1 + format2 (2-way merge) for 1024 FP32 elements.
+
+    Mirrors ``MrgSort1DynFP32TensorValIdxProgram`` style, using ``pl.tensor.*``
+    APIs inside ``pl.at(CORE_GROUP)``.
+
+    Pipeline:
+      Left half  [1,512] → sort32 → [1,1024] → format1(64) → format1(256) → sorted [1,1024]
+      Right half [1,512] → sort32 → [1,1024] → format1(64) → format1(256) → sorted [1,1024]
+      format2 2-way merge → [1,2048] → gather(P0101) vals + gather(P1010,UINT32) idx
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 1024], pl.FP32],
+        idx: pl.Tensor[[1, 1024], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 1024], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 1024], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 1024], pl.FP32], pl.Tensor[[1, 1024], pl.UINT32]]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            # Slice src/idx into left and right halves.
+            left_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 0])
+            left_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 0])
+            right_src = pl.tensor.slice(src, shape=[1, 512], offset=[0, 512])
+            right_idx = pl.tensor.slice(idx, shape=[1, 512], offset=[0, 512])
+
+            # Sort left half: sort32 → [1,1024] interleaved, then 2x format1 → fully sorted.
+            left_s32 = pl.tensor.sort32(left_src, left_idx)
+            left_m1 = pl.tensor.mrgsort(left_s32, block_len=64)
+            left_sorted = pl.tensor.mrgsort(left_m1, block_len=256)
+
+            # Sort right half: same pipeline.
+            right_s32 = pl.tensor.sort32(right_src, right_idx)
+            right_m1 = pl.tensor.mrgsort(right_s32, block_len=64)
+            right_sorted = pl.tensor.mrgsort(right_m1, block_len=256)
+
+            # Format2 2-way merge: tmp/executed are synthesized by the conversion pass.
+            merged = pl.tensor.mrgsort(left_sorted, right_sorted)
+
+            # Extract sorted values (even columns) and indices (odd columns, reinterpret as UINT32).
+            vals = pl.tensor.gather(merged, mask_pattern=pl.tile.MaskPattern.P0101)
+            sorted_idx = pl.tensor.gather(
+                merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
+            )
+            val_output = pl.assemble(val_output, vals, [0, 0])
+            idx_output = pl.assemble(idx_output, sorted_idx, [0, 0])
+        return val_output, idx_output
+
+
 # --- Test Cases ---
 
 
@@ -375,6 +429,16 @@ def _make_idx_1x2048():
 def _make_src_1x2048():
     """Random [1, 2048] FP32 source for mrgsort dynamic block_len test."""
     return torch.randn(2048).unsqueeze(0).contiguous()
+
+
+def _make_idx_1x1024():
+    """Global indices [0..1023] for mrgsort 2-way format2 test."""
+    return torch.arange(0, 1024, dtype=torch.int32).unsqueeze(0).contiguous()
+
+
+def _make_src_1x1024():
+    """Random [1, 1024] FP32 source for mrgsort 2-way format2 test."""
+    return torch.randn(1024).unsqueeze(0).contiguous()
 
 
 class MrgSort1FP32TestCase(PTOTestCase):
@@ -513,6 +577,41 @@ class MrgSort1DynFP32TensorValIdxTestCase(PTOTestCase):
         src = tensors["src"].flatten()
         idx = tensors["idx"].flatten()
         _, global_order = torch.sort(src, descending=True)
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
+        tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
+
+
+class MrgSort2WayFP32TestCase(PTOTestCase):
+    """Test sort32 → format1 (per 512-element half) → format2 2-way merge pipeline.
+
+    1024 FP32 elements are split into two 512-element halves. Each half is sorted
+    independently using sort32 + 2x mrgsort format1. The two sorted halves are then
+    merged via mrgsort format2 (2-way), and values/indices are extracted with gather.
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort2_way_fp32"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 1024], DataType.FP32, init_value=_make_src_1x1024),
+            TensorSpec("idx", [1, 1024], DataType.UINT32, init_value=_make_idx_1x1024),
+            TensorSpec("val_output", [1, 1024], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 1024], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort2WayFP32Program
+
+    def compute_expected(self, tensors, params=None):
+        """Sort all 1024 elements descending; verify values and original indices."""
+        src = tensors["src"].flatten()  # [1024]
+        idx = tensors["idx"].flatten()  # [0, 1, 2, ..., 1023]
+        _, global_order = torch.sort(src, descending=True)
+
         tensors["val_output"][:] = src[global_order].unsqueeze(0)
         tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
 
@@ -685,6 +784,18 @@ class TestSort:
     def test_mrgsort1_dyn_fp32_tensor_val_idx(self, test_runner, platform):
         """Tensor-level sort32 + mrgsort + P0101/P1010 mask-gather: returns values and indices."""
         result = test_runner.run(MrgSort1DynFP32TensorValIdxTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort2_way_fp32(self, test_runner, platform):
+        """Tensor-level sort32 + format1 + format2 (2-way merge) for 1024-element sort.
+
+        Pipeline:
+          left  [1,512] → sort32 → format1(64) → format1(256) → sorted [1,1024]
+          right [1,512] → sort32 → format1(64) → format1(256) → sorted [1,1024]
+          format2 2-way merge → [1,2048] → gather → val [1,1024] + idx [1,1024]
+        """
+        result = test_runner.run(MrgSort2WayFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

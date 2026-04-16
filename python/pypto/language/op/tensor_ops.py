@@ -857,14 +857,16 @@ def mrgsort(src0: Tensor, *, block_len: int | Scalar) -> Tensor: ...
 
 
 @overload
+def mrgsort(src0: Tensor, src1: Tensor, exhausted: bool = ...) -> Tensor: ...
+
+
+@overload
+def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, exhausted: bool = ...) -> Tensor: ...
+
+
+@overload
 def mrgsort(
-    src0: Tensor,
-    src1: Tensor,
-    src2: Tensor,
-    src3: Tensor,
-    tmp: Tensor,
-    executed: Tensor,
-    exhausted: bool = ...,
+    src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, exhausted: bool = ...
 ) -> Tensor: ...
 
 
@@ -873,31 +875,31 @@ def mrgsort(
     src1: Tensor | None = None,
     src2: Tensor | None = None,
     src3: Tensor | None = None,
-    tmp: Tensor | None = None,
-    executed: Tensor | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Scalar | None = None,
 ) -> Tensor:
-    """Merge sort — format1 (single-list) or format2 (4-way merge), tensor-level.
+    """Merge sort — format1 (single-list) or format2 (2-4 way merge), tensor-level.
 
-    Tensor-level counterpart of ``pl.tile.mrgsort``.
+    Tensor-level counterpart of ``pl.tile.mrgsort``. The scratch ``tmp`` and
+    ``executed`` tiles required by the tile-level op are synthesized
+    automatically during conversion as local Vec tiles — users do not pass them.
 
     Format1 usage (keyword block_len):
         out = mrgsort(src, block_len=64)
 
-    Format2 usage (6 positional args):
-        out = mrgsort(src0, src1, src2, src3, tmp, executed)
-        out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
+    Format2 usage:
+        out = mrgsort(src0, src1)                # 2-way
+        out = mrgsort(src0, src1, src2)          # 3-way
+        out = mrgsort(src0, src1, src2, src3)    # 4-way
+        out = mrgsort(src0, src1, exhausted=True)
 
     Args:
         src0: For format1: input tensor with pre-sorted runs (FP16 or FP32).
               For format2: first sorted input tensor.
         src1: (format2) Second sorted input tensor.
-        src2: (format2) Third sorted input tensor.
-        src3: (format2) Fourth sorted input tensor.
-        tmp: (format2) Temporary workspace tensor.
-        executed: (format2) Exhaustion status tensor (written by hardware).
+        src2: (format2, optional) Third sorted input tensor (3-way or 4-way).
+        src3: (format2, optional) Fourth sorted input tensor (4-way only).
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
 
@@ -905,27 +907,26 @@ def mrgsort(
         Tensor with merged sorted elements
     """
     if block_len is not None:
-        if exhausted or any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if exhausted or any(arg is not None for arg in (src1, src2, src3)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ...) "
                 "are mutually exclusive; do not pass format2 arguments or exhausted=True with block_len"
             )
         block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
         call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
         return Tensor(expr=call_expr)
-    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+    # format2: 2-4 way merge
+    if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or (src0, src1, src2, src3, tmp, executed) for format2"
+            "or at least (src0, src1) for format2"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),
         src1.unwrap(),
-        src2.unwrap(),
-        src3.unwrap(),
-        tmp.unwrap(),
-        executed.unwrap(),
-        exhausted,
+        src2.unwrap() if src2 is not None else None,
+        src3.unwrap() if src3 is not None else None,
+        exhausted=exhausted,
     )
     return Tensor(expr=call_expr)
 

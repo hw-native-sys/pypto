@@ -2640,7 +2640,7 @@ class TestConvertSortOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_mrgsort_format2_conversion(self):
-        """tensor.mrgsort(s0..s3, tmp, exe) -> 6 tile.loads + tile.mrgsort_format2 + tile.store."""
+        """tensor.mrgsort(s0..s3) -> tile.loads + synthesized tile.create(tmp/executed) + tile.mrgsort_format2 + tile.store."""
 
         @pl.program
         class Before:
@@ -2651,10 +2651,8 @@ class TestConvertSortOps:
                 s1: pl.Tensor[[1, 128], pl.FP32],
                 s2: pl.Tensor[[1, 128], pl.FP32],
                 s3: pl.Tensor[[1, 128], pl.FP32],
-                tmp: pl.Tensor[[1, 512], pl.FP32],
-                exe: pl.Tensor[[4], pl.INT32],
             ) -> pl.Tensor[[1, 512], pl.FP32]:
-                out: pl.Tensor[[1, 512], pl.FP32] = pl.tensor.mrgsort(s0, s1, s2, s3, tmp, exe)
+                out: pl.Tensor[[1, 512], pl.FP32] = pl.tensor.mrgsort(s0, s1, s2, s3)
                 return out
 
             @pl.function
@@ -2664,10 +2662,8 @@ class TestConvertSortOps:
                 s1: pl.Tensor[[1, 128], pl.FP32],
                 s2: pl.Tensor[[1, 128], pl.FP32],
                 s3: pl.Tensor[[1, 128], pl.FP32],
-                tmp: pl.Tensor[[1, 512], pl.FP32],
-                exe: pl.Tensor[[4], pl.INT32],
             ) -> pl.Tensor[[1, 512], pl.FP32]:
-                out: pl.Tensor[[1, 512], pl.FP32] = self.main_incore_0(s0, s1, s2, s3, tmp, exe)
+                out: pl.Tensor[[1, 512], pl.FP32] = self.main_incore_0(s0, s1, s2, s3)
                 return out
 
         @pl.program
@@ -2679,18 +2675,16 @@ class TestConvertSortOps:
                 s1: pl.Tensor[[1, 128], pl.FP32],
                 s2: pl.Tensor[[1, 128], pl.FP32],
                 s3: pl.Tensor[[1, 128], pl.FP32],
-                tmp: pl.Tensor[[1, 512], pl.FP32],
-                exe: pl.Tensor[[4], pl.INT32],
                 out_0: pl.Out[pl.Tensor[[1, 512], pl.FP32]],
             ) -> pl.Tensor[[1, 512], pl.FP32]:
                 s0_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s0, [0, 0], [1, 128])
                 s1_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s1, [0, 0], [1, 128])
                 s2_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s2, [0, 0], [1, 128])
                 s3_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s3, [0, 0], [1, 128])
-                tmp_tile: pl.Tile[[1, 512], pl.FP32] = pl.load(tmp, [0, 0], [1, 512])
-                exe_tile: pl.Tile[[4], pl.INT32] = pl.load(exe, [0], [4])
+                mrgsort2_tmp: pl.Tile[[1, 512], pl.FP32] = pl.tile.create([1, 512], dtype=pl.FP32)
+                mrgsort2_executed: pl.Tile[[1, 4], pl.INT16] = pl.tile.create([1, 4], dtype=pl.INT16)
                 out_tile: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(
-                    s0_tile, s1_tile, s2_tile, s3_tile, tmp_tile, exe_tile
+                    s0_tile, s1_tile, s2_tile, s3_tile, mrgsort2_tmp, mrgsort2_executed
                 )
                 out_store: pl.Tensor[[1, 512], pl.FP32] = pl.store(out_tile, [0, 0], out_0)
                 return out_store
@@ -2702,11 +2696,9 @@ class TestConvertSortOps:
                 s1: pl.Tensor[[1, 128], pl.FP32],
                 s2: pl.Tensor[[1, 128], pl.FP32],
                 s3: pl.Tensor[[1, 128], pl.FP32],
-                tmp: pl.Tensor[[1, 512], pl.FP32],
-                exe: pl.Tensor[[4], pl.INT32],
             ) -> pl.Tensor[[1, 512], pl.FP32]:
                 out_0: pl.Tensor[[1, 512], pl.FP32] = pl.create_tensor([1, 512], dtype=pl.FP32)
-                out: pl.Tensor[[1, 512], pl.FP32] = self.main_incore_0(s0, s1, s2, s3, tmp, exe, out_0)
+                out: pl.Tensor[[1, 512], pl.FP32] = self.main_incore_0(s0, s1, s2, s3, out_0)
                 return out
 
         After = passes.convert_tensor_to_tile_ops()(Before)
