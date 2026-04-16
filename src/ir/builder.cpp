@@ -350,6 +350,10 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
                                                          std::move(name_hint), body, combined_span);
       break;
   }
+  // Safety net: every ScopeKind value above must populate scope_stmt. The switch has
+  // no default so adding a new ScopeKind without a case here will trip -Wswitch-enum;
+  // this assertion guards the runtime path in case someone bypasses that warning.
+  INTERNAL_CHECK(scope_stmt != nullptr) << "Unhandled ScopeKind in EndScope";
   context_stack_.pop_back();
 
   // Emit to parent context if it exists

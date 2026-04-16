@@ -117,7 +117,7 @@ def test_structural_equal_different_kinds():
     """Different scope kinds (InCore vs Hierarchy) compare as unequal."""
     s_in = ir.InCoreScopeStmt(body=_empty_body(), span=_span())
     s_hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, body=_empty_body(), span=_span())
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ir.assert_structural_equal(s_in, s_hier)
 
 

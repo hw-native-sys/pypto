@@ -12,7 +12,6 @@
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
-from pypto.pypto_core.ir import Level, Role
 
 
 class TestScopeStmt:
@@ -81,13 +80,13 @@ class TestScopeStmt:
         assert scope.name_hint == ""
 
     def test_spmd_scope_requires_positive_core_num(self):
-        """SpmdScopeStmt enforces core_num > 0 at construction (compile-time guarantee for type)."""
+        """SpmdScopeStmt enforces core_num > 0 at construction time."""
         span = ir.Span("test.py", 1, 1, 1, 10)
         var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
         body = ir.AssignStmt(var_y, var_x, span)
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="core_num"):
             ir.SpmdScopeStmt(core_num=0, body=body, span=span)
 
     def test_hierarchy_scope_typed_fields(self):
@@ -97,9 +96,9 @@ class TestScopeStmt:
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
         body = ir.AssignStmt(var_y, var_x, span)
 
-        scope = ir.HierarchyScopeStmt(level=Level.HOST, role=Role.Worker, body=body, span=span)
-        assert scope.level == Level.HOST
-        assert scope.role == Role.Worker
+        scope = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=body, span=span)
+        assert scope.level == ir.Level.HOST
+        assert scope.role == ir.Role.Worker
         assert scope.scope_kind == ir.ScopeKind.Hierarchy
 
 

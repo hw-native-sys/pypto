@@ -259,6 +259,10 @@ kind from a `ScopeStmt`-typed reference, or `isinstance(s, InCoreScopeStmt)`
 to dispatch on the concrete type.
 
 All five share the common base fields `name_hint_: str` and `body_: StmtPtr`.
+Note that `pl.at(level=Level.CORE_GROUP)` lowers to `InCoreScopeStmt` /
+`AutoInCoreScopeStmt`, not `HierarchyScopeStmt` — the parser rejects `role=`
+at `CORE_GROUP`. `HierarchyScopeStmt` is reserved for non-`CORE_GROUP` levels
+(host, cluster, global) and is not a general replacement for in-core scopes.
 
 ```python
 # with pl.incore(): y = pl.add(x, x)
@@ -270,8 +274,8 @@ auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
 # with pl.cluster():
 cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
 
-# with pl.at(level=Level.CORE_GROUP, role=Role.AIC):
-hier = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, role=ir.Role.AIC,
+# with pl.at(level=Level.HOST, role=Role.Worker):
+hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
 
 # with pl.spmd(core_num=8):

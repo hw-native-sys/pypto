@@ -16,20 +16,23 @@ new ``optimizations=`` with either deprecated kwarg is a hard error.
 """
 
 import warnings
+from typing import TypeVar
 
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
+T = TypeVar("T", bound=ir.ScopeStmt)
 
-def _find_scope_stmt(stmt):
-    """Recursively find the first ScopeStmt in an IR tree."""
-    if isinstance(stmt, ir.ScopeStmt):
+
+def _find_scope(stmt, scope_type: type[T]) -> T | None:
+    """Recursively find the first scope of ``scope_type`` in an IR tree."""
+    if isinstance(stmt, scope_type):
         return stmt
     if isinstance(stmt, ir.SeqStmts):
         for s in stmt.stmts:
-            r = _find_scope_stmt(s)
+            r = _find_scope(s, scope_type)
             if r is not None:
                 return r
     return None
@@ -47,9 +50,8 @@ def test_parse_optimizations_split_only_up_down():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.UP_DOWN
 
 
@@ -62,9 +64,8 @@ def test_parse_optimizations_split_only_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.LEFT_RIGHT
 
 
@@ -81,9 +82,8 @@ def test_parse_optimizations_auto_chunk_only():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
     assert scope.split is None
 
 
@@ -103,9 +103,8 @@ def test_parse_optimizations_auto_chunk_with_split():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
     assert scope.split == ir.SplitMode.UP_DOWN
 
 
@@ -132,10 +131,9 @@ def test_parse_optimizations_order_independent():
                 x = pl.add(x, x)
         return x
 
-    s1 = _find_scope_stmt(f1.body)
-    s2 = _find_scope_stmt(f2.body)
+    s1 = _find_scope(f1.body, ir.AutoInCoreScopeStmt)
+    s2 = _find_scope(f2.body, ir.AutoInCoreScopeStmt)
     assert s1 is not None and s2 is not None
-    assert s1.scope_kind == s2.scope_kind == ir.ScopeKind.AutoInCore
     assert s1.split == s2.split == ir.SplitMode.LEFT_RIGHT
 
 
@@ -148,9 +146,8 @@ def test_parse_optimizations_empty_list_is_plain_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split is None
 
 
@@ -180,10 +177,9 @@ def test_legacy_chunked_loop_optimizer_matches_new_form():
                 x = pl.add(x, x)
         return x
 
-    s_legacy = _find_scope_stmt(legacy.body)
-    s_new = _find_scope_stmt(new.body)
+    s_legacy = _find_scope(legacy.body, ir.AutoInCoreScopeStmt)
+    s_new = _find_scope(new.body, ir.AutoInCoreScopeStmt)
     assert s_legacy is not None and s_new is not None
-    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.AutoInCore
     assert s_legacy.split == s_new.split == ir.SplitMode.UP_DOWN
 
 
@@ -205,10 +201,9 @@ def test_legacy_split_kwarg_matches_new_form():
             y = pl.add(x, x)
         return y
 
-    s_legacy = _find_scope_stmt(legacy.body)
-    s_new = _find_scope_stmt(new.body)
+    s_legacy = _find_scope(legacy.body, ir.InCoreScopeStmt)
+    s_new = _find_scope(new.body, ir.InCoreScopeStmt)
     assert s_legacy is not None and s_new is not None
-    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.InCore
     assert s_legacy.split == s_new.split == ir.SplitMode.LEFT_RIGHT
 
 
@@ -394,9 +389,8 @@ def test_fully_qualified_auto_chunk():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
 
 
 def test_fully_qualified_split():
@@ -411,9 +405,8 @@ def test_fully_qualified_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.UP_DOWN
 
 

@@ -583,7 +583,11 @@ static std::optional<SplitMode> DeserializeScopeSplit(const msgpack::object& fie
   std::optional<SplitMode> split = std::nullopt;
   auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
   if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
-    split = static_cast<SplitMode>(split_obj->via.u64);
+    CHECK(split_obj->type == msgpack::type::POSITIVE_INTEGER ||
+          split_obj->type == msgpack::type::NEGATIVE_INTEGER)
+        << "ScopeStmt split must be an integer SplitMode code, got msgpack type "
+        << static_cast<int>(split_obj->type);
+    split = static_cast<SplitMode>(split_obj->as<uint64_t>());
   }
   return split;
 }
@@ -673,6 +677,30 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<SpmdScopeStmt>(core_num, sync_start, std::move(name_hint), body, span,
                                          DeserializeLeadingComments(fields_obj));
+}
+
+// Backward-compatibility: route legacy "ScopeStmt" type tags (written before the
+// per-kind subclass split, issue #1047) to the matching derived deserializer by
+// reading the legacy "scope_kind" field.
+static IRNodePtr DeserializeLegacyScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                            DeserializerContext& ctx) {
+  auto kind_obj = GET_FIELD_OBJ("scope_kind");
+  CHECK(kind_obj.type == msgpack::type::STR)
+      << "Legacy ScopeStmt scope_kind must be a string, got msgpack type " << static_cast<int>(kind_obj.type);
+  auto kind = StringToScopeKind(kind_obj.as<std::string>());
+  switch (kind) {
+    case ScopeKind::InCore:
+      return DeserializeInCoreScopeStmt(fields_obj, zone, ctx);
+    case ScopeKind::AutoInCore:
+      return DeserializeAutoInCoreScopeStmt(fields_obj, zone, ctx);
+    case ScopeKind::Cluster:
+      return DeserializeClusterScopeStmt(fields_obj, zone, ctx);
+    case ScopeKind::Hierarchy:
+      return DeserializeHierarchyScopeStmt(fields_obj, zone, ctx);
+    case ScopeKind::Spmd:
+      return DeserializeSpmdScopeStmt(fields_obj, zone, ctx);
+  }
+  throw pypto::TypeError("Unknown legacy ScopeKind during deserialization");
 }
 
 // Deserialize SeqStmts
@@ -915,6 +943,8 @@ static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
 static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
 static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
 static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);
+// Backward compatibility for IR serialized before issue #1047 split ScopeStmt into per-kind subclasses.
+static TypeRegistrar _legacy_scope_stmt_registrar("ScopeStmt", DeserializeLegacyScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);

@@ -884,6 +884,7 @@ class SSAConverter {
     if (auto hier = As<HierarchyScopeStmt>(op)) return rewrite(hier);
     if (auto spmd = As<SpmdScopeStmt>(op)) return rewrite(spmd);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
+    return op;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

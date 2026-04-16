@@ -225,7 +225,11 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 可使用 `s.scope_kind`（C++ 中为 `s.GetScopeKind()`）来取回类型，或使用
 `isinstance(s, InCoreScopeStmt)` 在具体类型上分派。
 
-五个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。
+五个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。注意：
+`pl.at(level=Level.CORE_GROUP)` 实际下沉到 `InCoreScopeStmt` /
+`AutoInCoreScopeStmt`，而非 `HierarchyScopeStmt`——解析器会在 `CORE_GROUP`
+拒绝 `role=`。`HierarchyScopeStmt` 仅用于非 `CORE_GROUP` 的层级
+（host、cluster、global），并不是 in-core 作用域的通用替代。
 
 ```python
 # with pl.incore(): y = pl.add(x, x)
@@ -237,8 +241,8 @@ auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
 # with pl.cluster():
 cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
 
-# with pl.at(level=Level.CORE_GROUP, role=Role.AIC):
-hier = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, role=ir.Role.AIC,
+# with pl.at(level=Level.HOST, role=Role.Worker):
+hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
 
 # with pl.spmd(core_num=8):

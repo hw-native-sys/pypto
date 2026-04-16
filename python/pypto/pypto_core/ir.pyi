@@ -1799,7 +1799,10 @@ class SplitMode(enum.Enum):
     """Split horizontally (width halved)."""
 
 class ScopeStmt(Stmt):
-    """Scope statement: marks a region with specific execution context (abstract base)."""
+    """Scope statement: marks a region with specific execution context (abstract base).
+
+    Abstract — instantiate one of the concrete subclasses below.
+    """
 
     scope_kind: Final[ScopeKind]
     """The kind of scope (discriminator)."""
@@ -1809,6 +1812,10 @@ class ScopeStmt(Stmt):
 
     body: Final[Stmt]
     """The nested statements."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        """ScopeStmt is abstract — construct an InCoreScopeStmt, AutoInCoreScopeStmt,
+        ClusterScopeStmt, HierarchyScopeStmt, or SpmdScopeStmt instead."""
 
 class InCoreScopeStmt(ScopeStmt):
     """InCore scope: AICore sub-graph region."""
@@ -1820,8 +1827,9 @@ class InCoreScopeStmt(ScopeStmt):
         self,
         split: SplitMode | None = None,
         name_hint: str = "",
-        body: Stmt = ...,
-        span: Span = ...,
+        *,
+        body: Stmt,
+        span: Span,
     ) -> None:
         """Create an InCore scope statement."""
 
@@ -1835,15 +1843,16 @@ class AutoInCoreScopeStmt(ScopeStmt):
         self,
         split: SplitMode | None = None,
         name_hint: str = "",
-        body: Stmt = ...,
-        span: Span = ...,
+        *,
+        body: Stmt,
+        span: Span,
     ) -> None:
         """Create an AutoInCore scope statement."""
 
 class ClusterScopeStmt(ScopeStmt):
     """Cluster scope: co-scheduled AIC + AIV group."""
 
-    def __init__(self, name_hint: str = "", body: Stmt = ..., span: Span = ...) -> None:
+    def __init__(self, name_hint: str = "", *, body: Stmt, span: Span) -> None:
         """Create a Cluster scope statement."""
 
 class HierarchyScopeStmt(ScopeStmt):
@@ -1860,8 +1869,9 @@ class HierarchyScopeStmt(ScopeStmt):
         level: Level,
         role: Role | None = None,
         name_hint: str = "",
-        body: Stmt = ...,
-        span: Span = ...,
+        *,
+        body: Stmt,
+        span: Span,
     ) -> None:
         """Create a Hierarchy scope statement."""
 
@@ -1879,8 +1889,9 @@ class SpmdScopeStmt(ScopeStmt):
         core_num: int,
         sync_start: bool = False,
         name_hint: str = "",
-        body: Stmt = ...,
-        span: Span = ...,
+        *,
+        body: Stmt,
+        span: Span,
     ) -> None:
         """Create an SPMD scope statement."""
 
@@ -3180,7 +3191,11 @@ class IRVisitor:
     def visit_if_stmt(self, op: IfStmt) -> None: ...
     def visit_for_stmt(self, op: ForStmt) -> None: ...
     def visit_while_stmt(self, op: WhileStmt) -> None: ...
-    def visit_scope_stmt(self, op: ScopeStmt) -> None: ...
+    def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> None: ...
+    def visit_auto_in_core_scope_stmt(self, op: AutoInCoreScopeStmt) -> None: ...
+    def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
+    def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
+    def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
     def visit_seq_stmts(self, op: SeqStmts) -> None: ...
     def visit_yield_stmt(self, op: YieldStmt) -> None: ...
     def visit_return_stmt(self, op: ReturnStmt) -> None: ...
@@ -3253,7 +3268,11 @@ class IRMutator:
     def visit_if_stmt(self, op: IfStmt) -> Stmt: ...
     def visit_for_stmt(self, op: ForStmt) -> Stmt: ...
     def visit_while_stmt(self, op: WhileStmt) -> Stmt: ...
-    def visit_scope_stmt(self, op: ScopeStmt) -> Stmt: ...
+    def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> Stmt: ...
+    def visit_auto_in_core_scope_stmt(self, op: AutoInCoreScopeStmt) -> Stmt: ...
+    def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
+    def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
+    def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
     def visit_seq_stmts(self, op: SeqStmts) -> Stmt: ...
     def visit_yield_stmt(self, op: YieldStmt) -> Stmt: ...
     def visit_return_stmt(self, op: ReturnStmt) -> Stmt: ...

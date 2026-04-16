@@ -52,7 +52,7 @@ program_outlined = outline_pass(program)
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)
 - User-provided: when `InCoreScopeStmt.name_hint` is non-empty, that name is used directly
-  - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → function named `fused_add`
+  - `with pl.incore(name_hint="fused_add"):` → function named `fused_add`
 
 ## Example
 
