@@ -9,65 +9,27 @@
 
 """Environment configuration for Simpler dependency.
 
-This module manages the Simpler runtime dependency, which is external
-to the PyPTO project and required for test execution.
+Simpler is bundled as a git submodule at the repository root (``runtime/``).
 """
 
-import os
 from pathlib import Path
 
-
-class PtoEnvironmentError(Exception):
-    """Environment configuration error exception"""
-
-    pass
+_SIMPLER_ROOT = Path(__file__).resolve().parents[4] / "runtime"
 
 
-def get_simpler_root() -> Path | None:
-    """Get Simpler root directory from SIMPLER_ROOT environment variable.
-
-    Returns:
-        Simpler root directory, or None if not set.
-    """
-    if "SIMPLER_ROOT" in os.environ:
-        return Path(os.environ["SIMPLER_ROOT"])
-    return None
+def get_simpler_root() -> Path:
+    """Return the Simpler submodule root directory."""
+    return _SIMPLER_ROOT
 
 
-def get_simpler_python_path() -> Path | None:
+def get_simpler_python_path() -> Path:
     """Get Simpler Python package path (simpler/python directory)."""
-    root = get_simpler_root()
-    if root is None:
-        return None
-    return root / "python"
+    return _SIMPLER_ROOT / "python"
 
 
-def get_simpler_scripts_path() -> Path | None:
+def get_simpler_scripts_path() -> Path:
     """Get Simpler scripts path (simpler/examples/scripts directory)."""
-    root = get_simpler_root()
-    if root is None:
-        return None
-    return root / "examples" / "scripts"
-
-
-def ensure_simpler_available() -> Path:
-    """Ensure Simpler is available, raise error if SIMPLER_ROOT is not set.
-
-    Returns:
-        Simpler root directory
-
-    Raises:
-        PtoEnvironmentError: When SIMPLER_ROOT is not set
-    """
-    root = get_simpler_root()
-    if root is not None:
-        return root
-
-    raise PtoEnvironmentError(
-        "Simpler runtime is not available.\n\n"
-        "Please set the SIMPLER_ROOT environment variable:\n"
-        "  export SIMPLER_ROOT=/path/to/your/simpler"
-    )
+    return _SIMPLER_ROOT / "examples" / "scripts"
 
 
 def is_hardware_available() -> bool:

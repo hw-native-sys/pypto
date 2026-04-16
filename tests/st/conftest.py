@@ -15,7 +15,6 @@ harness package (migrated from pto-testing-framework).
 """
 
 import inspect
-import os
 import random
 import re
 import shutil
@@ -37,7 +36,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 from harness.core.environment import (  # noqa: E402
-    ensure_simpler_available,
     get_simpler_python_path,
     get_simpler_scripts_path,
 )
@@ -57,41 +55,17 @@ from pypto.runtime.runner import RunConfig  # noqa: E402
 _temp_precompile_dirs: list[Path] = []
 
 
-def _init_simpler_root_if_needed() -> None:
-    """Populate SIMPLER_ROOT if not already set.
-
-    pytest_collection_finish runs before session fixtures, so
-    setup_simpler_dependency may not have set SIMPLER_ROOT yet when
-    prebuild_binaries is called.  This function bridges that gap.
-    """
-    if os.environ.get("SIMPLER_ROOT"):
-        return
-    try:
-        os.environ["SIMPLER_ROOT"] = str(ensure_simpler_available())
-    except Exception:
-        pass  # SIMPLER_ROOT unavailable; prebuild_binaries will bail out early
-
-
 @pytest.fixture(scope="session", autouse=True)
 def setup_simpler_dependency(request):
-    """Ensure Simpler dependency is available.
-
-    This fixture runs once per session before any tests. It:
-    1. Checks if Simpler is available (raises error if not)
-    2. Sets SIMPLER_ROOT environment variable for test runner
-    3. Adds simpler's Python paths to sys.path
+    """Add Simpler submodule Python paths to sys.path.
 
     Skipped when --codegen-only is specified (Simpler not needed).
     """
     if request.config.getoption("--codegen-only"):
-        return  # Code generation only, Simpler not needed
+        return
 
-    simpler_root = ensure_simpler_available()
-    os.environ["SIMPLER_ROOT"] = str(simpler_root)
-
-    # Add simpler to sys.path after ensuring it's available
     for path in [get_simpler_python_path(), get_simpler_scripts_path()]:
-        if path is not None and path.exists() and str(path) not in sys.path:
+        if path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
 
 
@@ -402,10 +376,6 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         ]
         platform: str = session.config.getoption("--platform")
         pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
-        # Ensure SIMPLER_ROOT is available before prebuild_binaries checks it.
-        # This hook runs before session fixtures, so setup_simpler_dependency
-        # may not have set it yet.
-        _init_simpler_root_if_needed()
         print(
             f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"
             f" in parallel (workers={workers_str})…"

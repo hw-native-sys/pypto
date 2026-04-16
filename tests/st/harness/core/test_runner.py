@@ -21,7 +21,6 @@ Orchestrates the full test execution pipeline:
 import concurrent.futures
 import importlib.util
 import logging
-import os
 import shutil
 import tempfile
 import threading
@@ -299,10 +298,6 @@ def prebuild_binaries(
         Number of test cases whose kernels and orchestration were successfully
         pre-built.
     """
-    simpler_root = os.environ.get("SIMPLER_ROOT", "")
-    if not simpler_root:
-        return 0
-
     from pypto.runtime.device_runner import (  # noqa: PLC0415
         compile_single_kernel,
         compile_single_orchestration,

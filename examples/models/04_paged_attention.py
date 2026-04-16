@@ -618,7 +618,6 @@ def main():
         max_num_blocks_per_req=max_num_blocks_per_req,
     )
 
-    # Run on device (requires Simpler's CodeRunner in SIMPLER_ROOT)
     tensor_specs = build_tensor_specs(
         batch=batch,
         num_heads=num_heads,

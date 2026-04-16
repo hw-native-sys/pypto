@@ -85,7 +85,6 @@ jobs:
     runs-on: [self-hosted, linux, arm64, npu]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
-      SIMPLER_ROOT: ${{ github.workspace }}/simpler
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: v0.24
       PTOAS_SHA256: 31a1f14767f23f0e530faeea0b0dea481ec22c09f9bee5045287b444df00b5bd
@@ -134,11 +133,8 @@ jobs:
       - name: Add Ascend tools to PATH
         run: echo "/usr/local/Ascend/cann-8.5.0/bin" >> $GITHUB_PATH
 
-      - name: Clone and install simpler repository (pinned)
-        run: |
-          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
-          cd $GITHUB_WORKSPACE/simpler
-          pip install -v .
+      - name: Install simpler
+        run: pip install -v ./runtime
 
       - name: Test system tests
         run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=d96c8784
@@ -151,7 +147,6 @@ jobs:
   system-tests-a5sim:
     runs-on: ubuntu-latest
     env:
-      SIMPLER_ROOT: ${{ github.workspace }}/simpler
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: v0.16
       PTOAS_SHA256: 37bae58a015fe64be1cc105898317fb38f422992e87963ac90fcef5d595d00ec
@@ -186,11 +181,8 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
-      - name: Clone and install simpler repository (stable)
-        run: |
-          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
-          cd $GITHUB_WORKSPACE/simpler
-          pip install -v .
+      - name: Install simpler
+        run: pip install -v ./runtime
 
       - name: Test A5 system tests (simulator)
         run: pytest tests/st -v --platform a5sim --forked --pto-isa-commit=d96c8784 -m a5
@@ -210,18 +202,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -v .[dev]
 
-      - name: Clone and install simpler repository (pinned)
-        run: |
-          git clone --branch stable --depth 1 https://github.com/hw-native-sys/simpler $GITHUB_WORKSPACE/simpler
-          cd $GITHUB_WORKSPACE/simpler
-          pip install -v .
+      - name: Install simpler
+        run: pip install -v ./runtime
 
       - name: Run fuzz tests (sim mode)
         id: run_fuzz
         continue-on-error: true
         run: |
-          export SIMPLER_ROOT="${GITHUB_WORKSPACE}/simpler"
-          export PYTHONPATH="${SIMPLER_ROOT}/python:${SIMPLER_ROOT}/examples/scripts:${PYTHONPATH:-}"
           mkdir -p build/fuzz-artifacts/sim
           cd tests/st/fuzz
           python generate_test.py --num-cases 10 --seed ${{ github.run_number }}

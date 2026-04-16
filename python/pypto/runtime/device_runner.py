@@ -22,7 +22,8 @@ These functions eliminate all Python-level imports from Simpler. The only
 Simpler dependency remaining is:
 
 - ``pip install simpler`` → provides the ``_task_interface`` nanobind C++ module.
-- ``SIMPLER_ROOT`` → provides C++ headers and pre-built runtime binaries.
+- The ``runtime/`` git submodule at the repository root provides C++ headers and
+  pre-built runtime binaries.
 """
 
 from __future__ import annotations

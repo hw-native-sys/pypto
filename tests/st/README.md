@@ -34,7 +34,7 @@ Test Case Definition → Build IR → Generate Kernels → Compile → Execute �
 
 - **Python**: Version 3.9 or higher
 - **PyPTO**: Installed (`pip install -e .` from project root)
-- **Simpler Runtime**: Set `SIMPLER_ROOT` environment variable
+- **Simpler Runtime**: Bundled as a git submodule (`git submodule update --init`)
 
 ### Python Dependencies
 
@@ -471,12 +471,13 @@ The `conftest.py` automatically adds `tests/st/` to the Python path.
 
 #### ModuleNotFoundError: No module named 'code_runner'
 
-**Problem:** Simpler runtime is not available.
+**Problem:** Simpler submodule is not checked out.
 
-**Solution:** Set the SIMPLER_ROOT environment variable:
+**Solution:** Initialize the git submodule:
 
 ```bash
-export SIMPLER_ROOT=/path/to/simpler
+git submodule update --init
+pip install -v ./simpler
 ```
 
 #### Fixtures Not Found
@@ -514,7 +515,7 @@ Before running tests, verify your setup:
 - [ ] In correct directory: `pwd` shows PyPTO project root
 - [ ] conftest.py exists: `ls tests/st/conftest.py`
 - [ ] harness package exists: `ls tests/st/harness/`
-- [ ] Simpler is set up: `echo $SIMPLER_ROOT`
+- [ ] Simpler submodule checked out: `ls runtime/`
 
 ---
 

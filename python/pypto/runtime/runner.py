@@ -56,6 +56,7 @@ from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
+from .env_manager import get_simpler_root as _get_simpler_root
 from .golden_writer import write_golden
 from .tensor_spec import ScalarSpec, TensorSpec
 
@@ -498,7 +499,7 @@ def _collect_swimlane_data(
     Moves ``perf_swimlane_*.json`` into ``work_dir/swimlane_data/`` and runs
     Simpler's ``swimlane_converter.py`` (if available) to produce merged JSON.
     """
-    simpler_root = os.environ.get("SIMPLER_ROOT")
+    simpler_root = _get_simpler_root()
     swimlane_dir = work_dir / "swimlane_data"
     swimlane_dir.mkdir(parents=True, exist_ok=True)
 
@@ -559,7 +560,7 @@ def _generate_swimlane(
     device_id: int,
     device_log_dir: Path | None,
     pre_run_logs: set[Path],
-    simpler_root: str | None,
+    simpler_root: Path,
     swimlane_dir: Path,
     perf_file: Path | None,
 ) -> None:
@@ -572,16 +573,13 @@ def _generate_swimlane(
         device_id: Hardware device index (fallback when no device log found).
         device_log_dir: CANN device log directory snapshotted before the run.
         pre_run_logs: Set of log files that existed before the run.
-        simpler_root: Path to the Simpler repository root.
+        simpler_root: Path to the Simpler submodule root.
         swimlane_dir: Directory where swimlane JSON files are written.
         perf_file: Path to the ``perf_swimlane_*.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
             swimlane conversion is skipped.
     """
-    if not simpler_root:
-        return
-
-    swimlane_script = Path(simpler_root) / "tools" / "swimlane_converter.py"
+    swimlane_script = simpler_root / "tools" / "swimlane_converter.py"
     if not swimlane_script.exists():
         return
 

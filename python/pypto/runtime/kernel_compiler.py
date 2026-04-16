@@ -17,8 +17,8 @@ Toolchain selection is determined by platform:
 - Hardware (a2a3/a5): CCEC for kernels, aarch64-g++ for orchestration
 - Simulation (a2a3sim/a5sim): g++-15 for kernels, g++ for orchestration
 
-Requires ``SIMPLER_ROOT`` environment variable pointing to the Simpler repository
-for C++ header paths (runtime headers, task_interface, platform includes).
+C++ header paths (runtime headers, task_interface, platform includes) are resolved
+from the ``simpler`` git submodule at the repository root.
 """
 
 import importlib.util
@@ -27,7 +27,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 from . import env_manager
 from .toolchain import (
@@ -39,23 +38,6 @@ from .toolchain import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _get_simpler_root() -> Path:
-    """Return the Simpler project root from ``SIMPLER_ROOT`` environment variable.
-
-    Raises:
-        EnvironmentError: If ``SIMPLER_ROOT`` is not set.
-    """
-    root = os.environ.get("SIMPLER_ROOT")
-    if not root:
-        raise OSError(
-            "SIMPLER_ROOT environment variable is not set.\n"
-            "Kernel and orchestration compilation requires C++ headers from the Simpler repository.\n"
-            "Set it to the root of your Simpler checkout:\n"
-            "  export SIMPLER_ROOT=/path/to/simpler"
-        )
-    return Path(root)
 
 
 class KernelCompiler:
@@ -72,7 +54,7 @@ class KernelCompiler:
 
     def __init__(self, platform: str = "a2a3"):
         self.platform = platform
-        self.runtime_root = _get_simpler_root()
+        self.runtime_root = env_manager.get_simpler_root()
 
         # Map platform to architecture directory
         if platform in ("a2a3", "a2a3sim"):

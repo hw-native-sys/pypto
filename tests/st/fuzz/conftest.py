@@ -9,8 +9,10 @@
 
 """Fuzz-specific conftest ensuring simpler paths survive pytest-forked forks."""
 
-import os
 import sys
+from pathlib import Path
+
+_SIMPLER_ROOT = Path(__file__).resolve().parents[3] / "runtime"
 
 
 def pytest_configure(config):
@@ -21,11 +23,7 @@ def pytest_configure(config):
     rather than in a session fixture, we guarantee that forked children
     see the correct paths for ``code_runner``, ``runtime_builder``, etc.
     """
-    simpler_root = os.environ.get("SIMPLER_ROOT")
-    if not simpler_root:
-        return
-
     for sub in ("examples/scripts", "python"):
-        p = os.path.join(simpler_root, sub)
-        if os.path.isdir(p) and p not in sys.path:
+        p = str(_SIMPLER_ROOT / sub)
+        if Path(p).is_dir() and p not in sys.path:
             sys.path.insert(0, p)

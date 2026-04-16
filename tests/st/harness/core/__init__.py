@@ -11,7 +11,6 @@
 
 from pypto.runtime.runner import RunConfig, RunResult
 
-from harness.core.environment import ensure_simpler_available
 from harness.core.harness import (
     A2A3_ONLY,
     A5_ONLY,
@@ -34,5 +33,4 @@ __all__ = [
     "RunConfig",
     "RunResult",
     "TestRunner",
-    "ensure_simpler_available",
 ]
