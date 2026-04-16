@@ -25,7 +25,7 @@ import pypto.language as pl
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime import RunConfig, TensorSpec, run
+from pypto.runtime import RunConfig, run
 
 # ---------------------------------------------------------------------------
 # Module-level dynamic variables — used only in InCore kernel type annotations.
@@ -455,44 +455,34 @@ def golden(tensors: dict, params: dict | None = None) -> None:
     tensors["out"][:] = out.reshape(batch * num_heads, head_dim)
 
 
-def build_tensor_specs(
+def build_tensors(
     batch: int,
     num_heads: int,
     head_dim: int,
     block_size: int,
     max_num_blocks_per_req: int,
     context_len: int,
-) -> list[TensorSpec]:
-    """Build the TensorSpec list matching the dynamic paged_attention orchestration signature.
+) -> tuple[torch.Tensor, ...]:
+    """Build torch tensors matching the dynamic paged_attention orchestration signature.
 
-    The dynamic program derives all shape parameters from tensor dimensions at
-    runtime, so there is no config tensor (unlike the static version).
-
-    Args:
-        batch: Number of requests in the batch.
-        num_heads: Number of query heads.
-        head_dim: Per-head feature dimension.
-        block_size: KV-cache block size (rows per physical block).
-        max_num_blocks_per_req: Maximum number of KV blocks per request.
-        context_len: Number of valid tokens per request.
+    Returns:
+        (query, key_cache, value_cache, block_table, context_lens, out)
     """
     query_rows = batch * num_heads
     key_cache_rows = batch * max_num_blocks_per_req * block_size
     block_table_flat_size = batch * max_num_blocks_per_req
 
-    context_lens_data = torch.full((batch,), context_len, dtype=torch.int32)
-    block_table_data = torch.randint(
+    context_lens = torch.full((batch,), context_len, dtype=torch.int32)
+    block_table = torch.randint(
         0, max(block_table_flat_size, 1), size=(batch, max_num_blocks_per_req), dtype=torch.int32
     ).flatten()
 
-    return [
-        TensorSpec("query", [query_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("key_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("value_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("block_table", [block_table_flat_size], torch.int32, init_value=block_table_data),
-        TensorSpec("context_lens", [batch], torch.int32, init_value=context_lens_data),
-        TensorSpec("out", [query_rows, head_dim], torch.float32, is_output=True),
-    ]
+    query = torch.randn(query_rows, head_dim, dtype=torch.bfloat16)
+    key_cache = torch.randn(key_cache_rows, head_dim, dtype=torch.bfloat16)
+    value_cache = torch.randn(key_cache_rows, head_dim, dtype=torch.bfloat16)
+    out = torch.zeros(query_rows, head_dim, dtype=torch.float32)
+
+    return query, key_cache, value_cache, block_table, context_lens, out
 
 
 def main():
@@ -526,7 +516,7 @@ def main():
         block_size=block_size,
     )
 
-    tensor_specs = build_tensor_specs(
+    query, key_cache, value_cache, block_table, context_lens, out = build_tensors(
         batch=batch,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -534,24 +524,40 @@ def main():
         max_num_blocks_per_req=max_num_blocks_per_req,
         context_len=context_len,
     )
-    result = run(
-        program=program,
-        tensor_specs=tensor_specs,
-        golden=golden,
+    run(
+        program,
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        context_lens,
+        out,
         config=RunConfig(
             platform="a2a3",
             device_id=11,
-            rtol=2e-2,
-            atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
             runtime_profiling=args.runtime_profiling,
         ),
     )
-    print(f"Result: {result}")
 
-    print("\nDone.")
+    # Golden validation
+    expected_out = out.clone()
+    golden(
+        {
+            "query": query,
+            "key_cache": key_cache,
+            "value_cache": value_cache,
+            "block_table": block_table,
+            "context_lens": context_lens,
+            "out": expected_out,
+        },
+    )
+    assert torch.allclose(out, expected_out, rtol=2e-2, atol=2e-2), (
+        f"Validation failed: max diff = {(out - expected_out).abs().max().item()}"
+    )
+    print("PASSED")
 
 
 if __name__ == "__main__":

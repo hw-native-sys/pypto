@@ -246,7 +246,7 @@ class CompiledProgram:
     def __call__(
         self,
         *args: torch.Tensor,
-        device: int = 0,
+        config: Any = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Execute the compiled program with torch tensors.
 
@@ -257,7 +257,8 @@ class CompiledProgram:
 
         Args:
             *args: Positional ``torch.Tensor`` arguments.
-            device: Device index for execution (default: 0).
+            config: Optional :class:`~pypto.runtime.runner.RunConfig` for
+                device index, profiling, etc.  Defaults to ``RunConfig()``.
 
         Returns:
             ``None`` for in-place calls, a single ``torch.Tensor`` or a
@@ -286,13 +287,18 @@ class CompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
-        from pypto.runtime.runner import execute_compiled  # noqa: PLC0415
+        from pypto.runtime.runner import RunConfig, execute_compiled  # noqa: PLC0415
+
+        if config is None:
+            config = RunConfig()
 
         execute_compiled(
             self._output_dir,
             all_tensors,
             platform=self._platform,
-            device_id=device,
+            device_id=config.device_id,
+            pto_isa_commit=config.pto_isa_commit,
+            runtime_profiling=config.runtime_profiling,
         )
 
         if not return_style:

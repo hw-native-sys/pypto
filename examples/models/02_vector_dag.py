@@ -38,7 +38,7 @@ import pypto.language as pl
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime import RunConfig, TensorSpec, run
+from pypto.runtime import RunConfig, run
 
 
 @pl.program
@@ -198,26 +198,31 @@ def main():
     )
     args = parser.parse_args()
 
-    tensor_specs = [
-        TensorSpec("a", [128, 128], torch.float32, init_value=2.0),
-        TensorSpec("b", [128, 128], torch.float32, init_value=3.0),
-        TensorSpec("f", [128, 128], torch.float32, is_output=True),
-    ]
-    result = run(
-        program=VectorDAGProgram,
-        tensor_specs=tensor_specs,
-        golden=golden,
+    a = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b = torch.full((128, 128), 3.0, dtype=torch.float32)
+    f = torch.zeros((128, 128), dtype=torch.float32)
+
+    run(
+        VectorDAGProgram,
+        a,
+        b,
+        f,
         config=RunConfig(
             platform="a2a3",
             device_id=10,
             strategy=OptimizationStrategy.Default,
             backend_type=BackendType.Ascend910B,
-            rtol=1e-5,
-            atol=1e-5,
             runtime_profiling=args.runtime_profiling,
         ),
     )
-    print(f"Result: {result}")
+
+    # Golden validation
+    c = a + b
+    expected_f = (c + 1.0) * (c + 2.0) + c
+    assert torch.allclose(f, expected_f, rtol=1e-5, atol=1e-5), (
+        f"Validation failed: max diff = {(f - expected_f).abs().max().item()}"
+    )
+    print("PASSED")
 
 
 if __name__ == "__main__":

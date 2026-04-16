@@ -10,29 +10,18 @@
 """
 PyPTO runtime runner.
 
-Provides :func:`run`, the main entry point for compiling a ``@pl.program`` and
-executing it on an Ascend NPU (or simulator), with correctness validation against
-a user-supplied golden function.
+Provides :func:`run`, the main entry point for compiling a ``@pl.program``
+and executing it on an Ascend NPU (or simulator).
 
 Typical usage::
 
     import torch
-    from pypto.runtime import run, RunConfig, TensorSpec
+    from pypto.runtime import run, RunConfig
 
-    def golden(tensors, params):
-        tensors["out"][:] = tensors["a"] + tensors["b"]
-
-    result = run(
-        program=MyProgram,
-        tensor_specs=[
-            TensorSpec("a",   [128, 128], torch.float32, init_value=2.0),
-            TensorSpec("b",   [128, 128], torch.float32, init_value=3.0),
-            TensorSpec("out", [128, 128], torch.float32, is_output=True),
-        ],
-        golden=golden,
-        config=RunConfig(platform="a2a3sim"),
-    )
-    print(result)  # PASS / FAIL: ...
+    a = torch.full((128, 128), 2.0)
+    b = torch.full((128, 128), 3.0)
+    c = torch.zeros(128, 128)
+    compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
 import importlib.util
@@ -40,9 +29,6 @@ import os
 import subprocess
 import sys
 import time
-import traceback
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -50,15 +36,11 @@ from typing import Any
 
 import torch
 
-from pypto import ir
-from pypto.backend import BackendType, set_backend_type
-from pypto.compile_profiling import CompileProfiler, get_active_profiler
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
 from .env_manager import get_simpler_root as _get_simpler_root
-from .golden_writer import write_golden
-from .tensor_spec import ScalarSpec, TensorSpec
 
 _OUTPUTS_DIR = Path("outputs")
 
@@ -221,6 +203,8 @@ def compile_program(
         disabled_warnings: Set of warning checks to disable.
         profiling: If ``True``, enable compile profiling.
     """
+    from pypto import ir  # noqa: PLC0415
+
     ir.compile(
         program,
         output_dir=str(work_dir),
@@ -236,139 +220,54 @@ def compile_program(
 
 def run(
     program: Any,
-    tensor_specs: list[TensorSpec],
-    golden: Callable,
+    *tensors: torch.Tensor,
     config: RunConfig | None = None,
-    scalar_specs: list[ScalarSpec] | None = None,
-) -> RunResult:
-    """Compile *program* and run it on device, validating against *golden*.
+) -> Any:
+    """Compile *program* and execute it with *tensors* on device.
 
-    The full pipeline executed by this function:
-
-    1. Call :func:`ir.compile` to generate CCE C++ kernel and orchestration files.
-    2. Patch the orchestration file with the required ``runtime.h`` header.
-    3. If *codegen_only*, return immediately.
-    4. Compile kernels + orchestration to binaries, assemble ``ChipCallable``.
-    5. Build tensor arguments, compute golden, execute on device, validate.
+    This is the user-facing entry point for the compile-and-run workflow.
+    No golden function, no TensorSpec — just define, compile, call.
 
     Args:
-        program: A ``@pl.program`` decorated class or an ``ir.Program`` object.
-        tensor_specs: Ordered list of tensor specifications.  The order must match
-            the parameter order of the program's orchestration function.
-        golden: A function with signature ``golden(tensors, params)`` that
-            computes the expected outputs in-place (writes to
-            ``tensors[output_name]``).  The function name does not matter.
-        config: Run configuration.  Uses default :class:`RunConfig` if ``None``.
-        scalar_specs: Optional list of scalar parameter specifications.  Scalar
-            TaskArg entries appear after all tensor entries in the generated
-            ``golden.py``, matching the TaskArg slot order produced by
-            orchestration codegen.
+        program: A ``@pl.program`` decorated class or an ``ir.Program``.
+        *tensors: Positional ``torch.Tensor`` arguments matching the
+            orchestration function's parameter order.  Pass no tensors
+            for compile-only.
+        config: Run configuration (platform, device, profiling, etc.).
+            Uses default :class:`RunConfig` if ``None``.
 
     Returns:
-        :class:`RunResult` with ``passed=True`` on success, or ``passed=False``
-        with an ``error`` message on failure.
+        A :class:`~pypto.ir.compiled_program.CompiledProgram` that can
+        be called again with new tensors.
 
     Example:
-        >>> result = run(MyProgram, specs, my_golden, RunConfig(platform="a2a3sim"))
-        >>> assert result.passed, str(result)
+        >>> from pypto.runtime import run, RunConfig
+        >>> a = torch.full((128, 128), 2.0)
+        >>> b = torch.full((128, 128), 3.0)
+        >>> c = torch.zeros(128, 128)
+        >>> compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
+        >>> # Re-run with different inputs:
+        >>> compiled(a2, b2, c2)
     """
     if config is None:
         config = RunConfig()
 
-    start_time = time.time()
-    if config.save_kernels_dir:
-        work_dir = Path(config.save_kernels_dir).resolve()
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        work_dir = Path("build_output") / f"{program.name}_{timestamp}"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    from pypto import ir  # noqa: PLC0415
 
-    # --- Compile profiling ---------------------------------------------------
-    prof = get_active_profiler()
-    owns_profiler = False
-    if prof is None and config.compile_profiling:
-        prof = CompileProfiler()
-        prof.__enter__()
-        owns_profiler = True
+    compiled = ir.compile(
+        program,
+        output_dir=config.save_kernels_dir,
+        strategy=config.strategy,
+        backend_type=config.backend_type,
+        dump_passes=config.dump_passes,
+        platform=config.platform,
+        profiling=config.compile_profiling,
+    )
 
-    def _stage(name: str) -> AbstractContextManager[Any]:
-        if prof is not None:
-            return prof.stage(name)
-        return nullcontext()
+    if tensors:
+        compiled(*tensors, config=config)
 
-    try:
-        # 1. Set backend for code generation
-        set_backend_type(config.backend_type)
-
-        # 2. Compile: generates kernels/, orchestration/, kernel_config.py
-        #    and patches orchestration headers
-        with _stage("compile"):
-            compile_program(
-                program,
-                work_dir,
-                strategy=config.strategy,
-                backend_type=config.backend_type,
-                dump_passes=config.dump_passes,
-                warning_level=config.warning_level,
-                disabled_warnings=config.disabled_warnings,
-                profiling=config.compile_profiling,
-            )
-
-        # 3. Write golden.py (still used for test harness compatibility)
-        golden_path = work_dir / "golden.py"
-        with _stage("golden_write"):
-            write_golden(
-                tensor_specs,
-                golden,
-                golden_path,
-                rtol=config.rtol,
-                atol=config.atol,
-                scalar_specs=scalar_specs,
-                data_dir=config.golden_data_dir,
-            )
-
-        # 4. If codegen_only, stop here — no binary compilation or device execution
-        if config.codegen_only:
-            profile_data = prof.to_dict() if prof is not None else None
-            return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
-
-        # 5. Compile C++ → binaries + assemble ChipCallable
-        from .device_runner import compile_and_assemble  # noqa: PLC0415
-
-        with _stage("binary_compilation"):
-            chip_callable, runtime_name = compile_and_assemble(
-                work_dir, config.platform, pto_isa_commit=config.pto_isa_commit
-            )
-
-        # 6–9. Load inputs, execute, validate
-        with _stage("device_execution"):
-            _execute_on_device(
-                work_dir,
-                golden_path,
-                chip_callable,
-                runtime_name,
-                config.platform,
-                config.device_id,
-                runtime_profiling=config.runtime_profiling,
-            )
-
-        profile_data = prof.to_dict() if prof is not None else None
-        return RunResult(passed=True, execution_time=time.time() - start_time, profile=profile_data)
-
-    except Exception:
-        profile_data = prof.to_dict() if prof is not None else None
-        return RunResult(
-            passed=False,
-            error=traceback.format_exc(),
-            execution_time=time.time() - start_time,
-            profile=profile_data,
-        )
-    finally:
-        if prof is not None:
-            report_dir = work_dir / "report"
-            prof.write_report(str(report_dir))
-        if owns_profiler and prof is not None:
-            prof.__exit__(None, None, None)
+    return compiled
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +582,7 @@ def execute_compiled(
     platform: str,
     device_id: int,
     pto_isa_commit: str | None = None,
+    runtime_profiling: bool = False,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors.
 
@@ -699,6 +599,8 @@ def execute_compiled(
         platform: Target execution platform.
         device_id: Hardware device index.
         pto_isa_commit: Optional git commit to pin pto-isa clone.
+        runtime_profiling: If ``True``, enable runtime profiling and
+            generate swimlane JSON after execution.
     """
     work_dir = Path(work_dir)
 
@@ -720,10 +622,21 @@ def execute_compiled(
         tensor_contiguous = tensor.cpu().contiguous()
         orch_args.add_tensor(make_tensor_arg(tensor_contiguous))
 
+    # Snapshot profiling state before execution
+    if runtime_profiling:
+        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+
     execute_on_device(
         chip_callable,
         orch_args,
         platform,
         runtime_name,
         device_id,
+        enable_profiling=runtime_profiling,
     )
+
+    # Collect swimlane data after execution
+    if runtime_profiling:
+        _collect_swimlane_data(
+            work_dir, platform, device_id, pre_run_logs, device_log_dir, pre_run_perf_files
+        )

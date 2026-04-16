@@ -45,7 +45,7 @@ import pypto.language as pl
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime import RunConfig, TensorSpec, run
+from pypto.runtime import RunConfig, run
 
 # ── Constants ────────────────────────────────────────────────────────────────
 Q_TILE = 16
@@ -668,7 +668,7 @@ def golden_multi_config(tensors: dict, params: dict | None = None) -> None:
 # ── TensorSpec builder ───────────────────────────────────────────────────────
 
 
-def build_tensor_specs_multi_config(
+def build_tensors_multi_config(
     batch: int,
     num_heads: int,
     head_dim: int,
@@ -676,20 +676,24 @@ def build_tensor_specs_multi_config(
     max_num_blocks_per_req: int,
     context_len: int,
     scale: float = 1.0,
-) -> list[TensorSpec]:
-    """Build TensorSpec list for multi-config paged attention."""
+) -> tuple[torch.Tensor, ...]:
+    """Build torch tensors for multi-config paged attention.
+
+    Returns:
+        (query, key_cache, value_cache, block_table, context_lens, out,
+         config, size_query, size_key_cache, size_value_cache)
+    """
     query_rows = batch * num_heads
     key_cache_rows = batch * max_num_blocks_per_req * block_size
-    block_table_flat_size = batch * max_num_blocks_per_req
     total_cache_blocks = key_cache_rows // block_size
 
     scale_bits = struct.unpack("I", struct.pack("f", scale))[0]
-    config_data = torch.tensor(
+    config = torch.tensor(
         [batch, num_heads, 1, head_dim, block_size, max_num_blocks_per_req, scale_bits],
         dtype=torch.int64,
     )
-    context_lens_data = torch.full((batch,), context_len, dtype=torch.int32)
-    block_table_data = torch.randint(
+    context_lens = torch.full((batch,), context_len, dtype=torch.int32)
+    block_table = torch.randint(
         0, max(total_cache_blocks, 1), size=(batch, max_num_blocks_per_req), dtype=torch.int32
     ).flatten()
 
@@ -697,18 +701,23 @@ def build_tensor_specs_multi_config(
     size_key_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
     size_value_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
 
-    return [
-        TensorSpec("query", [query_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("key_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("value_cache", [key_cache_rows, head_dim], torch.bfloat16, init_value=torch.randn),
-        TensorSpec("block_table", [block_table_flat_size], torch.int32, init_value=block_table_data),
-        TensorSpec("context_lens", [batch], torch.int32, init_value=context_lens_data),
-        TensorSpec("out", [query_rows, head_dim], torch.float32, is_output=True),
-        TensorSpec("config", [7], torch.int64, init_value=config_data),
-        TensorSpec("size_query", [1], torch.int64, init_value=size_query),
-        TensorSpec("size_key_cache", [1], torch.int64, init_value=size_key_cache),
-        TensorSpec("size_value_cache", [1], torch.int64, init_value=size_value_cache),
-    ]
+    query = torch.randn(query_rows, head_dim, dtype=torch.bfloat16)
+    key_cache = torch.randn(key_cache_rows, head_dim, dtype=torch.bfloat16)
+    value_cache = torch.randn(key_cache_rows, head_dim, dtype=torch.bfloat16)
+    out = torch.zeros(query_rows, head_dim, dtype=torch.float32)
+
+    return (
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        context_lens,
+        out,
+        config,
+        size_query,
+        size_key_cache,
+        size_value_cache,
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -741,7 +750,18 @@ def main():
         max_num_blocks_per_req=max_num_blocks_per_req,
     )
 
-    tensor_specs = build_tensor_specs_multi_config(
+    (
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        context_lens,
+        out,
+        config_tensor,
+        size_query,
+        size_key_cache,
+        size_value_cache,
+    ) = build_tensors_multi_config(
         batch=batch,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -750,15 +770,21 @@ def main():
         context_len=context_len,
         scale=scale,
     )
-    result = run(
-        program=program,
-        tensor_specs=tensor_specs,
-        golden=golden_multi_config,
+    run(
+        program,
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        context_lens,
+        out,
+        config_tensor,
+        size_query,
+        size_key_cache,
+        size_value_cache,
         config=RunConfig(
             platform="a2a3sim",
             device_id=11,
-            rtol=2e-2,
-            atol=2e-2,
             strategy=OptimizationStrategy.Default,
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
@@ -766,8 +792,27 @@ def main():
             runtime_profiling=args.runtime_profiling,
         ),
     )
-    print(f"Result: {result}")
-    print("\nDone.")
+
+    # Golden validation
+    expected_out = out.clone()
+    golden_multi_config(
+        {
+            "query": query,
+            "key_cache": key_cache,
+            "value_cache": value_cache,
+            "block_table": block_table,
+            "context_lens": context_lens,
+            "out": expected_out,
+            "config": config_tensor,
+            "size_query": size_query,
+            "size_key_cache": size_key_cache,
+            "size_value_cache": size_value_cache,
+        },
+    )
+    assert torch.allclose(out, expected_out, rtol=2e-2, atol=2e-2), (
+        f"Validation failed: max diff = {(out - expected_out).abs().max().item()}"
+    )
+    print("PASSED")
 
 
 if __name__ == "__main__":
