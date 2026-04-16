@@ -41,6 +41,7 @@ from .builder import IRBuilder
 
 # Import high-level API functions
 from .compile import compile
+from .compiled_program import CompiledProgram
 
 # Import roundtrip instrument factory
 from .instruments import make_roundtrip_instrument
@@ -97,6 +98,7 @@ __all__ = [
     "TileView",
     "python_print",
     "compile",
+    "CompiledProgram",
     "PassManager",
     "OptimizationStrategy",
     "VerificationMode",

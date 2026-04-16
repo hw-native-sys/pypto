@@ -669,3 +669,61 @@ def _add_headers_to_file(cpp_file: Path) -> None:
 
     lines.insert(insert_pos, header_block)
     cpp_file.write_text("".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Compiled program execution (callable API)
+# ---------------------------------------------------------------------------
+
+
+def execute_compiled(
+    work_dir: str | Path,
+    tensors: list[torch.Tensor],
+    *,
+    platform: str,
+    device_id: int,
+    pto_isa_commit: str | None = None,
+) -> None:
+    """Execute a pre-compiled program with user-provided tensors.
+
+    Reuses :func:`device_runner.compile_and_assemble` for binary compilation
+    (with caching and parallel kernel compilation) and
+    :func:`device_runner.execute_on_device` for device dispatch.  Output
+    tensors in *tensors* are modified in-place with device results.
+
+    Args:
+        work_dir: Root output directory from :func:`ir.compile`, containing
+            ``kernels/``, ``orchestration/``, and ``kernel_config.py``.
+        tensors: Ordered list of torch tensors matching the orchestration
+            function's parameter order.
+        platform: Target execution platform.
+        device_id: Hardware device index.
+        pto_isa_commit: Optional git commit to pin pto-isa clone.
+    """
+    work_dir = Path(work_dir)
+
+    # Ensure orchestration headers are patched (idempotent)
+    _patch_orchestration_headers(work_dir)
+
+    from .device_runner import (  # noqa: PLC0415
+        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+        compile_and_assemble,
+        execute_on_device,
+        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
+
+    # Build orch args directly from user tensors
+    orch_args = ChipStorageTaskArgs()
+    for tensor in tensors:
+        tensor_contiguous = tensor.cpu().contiguous()
+        orch_args.add_tensor(make_tensor_arg(tensor_contiguous))
+
+    execute_on_device(
+        chip_callable,
+        orch_args,
+        platform,
+        runtime_name,
+        device_id,
+    )
