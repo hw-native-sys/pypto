@@ -238,6 +238,9 @@ class PartialUnrollMutator : public IRMutator {
       }
       auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
       auto [cloned_stmts, cloned_yields] = SplitBodyYield(cloned.cloned_body);
+      INTERNAL_CHECK(cloned_yields.size() == op->iter_args_.size())
+          << "Internal error: loop body must yield " << op->iter_args_.size() << " values for iter_args, got "
+          << cloned_yields.size();
       clones.push_back(cloned_stmts);
       prev_yields = std::move(cloned_yields);
     }
