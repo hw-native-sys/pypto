@@ -30,13 +30,21 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace {
 
 /// IO category used for priority during the topological sort. Lower is emitted first.
-enum class IOCategory : int { Load = 0, Compute = 1, Store = 2 };
+///
+/// ``ScalarCompute`` sits above ``Load`` so that address-arithmetic assigns
+/// (e.g. ``k = i * 512``) — the typical predecessors of a tile.load offset —
+/// are emitted first, allowing all sibling clones' loads to become ready and
+/// cluster at the top of the region. Without this split, a per-clone scalar
+/// gate would interleave between clones and prevent the load-cluster layout
+/// that ping-pong buffering depends on.
+enum class IOCategory : int { ScalarCompute = 0, Load = 1, TileCompute = 2, Store = 3 };
 
 /// Singletons for the ops the pass cares about — resolved once from the registry
 /// and compared by identity in ``CategorizeStmt``. Using pointer identity instead
@@ -71,15 +79,23 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto op = CalledOp(assign->value_);
     if (op) {
+      // tile.read keeps Load even though its LHS is scalar — it's I/O against
+      // a tile and belongs in the load tier alongside tile.load.
       if (ops.IsLoadLike(op)) return IOCategory::Load;
       if (ops.IsStoreLike(op)) return IOCategory::Store;
     }
+    // Scalar-producing compute lifts to the top so it unblocks downstream
+    // loads; tile/tensor-producing compute stays in the middle.
+    if (std::dynamic_pointer_cast<const ScalarType>(assign->var_->GetType())) {
+      return IOCategory::ScalarCompute;
+    }
+    return IOCategory::TileCompute;
   }
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto op = CalledOp(eval->expr_);
     if (op && ops.IsStoreLike(op)) return IOCategory::Store;
   }
-  return IOCategory::Compute;
+  return IOCategory::TileCompute;
 }
 
 /// Terminators (`YieldStmt`, `ReturnStmt`, `BreakStmt`, `ContinueStmt`) must
@@ -94,9 +110,12 @@ bool IsTerminator(const StmtPtr& stmt) {
 }
 
 /**
- * @brief Mutator that reorders every multi-stmt ``SeqStmts`` in the program:
- *        loads pulled to the top, stores pushed to the bottom, compute in the middle —
- *        all subject to the dependency graph.
+ * @brief Mutator that reorders every multi-stmt ``SeqStmts`` in the program.
+ *
+ * Layered priority (top → bottom): scalar compute, loads, tile compute, stores —
+ * all subject to the dependency graph. Lifting scalar compute (typically address
+ * arithmetic) above loads ensures sibling clones' loads become ready together
+ * and cluster at the top, the layout ``MemoryReuse`` needs for ping-pong.
  */
 class ReorderUnrolledIOMutator : public IRMutator {
  public:

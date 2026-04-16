@@ -1,18 +1,21 @@
 # ReorderUnrolledIO Pass
 
-Inside every `SeqStmts` in the program, lifts `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph — to canonicalize IO order. Within replicated regions produced by `PartialUnrollTileLoops`, this enables symmetric ping-pong buffering.
+Inside every `SeqStmts` in the program, lifts scalar compute and `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph — to canonicalize IO order. Within replicated regions produced by `PartialUnrollTileLoops`, this enables symmetric ping-pong buffering.
 
 ## Overview
 
-After `PartialUnrollTileLoops` produces an outer `ForStmt` whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[load_0, compute_0, store_0, load_1, compute_1, store_1, …]`. With this layout, sibling clones' tile live ranges are sequential — `MemoryReuse` happily coalesces them into a single buffer, defeating ping-pong.
+After `PartialUnrollTileLoops` produces an outer `ForStmt` whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). With this layout, sibling clones' tile live ranges are sequential — `MemoryReuse` happily coalesces them into a single buffer, defeating ping-pong.
 
 This pass reorders every `SeqStmts` in the program (including function bodies, `ForStmt` bodies, and `IfStmt` branch bodies) so:
 
+- Each scalar-producing compute (typically address arithmetic) floats to the earliest position the dependency graph permits, so it unblocks downstream loads.
 - Each `tile.load` / `tile.read` floats to the earliest position the dependency graph permits.
+- Tile compute statements settle in the middle.
 - Each `tile.store` / `tile.write` sinks to the latest position the dependency graph permits.
-- Compute statements settle in the middle.
 
-The result is `[loads…, compute…, stores…]` whenever the dataflow allows. Within replicated regions, sibling clones' input tiles become co-live near the top and output tiles become co-live near the bottom — `MemoryReuse` cannot coalesce them, so each clone keeps its own MemRef and ping-pong buffering becomes possible.
+The result is `[scalars…, loads…, tile compute…, stores…]` whenever the dataflow allows. Within replicated regions, sibling clones' input tiles become co-live near the top and output tiles become co-live near the bottom — `MemoryReuse` cannot coalesce them, so each clone keeps its own MemRef and ping-pong buffering becomes possible.
+
+Lifting scalar compute is what unlocks the load cluster: without it, each clone's address-arithmetic assign would be classified as ordinary compute and rank by original position — interleaving between sibling loads and pinning them in their original groups. With scalar compute as the highest-priority category, all sibling clones' address arithmetic emits first, all dependent loads become ready together, and the loads naturally cluster.
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
@@ -35,30 +38,29 @@ A priority-aware stable topological sort applied to every `SeqStmts` of two or m
 
 | Category | Priority | Examples |
 | -------- | -------- | -------- |
-| `Load` | 0 (emit first) | `AssignStmt(tile, Call("tile.load", …))`, `AssignStmt(scalar, Call("tile.read", …))` |
-| `Compute` | 1 | Anything else inside the region |
-| `Store` | 2 (emit last) | `AssignStmt(_, Call("tile.store", …))` / `EvalStmt(Call("tile.store", …))` / `tile.write` variants |
+| `ScalarCompute` | 0 (emit first) | `AssignStmt` whose LHS is a `ScalarType` (e.g. `off = i * 64`) |
+| `Load` | 1 | `AssignStmt(_, Call("tile.load", …))` or `AssignStmt(_, Call("tile.read", …))` |
+| `TileCompute` | 2 | Anything else inside the region (tile.move, tile.matmul, yield_, …) |
+| `Store` | 3 (emit last) | `AssignStmt(_, Call("tile.store", …))` / `EvalStmt(Call("tile.store", …))` / `tile.write` variants |
 
-At each step:
+`tile.read` is classified as `Load` even though it produces a scalar — it's I/O against a tile and belongs in the load tier alongside `tile.load`. The LHS-type check only applies once the RHS is determined not to be a recognized I/O op.
 
-- Among statements whose predecessors are all already emitted (`ready`):
-  - If any non-store is ready → emit the smallest `(category, original_index)`. Loads (cat 0) win over compute (cat 1).
-  - Otherwise → emit the smallest-index store.
+At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(category, original_index)`. Stores naturally sort last because `Store = 3` is the largest category — they are only emitted once nothing else is ready.
 
-Stores are deferred because they are only chosen when no load or compute is available — combined with the load-priority rule, the pass produces `[loads…, compute…, stores…]` whenever the dataflow allows.
-
-Worked example — input `[load_0, compute_0, store_0, load_1, compute_1, store_1]` with each clone's compute reading its load and each store reading its compute:
+Worked example — input `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]` with each clone's load reading its scalar, each compute reading its load, each store reading both its scalar and compute:
 
 ```text
-ready={load_0, load_1}        non-store ready → emit load_0
-ready={load_1, compute_0}     non-store ready → emit load_1   (cat 0 < cat 1)
-ready={compute_0, compute_1}  non-store ready → emit compute_0
-ready={compute_1, store_0}    non-store ready → emit compute_1
-ready={store_0, store_1}      no non-store    → emit store_0
-ready={store_1}               no non-store    → emit store_1
+ready={scalar_0, scalar_1}              emit scalar_0    (cat 0, idx 0)
+ready={load_0, scalar_1}                emit scalar_1    (cat 0 < cat 1)
+ready={load_0, load_1}                  emit load_0      (cat 1, idx 1 < 5)
+ready={load_1, compute_0}               emit load_1      (cat 1 < cat 2)
+ready={compute_0, compute_1}            emit compute_0
+ready={compute_1, store_0}              emit compute_1   (cat 2 < cat 3)
+ready={store_0, store_1}                emit store_0
+ready={store_1}                         emit store_1
 ```
 
-Output: `[load_0, load_1, compute_0, compute_1, store_0, store_1]`.
+Output: `[scalar_0, scalar_1, load_0, load_1, compute_0, compute_1, store_0, store_1]`.
 
 ## Correctness
 
@@ -76,16 +78,18 @@ The reorder is a topological sort over the SSA def-use dependency graph, so it p
 
 ## Example
 
-**Before** (input from `PartialUnrollTileLoops`):
+**Before** (input from `PartialUnrollTileLoops` — note the per-clone scalar address-arithmetic assigns):
 
 ```python
 for i in pl.range(0, 8, 4):
-    tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
+    off_0: pl.Scalar[pl.INDEX] = i * 128
+    tile_x_0 = pl.tile.load(input_a, [off_0], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)
-    pl.tile.store(tile_y_0, [i * 128], output)
-    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128])
+    pl.tile.store(tile_y_0, [off_0], output)
+    off_1: pl.Scalar[pl.INDEX] = (i + 1) * 128
+    tile_x_1 = pl.tile.load(input_a, [off_1], [128])
     tile_y_1 = pl.tile.add(tile_x_1, 1.0)
-    pl.tile.store(tile_y_1, [(i + 1) * 128], output)
+    pl.tile.store(tile_y_1, [off_1], output)
     # ... k=2, k=3 ...
 ```
 
@@ -93,21 +97,25 @@ for i in pl.range(0, 8, 4):
 
 ```python
 for i in pl.range(0, 8, 4):
-    tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
-    tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128])
-    tile_x_2 = pl.tile.load(input_a, [(i + 2) * 128], [128])
-    tile_x_3 = pl.tile.load(input_a, [(i + 3) * 128], [128])
+    off_0: pl.Scalar[pl.INDEX] = i * 128
+    off_1: pl.Scalar[pl.INDEX] = (i + 1) * 128
+    off_2: pl.Scalar[pl.INDEX] = (i + 2) * 128
+    off_3: pl.Scalar[pl.INDEX] = (i + 3) * 128
+    tile_x_0 = pl.tile.load(input_a, [off_0], [128])
+    tile_x_1 = pl.tile.load(input_a, [off_1], [128])
+    tile_x_2 = pl.tile.load(input_a, [off_2], [128])
+    tile_x_3 = pl.tile.load(input_a, [off_3], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)
     tile_y_1 = pl.tile.add(tile_x_1, 1.0)
     tile_y_2 = pl.tile.add(tile_x_2, 1.0)
     tile_y_3 = pl.tile.add(tile_x_3, 1.0)
-    pl.tile.store(tile_y_0, [i * 128], output)
-    pl.tile.store(tile_y_1, [(i + 1) * 128], output)
-    pl.tile.store(tile_y_2, [(i + 2) * 128], output)
-    pl.tile.store(tile_y_3, [(i + 3) * 128], output)
+    pl.tile.store(tile_y_0, [off_0], output)
+    pl.tile.store(tile_y_1, [off_1], output)
+    pl.tile.store(tile_y_2, [off_2], output)
+    pl.tile.store(tile_y_3, [off_3], output)
 ```
 
-All four `tile_x_k` are now co-live up to the last load, and all four `tile_y_k` are co-live up to the first store. `MemoryReuse` (running next) cannot merge them — each gets a distinct MemRef.
+All four `off_k` lift first to unblock the loads. All four `tile_x_k` are now co-live up to the last load, and all four `tile_y_k` are co-live up to the first store. `MemoryReuse` (running next) cannot merge them — each gets a distinct MemRef.
 
 ## Related
 
