@@ -1493,13 +1493,6 @@ class SliceInputStridesOptimizer {
   // func_name -> { param_index -> parent_shape }
   using InputShapeMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<ExprPtr>>>;
 
-  // Sentinel: when a param_index maps to this, the parent shapes from
-  // different call sites disagree and the optimization must be skipped.
-  static const std::vector<ExprPtr>& ConflictMarker() {
-    static const std::vector<ExprPtr> marker;
-    return marker;
-  }
-
   static bool ShapesMatch(const std::vector<ExprPtr>& a, const std::vector<ExprPtr>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -1551,11 +1544,15 @@ class SliceInputStridesOptimizer {
         auto it = var_to_parent_shape_.find(arg_var.get());
         if (it == var_to_parent_shape_.end()) continue;
 
+        auto conflict_key = fname + ":" + std::to_string(i);
+        if (conflicted_.count(conflict_key)) continue;
+
         auto& entry = result_[fname][i];
-        if (entry.empty() && &entry != &ConflictMarker()) {
+        if (entry.empty()) {
           entry = it->second;
-        } else if (!entry.empty() && !ShapesMatch(entry, it->second)) {
-          entry.clear();  // conflict — different parent shapes at different call sites
+        } else if (!ShapesMatch(entry, it->second)) {
+          conflicted_.insert(conflict_key);
+          entry.clear();
         }
       }
     }
@@ -1564,6 +1561,7 @@ class SliceInputStridesOptimizer {
     const ProgramPtr& program_;
     const std::unordered_set<std::string>& incore_names_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> var_to_parent_shape_;
+    std::unordered_set<std::string> conflicted_;
     InputShapeMap result_;
   };
 
@@ -1604,7 +1602,7 @@ class SliceInputStridesOptimizer {
       std::vector<VarPtr> new_params = func->params_;
 
       for (const auto& [param_idx, parent_shape] : param_idx_to_shape) {
-        if (parent_shape.empty()) continue;  // conflict marker
+        if (parent_shape.empty()) continue;  // conflicted or not from slice
         if (param_idx >= func->params_.size()) continue;
 
         auto full_strides = ComputeRowMajorStrides(parent_shape);
