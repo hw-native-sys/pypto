@@ -72,7 +72,7 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << codegen.GenerateExprString(result_type->shape_[i]);
+    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(result_type->shape_[i]) << ")";
   }
   oss << "};\n";
 
@@ -219,7 +219,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << codegen.GenerateExprString(shape_tuple->elements_[i]);
+    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(shape_tuple->elements_[i]) << ")";
   }
   oss << "};\n";
 
@@ -227,7 +227,7 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "uint32_t " << result_var << "_offsets[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << codegen.GenerateExprString(offset_tuple->elements_[i]);
+    oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(offset_tuple->elements_[i]) << ")";
   }
   oss << "};\n";
 

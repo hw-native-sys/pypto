@@ -119,7 +119,7 @@ class TestOrchestration:
                 Tensor ext_d = from_tensor_arg(orch_args.tensor(2));
 
                 PTO2_SCOPE() {
-                    uint32_t c_ci_shapes[2] = {16, 16};
+                    uint32_t c_ci_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
                     TaskOutputTensors alloc_0 = alloc_tensors(c_ci);
                     const Tensor& c = alloc_0.get_ref(0);
@@ -362,13 +362,13 @@ class TestOrchestration:
                 Tensor ext_f = from_tensor_arg(orch_args.tensor(2));
 
                 PTO2_SCOPE() {
-                    uint32_t c_ci_shapes[2] = {16, 16};
+                    uint32_t c_ci_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};
                     TensorCreateInfo c_ci(c_ci_shapes, 2, DataType::FLOAT32);
-                    uint32_t d_ci_shapes[2] = {16, 16};
+                    uint32_t d_ci_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};
                     TensorCreateInfo d_ci(d_ci_shapes, 2, DataType::FLOAT32);
-                    uint32_t e_ci_shapes[2] = {16, 16};
+                    uint32_t e_ci_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};
                     TensorCreateInfo e_ci(e_ci_shapes, 2, DataType::FLOAT32);
-                    uint32_t g_ci_shapes[2] = {16, 16};
+                    uint32_t g_ci_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};
                     TensorCreateInfo g_ci(g_ci_shapes, 2, DataType::FLOAT32);
                     TaskOutputTensors alloc_0 = alloc_tensors(c_ci, d_ci, e_ci, g_ci);
                     const Tensor& c = alloc_0.get_ref(0);
@@ -652,7 +652,7 @@ class TestOrchestration:
 
         # tensor.create generates TensorCreateInfo; const Tensor& binding emitted at submit site
         # FP16 = DataType::FLOAT16
-        assert "uint32_t buf_ci_shapes[2] = {32, 32};" in code
+        assert "uint32_t buf_ci_shapes[2] = {static_cast<uint32_t>(32), static_cast<uint32_t>(32)};" in code
         assert "TensorCreateInfo buf_ci(buf_ci_shapes, 2, DataType::FLOAT16)" in code
         assert "const Tensor& buf = " in code
         assert "make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" not in code
@@ -847,8 +847,10 @@ class TestOrchestration:
         assert "PTO2_SCOPE()" in code
 
         # tensor.slice generates array variables and runtime .view() call with dynamic offset
-        assert "uint32_t chunk_shapes[2] = {16, 16};" in code
-        assert "uint32_t chunk_offsets[2] = {(i * 16), 0};" in code
+        assert "uint32_t chunk_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};" in code
+        assert (
+            "uint32_t chunk_offsets[2] = {static_cast<uint32_t>((i * 16)), static_cast<uint32_t>(0)};" in code
+        )
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
         # tensor.read generates host pointer access
@@ -877,8 +879,8 @@ class TestOrchestration:
 
         code = _generate_orch_code(ValidShapeSliceProgram)
 
-        assert "uint32_t chunk_shapes[2] = {16, 16};" in code
-        assert "uint32_t chunk_offsets[2] = {0, 0};" in code
+        assert "uint32_t chunk_shapes[2] = {static_cast<uint32_t>(16), static_cast<uint32_t>(16)};" in code
+        assert "uint32_t chunk_offsets[2] = {static_cast<uint32_t>(0), static_cast<uint32_t>(0)};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
     def test_if_statement(self):
