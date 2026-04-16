@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -30,7 +29,6 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -40,6 +38,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -48,6 +47,8 @@
 namespace pypto {
 namespace ir {
 
+using tile_conversion_utils::MakeShapeTuple;
+using tile_conversion_utils::MakeZeroOffsets;
 using transform_utils::FlattenToStmts;
 
 namespace {
@@ -162,25 +163,6 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
   std::unordered_set<const Var*> used_;
   std::unordered_map<const Var*, ExprPtr> iter_arg_to_init_;
 };
-
-/**
- * @brief Build a MakeTuple of zeros for load/store offsets (INT64).
- */
-ExprPtr MakeZeroOffsets(size_t ndim, const Span& span) {
-  std::vector<ExprPtr> zeros;
-  zeros.reserve(ndim);
-  for (size_t i = 0; i < ndim; ++i) {
-    zeros.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, span));
-  }
-  return std::make_shared<MakeTuple>(zeros, span);
-}
-
-/**
- * @brief Build a MakeTuple from a shape vector.
- */
-ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& shape, const Span& span) {
-  return std::make_shared<MakeTuple>(shape, span);
-}
 
 /**
  * @brief Find the YieldStmt in a list of statements and return its value types.

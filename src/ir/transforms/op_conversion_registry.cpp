@@ -31,25 +31,16 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
+using tile_conversion_utils::MakeShapeTuple;
+using tile_conversion_utils::MakeZeroOffsets;
+
 namespace {
-
-ExprPtr MakeZeroOffsetsTuple(size_t ndim, const Span& span) {
-  std::vector<ExprPtr> zeros;
-  zeros.reserve(ndim);
-  for (size_t i = 0; i < ndim; ++i) {
-    zeros.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, span));
-  }
-  return std::make_shared<MakeTuple>(zeros, span);
-}
-
-ExprPtr MakeShapesTuple(const std::vector<ExprPtr>& shape, const Span& span) {
-  return std::make_shared<MakeTuple>(shape, span);
-}
 
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
 
@@ -88,27 +79,37 @@ OpConversionRegistry& OpConversionRegistry::GetInstance() {
 }
 
 OpConversionRegistry::OpConversionRegistry() {
-  auto& reg = OpRegistry::GetInstance();
+  RegisterScalarAndUnaryOps();
+  RegisterBroadcastAndTransformOps();
+  RegisterElementwiseBinaryOps();
+  RegisterMemoryOps();
+  RegisterMatmulOps();
+  RegisterReductionOps();
+}
 
-  // ────────────────────────────────────────────────────────────────────────
-  // Simple 1:1 conversions (tensor op → tile op, same args/kwargs)
-  // ────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// Scalar and unary ops: simple 1:1 tensor → tile name mapping
+// ============================================================================
 
-  // Scalar ops
+void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.adds", "tile.adds");
   RegisterSimple("tensor.subs", "tile.subs");
   RegisterSimple("tensor.muls", "tile.muls");
   RegisterSimple("tensor.divs", "tile.divs");
 
-  // Unary ops
   RegisterSimple("tensor.neg", "tile.neg");
   RegisterSimple("tensor.recip", "tile.recip");
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.sqrt", "tile.sqrt");
   RegisterSimple("tensor.rsqrt", "tile.rsqrt");
   RegisterSimple("tensor.cast", "tile.cast");
+}
 
-  // Broadcast ops
+// ============================================================================
+// Broadcast and transform ops: simple 1:1 name mapping
+// ============================================================================
+
+void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.row_expand_mul", "tile.row_expand_mul");
   RegisterSimple("tensor.row_expand_div", "tile.row_expand_div");
   RegisterSimple("tensor.col_expand_mul", "tile.col_expand_mul");
@@ -120,22 +121,22 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterSimple("tensor.col_expand_div", "tile.col_expand_div");
   RegisterSimple("tensor.expands", "tile.expands");
 
-  // Transform ops
   RegisterSimple("tensor.reshape", "tile.reshape");
   RegisterSimple("tensor.transpose", "tile.transpose");
   RegisterSimple("tensor.concat", "tile.concat");
   RegisterSimple("tensor.set_validshape", "tile.set_validshape");
 
-  // Memory creation ops
   RegisterSimple("tensor.full", "tile.full");
+}
 
-  // ────────────────────────────────────────────────────────────────────────
-  // Broadcast-aware elementwise binary ops
-  //
-  // When both operands have the same shape → tile.{op}
-  // When one operand is [M,1] (column vector) → tile.row_expand_{op}
-  // ────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// Broadcast-aware elementwise binary ops
+//
+// When both operands have the same shape → tile.{op}
+// When one operand is [M,1] (column vector) → tile.row_expand_{op}
+// ============================================================================
 
+void OpConversionRegistry::RegisterElementwiseBinaryOps() {
   auto MakeBroadcastBinaryConv = [](const std::string& tile_op,
                                     const std::string& row_expand_op) -> ConversionFunc {
     return [tile_op, row_expand_op](const std::vector<ExprPtr>& args,
@@ -158,14 +159,14 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterCustom("tensor.mul", MakeBroadcastBinaryConv("tile.mul", "tile.row_expand_mul"));
   RegisterCustom("tensor.div", MakeBroadcastBinaryConv("tile.div", "tile.row_expand_div"));
   RegisterCustom("tensor.maximum", MakeBroadcastBinaryConv("tile.maximum", "tile.maximum"));
+}
 
-  // ────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// Memory ops: slice, assemble, create, fillpad, scatter_update, read, write
+// ============================================================================
+
+void OpConversionRegistry::RegisterMemoryOps() {
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
-  //
-  // gm_tensor.slice(tensor, shape, offset) → tile.load(tensor, offset, shape, shape, target_memory=Vec)
-  // local_tensor.slice(tile, shape, offset) → tile.slice(tile, shape, offset)
-  // ────────────────────────────────────────────────────────────────────────
-
   RegisterCustom(
       "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -181,7 +182,6 @@ OpConversionRegistry::OpConversionRegistry() {
         auto tile_type = As<TileType>(input->GetType());
 
         if (tensor_type) {
-          // gm_tensor: function parameter or prior gm_tensor.slice result → tile.load
           auto valid_shapes = (args.size() == 4) ? args[3] : shape;
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
                                                                        {"transpose", false}};
@@ -191,7 +191,6 @@ OpConversionRegistry::OpConversionRegistry() {
         }
 
         if (tile_type) {
-          // local_tensor: created via tensor.create (now tile) → tile.slice
           std::vector<ExprPtr> slice_args = {input, shape, offset};
           if (args.size() == 4) {
             slice_args.push_back(args[3]);
@@ -204,143 +203,7 @@ OpConversionRegistry::OpConversionRegistry() {
         return ConversionResult{nullptr};  // unreachable
       });
 
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul → tile.matmul
-  //
-  // tensor.matmul(lhs, rhs, a_trans=False, b_trans=False)
-  // Input loads into Mat space are emitted by framework auto-bridging via input_reqs
-  // (see TensorToTileMutator::BridgeInputSpaces).  Downstream tile.move(L0A/L0B) is
-  // inserted by later passes (ExpandMixedKernel), not here.
-  // ────────────────────────────────────────────────────────────────────────
-
-  RegisterCustom(
-      "tensor.matmul",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
-        return ConversionResult{OpRegistry::GetInstance().Create("tile.matmul", {args[0], args[1]}, span)};
-      },
-      {{0, {MemorySpace::Mat, "a_trans"}}, {1, {MemorySpace::Mat, "b_trans"}}});
-
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.matmul_acc → tile.matmul_acc
-  //
-  // tensor.matmul_acc(acc, lhs, rhs, a_trans=False, b_trans=False)
-  // lhs/rhs loads into Mat space are emitted by framework auto-bridging via input_reqs.
-  // acc (arg 0) has no space requirement — it passes through from IterArg type propagation.
-  // ────────────────────────────────────────────────────────────────────────
-
-  RegisterCustom(
-      "tensor.matmul_acc",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
-        return ConversionResult{
-            OpRegistry::GetInstance().Create("tile.matmul_acc", {args[0], args[1], args[2]}, span)};
-      },
-      {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
-
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.row_max / tensor.row_sum → tile.row_max / tile.row_sum
-  //
-  // Tile reductions need a tmp_tile with the same shape as input (allocated
-  // in Vec space) as a workspace parameter.
-  // ────────────────────────────────────────────────────────────────────────
-
-  auto MakeReductionConv = [](const std::string& tile_op) -> ConversionFunc {
-    return [tile_op](const std::vector<ExprPtr>& args,
-                     const std::vector<std::pair<std::string, std::any>>& kwargs,
-                     const Span& span) -> ConversionResult {
-      CHECK(args.size() == 1) << tile_op << " conversion expects 1 arg (input tile)";
-      auto& op_reg = OpRegistry::GetInstance();
-
-      const auto& input = args[0];
-      auto tile_type = As<TileType>(input->GetType());
-      CHECK(tile_type) << tile_op << " conversion: input must be TileType, got "
-                       << input->GetType()->TypeName();
-
-      // Build a padded shape for the tmp tile: keep rows, round up cols to a
-      // hardware-friendly size (use 128 as default alignment).  If the original
-      // last dim is already ConstInt we can compute at compile time; otherwise
-      // fall back to the original shape.
-      std::vector<ExprPtr> tmp_shape = tile_type->shape_;
-      if (tmp_shape.size() >= 2) {
-        auto last = As<ConstInt>(tmp_shape.back());
-        if (!last || last->value_ < 128) {
-          tmp_shape.back() = std::make_shared<ConstInt>(128, DataType::INDEX, span);
-        }
-      }
-      auto shape_tuple = std::make_shared<MakeTuple>(tmp_shape, span);
-      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
-                                                                     {"target_memory", MemorySpace::Vec}};
-      auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
-
-      auto tmp_var = std::make_shared<Var>("tmp_tile", create_call->GetType(), span);
-      std::vector<StmtPtr> prologue;
-      prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
-
-      auto reduction_call = op_reg.Create(tile_op, {input, tmp_var}, span);
-      return ConversionResult{std::move(prologue), reduction_call};
-    };
-  };
-
-  RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
-  RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
-  RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
-
-  RegisterCustom(
-      "tensor.fillpad",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        CHECK(args.size() == 1) << "tensor.fillpad conversion expects 1 arg (input)";
-        auto& op_reg = OpRegistry::GetInstance();
-        const auto& input = args[0];
-
-        if (As<TileType>(input->GetType())) {
-          if (kwargs.empty()) {
-            return ConversionResult{op_reg.Create("tile.fillpad", {input}, span)};
-          }
-          return ConversionResult{op_reg.Create("tile.fillpad", {input}, kwargs, span)};
-        }
-
-        auto tensor_type = As<TensorType>(input->GetType());
-        CHECK(tensor_type) << "tensor.fillpad conversion: input must be TensorType or TileType, got "
-                           << input->GetType()->TypeName();
-
-        auto offsets = MakeZeroOffsetsTuple(tensor_type->shape_.size(), span);
-        auto shapes = MakeShapesTuple(tensor_type->shape_, span);
-
-        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
-        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
-          valid_shape = tensor_type->tensor_view_->valid_shape;
-        }
-        auto valid_shapes = MakeShapesTuple(valid_shape, span);
-
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
-                                                                     {"transpose", false}};
-        auto load_call =
-            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
-        auto load_var = std::make_shared<Var>("fillpad_src", load_call->GetType(), span);
-
-        std::vector<StmtPtr> prologue;
-        prologue.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
-
-        ExprPtr fillpad_call;
-        if (kwargs.empty()) {
-          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, span);
-        } else {
-          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, kwargs, span);
-        }
-        return ConversionResult{std::move(prologue), fillpad_call};
-      });
-
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.assemble → tile.store
-  //
-  // tensor.assemble(target, source, offset) → tile.store(source_tile, offset, target)
-  // Only converts when source is a TileType. Falls back to pass-through otherwise.
-  // ────────────────────────────────────────────────────────────────────────
-
+  // tensor.assemble → tile.store or tile.assemble depending on types
   RegisterCustom(
       "tensor.assemble",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -357,25 +220,22 @@ OpConversionRegistry::OpConversionRegistry() {
         auto target_tile_type = As<TileType>(target->GetType());
 
         if (source_tile_type && target_tensor_type) {
-          // Tile → Tensor: use tile.store
           auto store_call = op_reg.Create("tile.store", {source, offset, target}, span);
           return ConversionResult{store_call};
         }
 
         if (source_tile_type && target_tile_type) {
-          // Both are tiles → tile.assemble(target, source, offset)
           auto assemble_call = op_reg.Create("tile.assemble", {target, source, offset}, span);
           return ConversionResult{assemble_call};
         }
 
         if (target_tile_type && !source_tile_type) {
-          // Target is tile, source is still tensor → load source to Vec, then tile.assemble
           auto source_tensor_type = As<TensorType>(source->GetType());
           CHECK(source_tensor_type) << "tensor.assemble: source must be TensorType or TileType, but got "
                                     << source->GetType()->TypeName();
           std::vector<StmtPtr> prologue;
-          auto offsets_load = MakeZeroOffsetsTuple(source_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapesTuple(source_tensor_type->shape_, span);
+          auto offsets_load = MakeZeroOffsets(source_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapeTuple(source_tensor_type->shape_, span);
           std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
                                                                    {"transpose", false}};
           auto load_call = op_reg.Create("tile.load", {source, offsets_load, shapes, shapes}, load_kw, span);
@@ -386,22 +246,13 @@ OpConversionRegistry::OpConversionRegistry() {
           return ConversionResult{std::move(prologue), assemble_call};
         }
 
-        // Both still tensors — keep as tensor.assemble
         if (kwargs.empty()) {
           return ConversionResult{op_reg.Create("tensor.assemble", args, span)};
         }
         return ConversionResult{op_reg.Create("tensor.assemble", args, kwargs, span)};
       });
 
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.scatter_update → tile.scatter_update
-  //
-  // When input is a TileType (local buffer created via tensor.create), load
-  // index and src if needed, then emit tile.scatter_update(input, index, src).
-  // When input is a TensorType (global memory, e.g. KV cache pool), keep the
-  // op unchanged — the orchestration codegen handles it via memcpy.
-  // ────────────────────────────────────────────────────────────────────────
-
+  // tensor.scatter_update → tile.scatter_update (local) or passthrough (global)
   RegisterCustom(
       "tensor.scatter_update",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -416,7 +267,6 @@ OpConversionRegistry::OpConversionRegistry() {
         auto input_tensor_type = As<TensorType>(input->GetType());
 
         if (input_tensor_type) {
-          // Global tensor input — keep as tensor.scatter_update (handled by orchestration codegen)
           if (kwargs.empty()) {
             return ConversionResult{op_reg.Create("tensor.scatter_update", args, span)};
           }
@@ -428,11 +278,10 @@ OpConversionRegistry::OpConversionRegistry() {
 
         std::vector<StmtPtr> prologue;
 
-        // Load index to Vec tile if it is still a global tensor
         ExprPtr index_tile = index;
         if (auto index_tensor_type = As<TensorType>(index->GetType())) {
-          auto offsets = MakeZeroOffsetsTuple(index_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapesTuple(index_tensor_type->shape_, span);
+          auto offsets = MakeZeroOffsets(index_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapeTuple(index_tensor_type->shape_, span);
           std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
                                                                    {"transpose", false}};
           auto load = op_reg.Create("tile.load", {index, offsets, shapes, shapes}, load_kw, span);
@@ -441,11 +290,10 @@ OpConversionRegistry::OpConversionRegistry() {
           index_tile = idx_var;
         }
 
-        // Load src to Vec tile if it is still a global tensor
         ExprPtr src_tile = src;
         if (auto src_tensor_type = As<TensorType>(src->GetType())) {
-          auto offsets = MakeZeroOffsetsTuple(src_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapesTuple(src_tensor_type->shape_, span);
+          auto offsets = MakeZeroOffsets(src_tensor_type->shape_.size(), span);
+          auto shapes = MakeShapeTuple(src_tensor_type->shape_, span);
           std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
                                                                    {"transpose", false}};
           auto load = op_reg.Create("tile.load", {src, offsets, shapes, shapes}, load_kw, span);
@@ -458,14 +306,7 @@ OpConversionRegistry::OpConversionRegistry() {
         return ConversionResult{std::move(prologue), scatter_call};
       });
 
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.create → tile.create
-  //
-  // tensor.create(shape, dtype=...) → tile.create(shape, dtype=..., target_memory=Vec)
-  // If all shape dimensions are static constants, validate that the tile
-  // fits within the target memory space (obtained from Backend::GetMemSize).
-  // ────────────────────────────────────────────────────────────────────────
-
+  // tensor.create → tile.create with static buffer size validation
   RegisterCustom(
       "tensor.create",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -482,7 +323,6 @@ OpConversionRegistry::OpConversionRegistry() {
         }
         new_kwargs.emplace_back("target_memory", target_mem);
 
-        // Static buffer size check when all shape dims are ConstInt
         auto shape_tuple = As<MakeTuple>(args[0]);
         DataType dtype = GetKwargOr<DataType>(kwargs, "dtype", DataType::FP32);
         if (shape_tuple && backend::BackendConfig::IsConfigured()) {
@@ -513,13 +353,54 @@ OpConversionRegistry::OpConversionRegistry() {
         return ConversionResult{create_call};
       });
 
-  // ────────────────────────────────────────────────────────────────────────
-  // tensor.read → tensor.read (gm_tensor) or tile.read (local_tensor)
-  //
-  // gm_tensor.read(tensor, indices) stays as tensor.read (no conversion)
-  // local_tensor.read(tile, indices) → tile.read(tile, indices)
-  // ────────────────────────────────────────────────────────────────────────
+  // tensor.fillpad → tile.fillpad (with auto-load for TensorType inputs)
+  RegisterCustom(
+      "tensor.fillpad",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 1) << "tensor.fillpad conversion expects 1 arg (input)";
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
 
+        if (As<TileType>(input->GetType())) {
+          if (kwargs.empty()) {
+            return ConversionResult{op_reg.Create("tile.fillpad", {input}, span)};
+          }
+          return ConversionResult{op_reg.Create("tile.fillpad", {input}, kwargs, span)};
+        }
+
+        auto tensor_type = As<TensorType>(input->GetType());
+        CHECK(tensor_type) << "tensor.fillpad conversion: input must be TensorType or TileType, got "
+                           << input->GetType()->TypeName();
+
+        auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
+        auto shapes = MakeShapeTuple(tensor_type->shape_, span);
+
+        std::vector<ExprPtr> valid_shape = tensor_type->shape_;
+        if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+          valid_shape = tensor_type->tensor_view_->valid_shape;
+        }
+        auto valid_shapes = MakeShapeTuple(valid_shape, span);
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+        auto load_call =
+            op_reg.Create("tile.load", {input, offsets, shapes, valid_shapes}, load_kwargs, span);
+        auto load_var = std::make_shared<Var>("fillpad_src", load_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(load_var, load_call, span));
+
+        ExprPtr fillpad_call;
+        if (kwargs.empty()) {
+          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, span);
+        } else {
+          fillpad_call = op_reg.Create("tile.fillpad", {load_var}, kwargs, span);
+        }
+        return ConversionResult{std::move(prologue), fillpad_call};
+      });
+
+  // tensor.read → tensor.read (gm_tensor) or tile.read (local_tensor)
   RegisterCustom(
       "tensor.read",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -529,7 +410,6 @@ OpConversionRegistry::OpConversionRegistry() {
         const auto& input = args[0];
 
         if (As<TensorType>(input->GetType())) {
-          // gm_tensor: keep as tensor.read
           if (kwargs.empty()) {
             return ConversionResult{op_reg.Create("tensor.read", args, span)};
           }
@@ -537,7 +417,6 @@ OpConversionRegistry::OpConversionRegistry() {
         }
 
         if (As<TileType>(input->GetType())) {
-          // local_tensor (now tile): convert to tile.read
           if (kwargs.empty()) {
             return ConversionResult{op_reg.Create("tile.read", args, span)};
           }
@@ -548,12 +427,7 @@ OpConversionRegistry::OpConversionRegistry() {
         return ConversionResult{nullptr};  // unreachable
       });
 
-  // ────────────────────────────────────────────────────────────────────────
-  //
-  // gm_tensor.write(tensor, indices, value) stays as tensor.write (no conversion)
-  // local_tensor.write(tile, indices, value) → tile.write(tile, indices, value)
-  // ────────────────────────────────────────────────────────────────────────
-
+  // tensor.write → tensor.write (gm_tensor) or tile.write (local_tensor)
   RegisterCustom(
       "tensor.write",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -563,7 +437,6 @@ OpConversionRegistry::OpConversionRegistry() {
         const auto& dest = args[0];
 
         if (As<TensorType>(dest->GetType())) {
-          // gm_tensor: keep as tensor.write
           if (kwargs.empty()) {
             return ConversionResult{op_reg.Create("tensor.write", args, span)};
           }
@@ -571,7 +444,6 @@ OpConversionRegistry::OpConversionRegistry() {
         }
 
         if (As<TileType>(dest->GetType())) {
-          // local_tensor (now tile): convert to tile.write
           if (kwargs.empty()) {
             return ConversionResult{op_reg.Create("tile.write", args, span)};
           }
@@ -581,6 +453,74 @@ OpConversionRegistry::OpConversionRegistry() {
         CHECK(false) << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
+}
+
+// ============================================================================
+// Matmul ops: tensor.matmul / tensor.matmul_acc with Mat-space input_reqs
+// ============================================================================
+
+void OpConversionRegistry::RegisterMatmulOps() {
+  RegisterCustom(
+      "tensor.matmul",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
+        return ConversionResult{OpRegistry::GetInstance().Create("tile.matmul", {args[0], args[1]}, span)};
+      },
+      {{0, {MemorySpace::Mat, "a_trans"}}, {1, {MemorySpace::Mat, "b_trans"}}});
+
+  RegisterCustom(
+      "tensor.matmul_acc",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
+        return ConversionResult{
+            OpRegistry::GetInstance().Create("tile.matmul_acc", {args[0], args[1], args[2]}, span)};
+      },
+      {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
+}
+
+// ============================================================================
+// Reduction ops: row_max, row_sum, row_min (with tmp_tile workspace)
+// ============================================================================
+
+void OpConversionRegistry::RegisterReductionOps() {
+  auto MakeReductionConv = [](const std::string& tile_op) -> ConversionFunc {
+    return [tile_op](const std::vector<ExprPtr>& args,
+                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                     const Span& span) -> ConversionResult {
+      CHECK(args.size() == 1) << tile_op << " conversion expects 1 arg (input tile)";
+      auto& op_reg = OpRegistry::GetInstance();
+
+      const auto& input = args[0];
+      auto tile_type = As<TileType>(input->GetType());
+      CHECK(tile_type) << tile_op << " conversion: input must be TileType, got "
+                       << input->GetType()->TypeName();
+
+      std::vector<ExprPtr> tmp_shape = tile_type->shape_;
+      if (tmp_shape.size() >= 2) {
+        auto last = As<ConstInt>(tmp_shape.back());
+        if (!last || last->value_ < 128) {
+          tmp_shape.back() = std::make_shared<ConstInt>(128, DataType::INDEX, span);
+        }
+      }
+      auto shape_tuple = std::make_shared<MakeTuple>(tmp_shape, span);
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
+                                                                     {"target_memory", MemorySpace::Vec}};
+      auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+
+      auto tmp_var = std::make_shared<Var>("tmp_tile", create_call->GetType(), span);
+      std::vector<StmtPtr> prologue;
+      prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
+
+      auto reduction_call = op_reg.Create(tile_op, {input, tmp_var}, span);
+      return ConversionResult{std::move(prologue), reduction_call};
+    };
+  };
+
+  RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
+  RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
+  RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,

@@ -141,6 +141,13 @@ class OpConversionRegistry {
  private:
   OpConversionRegistry();
 
+  void RegisterScalarAndUnaryOps();
+  void RegisterBroadcastAndTransformOps();
+  void RegisterElementwiseBinaryOps();
+  void RegisterMemoryOps();
+  void RegisterMatmulOps();
+  void RegisterReductionOps();
+
   std::unordered_map<std::string, ConversionEntry> conversions_;
 };
 
