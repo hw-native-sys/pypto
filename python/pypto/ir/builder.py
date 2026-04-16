@@ -266,11 +266,11 @@ class IRBuilder:
         """Context manager for building scope statements.
 
         Args:
-            scope_kind: The kind of scope (e.g., ir.ScopeKind.InCore)
+            scope_kind: The kind of scope (e.g., ir.ScopeKind.Hierarchy)
             span: Optional explicit span. If None, automatically captured.
             level: Hierarchy level (for ScopeKind.Hierarchy)
             role: Function role (for ScopeKind.Hierarchy)
-            split: Split mode for cross-core transfer (for AutoInCore scopes)
+            split: Split mode for cross-core transfer (for ScopeKind.Hierarchy at CORE_GROUP)
             name_hint: User-provided scope name hint (empty = auto-generate)
             core_num: SPMD block count (for ScopeKind.Spmd scopes)
             sync_start: Require sync-start for SPMD dispatch (for ScopeKind.Spmd scopes)
@@ -279,8 +279,8 @@ class IRBuilder:
             ScopeBuilder: Helper object for building the scope statement
 
         Example:
-            >>> with ib.scope(ir.ScopeKind.InCore) as scope_builder:
-            ...     # InCore scope body
+            >>> with ib.scope(ir.ScopeKind.Hierarchy, level=ir.Level.CORE_GROUP) as scope_builder:
+            ...     # CORE_GROUP scope body (outlined to Function(InCore))
             ...     ib.assign(y, add_expr)
         """
         begin_span = span if span is not None else self._capture_call_span()

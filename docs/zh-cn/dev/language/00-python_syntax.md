@@ -255,22 +255,17 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用，且 `chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/05-split_chunked_loops.md)。
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk` 不能与 `init_values` 一起使用。
 
 ### 作用域上下文管理器 (Scope Context Managers)
 
-| 形式 | Scope 类型 | 说明 |
-| ---- | ---------- | ---- |
-| `pl.at(level=pl.Level.CORE_GROUP)` | `InCore` | CORE_GROUP 级固定边界 outline |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `InCore` | InCore + 跨核 split 提示 |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])` | `AutoInCore` | 编译器驱动的 chunked 循环 split |
-| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split 提示（条目独立） |
-| `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
-| `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
-| `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP)` |
-| `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., split=...)` *(已弃用)* | `InCore` | 请改用 `pl.at(..., optimizations=[pl.split(...)])` |
+| 形式 | 产生 | 说明 |
+| ---- | ---- | ---- |
+| `pl.at(level=pl.Level.CORE_GROUP)` | `HierarchyScopeStmt`（level=CORE_GROUP） | 由 `OutlineHierarchyScopes` 提取为 `Function(InCore)`；其父 `Opaque` 函数升级为 `Orchestration` |
+| `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(MODE)])` | `HierarchyScopeStmt`（level=CORE_GROUP, split=MODE） | 同上；split 提示随提取函数保留，由 `ExpandMixedKernel` 消费 |
+| `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 层级） | `HierarchyScopeStmt`（level=HOST/...） | 提取为 `Function(Opaque)`；父函数类型保持不变 |
+| `pl.cluster()` | `ClusterScopeStmt` | 由 `OutlineClusterScopes` 提取为 `Function(Group)` |
+| `pl.spmd(core_num=N[, sync_start=...])` | `SpmdScopeStmt` | 非 cluster 内的 standalone spmd 提取为 `Function(Spmd)`；若位于 cluster 内，属性会被合并到 Group 函数上 |
 
 示例参见 [语言指南](../../user/01-language_guide.md#incore-作用域)。
 

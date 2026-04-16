@@ -107,13 +107,15 @@ struct ChunkConfig {
 /**
  * @brief Loop origin classification for tracking how a loop was generated
  *
- * Used by SplitChunkedLoops to tag each generated loop with its origin.
+ * The Chunk* values were originally produced by the deleted SplitChunkedLoops
+ * pass; they remain bound for user-visible attrs but no built-in pass currently
+ * emits them.
  */
 enum class LoopOrigin : uint8_t {
   Original = 0,       ///< Regular loop (default)
-  ChunkOuter = 1,     ///< Outer loop from chunk splitting
-  ChunkInner = 2,     ///< Inner loop from chunk splitting
-  ChunkRemainder = 3  ///< Remainder loop from chunk splitting
+  ChunkOuter = 1,     ///< Outer loop from chunk splitting (no producer pass — user attr only)
+  ChunkInner = 2,     ///< Inner loop from chunk splitting (no producer pass — user attr only)
+  ChunkRemainder = 3  ///< Remainder loop from chunk splitting (no producer pass — user attr only)
 };
 
 /**
@@ -156,11 +158,9 @@ inline LoopOrigin StringToLoopOrigin(const std::string& str) {
  * @brief Distinguishes different scope kinds
  */
 enum class ScopeKind : uint8_t {
-  InCore = 0,      ///< InCore scope for AICore sub-graphs
-  AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
-  Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
-  Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
-  Spmd = 4         ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
+  Cluster = 0,    ///< Cluster scope for co-scheduled AIC + AIV groups
+  Hierarchy = 1,  ///< Distributed hierarchy scope (uses level_/role_/split_ on ScopeStmt)
+  Spmd = 2        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
 };
 
 /**
@@ -250,14 +250,10 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", or "Spmd")
+ * @return String representation ("Cluster", "Hierarchy", or "Spmd")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
-    case ScopeKind::InCore:
-      return "InCore";
-    case ScopeKind::AutoInCore:
-      return "AutoInCore";
     case ScopeKind::Cluster:
       return "Cluster";
     case ScopeKind::Hierarchy:
@@ -275,11 +271,7 @@ inline std::string ScopeKindToString(ScopeKind kind) {
  * @throws pypto::TypeError if string is not recognized
  */
 inline ScopeKind StringToScopeKind(const std::string& str) {
-  if (str == "InCore") {
-    return ScopeKind::InCore;
-  } else if (str == "AutoInCore") {
-    return ScopeKind::AutoInCore;
-  } else if (str == "Cluster") {
+  if (str == "Cluster") {
     return ScopeKind::Cluster;
   } else if (str == "Hierarchy") {
     return ScopeKind::Hierarchy;
@@ -702,32 +694,33 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * Represents a scoped region of code with a specific execution context.
  * This is NOT a control flow node — it executes its body exactly once, linearly.
  *
- * **Class hierarchy** (issue #1047):
+ * **Class hierarchy:**
  * - `ScopeStmt` (abstract): common fields `name_hint_`, `body_`
- *   - `InCoreScopeStmt`: optional `split_`
- *   - `AutoInCoreScopeStmt`: optional `split_`
  *   - `ClusterScopeStmt`: no extra fields
- *   - `HierarchyScopeStmt`: required `level_`, optional `role_`
+ *   - `HierarchyScopeStmt`: required `level_`, optional `role_`, optional `split_`
+ *     (split_ is only valid at Level::CORE_GROUP)
  *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
  *
  * **Syntax:**
- * with pl.incore():    # InCore scope -> InCoreScopeStmt
+ * with pl.cluster():                                     # -> ClusterScopeStmt
  *     body
- * with pl.cluster():   # Cluster scope -> ClusterScopeStmt
+ * with pl.at(level=pl.Level.CORE_GROUP):                 # -> HierarchyScopeStmt
  *     body
  * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # -> HierarchyScopeStmt
  *     body
- * with pl.spmd(core_num=8):  # -> SpmdScopeStmt
+ * with pl.spmd(core_num=8):                              # -> SpmdScopeStmt
  *     body
  *
  * **Semantics:**
- * - Marks a region of code as belonging to a specific scope (e.g., InCore, Cluster)
- * - Executes body exactly once (no iteration, no branching)
- * - Variables flow through transparently (no iter_args/return_vars needed)
- * - SSA conversion treats it as transparent (just visits body)
- * - OutlineIncoreScopes extracts InCore scopes into InCore functions
- * - OutlineClusterScopes extracts Cluster scopes into Group functions
- * - Hierarchy scopes are outlined into level-/role-annotated functions
+ * - Marks a region of code as belonging to a specific scope.
+ * - Executes body exactly once (no iteration, no branching).
+ * - Variables flow through transparently (no iter_args/return_vars needed).
+ * - SSA conversion treats it as transparent (just visits body).
+ * - OutlineHierarchyScopes extracts Hierarchy scopes into level-/role-annotated
+ *   functions. For Level::CORE_GROUP, the outlined function has
+ *   FunctionType::InCore and the parent function is promoted to
+ *   FunctionType::Orchestration.
+ * - OutlineClusterScopes extracts Cluster scopes into Group functions.
  */
 class ScopeStmt : public Stmt {
  public:
@@ -755,60 +748,6 @@ class ScopeStmt : public Stmt {
 using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
 
 /**
- * @brief InCore scope: AICore sub-graph region.
- *
- * Carries an optional `split` for cross-core transfer mode.
- */
-class InCoreScopeStmt : public ScopeStmt {
- public:
-  InCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
-                  std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
-        split_(split) {}
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::InCoreScopeStmt; }
-  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::InCore; }
-  [[nodiscard]] std::string TypeName() const override { return "InCoreScopeStmt"; }
-
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&InCoreScopeStmt::split_, "split")));
-  }
-
- public:
-  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
-};
-
-using InCoreScopeStmtPtr = std::shared_ptr<const InCoreScopeStmt>;
-
-/**
- * @brief AutoInCore scope: InCore region with automatic chunking.
- *
- * Carries an optional `split` for cross-core transfer mode.
- */
-class AutoInCoreScopeStmt : public ScopeStmt {
- public:
-  AutoInCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
-                      std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
-        split_(split) {}
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AutoInCoreScopeStmt; }
-  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::AutoInCore; }
-  [[nodiscard]] std::string TypeName() const override { return "AutoInCoreScopeStmt"; }
-
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&AutoInCoreScopeStmt::split_, "split")));
-  }
-
- public:
-  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
-};
-
-using AutoInCoreScopeStmtPtr = std::shared_ptr<const AutoInCoreScopeStmt>;
-
-/**
  * @brief Cluster scope: co-scheduled AIC + AIV group.
  *
  * No kind-specific fields; only inherits `name_hint_` and `body_` from base.
@@ -831,15 +770,18 @@ using ClusterScopeStmtPtr = std::shared_ptr<const ClusterScopeStmt>;
 /**
  * @brief Hierarchy scope: distributed-hierarchy region.
  *
- * Required `level`, optional `role`. Outlined into level-/role-annotated functions.
+ * Required `level`, optional `role`, optional `split`. `split` is only valid
+ * when `level == Level::CORE_GROUP`; it carries the AIC/AIV cross-core split
+ * mode through to the outlined InCore function.
  */
 class HierarchyScopeStmt : public ScopeStmt {
  public:
-  HierarchyScopeStmt(Level level, std::optional<Role> role, std::string name_hint, StmtPtr body, Span span,
-                     std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
-        level_(level),
-        role_(role) {}
+  // Out-of-line definition in src/ir/stmt.cpp so the CORE_GROUP check can see
+  // the full Level enum (function.h is not included from this header to avoid
+  // a circular dependency).
+  HierarchyScopeStmt(Level level, std::optional<Role> role, std::optional<SplitMode> split,
+                     std::string name_hint, StmtPtr body, Span span,
+                     std::vector<std::string> leading_comments = {});
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::HierarchyScopeStmt; }
   [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Hierarchy; }
@@ -848,12 +790,14 @@ class HierarchyScopeStmt : public ScopeStmt {
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&HierarchyScopeStmt::level_, "level"),
-                                          reflection::UsualField(&HierarchyScopeStmt::role_, "role")));
+                                          reflection::UsualField(&HierarchyScopeStmt::role_, "role"),
+                                          reflection::UsualField(&HierarchyScopeStmt::split_, "split")));
   }
 
  public:
-  Level level_;               ///< Hierarchy level (required)
-  std::optional<Role> role_;  ///< Function role (Orchestrator or Worker)
+  Level level_;                     ///< Hierarchy level (required)
+  std::optional<Role> role_;        ///< Function role (Orchestrator or Worker)
+  std::optional<SplitMode> split_;  ///< AIC/AIV split mode (only valid at CORE_GROUP)
 };
 
 using HierarchyScopeStmtPtr = std::shared_ptr<const HierarchyScopeStmt>;

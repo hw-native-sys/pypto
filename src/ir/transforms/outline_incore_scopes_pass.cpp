@@ -10,21 +10,16 @@
  */
 
 #include <memory>
-#include <string>
-#include <unordered_set>
 #include <vector>
 
-#include "pypto/core/error.h"
-#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
-#include "pypto/ir/transforms/utils/transform_utils.h"
-#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -32,37 +27,63 @@ namespace ir {
 namespace pass {
 
 /**
- * @brief Pass to outline InCore scopes into separate functions
+ * @brief Pass to outline CORE_GROUP Hierarchy scopes into InCore functions.
  *
- * This pass transforms ScopeStmt(InCore) nodes into separate Function(InCore) definitions
- * and replaces the scope with a Call to the outlined function.
+ * This pass picks up where OutlineHierarchyScopes leaves off: it transforms
+ * every `HierarchyScopeStmt(level=CORE_GROUP)` that survived the previous pass
+ * into a separate `Function(InCore)` definition and replaces the scope with a
+ * `Call` to that function. When any CORE_GROUP scope is outlined out of an
+ * `Opaque` function, the parent function is promoted from `Opaque` to
+ * `Orchestration` so downstream tile-level passes see the canonical
+ * Orchestration → InCore call shape.
  *
  * Requirements:
  * - Input IR must be in SSA form (run ConvertToSSA first)
- * - Only processes Opaque functions (InCore functions are left unchanged)
+ * - Should run after OutlineHierarchyScopes and before OutlineClusterScopes
+ * - Only processes Opaque functions
  *
- * Transformation:
- * 1. For each ScopeStmt(InCore) in an Opaque function:
- *    - Analyze body to determine external variable references (inputs)
- *    - Analyze subsequent statements to determine which definitions are outputs
- *    - Extract body into new Function(InCore) with appropriate params/returns
- *    - Replace scope with Call to the outlined function + output assignments
- *    - EvalStmt(store) calls on output tensors are converted to AssignStmt
- * 2. Recursively handles nested InCore scopes
- * 3. Add outlined functions to the program
- * 4. Promote the parent function from Opaque to Orchestration
+ * Together with OutlineHierarchyScopes this pass establishes the
+ * `HierarchyOutlined` property: after both have run, no `HierarchyScopeStmt`
+ * remains in any Opaque/Orchestration function body.
  */
+namespace {
+
+/// Returns true iff any HierarchyScopeStmt at Level::CORE_GROUP appears under
+/// the given statement. Used to decide whether to promote the parent function
+/// from Opaque to Orchestration.
+class CoreGroupHierarchyFinder : public IRVisitor {
+ public:
+  bool found = false;
+
+ protected:
+  void VisitStmt_(const HierarchyScopeStmtPtr& op) override {
+    if (op->level_ == Level::CORE_GROUP) {
+      found = true;
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
+}  // namespace
+
 Pass OutlineIncoreScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     std::vector<FunctionPtr> new_functions;
     std::vector<FunctionPtr> all_outlined_functions;
 
     for (const auto& [gvar, func] : program->functions_) {
-      // Only process Opaque functions (InCore functions are already outlined)
+      // Only Opaque functions can carry CORE_GROUP HierarchyScopeStmts at this
+      // point in the pipeline.
       if (func->func_type_ != FunctionType::Opaque) {
         new_functions.push_back(func);
         continue;
       }
+
+      // Detect CORE_GROUP scopes before outlining; outliner.GetOutlinedFunctions()
+      // tells us *what* was outlined, but we need the parent-promotion decision
+      // up front so it is symmetric with future filters.
+      CoreGroupHierarchyFinder finder;
+      finder.VisitStmt(func->body_);
 
       // Build symbol table for this function
       outline_utils::VarCollector type_collector;
@@ -73,29 +94,31 @@ Pass OutlineIncoreScopes() {
       }
       type_collector.VisitStmt(func->body_);
 
-      // Outline InCore scopes in this function
+      // Outline only HierarchyScopeStmts at CORE_GROUP into InCore functions.
+      outline_utils::ScopeOutliner::HierarchyLevelFilter filter{
+          Level::CORE_GROUP, outline_utils::ScopeOutliner::HierarchyLevelFilter::Mode::Only};
       outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
-                                            type_collector.known_names, ScopeKind::InCore,
-                                            FunctionType::InCore, "_incore_");
+                                            type_collector.known_names, ScopeKind::Hierarchy,
+                                            /*outlined_func_type=*/FunctionType::InCore, "_incore_",
+                                            /*program=*/nullptr, filter);
       auto new_body = outliner.VisitStmt(func->body_);
 
-      // Create new function with transformed body.
-      // If any InCore scopes were outlined, promote Opaque -> Orchestration.
-      const auto& outlined = outliner.GetOutlinedFunctions();
-      FunctionType new_func_type = outlined.empty() ? func->func_type_ : FunctionType::Orchestration;
       auto new_func = MutableCopy(func);
       new_func->body_ = new_body;
-      new_func->func_type_ = new_func_type;
+      if (finder.found) {
+        // Promote parent Opaque → Orchestration whenever any CORE_GROUP scope
+        // was outlined, matching the contract the former OutlineIncoreScopes
+        // (driven by InCoreScopeStmt) used to satisfy.
+        new_func->func_type_ = FunctionType::Orchestration;
+      }
       new_functions.push_back(new_func);
 
-      // Collect outlined functions (prepend before parent so inner functions come first)
+      const auto& outlined = outliner.GetOutlinedFunctions();
       all_outlined_functions.insert(all_outlined_functions.end(), outlined.begin(), outlined.end());
     }
 
-    // Add all outlined functions before the originals
+    // Outlined functions go before the originals so call sites can reference them.
     all_outlined_functions.insert(all_outlined_functions.end(), new_functions.begin(), new_functions.end());
-
-    // Create new program with all functions
     return std::make_shared<Program>(all_outlined_functions, program->name_, program->span_);
   };
 
@@ -103,69 +126,5 @@ Pass OutlineIncoreScopes() {
 }
 
 }  // namespace pass
-
-// ============================================================================
-// SplitIncoreOrch property verifier
-// ============================================================================
-
-namespace {
-
-/**
- * @brief Checks no InCore ScopeStmts remain in Opaque or Orchestration functions.
- */
-using SplitIncoreOrchVerifier = outline_utils::ScopeKindAbsenceVerifier<ScopeKind::InCore>;
-
-static bool IsComputeTensorOp(const std::string& op_name) {
-  return transform_utils::IsComputeTensorOp(op_name);
-}
-
-/// Checks Orchestration functions for compute tensor ops that should be in InCore.
-class OrchComputeTensorOpVerifier : public IRVisitor {
- public:
-  explicit OrchComputeTensorOpVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
-
-  void VisitExpr_(const CallPtr& op) override {
-    if (op && op->op_ && IsComputeTensorOp(op->op_->name_)) {
-      diagnostics_.emplace_back(DiagnosticSeverity::Warning, "SplitIncoreOrch", 0,
-                                "Compute tensor op '" + op->op_->name_ +
-                                    "' found in Orchestration function (should be inside InCore)",
-                                op->span_);
-    }
-    IRVisitor::VisitExpr_(op);
-  }
-
- private:
-  std::vector<Diagnostic>& diagnostics_;
-};
-
-}  // namespace
-
-class SplitIncoreOrchPropertyVerifierImpl : public PropertyVerifier {
- public:
-  [[nodiscard]] std::string GetName() const override { return "SplitIncoreOrch"; }
-
-  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
-    if (!program) return;
-    for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_) continue;
-      // Check Opaque and Orchestration functions — InCore functions are expected to have InCore content
-      if (func->func_type_ == FunctionType::InCore) continue;
-      SplitIncoreOrchVerifier verifier(
-          diagnostics, "SplitIncoreOrch",
-          "InCore ScopeStmt found in non-InCore function (should have been outlined)");
-      verifier.VisitStmt(func->body_);
-      // Also check Orchestration functions for leaked compute tensor ops
-      if (func->func_type_ == FunctionType::Orchestration) {
-        OrchComputeTensorOpVerifier compute_verifier(diagnostics);
-        compute_verifier.VisitStmt(func->body_);
-      }
-    }
-  }
-};
-
-PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier() {
-  return std::make_shared<SplitIncoreOrchPropertyVerifierImpl>();
-}
-
 }  // namespace ir
 }  // namespace pypto

@@ -1771,19 +1771,13 @@ class WhileStmt(Stmt):
 class ScopeKind(enum.Enum):
     """Scope kind classification."""
 
-    InCore = 0
-    """InCore scope for AICore sub-graphs."""
-
-    AutoInCore = 1
-    """AutoInCore scope for automatic chunking."""
-
-    Cluster = 2
+    Cluster = 0
     """Cluster scope for co-scheduled AIC + AIV groups."""
 
-    Hierarchy = 3
-    """Distributed hierarchy scope (uses level/role on ScopeStmt)."""
+    Hierarchy = 1
+    """Distributed hierarchy scope (uses level/role/split on ScopeStmt)."""
 
-    Spmd = 4
+    Spmd = 2
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
 class SplitMode(enum.Enum):
@@ -1814,40 +1808,8 @@ class ScopeStmt(Stmt):
     """The nested statements."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
-        """ScopeStmt is abstract — construct an InCoreScopeStmt, AutoInCoreScopeStmt,
-        ClusterScopeStmt, HierarchyScopeStmt, or SpmdScopeStmt instead."""
-
-class InCoreScopeStmt(ScopeStmt):
-    """InCore scope: AICore sub-graph region."""
-
-    split: Final[SplitMode | None]
-    """Split mode for cross-core transfer (None or SplitMode.None for no split)."""
-
-    def __init__(
-        self,
-        split: SplitMode | None = None,
-        name_hint: str = "",
-        *,
-        body: Stmt,
-        span: Span,
-    ) -> None:
-        """Create an InCore scope statement."""
-
-class AutoInCoreScopeStmt(ScopeStmt):
-    """AutoInCore scope: InCore region with automatic chunking."""
-
-    split: Final[SplitMode | None]
-    """Split mode for cross-core transfer (None or SplitMode.None for no split)."""
-
-    def __init__(
-        self,
-        split: SplitMode | None = None,
-        name_hint: str = "",
-        *,
-        body: Stmt,
-        span: Span,
-    ) -> None:
-        """Create an AutoInCore scope statement."""
+        """ScopeStmt is abstract — construct a ClusterScopeStmt, HierarchyScopeStmt,
+        or SpmdScopeStmt instead."""
 
 class ClusterScopeStmt(ScopeStmt):
     """Cluster scope: co-scheduled AIC + AIV group."""
@@ -1864,10 +1826,14 @@ class HierarchyScopeStmt(ScopeStmt):
     role: Final[Role | None]
     """Function role (Orchestrator or Worker; None for unspecified)."""
 
+    split: Final[SplitMode | None]
+    """AIC/AIV split mode (only valid at Level.CORE_GROUP)."""
+
     def __init__(
         self,
         level: Level,
         role: Role | None = None,
+        split: SplitMode | None = None,
         name_hint: str = "",
         *,
         body: Stmt,
@@ -2661,7 +2627,7 @@ class IRBuilder:
         """Begin building a scope statement.
 
         Args:
-            scope_kind: The kind of scope (e.g., ScopeKind.InCore)
+            scope_kind: The kind of scope (e.g., ScopeKind.Hierarchy)
             span: Source location for scope statement
             level: Hierarchy level (default: None)
             role: Hierarchy scope role (default: None)
@@ -3191,8 +3157,6 @@ class IRVisitor:
     def visit_if_stmt(self, op: IfStmt) -> None: ...
     def visit_for_stmt(self, op: ForStmt) -> None: ...
     def visit_while_stmt(self, op: WhileStmt) -> None: ...
-    def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> None: ...
-    def visit_auto_in_core_scope_stmt(self, op: AutoInCoreScopeStmt) -> None: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
@@ -3268,8 +3232,6 @@ class IRMutator:
     def visit_if_stmt(self, op: IfStmt) -> Stmt: ...
     def visit_for_stmt(self, op: ForStmt) -> Stmt: ...
     def visit_while_stmt(self, op: WhileStmt) -> Stmt: ...
-    def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> Stmt: ...
-    def visit_auto_in_core_scope_stmt(self, op: AutoInCoreScopeStmt) -> Stmt: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...

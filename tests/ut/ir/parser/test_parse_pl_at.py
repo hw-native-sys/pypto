@@ -7,9 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for parsing pl.at(level=..., role=...) (Step 04)."""
+"""Tests for parsing pl.at(level=..., role=...)."""
 
-import warnings
 from typing import TypeVar
 
 import pypto.language as pl
@@ -150,28 +149,13 @@ def test_parse_pl_at_unknown_kwarg():
 # ─── Backward compatibility ───────────────────────────────────────────────
 
 
-def test_backward_compat_incore():
-    """Existing pl.incore() still works."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore():
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert not isinstance(scope, ir.HierarchyScopeStmt)
-
-
 def test_backward_compat_cluster():
     """Existing pl.cluster() still works."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.cluster():
-            with pl.incore():
+            with pl.at(level=pl.Level.CORE_GROUP):
                 y = pl.add(x, x)
         return y
 
@@ -198,11 +182,11 @@ def test_printer_hierarchy_scope_roundtrip():
     assert "Role.Worker" in printed
 
 
-# ─── New pl.at() InCore / AutoInCore forms ───────────────────────────────────
+# ─── pl.at() with CORE_GROUP level ───────────────────────────────────────
 
 
-def test_parse_pl_at_core_group_incore():
-    """pl.at(level=CORE_GROUP) creates InCoreScopeStmt."""
+def test_parse_pl_at_core_group():
+    """pl.at(level=CORE_GROUP) creates HierarchyScopeStmt at CORE_GROUP."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -210,81 +194,9 @@ def test_parse_pl_at_core_group_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-
-
-def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
-    """pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer) → AutoInCore, split=UP_DOWN."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert scope.split == ir.SplitMode.UP_DOWN
-
-
-def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
-    """pl.at(level=CORE_GROUP, optimization=chunked_loop_optimizer(split=LEFT_RIGHT)) → AutoInCore."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT),
-        ):
-            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                x = pl.add(x, x)
-        return x
-
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
-
-
-def test_parse_pl_at_optimization_on_non_core_group_errors():
-    """optimization= is not supported for non-CORE_GROUP levels."""
-    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.HOST, optimization=pl.chunked_loop_optimizer):
-                y = pl.add(x, x)
-            return y
-
-
-def test_parse_pl_at_unknown_optimization_errors():
-    """optimization= with unsupported value raises error."""
-    with pytest.raises(ParserSyntaxError, match="chunked_loop_optimizer"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimization=42):  # type: ignore[arg-type]
-                y = pl.add(x, x)
-            return y
-
-
-def test_parse_pl_at_split_mode_none_errors():
-    """chunked_loop_optimizer(split=SplitMode.NONE) raises error."""
-    with pytest.raises(ParserSyntaxError, match=r"SplitMode\.NONE"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
-            ):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
+    assert scope.level == ir.Level.CORE_GROUP
 
 
 def test_parse_pl_at_role_with_core_group_errors():
@@ -296,139 +208,6 @@ def test_parse_pl_at_role_with_core_group_errors():
             with pl.at(level=pl.Level.CORE_GROUP, role=pl.Role.Worker):
                 y = pl.add(x, x)
             return y
-
-
-def test_incore_deprecation_warning():
-    """pl.incore() emits DeprecationWarning at parse time."""
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.incore():
-                y = pl.add(x, x)
-            return y
-
-    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
-    assert any("pl.incore()" in str(warning.message) for warning in w)
-
-
-def test_auto_incore_deprecation_warning():
-    """pl.auto_incore() emits DeprecationWarning at parse time."""
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.auto_incore():
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
-
-    assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
-    assert any("pl.auto_incore()" in str(warning.message) for warning in w)
-
-
-# ─── InCore with split ──────────────────────────────────────────────────────
-
-
-def test_parse_pl_incore_with_split():
-    """pl.incore(split=UP_DOWN) creates InCoreScopeStmt with split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore(split=pl.SplitMode.UP_DOWN):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.UP_DOWN
-
-
-def test_parse_pl_incore_with_split_left_right():
-    """pl.incore(split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore(split=pl.SplitMode.LEFT_RIGHT):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
-
-
-def test_parse_pl_at_core_group_with_split():
-    """pl.at(level=CORE_GROUP, split=UP_DOWN) creates InCoreScopeStmt with split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.UP_DOWN
-
-
-def test_parse_pl_at_core_group_with_split_left_right():
-    """pl.at(level=CORE_GROUP, split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.LEFT_RIGHT):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
-
-
-def test_parse_pl_at_optimization_and_split_conflict():
-    """Cannot use both optimization= and split= in pl.at()."""
-    with pytest.raises(ParserSyntaxError, match="Cannot use both"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(
-                level=pl.Level.CORE_GROUP,
-                optimization=pl.chunked_loop_optimizer,
-                split=pl.SplitMode.UP_DOWN,
-            ):
-                y = pl.add(x, x)
-            return y
-
-
-def test_parse_pl_at_split_on_non_core_group_errors():
-    """split= is not supported for non-CORE_GROUP levels."""
-    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.HOST, split=pl.SplitMode.UP_DOWN):
-                y = pl.add(x, x)
-            return y
-
-
-def test_printer_incore_with_split_roundtrip():
-    """Python printer renders InCore scope with split and it can be re-parsed."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-            y = pl.add(x, x)
-        return y
-
-    printed = str(f)
-    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
 
 
 if __name__ == "__main__":

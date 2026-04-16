@@ -113,7 +113,7 @@ class TestRangeUnrollKwargRejection:
             class _P:
                 @pl.function
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i in pl.range(8, chunk=4, unroll=2):
                             x = pl.add(x, 1.0)
                     return x

@@ -239,8 +239,6 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
-  void VisitStmt_(const InCoreScopeStmtPtr& op) override;
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
   void VisitStmt_(const ClusterScopeStmtPtr& op) override;
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
@@ -912,9 +910,9 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     VisitExpr(op->step_);
   }
 
-  // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
-  // pl.unroll(), and SplitChunkedLoops preserves this: chunk-split unroll loops
-  // always take the simple (no iter_args) path.
+  // Unroll loops cannot have iter_args. The DSL parser forbids init_values
+  // for pl.unroll(), and no built-in pass produces an unroll loop with
+  // iter_args; printers that hit this branch indicate a malformed IR.
   if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
     INTERNAL_CHECK_SPAN(false, op->span_) << "ForKind::Unroll does not support iter_args/init_values";
   }
@@ -1029,41 +1027,14 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
-  // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y, [name_hint="..."]):
+  // Print as: with pl.at(level=pl.Level.X, [role=...], [optimizations=[pl.split(...)]], [name_hint=...]):
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level." << LevelToString(op->level_);
   if (op->role_.has_value()) {
     stream_ << ", role=" << prefix_ << ".Role." << RoleToString(*op->role_);
   }
-  if (!op->name_hint_.empty()) {
-    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
-  }
-  stream_ << "):\n";
-  IncreaseIndent();
-  PrintStmtBlock(op->body_);
-  DecreaseIndent();
-}
-
-void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
-  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
   if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
-  }
-  if (!op->name_hint_.empty()) {
-    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
-  }
-  stream_ << "):\n";
-  IncreaseIndent();
-  PrintStmtBlock(op->body_);
-  DecreaseIndent();
-}
-
-void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
-  if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
-            << SplitModeToPythonString(op->split_.value()) << ")";
-  } else {
-    stream_ << prefix_ << ".chunked_loop_optimizer";
+    stream_ << ", optimizations=[" << prefix_ << ".split(" << prefix_ << ".SplitMode."
+            << SplitModeToPythonString(op->split_.value()) << ")]";
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";

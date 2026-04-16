@@ -23,7 +23,7 @@ class TestIRProperty:
         assert passes.IRProperty.NoNestedCalls is not None
         assert passes.IRProperty.NormalizedStmtStructure is not None
         assert passes.IRProperty.NoRedundantBlocks is not None
-        assert passes.IRProperty.SplitIncoreOrch is not None
+        assert passes.IRProperty.HierarchyOutlined is not None
         assert passes.IRProperty.HasMemRefs is not None
 
     def test_property_values_are_different(self):
@@ -34,7 +34,7 @@ class TestIRProperty:
             passes.IRProperty.NoNestedCalls,
             passes.IRProperty.NormalizedStmtStructure,
             passes.IRProperty.NoRedundantBlocks,
-            passes.IRProperty.SplitIncoreOrch,
+            passes.IRProperty.HierarchyOutlined,
             passes.IRProperty.HasMemRefs,
         ]
         assert len(props) == len(set(props))
@@ -185,12 +185,23 @@ class TestPassPropertyAccessors:
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.NoNestedCalls)
 
-    def test_outline_incore_requires_and_produces_ssa(self):
-        """Test OutlineIncoreScopes requires and produces SSAForm."""
+    def test_outline_hierarchy_requires_and_produces_ssa(self):
+        """Test OutlineHierarchyScopes requires and produces SSAForm.
+
+        HierarchyOutlined is *not* produced here — CORE_GROUP scopes survive this
+        pass and are outlined by OutlineIncoreScopes, which produces the property.
+        """
+        p = passes.outline_hierarchy_scopes()
+        assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
+        assert not p.get_produced_properties().contains(passes.IRProperty.HierarchyOutlined)
+
+    def test_outline_incore_requires_ssa_produces_hierarchy_outlined(self):
+        """OutlineIncoreScopes requires SSAForm and produces SSAForm + HierarchyOutlined."""
         p = passes.outline_incore_scopes()
         assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
-        assert p.get_produced_properties().contains(passes.IRProperty.SplitIncoreOrch)
+        assert p.get_produced_properties().contains(passes.IRProperty.HierarchyOutlined)
 
     def test_outline_cluster_requires_and_produces_ssa(self):
         """Test OutlineClusterScopes requires and produces SSAForm."""

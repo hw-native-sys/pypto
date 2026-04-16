@@ -8,7 +8,7 @@ Lowers `pl.range(N, unroll=F)` at the tile level: replicates the loop body `F` t
 
 `PartialUnrollTileLoops` provides the targeted knob: replicate the body `F` times (typically 2–4) at the tile level, leaving an outer loop of `N/F` iterations. Each clone gets fresh def-vars (SSA preserved) and operates on independent tiles, which downstream `MemoryReuse` cannot merge.
 
-**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
+**Requires**: SSAForm, HierarchyOutlined, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
 **Pipeline position**: After `NormalizeReturnOrder`, before `InitMemRef` (slot 20.5). Late enough that all tile-structural decisions are made; early enough that `InitMemRef`/`MemoryReuse` see distinct tile vars per clone.
 
@@ -157,6 +157,6 @@ Every main-loop iteration AND every tail branch carries the `unroll_replicated` 
 
 ## Related
 
-- [`ReorderUnrolledIO`](21-reorder_unrolled_io.md) — consumes the `unroll_replicated` marker
+- [`ReorderUnrolledIO`](16-reorder_unrolled_io.md) — consumes the `unroll_replicated` marker
 - [`UnrollLoops`](01-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering
 - RFC #1025 — design document

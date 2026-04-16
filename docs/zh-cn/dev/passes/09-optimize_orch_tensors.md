@@ -132,8 +132,8 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| Required | SplitIncoreOrch, IncoreTileOps |
-| Produced | SplitIncoreOrch, IncoreTileOps |
+| Required | HierarchyOutlined, IncoreTileOps |
+| Produced | HierarchyOutlined, IncoreTileOps |
 | Invalidated | — |
 
 ## 关键组件

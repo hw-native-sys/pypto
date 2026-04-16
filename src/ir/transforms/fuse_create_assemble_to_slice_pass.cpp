@@ -515,7 +515,7 @@ ProgramPtr TransformFuseCreateAssembleToSlice(const ProgramPtr& program) {
   return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
 }
 
-inline const PassProperties kFuseCreateAssembleToSliceProperties{.required = {IRProperty::SplitIncoreOrch}};
+inline const PassProperties kFuseCreateAssembleToSliceProperties{.required = {IRProperty::HierarchyOutlined}};
 
 }  // namespace
 

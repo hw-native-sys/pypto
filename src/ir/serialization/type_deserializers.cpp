@@ -592,28 +592,6 @@ static std::optional<SplitMode> DeserializeScopeSplit(const msgpack::object& fie
   return split;
 }
 
-// Deserialize InCoreScopeStmt
-static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                            DeserializerContext& ctx) {
-  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  auto split = DeserializeScopeSplit(fields_obj, ctx);
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-  return std::make_shared<InCoreScopeStmt>(split, std::move(name_hint), body, span,
-                                           DeserializeLeadingComments(fields_obj));
-}
-
-// Deserialize AutoInCoreScopeStmt
-static IRNodePtr DeserializeAutoInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                                DeserializerContext& ctx) {
-  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  auto split = DeserializeScopeSplit(fields_obj, ctx);
-  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
-  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-  return std::make_shared<AutoInCoreScopeStmt>(split, std::move(name_hint), body, span,
-                                               DeserializeLeadingComments(fields_obj));
-}
-
 // Deserialize ClusterScopeStmt
 static IRNodePtr DeserializeClusterScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                              DeserializerContext& ctx) {
@@ -641,9 +619,10 @@ static IRNodePtr DeserializeHierarchyScopeStmt(const msgpack::object& fields_obj
     role = static_cast<Role>(role_obj->via.u64);
   }
 
+  auto split = DeserializeScopeSplit(fields_obj, ctx);
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-  return std::make_shared<HierarchyScopeStmt>(level, role, std::move(name_hint), body, span,
+  return std::make_shared<HierarchyScopeStmt>(level, role, split, std::move(name_hint), body, span,
                                               DeserializeLeadingComments(fields_obj));
 }
 
@@ -689,10 +668,6 @@ static IRNodePtr DeserializeLegacyScopeStmt(const msgpack::object& fields_obj, m
       << "Legacy ScopeStmt scope_kind must be a string, got msgpack type " << static_cast<int>(kind_obj.type);
   auto kind = StringToScopeKind(kind_obj.as<std::string>());
   switch (kind) {
-    case ScopeKind::InCore:
-      return DeserializeInCoreScopeStmt(fields_obj, zone, ctx);
-    case ScopeKind::AutoInCore:
-      return DeserializeAutoInCoreScopeStmt(fields_obj, zone, ctx);
     case ScopeKind::Cluster:
       return DeserializeClusterScopeStmt(fields_obj, zone, ctx);
     case ScopeKind::Hierarchy:
@@ -937,9 +912,6 @@ static TypeRegistrar _yield_stmt_registrar("YieldStmt", DeserializeYieldStmt);
 static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt);
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
-static TypeRegistrar _in_core_scope_stmt_registrar("InCoreScopeStmt", DeserializeInCoreScopeStmt);
-static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
-                                                        DeserializeAutoInCoreScopeStmt);
 static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
 static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
 static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);

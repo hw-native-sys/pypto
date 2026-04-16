@@ -10,22 +10,11 @@
 """Optimization config entries for ``pl.at(..., optimizations=[...])``.
 
 Each entry is an orthogonal optimization hint applied to the enclosing scope.
-The entries can be combined freely in the ``optimizations=`` list.
 
 Available entries:
     - ``pl.split(mode)`` — Cross-core data-transfer split hint, consumed by
-      the ``ExpandMixedKernel`` pass. Lowers the scope to ``InCore`` with
-      ``split_=mode``.
-    - ``pl.auto_chunk`` — Request compiler-driven outlining of chunked
-      parallel loops. Lowers the scope to ``AutoInCore`` so that the
-      ``InterchangeChunkLoops`` pass can interchange and outline chunked
-      loops within it.
-
-These two entries are independent and may be combined::
-
-    with pl.at(level=pl.Level.CORE_GROUP,
-               optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-        ...
+      the ``ExpandMixedKernel`` pass. Only valid at ``Level::CORE_GROUP``;
+      sets ``split`` on the enclosing ``HierarchyScopeStmt``.
 """
 
 from __future__ import annotations
@@ -43,13 +32,9 @@ class Optimization:
 class Split(Optimization):
     """Cross-core data-transfer split hint.
 
-    Sets ``ScopeStmt::split_`` on the enclosing ``pl.at`` scope; that metadata
-    is consumed by the ``ExpandMixedKernel`` pass via the outlined function's
-    ``SplitMode``. The split hint is independent of the resulting scope kind:
-
-    - ``optimizations=[pl.split(mode)]`` → ``ScopeKind::InCore`` (split metadata).
-    - ``optimizations=[pl.auto_chunk, pl.split(mode)]`` → ``ScopeKind::AutoInCore``
-      (split metadata still attached).
+    Sets ``HierarchyScopeStmt::split_`` on the enclosing ``pl.at`` scope.
+    Only valid at ``Level::CORE_GROUP``; consumed by the ``ExpandMixedKernel``
+    pass via the outlined function's ``SplitMode``.
 
     Args:
         mode: Split mode (``SplitMode.UP_DOWN`` or ``SplitMode.LEFT_RIGHT``).
@@ -58,18 +43,6 @@ class Split(Optimization):
     """
 
     mode: SplitMode
-
-
-@dataclass(frozen=True)
-class AutoChunk(Optimization):
-    """Request compiler-driven outlining of chunked parallel loops.
-
-    Lowers the enclosing ``pl.at`` scope to ``ScopeKind::AutoInCore`` so the
-    ``InterchangeChunkLoops`` pass can interchange chunked parallel loops
-    and outline the inner sequential portion into ``InCore`` scopes.
-
-    Only valid with ``level=pl.Level.CORE_GROUP``.
-    """
 
 
 def split(mode: SplitMode) -> Split:
@@ -93,17 +66,8 @@ def split(mode: SplitMode) -> Split:
     return Split(mode=mode)
 
 
-auto_chunk: AutoChunk = AutoChunk()
-"""Sentinel for the ``AutoChunk`` optimization.
-
-Use as ``pl.auto_chunk`` in ``pl.at(..., optimizations=[pl.auto_chunk, ...])``.
-"""
-
-
 __all__ = [
     "Optimization",
     "Split",
-    "AutoChunk",
     "split",
-    "auto_chunk",
 ]

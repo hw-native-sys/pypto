@@ -33,8 +33,6 @@ std::string IRPropertyToString(IRProperty prop) {
       return "NormalizedStmtStructure";
     case IRProperty::NoRedundantBlocks:
       return "NoRedundantBlocks";
-    case IRProperty::SplitIncoreOrch:
-      return "SplitIncoreOrch";
     case IRProperty::HasMemRefs:
       return "HasMemRefs";
     case IRProperty::IncoreTileOps:
@@ -61,8 +59,6 @@ std::string IRPropertyToString(IRProperty prop) {
       return "VectorKernelSplit";
     case IRProperty::OutParamNotShadowed:
       return "OutParamNotShadowed";
-    case IRProperty::NoNestedInCore:
-      return "NoNestedInCore";
     case IRProperty::InOutUseValid:
       return "InOutUseValid";
     default:
@@ -132,8 +128,7 @@ VerificationLevel GetDefaultVerificationLevel() {
 const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid};
+                                   IRProperty::OutParamNotShadowed, IRProperty::InOutUseValid};
   return props;
 }
 
@@ -144,8 +139,7 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed,
-                                   IRProperty::NoNestedInCore};
+                                   IRProperty::OutParamNotShadowed};
   return props;
 }
 

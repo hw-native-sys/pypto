@@ -11,6 +11,25 @@
 
 #include "pypto/ir/stmt.h"
 
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "pypto/ir/function.h"
+
 namespace pypto {
-namespace ir {}  // namespace ir
+namespace ir {
+
+HierarchyScopeStmt::HierarchyScopeStmt(Level level, std::optional<Role> role, std::optional<SplitMode> split,
+                                       std::string name_hint, StmtPtr body, Span span,
+                                       std::vector<std::string> leading_comments)
+    : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+      level_(level),
+      role_(role),
+      split_(split) {
+  CHECK(!split_.has_value() || level_ == Level::CORE_GROUP)
+      << "HierarchyScopeStmt split is only valid at Level::CORE_GROUP";
+}
+
+}  // namespace ir
 }  // namespace pypto

@@ -410,50 +410,22 @@ class Model:
 将代码区域标记为 InCore 执行，无需创建单独的函数：
 
 ```python
-# 推荐用法（新 API）：
 with pl.at(level=pl.Level.CORE_GROUP):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# 已弃用（请改用 pl.at）：
-with pl.incore():
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
-如需编译器驱动的 chunked 循环 outline（AutoInCore），在 `optimizations` 列表中传入
-`pl.auto_chunk`：
+`OutlineIncoreScopes` 之后会把该区域提取为 `Function(InCore)`，并把父
+`Opaque` 函数升级为 `Orchestration`。（非 CORE_GROUP 的 `pl.at(level=...)`
+区域则由先行的 `OutlineHierarchyScopes` 提取为 `Function(Opaque)`，不会
+提升父函数类型。）
+
+如需为 `ExpandMixedKernel` Pass 指定跨核 split 模式，在 `optimizations`
+列表中传入 `pl.split(...)`：
 
 ```python
-# 推荐用法（新 API）：
-with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
-
-# 已弃用（仍可用，会触发 DeprecationWarning）：
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-    ...
-
-with pl.auto_incore():
-    ...
-```
-
-如需为 `ExpandMixedKernel` Pass 指定跨核 split 模式，使用 `pl.split(...)` —— 它与
-`pl.auto_chunk` 互相独立，可任意组合：
-
-```python
-# 普通 InCore + split 提示：
 with pl.at(level=pl.Level.CORE_GROUP,
            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# AutoInCore + split 提示（独立条目，自由组合）：
-with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
-
-# 已弃用的单关键字形式（仍可用，会触发 DeprecationWarning）：
-with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-    ...
 ```
 
 ## 内存与数据搬运
@@ -541,22 +513,28 @@ output_dir = ir.compile(
 1. **UnrollLoops** —— 展开循环迭代
 2. **CtrlFlowTransform** —— 将控制流改写为结构化 IR
 3. **ConvertToSSA** —— 转换为静态单赋值形式
-4. **FlattenCallExpr** —— 展平嵌套函数调用
-5. **SplitChunkedLoops** —— 将分块循环拆分为独立循环
-6. **InterchangeChunkLoops** —— 交换分块循环顺序
-7. **OutlineHierarchyScopes** —— 提取 hierarchy 作用域
-8. **OutlineIncoreScopes** —— 将 InCore 作用域提取为独立函数
-9. **OutlineClusterScopes** —— 提取 cluster 作用域
-10. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
+4. **NormalizeStmtStructure** —— 展平/解包冗余的 `SeqStmts`
+5. **FlattenCallExpr** —— 展平嵌套函数调用
+6. **OutlineHierarchyScopes** —— 将非 CORE_GROUP 的 `HierarchyScopeStmt` 区域提取为 `Function(Opaque)`
+7. **OutlineIncoreScopes** —— 将 CORE_GROUP 的 `HierarchyScopeStmt` 区域提取为 `Function(InCore)`，并把父函数升级为 `Orchestration`
+8. **OutlineClusterScopes** —— 将 cluster 作用域提取为 Group 函数
+9. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
+10. **OptimizeOrchTensors** —— 优化编排层张量操作
 11. **FlattenTileNdTo2D** —— 将 ND tile 操作规范化为 2D
 12. **InferTileMemorySpace** —— 推断 tile 内存空间
 13. **ResolveTransposeLayout** —— 修复转置布局处理
 14. **ResolveBackendOpLayouts** —— 修复 backend 受限的 tile 布局
 15. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
-16. **InitMemRef** —— 分配内存空间并插入缓冲区分配
-17. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
-18. **LegalizePTOBufferReuse** —— 规范化 PTO 缓冲区复用模式
-19. **AllocateMemoryAddr** —— 分配具体内存地址
+16. **SplitVectorKernel** —— 在需要时拆分 vector kernel
+17. **NormalizeReturnOrder** —— 按 Out/InOut 参数顺序重排返回值
+18. **PartialUnrollTileLoops** —— 在 tile 层部分展开循环
+19. **ReorderUnrolledIO** —— 将展开副本的 load/store 分组
+20. **InitMemRef** —— 分配内存空间并插入缓冲区分配
+21. **MemoryReuse** —— 共享生命周期不重叠的缓冲区
+22. **LegalizePTOBufferReuse** —— 规范化 PTO 缓冲区复用模式
+23. **AllocateMemoryAddr** —— 分配具体内存地址
+24. **FuseCreateAssembleToSlice** —— 融合 create + assemble 操作
+25. **Simplify** —— 最终简化 Pass
 
 ### 调试
 

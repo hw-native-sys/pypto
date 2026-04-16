@@ -4,14 +4,14 @@ Converts tensor operations to tile operations in InCore functions and updates or
 
 ## Overview
 
-After `OutlineIncoreScopes` extracts InCore scopes into separate functions, those functions still operate on `TensorType` variables using `tensor.*` operations. This pass lowers them to `TileType` variables with `tile.*` operations that map directly to PTO-ISA instructions.
+After `OutlineHierarchyScopes` and `OutlineIncoreScopes` extract `HierarchyScopeStmt` regions into separate functions (with `OutlineIncoreScopes` producing `Function(InCore)` for `CORE_GROUP` scopes), those InCore functions still operate on `TensorType` variables using `tensor.*` operations. This pass lowers them to `TileType` variables with `tile.*` operations that map directly to PTO-ISA instructions.
 
 The pass also updates call sites in orchestration/opaque functions: for each new output parameter added to an InCore function, a `tensor.create` is inserted at the call site.
 
 **Requirements**:
 
 - Input IR must be in SSA form
-- InCore scopes must be outlined (run `OutlineIncoreScopes` first)
+- Hierarchy scopes must be outlined into functions (run `OutlineHierarchyScopes` and `OutlineIncoreScopes` first)
 - Statement structure must be normalized
 
 **When to use**: Run after `OutlineClusterScopes` and before `OptimizeOrchTensors`.
@@ -119,7 +119,7 @@ Key changes:
 
 | Property | Value |
 | -------- | ----- |
-| Required | SSAForm, SplitIncoreOrch, NormalizedStmtStructure |
+| Required | SSAForm, HierarchyOutlined, NormalizedStmtStructure |
 | Produced | SSAForm, IncoreTileOps, NormalizedStmtStructure |
 | Invalidated | — |
 

@@ -14,7 +14,7 @@ This pass reorders each marked `SeqStmts` so:
 
 The result is `[loads…, compute…, stores…]` whenever the dataflow allows. Sibling clones' input tiles are co-live near the top, output tiles co-live near the bottom — `MemoryReuse` cannot coalesce them, so each clone keeps its own MemRef and ping-pong buffering becomes possible.
 
-**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
+**Requires**: SSAForm, HierarchyOutlined, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
 **Pipeline position**: After `PartialUnrollTileLoops`, before `InitMemRef` (slot 20.6). Running before `InitMemRef` keeps SSAForm intact for the dependency analysis.
 
@@ -112,7 +112,7 @@ All four `tile_x_k` are now co-live up to the last load, and all four `tile_y_k`
 
 ## Related
 
-- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) — produces the `unroll_replicated` marker this pass consumes
-- [`MemoryReuse`](16-memory_reuse.md) — runs after this pass; benefits from the co-live tiles
+- [`PartialUnrollTileLoops`](15-partial_unroll_tile_loops.md) — produces the `unroll_replicated` marker this pass consumes
+- [`MemoryReuse`](13-memory_reuse.md) — runs after this pass; benefits from the co-live tiles
 - RFC #1025 — design document
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility

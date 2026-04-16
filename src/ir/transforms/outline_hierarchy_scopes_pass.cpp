@@ -29,11 +29,14 @@ namespace ir {
 namespace pass {
 
 /**
- * @brief Pass to outline Hierarchy scopes into separate functions with level/role
+ * @brief Pass to outline non-CORE_GROUP Hierarchy scopes into separate functions.
  *
- * This pass transforms ScopeStmt(Hierarchy) nodes into separate Function definitions
- * that carry the scope's Level and Role metadata, and replaces the scope with a Call
- * to the outlined function.
+ * This pass transforms HierarchyScopeStmt nodes whose `level_` is anything other
+ * than `Level::CORE_GROUP` into separate Function definitions that carry the
+ * scope's Level/Role metadata, and replaces the scope with a Call to the outlined
+ * function. CORE_GROUP scopes are intentionally left intact for the subsequent
+ * `OutlineIncoreScopes` pass, which emits `Function(InCore)` and promotes the
+ * parent function from `Opaque` to `Orchestration`.
  *
  * Requirements:
  * - Input IR must be in SSA form (run ConvertToSSA first)
@@ -41,14 +44,13 @@ namespace pass {
  * - Should run before OutlineIncoreScopes and OutlineClusterScopes
  *
  * Transformation:
- * 1. For each ScopeStmt(Hierarchy) in an Opaque function:
- *    - Analyze body to determine external variable references (inputs)
- *    - Analyze subsequent statements to determine which definitions are outputs
- *    - Extract body into new Function(Opaque, level, role) with appropriate params/returns
- *    - Replace scope with Call to the outlined function + output assignments
- * 2. Recursively handles nested Hierarchy scopes
- * 3. Add outlined functions to the program
- * 4. Parent function type is preserved (not promoted)
+ * 1. For each HierarchyScopeStmt at level != CORE_GROUP in an Opaque function:
+ *    - Analyze body for inputs/outputs
+ *    - Extract body into a new Opaque Function carrying the scope's level/role
+ *    - Replace the scope with a Call to the outlined function + output assignments
+ * 2. Recursively descends into other scopes; nested non-CORE_GROUP Hierarchy
+ *    scopes are outlined together with their parent.
+ * 3. CORE_GROUP scopes (and their bodies) are preserved verbatim.
  */
 Pass OutlineHierarchyScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
@@ -71,15 +73,20 @@ Pass OutlineHierarchyScopes() {
       }
       type_collector.VisitStmt(func->body_);
 
-      // Outline Hierarchy scopes in this function
+      // Outline non-CORE_GROUP Hierarchy scopes; CORE_GROUP scopes are skipped
+      // and handled by OutlineIncoreScopes downstream.
+      outline_utils::ScopeOutliner::HierarchyLevelFilter filter{
+          Level::CORE_GROUP, outline_utils::ScopeOutliner::HierarchyLevelFilter::Mode::Exclude};
       outline_utils::ScopeOutliner outliner(func->name_, type_collector.var_types, type_collector.var_objects,
                                             type_collector.known_names, ScopeKind::Hierarchy,
-                                            FunctionType::Opaque, "_hierarchy_");
+                                            /*outlined_func_type=*/FunctionType::Opaque, "_hierarchy_",
+                                            /*program=*/nullptr, filter);
       auto new_body = outliner.VisitStmt(func->body_);
 
-      // Preserve parent function type (don't promote — hierarchy is orthogonal to FunctionType)
       auto new_func = MutableCopy(func);
       new_func->body_ = new_body;
+      // Parent type unchanged; CORE_GROUP-driven promotion to Orchestration
+      // happens in OutlineIncoreScopes.
       new_functions.push_back(new_func);
 
       const auto& outlined = outliner.GetOutlinedFunctions();
@@ -101,6 +108,10 @@ Pass OutlineHierarchyScopes() {
 // ============================================================================
 // HierarchyOutlined property verifier
 // ============================================================================
+//
+// This verifier is shared between OutlineHierarchyScopes and OutlineIncoreScopes.
+// The HierarchyOutlined property is produced by OutlineIncoreScopes (which runs
+// after OutlineHierarchyScopes), since CORE_GROUP scopes survive the first pass.
 
 namespace {
 
@@ -116,9 +127,13 @@ class HierarchyOutlinedPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      // Only check Opaque functions — the pass only processes Opaque functions,
-      // so Hierarchy scopes in other function types are not expected to be outlined.
-      if (func->func_type_ != FunctionType::Opaque) continue;
+      // After both outline passes have run, no Hierarchy scopes should remain in
+      // Opaque/Orchestration functions. Inside InCore/Group/Spmd outlined
+      // functions, Hierarchy scopes are disallowed by construction (the outliner
+      // only produces leaf scope bodies).
+      if (func->func_type_ != FunctionType::Opaque && func->func_type_ != FunctionType::Orchestration) {
+        continue;
+      }
       HierarchyOutlinedVerifier verifier(diagnostics, "HierarchyOutlined",
                                          "Hierarchy ScopeStmt found in function (should have been outlined)");
       verifier.VisitStmt(func->body_);

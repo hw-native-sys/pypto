@@ -81,8 +81,6 @@ fixable = ["ALL"]
 "tests/ut/ir/transforms/test_init_memref.py" = ["E501"]
 "tests/ut/ir/transforms/test_memory_reuse.py" = ["E501"]
 "tests/ut/ir/transforms/test_infer_tile_memory_space.py" = ["E501"]
-"tests/ut/ir/transforms/test_interchange_chunk_loops.py" = ["E501", "F841"]
-"tests/ut/ir/transforms/test_outline_incore_interleaved_ops.py" = ["E501"]
 "tests/ut/ir/transforms/test_legalize_pto_buffer_reuse.py" = ["E501", "F841"]
 # IR dumps are formatted at 200-col for readability — suppress line-length lint
 "build_output/**" = ["E501"]

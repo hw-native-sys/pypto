@@ -183,25 +183,6 @@ Pass InsertSync();
 Pass AllocateMemoryAddr();
 
 /**
- * @brief Create a loop chunking pass
- *
- * Splits ForStmt nodes with chunk_size into nested loops: an outer loop
- * iterating over chunk indices and an inner loop iterating within each chunk.
- * Requires SSA form input and produces SSA form output.
- */
-Pass SplitChunkedLoops();
-
-/**
- * @brief Interchange chunk loops and insert InCore scopes
- *
- * Reorders nested ChunkOuter/ChunkInner loop pairs so that all outer loops
- * are on top, then wraps the inner loops + body in a ScopeStmt(InCore).
- * Only interchanges when all ChunkInner loops are Parallel.
- * Requires SSA form input and produces SSA form output.
- */
-Pass InterchangeChunkLoops();
-
-/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop
@@ -263,16 +244,12 @@ Pass CtrlFlowTransform();
 Pass ConvertToSSA();
 
 /**
- * @brief Outline InCore scopes into separate functions
+ * @brief Outline non-CORE_GROUP Hierarchy scopes into separate Opaque functions
  *
- * Requirements:
- * - Input IR must be in SSA form (run ConvertToSSA first)
- * - Only processes Opaque functions
- */
-Pass OutlineIncoreScopes();
-
-/**
- * @brief Outline Hierarchy scopes into separate functions with level/role
+ * Outlines every `HierarchyScopeStmt` whose `level_` is anything other than
+ * `CORE_GROUP`, carrying the scope's level/role onto the outlined function. The
+ * parent function's type is preserved (it stays `Opaque`). CORE_GROUP scopes
+ * survive this pass for `OutlineIncoreScopes` to handle.
  *
  * Requirements:
  * - Input IR must be in SSA form (run ConvertToSSA first)
@@ -280,6 +257,22 @@ Pass OutlineIncoreScopes();
  * - Should run before OutlineIncoreScopes and OutlineClusterScopes
  */
 Pass OutlineHierarchyScopes();
+
+/**
+ * @brief Outline CORE_GROUP Hierarchy scopes into InCore functions
+ *
+ * Outlines every `HierarchyScopeStmt(level=CORE_GROUP)` into a separate
+ * `Function(InCore)` and promotes the parent function from `Opaque` to
+ * `Orchestration` when any CORE_GROUP scope was outlined. Together with
+ * `OutlineHierarchyScopes`, establishes the `HierarchyOutlined` property: no
+ * `HierarchyScopeStmt` remains in any Opaque/Orchestration function body.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form (run ConvertToSSA first)
+ * - Should run after OutlineHierarchyScopes and before OutlineClusterScopes
+ * - Only processes Opaque functions
+ */
+Pass OutlineIncoreScopes();
 
 /**
  * @brief Outline Cluster scopes into separate Group functions
@@ -298,7 +291,7 @@ Pass OutlineClusterScopes();
  * orchestration call sites with tensor.create for output parameters.
  *
  * Requirements:
- * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ * - Input IR must have InCore functions outlined (run OutlineHierarchyScopes first)
  */
 Pass ConvertTensorToTileOps();
 
@@ -363,7 +356,7 @@ Pass InferTileMemorySpace();
  *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
- * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ * - Input IR must have InCore functions outlined (run OutlineHierarchyScopes first)
  */
 Pass ResolveTransposeLayout();
 
@@ -386,7 +379,7 @@ Pass ResolveBackendOpLayouts();
  *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
- * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
+ * - Input IR must have InCore functions outlined (run OutlineHierarchyScopes first)
  */
 Pass ExpandMixedKernel();
 

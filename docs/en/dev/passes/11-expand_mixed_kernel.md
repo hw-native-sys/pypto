@@ -4,7 +4,7 @@ Expands mixed InCore functions into separate AIC (Cube) + AIV (Vector) kernels w
 
 ## Overview
 
-After `OutlineIncoreScopes` and `ConvertTensorToTileOps`, InCore functions may contain both Cube ops (`tile.matmul`, `tile.gemv`, etc.) and Vector ops (`tile.add`, `tile.exp`, etc.). Some ops like `tile.load`, `tile.store`, `tile.move`, and `tile.reshape` are classified as Cube or Vector based on the MemorySpace of their tile operands. Functions containing ops from both sides are **mixed InCore functions**. Hardware requires Cube and Vector operations to run on separate core types, so this pass splits them into:
+After `OutlineHierarchyScopes` and `ConvertTensorToTileOps`, InCore functions may contain both Cube ops (`tile.matmul`, `tile.gemv`, etc.) and Vector ops (`tile.add`, `tile.exp`, etc.). Some ops like `tile.load`, `tile.store`, `tile.move`, and `tile.reshape` are classified as Cube or Vector based on the MemorySpace of their tile operands. Functions containing ops from both sides are **mixed InCore functions**. Hardware requires Cube and Vector operations to run on separate core types, so this pass splits them into:
 
 - **AIC function** (`FunctionType::AIC`) — contains only Cube + shared ops
 - **AIV function** (`FunctionType::AIV`) — contains only Vector + shared ops
@@ -76,7 +76,7 @@ For consumer-side cross-core tiles, the pass also normalizes statement order to 
 **Requirements**:
 
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
-- Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
+- Input IR must have hierarchy scopes outlined into functions (run `OutlineHierarchyScopes` first)
 - Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
 - Tile memory space must be inferred (run `InferTileMemorySpace` first)
 - Cross-core fractal TileView assignment is supported on Ascend950 and Ascend910B backends
@@ -292,7 +292,7 @@ class After:
 
 | Property | Value |
 | -------- | ----- |
-| Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred |
+| Required | SSAForm, IncoreTileOps, HierarchyOutlined, TileOps2D, TileMemoryInferred |
 | Produced | SSAForm, MixedKernelExpanded |
 | Invalidated | — |
 

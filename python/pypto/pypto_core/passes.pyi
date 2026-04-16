@@ -23,7 +23,6 @@ class IRProperty(Enum):
     NoNestedCalls = ...
     NormalizedStmtStructure = ...
     NoRedundantBlocks = ...
-    SplitIncoreOrch = ...
     HasMemRefs = ...
     IncoreTileOps = ...
     AllocatedMemoryAddr = ...
@@ -37,7 +36,6 @@ class IRProperty(Enum):
     StructuredCtrlFlow = ...
     VectorKernelSplit = ...
     OutParamNotShadowed = ...
-    NoNestedInCore = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -316,12 +314,6 @@ class TypeCheckErrorType(Enum):
     FOR_RANGE_MUST_BE_SCALAR = ...
     CONDITION_MUST_BE_BOOL = ...
 
-def split_chunked_loops() -> Pass:
-    """Create a pass that splits chunked loops into nested loops."""
-
-def interchange_chunk_loops() -> Pass:
-    """Create a pass that interchanges chunk loops and inserts InCore scopes."""
-
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
 
@@ -348,14 +340,14 @@ def ctrl_flow_transform() -> Pass:
 def convert_to_ssa() -> Pass:
     """Create an SSA conversion pass."""
 
-def outline_incore_scopes() -> Pass:
-    """Create a pass that outlines InCore scopes."""
-
 def outline_cluster_scopes() -> Pass:
     """Create a pass that outlines Cluster scopes to Group and standalone Spmd scopes to Spmd."""
 
 def outline_hierarchy_scopes() -> Pass:
-    """Create a pass that outlines Hierarchy scopes into level/role functions."""
+    """Outline non-CORE_GROUP Hierarchy scopes into Opaque level/role functions."""
+
+def outline_incore_scopes() -> Pass:
+    """Outline CORE_GROUP Hierarchy scopes into InCore functions; promote parent to Orchestration."""
 
 def convert_tensor_to_tile_ops() -> Pass:
     """Create a pass that converts tensor ops to tile ops in InCore functions."""
@@ -492,14 +484,12 @@ __all__ = [
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",
-    "split_chunked_loops",
-    "interchange_chunk_loops",
     "unroll_loops",
     "ctrl_flow_transform",
     "convert_to_ssa",
-    "outline_incore_scopes",
     "outline_cluster_scopes",
     "outline_hierarchy_scopes",
+    "outline_incore_scopes",
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",

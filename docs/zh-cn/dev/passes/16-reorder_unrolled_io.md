@@ -14,7 +14,7 @@
 
 只要数据流允许，结果即为 `[loads…, compute…, stores…]`。各克隆的输入 tile 在顶部同时活跃，输出 tile 在底部同时活跃 —— `MemoryReuse` 无法合并它们，每个克隆保留独立的 MemRef，从而 ping-pong 缓冲成为可能。
 
-**前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
+**前置条件**: SSAForm、HierarchyOutlined、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
 **流水线位置**: 位于 `PartialUnrollTileLoops` 之后、`InitMemRef` 之前（slot 20.6）。在 `InitMemRef` 之前运行可保留 SSAForm，依赖分析正常工作。
 
@@ -112,7 +112,7 @@ for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
 
 ## 相关
 
-- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) —— 生成本 Pass 消费的 `unroll_replicated` 标记
-- [`MemoryReuse`](16-memory_reuse.md) —— 在本 Pass 之后运行；受益于同时活跃的 tile
+- [`PartialUnrollTileLoops`](15-partial_unroll_tile_loops.md) —— 生成本 Pass 消费的 `unroll_replicated` 标记
+- [`MemoryReuse`](13-memory_reuse.md) —— 在本 Pass 之后运行；受益于同时活跃的 tile
 - RFC #1025 —— 设计文档
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具

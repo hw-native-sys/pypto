@@ -21,7 +21,6 @@ def _run_prereqs_only(program):
     pipeline.add_pass(passes.normalize_stmt_structure())
     pipeline.add_pass(passes.flatten_call_expr())
     pipeline.add_pass(passes.outline_hierarchy_scopes())
-    pipeline.add_pass(passes.outline_incore_scopes())
     pipeline.add_pass(passes.outline_cluster_scopes())
     ctx = passes.PassContext([], passes.VerificationLevel.NONE)
     with ctx:
@@ -35,7 +34,6 @@ def _run_prereqs_and_fuse(program):
     pipeline.add_pass(passes.normalize_stmt_structure())
     pipeline.add_pass(passes.flatten_call_expr())
     pipeline.add_pass(passes.outline_hierarchy_scopes())
-    pipeline.add_pass(passes.outline_incore_scopes())
     pipeline.add_pass(passes.outline_cluster_scopes())
     pipeline.add_pass(passes.fuse_create_assemble_to_slice())
     ctx = passes.PassContext([], passes.VerificationLevel.NONE)

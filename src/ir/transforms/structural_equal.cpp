@@ -876,8 +876,6 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(ReturnStmt)
   EQUAL_DISPATCH(ForStmt)
   EQUAL_DISPATCH(WhileStmt)
-  EQUAL_DISPATCH(InCoreScopeStmt)
-  EQUAL_DISPATCH(AutoInCoreScopeStmt)
   EQUAL_DISPATCH(ClusterScopeStmt)
   EQUAL_DISPATCH(HierarchyScopeStmt)
   EQUAL_DISPATCH(SpmdScopeStmt)

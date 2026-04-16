@@ -375,8 +375,7 @@ class SSAConverter {
     if (kind == ObjectKind::ReturnStmt) return ConvertReturn(As<ReturnStmt>(s));
     if (kind == ObjectKind::YieldStmt) return ConvertYield(As<YieldStmt>(s));
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
-    if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::AutoInCoreScopeStmt ||
-        kind == ObjectKind::ClusterScopeStmt || kind == ObjectKind::HierarchyScopeStmt ||
+    if (kind == ObjectKind::ClusterScopeStmt || kind == ObjectKind::HierarchyScopeStmt ||
         kind == ObjectKind::SpmdScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
@@ -878,8 +877,6 @@ class SSAConverter {
       result->body_ = body;
       return result;
     };
-    if (auto in_core = As<InCoreScopeStmt>(op)) return rewrite(in_core);
-    if (auto auto_in_core = As<AutoInCoreScopeStmt>(op)) return rewrite(auto_in_core);
     if (auto cluster = As<ClusterScopeStmt>(op)) return rewrite(cluster);
     if (auto hier = As<HierarchyScopeStmt>(op)) return rewrite(hier);
     if (auto spmd = As<SpmdScopeStmt>(op)) return rewrite(spmd);

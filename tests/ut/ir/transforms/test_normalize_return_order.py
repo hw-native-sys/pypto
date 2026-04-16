@@ -378,7 +378,7 @@ class TestNormalizeReturnOrderProperties:
     def test_required_properties(self):
         p = passes.normalize_return_order()
         required = p.get_required_properties()
-        assert required.contains(passes.IRProperty.SplitIncoreOrch)
+        assert required.contains(passes.IRProperty.HierarchyOutlined)
         assert required.contains(passes.IRProperty.IncoreTileOps)
 
     def test_no_produced_properties(self):

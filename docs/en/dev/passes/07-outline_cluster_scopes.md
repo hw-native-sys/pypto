@@ -11,7 +11,7 @@ This pass transforms `ClusterScopeStmt` nodes into separate `Function(Group)` de
 - Input IR must be in SSA form (run ConvertToSSA first)
 - Only processes Opaque and Orchestration functions
 
-**When to use**: Run after `OutlineIncoreScopes` when the IR contains `with pl.cluster():` scopes or standalone `with pl.spmd(...):` scopes that need to be extracted into wrapper functions.
+**When to use**: Run after `OutlineHierarchyScopes` and `OutlineIncoreScopes` when the IR contains `with pl.cluster():` scopes or standalone `with pl.spmd(...):` scopes that need to be extracted into wrapper functions. The cluster body may still contain calls to `Function(InCore)` produced earlier by `OutlineIncoreScopes`.
 
 ## API
 
@@ -42,7 +42,9 @@ program_outlined = outline_pass(program)
 
 ## Example
 
-**Before**:
+**Before** (assume `OutlineIncoreScopes` has already turned the inner
+`with pl.at(level=pl.Level.CORE_GROUP): ...` scope into a call to an outlined
+`Function(InCore)` named `main_core_group_0`):
 
 ```python
 @pl.program
@@ -50,8 +52,7 @@ class Before:
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.cluster():
-            with pl.incore():
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+            y: pl.Tensor[[64], pl.FP32] = self.main_core_group_0(x)
         return y
 ```
 
@@ -62,8 +63,7 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.Group)
     def main_cluster_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore():
-            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+        y: pl.Tensor[[64], pl.FP32] = self.main_core_group_0(x)
         return y
 
     @pl.function
@@ -72,7 +72,10 @@ class After:
         return y
 ```
 
-Note: InCore scopes inside the Cluster are preserved in the outlined Group function. Run `OutlineIncoreScopes` first to outline InCore scopes before clustering, or after to outline them within Group functions.
+Note: `OutlineHierarchyScopes` and `OutlineIncoreScopes` run before this
+pass, so the cluster body already contains calls to `Function(InCore)`
+rather than inline `HierarchyScopeStmt` nodes. The outlined Group function
+preserves those calls.
 
 ## Standalone Spmd Example
 
@@ -133,12 +136,12 @@ class After:
 | Produced | SSAForm, ClusterOutlined |
 | Invalidated | — |
 
-## Relationship to OutlineIncoreScopes
+## Relationship to OutlineHierarchyScopes / OutlineIncoreScopes
 
-| Aspect | OutlineIncoreScopes | OutlineClusterScopes |
-| ------ | ------------------- | -------------------- |
-| Scope kind | `ScopeKind::InCore` | `ScopeKind::Cluster` / standalone `ScopeKind::Spmd` |
-| Output function type | `FunctionType::InCore` | `FunctionType::Group` / `FunctionType::Spmd` |
-| Naming pattern | `{func}_incore_{n}` | `{func}_cluster_{n}` / `{func}_spmd_{n}` |
-| Promotes parent to | Orchestration | *(unchanged)* |
-| Processes | Opaque functions only | Opaque + Orchestration |
+| Aspect | OutlineHierarchyScopes | OutlineIncoreScopes | OutlineClusterScopes |
+| ------ | ---------------------- | ------------------- | -------------------- |
+| Scope kind | `HierarchyScopeStmt` (non-CORE_GROUP) | `HierarchyScopeStmt` (CORE_GROUP) | `ClusterScopeStmt` / standalone `SpmdScopeStmt` |
+| Output function type | `FunctionType::Opaque` | `FunctionType::InCore` | `FunctionType::Group` / `FunctionType::Spmd` |
+| Naming pattern | `{func}_{level}_{n}` | `{func}_core_group_{n}` | `{func}_cluster_{n}` / `{func}_spmd_{n}` |
+| Promotes parent to | *(unchanged)* | `Orchestration` | *(unchanged)* |
+| Processes | `Opaque` functions only | `Opaque` functions only | `Opaque` + `Orchestration` |

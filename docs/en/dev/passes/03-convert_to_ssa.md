@@ -13,7 +13,7 @@ This pass transforms IR with multiple assignments to the same variable into SSA 
 
 **Requires**: `TypeChecked` property. `TypeChecked` is verified automatically at BASIC level once produced; use a `VerificationInstrument` via `PassContext` to validate required properties before this pass runs.
 
-**When to use**: Run this pass before any optimization or analysis that requires SSA form (e.g., OutlineIncoreScopes, memory optimization passes).
+**When to use**: Run this pass before any optimization or analysis that requires SSA form (e.g., OutlineHierarchyScopes, memory optimization passes).
 
 ## API
 

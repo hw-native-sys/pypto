@@ -152,7 +152,7 @@ class TestCollectDefVars:
         """Collects vars from ScopeStmt body."""
         v1, s1 = _assign("s", _const(7))
         body = ir.SeqStmts([s1], _span())
-        scope = ir.InCoreScopeStmt(body=body, span=_span())
+        scope = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, body=body, span=_span())
         result = ir.collect_def_vars(scope)
         assert len(result) == 1
         assert result[0] is v1

@@ -32,7 +32,12 @@
 <return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
+<scope_stmt> ::= "with" "pl.at" "(" "level" "=" <level> [ "," "role" "=" <role> ]
+                 [ "," "optimizations" "=" "[" <optimization_list> "]" ] ")"
+                 ":" <stmt_list>
+               | "with" "pl.cluster" "(" ")" ":" <stmt_list>
+               | "with" "pl.spmd" "(" "core_num" "=" <expr>
+                 [ "," "sync_start" "=" <expr> ] ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
 
@@ -152,10 +157,8 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | 条件分支 |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | 带可选迭代参数的 for 循环 |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | 带条件和迭代参数的 while 循环 |
-| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | InCore 区域；由 `OutlineIncoreScopes` 提取为 `Function(InCore)` |
-| **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | Auto-InCore 区域；由 `InterchangeChunkLoops` 消费 |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
-| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
+| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选）, `split_`（可选） | 给定 Level/Role 的流水线阶段区域；当 `level_ == CORE_GROUP` 时提取为 `Function(InCore)`，其他层级提取为 `Function(Opaque)` |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
@@ -220,30 +223,31 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 
 ### ScopeStmt 详细说明
 
-`ScopeStmt` 是一个**抽象基类**，用于标记具有特定执行上下文的区域。下列五个具体子类
+`ScopeStmt` 是一个**抽象基类**，用于标记具有特定执行上下文的区域。下列三个具体子类
 各自只携带其类型有效的字段——非法组合在构造时即不可表达。在 `ScopeStmt` 类型的引用上，
 可使用 `s.scope_kind`（C++ 中为 `s.GetScopeKind()`）来取回类型，或使用
-`isinstance(s, InCoreScopeStmt)` 在具体类型上分派。
+`isinstance(s, HierarchyScopeStmt)` 在具体类型上分派。
 
-五个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。注意：
-`pl.at(level=Level.CORE_GROUP)` 实际下沉到 `InCoreScopeStmt` /
-`AutoInCoreScopeStmt`，而非 `HierarchyScopeStmt`——解析器会在 `CORE_GROUP`
-拒绝 `role=`。`HierarchyScopeStmt` 仅用于非 `CORE_GROUP` 的层级
-（host、cluster、global），并不是 in-core 作用域的通用替代。
+三个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。`pl.at(level=...)`
+统一下沉到 `HierarchyScopeStmt`——包括 `level=Level.CORE_GROUP`，它会产生
+`level_ == CORE_GROUP` 且可选携带 `split_` 的 `HierarchyScopeStmt`。`OutlineIncoreScopes`
+随后把该 `CORE_GROUP` 作用域提取为 `Function(InCore)`，并将其父 `Opaque`
+函数升级为 `Orchestration`。非 `CORE_GROUP` 的 `HierarchyScopeStmt` 则由
+紧邻其前执行的 `OutlineHierarchyScopes` 提取为 `Function(Opaque)`。
 
 ```python
-# with pl.incore(): y = pl.add(x, x)
-in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
-
-# with pl.auto_incore():       (split 可选)
-auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
-
 # with pl.cluster():
 cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
 
 # with pl.at(level=Level.HOST, role=Role.Worker):
 hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
+
+# with pl.at(level=Level.CORE_GROUP,
+#            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+hier_core = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP,
+                                  split=ir.SplitMode.UP_DOWN,
+                                  name_hint="", body=body, span=span)
 
 # with pl.spmd(core_num=8):
 spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
@@ -256,20 +260,31 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
   （执行一次，线性执行）。
 - 必填字段在构造时强制校验：`HierarchyScopeStmt.level_` 不可为空；
   `SpmdScopeStmt` 拒绝 `core_num <= 0`。
-- `InCoreScopeStmt` / `AutoInCoreScopeStmt` 已计划弃用；新代码应优先使用
-  `HierarchyScopeStmt` 或其它将保留的子类。
+- `HierarchyScopeStmt.split_` 可选，且仅在 `Level.CORE_GROUP` 下有意义。
+  它会被复制到提取出的 `InCore` 函数 attrs 上，供 `ExpandMixedKernel` 读取。
 - Pass 行为：
-  - `InterchangeChunkLoops` 消费 `AutoInCoreScopeStmt`
-  - `OutlineIncoreScopes` 将 `InCoreScopeStmt` 提取为 `Function(InCore)`
+  - `OutlineHierarchyScopes` 将每个非 `CORE_GROUP` 的 `HierarchyScopeStmt`
+    提取为一个独立的 `FunctionType::Opaque` 函数，父函数类型保持不变。
+  - `OutlineIncoreScopes`（紧随其后执行）将每个 `CORE_GROUP`
+    `HierarchyScopeStmt` 提取为一个独立的 `FunctionType::InCore` 函数。
+    包含至少一个 `CORE_GROUP` 作用域的父函数由 `Opaque` 升级为
+    `Orchestration`。
   - `OutlineClusterScopes` 将 `ClusterScopeStmt` 提取为 `Function(Group)`，
-    将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`
-  - `OutlineHierarchyScopes` 提取 `HierarchyScopeStmt`
+    将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`。
 
 **变换示例：**
 
 ```python
-# Before: with pl.incore(): y = pl.add(x, x); return y
-# After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
+# Before:
+# def main(x):
+#     with pl.at(level=pl.Level.CORE_GROUP):
+#         y = pl.add(x, x)
+#     return y
+# After:
+# def main_core_group_0(x) -> y: ...         # FunctionType.InCore
+# def main(x) -> y:                           # FunctionType.Orchestration
+#     y = main_core_group_0(x)
+#     return y
 ```
 
 **并行 for 循环 (ForKind)：**
@@ -411,7 +426,7 @@ add_func = program.get_function("add")  # Access by name
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |
-| **语句** | 15 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, AutoInCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **语句** | 13 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **类型** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **函数** | 2 | Function, Program |
 

@@ -12,7 +12,7 @@
 
 内存空间从 `TileType::memory_space_` 读取（由 InferTileMemorySpace 设置）。无 `memory_space` 的变量默认为 DDR。
 
-**需要**：SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred。
+**需要**：SSAForm、HierarchyOutlined、IncoreTileOps、TileOps2D、TileMemoryInferred。
 
 **产生**：HasMemRefs、NormalizedStmtStructure。
 

@@ -163,7 +163,7 @@ while i < n and not __break_0:
 CtrlFlowTransform runs after UnrollLoops and before ConvertToSSA:
 
 ```text
-UnrollLoops -> CtrlFlowTransform -> ConvertToSSA -> FlattenCallExpr -> SplitChunkedLoops -> ...
+UnrollLoops -> CtrlFlowTransform -> ConvertToSSA -> NormalizeStmtStructure -> FlattenCallExpr -> OutlineHierarchyScopes -> ...
 ```
 
 ## Pass Properties

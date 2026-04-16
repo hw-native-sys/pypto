@@ -59,12 +59,9 @@ from pypto.pypto_core.ir import (
 from . import optimizations, parser
 from .dsl_api import (
     at,
-    auto_incore,
-    chunked_loop_optimizer,
     cluster,
     cond,
     const,
-    incore,
     parallel,
     range,
     spmd,
@@ -169,7 +166,7 @@ from .op.unified_ops import (
     transpose,
     write,
 )
-from .optimizations import auto_chunk, split
+from .optimizations import split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
@@ -236,14 +233,10 @@ __all__ = [
     "static_print",
     "static_assert",
     "at",
-    "incore",
-    "auto_incore",
     "cluster",
     "spmd",
-    "chunked_loop_optimizer",
     "optimizations",
     "split",
-    "auto_chunk",
     "tile",
     "system",
     "tensor",

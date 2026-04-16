@@ -8,7 +8,7 @@
 
 `PartialUnrollTileLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile，下游 `MemoryReuse` 无法将其合并。
 
-**前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
+**前置条件**: SSAForm、HierarchyOutlined、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
 **流水线位置**: 位于 `NormalizeReturnOrder` 之后、`InitMemRef` 之前（slot 20.5）。此时 tile 结构决策已完成；同时早于 `InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
 
@@ -157,6 +157,6 @@ else:
 
 ## 相关
 
-- [`ReorderUnrolledIO`](21-reorder_unrolled_io.md) —— 消费 `unroll_replicated` 标记
+- [`ReorderUnrolledIO`](16-reorder_unrolled_io.md) —— 消费 `unroll_replicated` 标记
 - [`UnrollLoops`](01-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径
 - RFC #1025 —— 设计文档

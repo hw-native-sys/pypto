@@ -35,7 +35,6 @@ enum class IRProperty : uint64_t {
   NoNestedCalls,            ///< No nested call expressions
   NormalizedStmtStructure,  ///< Statement structure normalized
   NoRedundantBlocks,        ///< No single-child or nested SeqStmts
-  SplitIncoreOrch,          ///< InCore scopes outlined into separate functions
   HasMemRefs,               ///< MemRef objects initialized on variables
   IncoreTileOps,            ///< InCore functions use tile ops (tile types, load/store)
   AllocatedMemoryAddr,      ///< All MemRefs have valid addresses within buffer limits
@@ -45,11 +44,10 @@ enum class IRProperty : uint64_t {
   TileMemoryInferred,       ///< TileType memory_space_ populated in InCore functions
   BreakContinueValid,       ///< Break/continue only in sequential/while loops
   UseAfterDef,              ///< All variable uses are dominated by a definition
-  HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
+  HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions (CORE_GROUP→InCore funcs)
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
-  NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
   InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
   kCount                    ///< Sentinel (must be last)
 };
@@ -191,7 +189,7 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed}.
  */
 const IRPropertySet& GetStructuralProperties();
 
@@ -199,7 +197,7 @@ const IRPropertySet& GetStructuralProperties();
  * @brief Default property set for explicit verification
  *
  * Returns {SSAForm, TypeChecked, NoNestedCalls, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore} — the properties checked by
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed} — the properties checked by
  * run_verifier() when no explicit set is given.
  */
 const IRPropertySet& GetDefaultVerifyProperties();

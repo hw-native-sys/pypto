@@ -255,8 +255,6 @@ void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
       }
       break;
     }
-    case ObjectKind::InCoreScopeStmt:
-    case ObjectKind::AutoInCoreScopeStmt:
     case ObjectKind::ClusterScopeStmt:
     case ObjectKind::HierarchyScopeStmt:
     case ObjectKind::SpmdScopeStmt: {

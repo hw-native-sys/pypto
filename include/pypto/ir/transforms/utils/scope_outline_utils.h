@@ -199,13 +199,29 @@ class VarCollector : public IRVisitor {
  * and a naming suffix. Handles SeqStmts specially to determine which scope-defined
  * variables are actually used after each scope (output filtering), and recursively
  * transforms scope bodies to handle nested scopes.
+ *
+ * For HierarchyScopeStmt, an optional `level_filter_` narrows which scopes are
+ * outlined: when set with mode `Only`, only scopes whose `level_` matches are
+ * outlined; when set with mode `Exclude`, scopes at the matching level are
+ * skipped (and the mutator descends into their body to outline nested scopes
+ * normally). Used to split outlining into two passes: `OutlineHierarchyScopes`
+ * (excludes CORE_GROUP, emits Opaque) and `OutlineIncoreScopes` (only
+ * CORE_GROUP, emits InCore).
  */
 class ScopeOutliner : public IRMutator {
  public:
+  /// Hierarchy-level filter for ScopeOutliner.
+  struct HierarchyLevelFilter {
+    enum class Mode { Only, Exclude };
+    Level level;
+    Mode mode;
+  };
+
   ScopeOutliner(std::string func_name, const std::unordered_map<const Var*, TypePtr>& var_types,
                 const std::unordered_map<const Var*, VarPtr>& var_objects,
                 const std::unordered_set<std::string>& known_names, ScopeKind target_scope_kind,
-                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr)
+                FunctionType outlined_func_type, std::string name_suffix, ProgramPtr program = nullptr,
+                std::optional<HierarchyLevelFilter> level_filter = std::nullopt)
       : func_name_(std::move(func_name)),
         var_types_(var_types),
         var_objects_(var_objects),
@@ -213,7 +229,8 @@ class ScopeOutliner : public IRMutator {
         target_scope_kind_(target_scope_kind),
         outlined_func_type_(outlined_func_type),
         name_suffix_(std::move(name_suffix)),
-        program_(std::move(program)) {}
+        program_(std::move(program)),
+        level_filter_(level_filter) {}
 
   [[nodiscard]] const std::vector<FunctionPtr>& GetOutlinedFunctions() const { return outlined_functions_; }
 
@@ -244,7 +261,7 @@ class ScopeOutliner : public IRMutator {
 
     for (size_t i = 0; i < op->stmts_.size(); ++i) {
       auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
-      if (scope && scope->GetScopeKind() == target_scope_kind_) {
+      if (scope && scope->GetScopeKind() == target_scope_kind_ && ShouldOutline(scope)) {
         // Collect variables referenced in all subsequent statements
         VarDefUseCollector after_ref_collector;
         for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
@@ -300,6 +317,9 @@ class ScopeOutliner : public IRMutator {
     if (op->GetScopeKind() != target_scope_kind_) {
       return IRMutator::VisitStmt_(op);
     }
+    if (!ShouldOutline(op)) {
+      return IRMutator::VisitStmt_(op);
+    }
     VarDefUseCollector def_collector;
     def_collector.VisitStmt(op->body_);
     StoreTargetCollector store_collector;
@@ -308,11 +328,20 @@ class ScopeOutliner : public IRMutator {
     return OutlineScope(op, def_collector.var_defs);
   }
 
-  StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
-  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override { return VisitScopeKind(op); }
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return VisitScopeKind(op); }
+
+  /// Apply the optional hierarchy-level filter. Non-Hierarchy scopes are
+  /// unaffected; Hierarchy scopes are matched against `level_filter_.level`
+  /// and accepted/rejected per `level_filter_.mode`.
+  bool ShouldOutline(const ScopeStmtPtr& op) const {
+    if (!level_filter_.has_value()) return true;
+    auto hier = As<HierarchyScopeStmt>(op);
+    if (!hier) return true;
+    bool matches = (hier->level_ == level_filter_->level);
+    return level_filter_->mode == HierarchyLevelFilter::Mode::Only ? matches : !matches;
+  }
 
  private:
   /**
@@ -540,18 +569,12 @@ class ScopeOutliner : public IRMutator {
       outlined_body = std::make_shared<SeqStmts>(body_stmts, op->span_);
     }
 
-    // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)
+    // Register the outlined function (propagate level/role/split from ScopeStmt, convert split/core_num to
+    // attrs). When outlining a HierarchyScopeStmt at Level::CORE_GROUP, the outlined function becomes
+    // FunctionType::InCore regardless of the default outlined_func_type_ — this replaces the former
+    // OutlineIncoreScopes pass.
     std::vector<std::pair<std::string, std::any>> outlined_attrs;
-    auto append_split_attr = [&](std::optional<SplitMode> split) {
-      if (split.has_value() && split.value() != SplitMode::None) {
-        outlined_attrs.emplace_back("split", static_cast<int>(split.value()));
-      }
-    };
-    if (auto incore = As<InCoreScopeStmt>(op)) {
-      append_split_attr(incore->split_);
-    } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
-      append_split_attr(auto_incore->split_);
-    } else if (auto spmd = As<SpmdScopeStmt>(op)) {
+    if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {
         outlined_attrs.emplace_back("sync_start", true);
@@ -562,6 +585,9 @@ class ScopeOutliner : public IRMutator {
     if (auto hier = As<HierarchyScopeStmt>(op)) {
       outlined_level = hier->level_;
       outlined_role = hier->role_;
+      if (hier->split_.has_value() && hier->split_.value() != SplitMode::None) {
+        outlined_attrs.emplace_back("split", static_cast<int>(hier->split_.value()));
+      }
     }
     auto outlined_func = std::make_shared<Function>(
         outlined_func_name, input_params, input_param_directions, return_types, outlined_body, op->span_,
@@ -793,6 +819,7 @@ class ScopeOutliner : public IRMutator {
   FunctionType outlined_func_type_;
   std::string name_suffix_;
   ProgramPtr program_;
+  std::optional<HierarchyLevelFilter> level_filter_;
   int scope_counter_ = 0;
   std::vector<FunctionPtr> outlined_functions_;
 };
@@ -807,7 +834,7 @@ class ScopeOutliner : public IRMutator {
 /// have been successfully outlined into separate functions.
 ///
 /// Usage:
-///   ScopeKindAbsenceVerifier<ScopeKind::InCore> verifier(diagnostics, "PassName", "error message");
+///   ScopeKindAbsenceVerifier<ScopeKind::Hierarchy> verifier(diagnostics, "PassName", "error message");
 ///   verifier.VisitStmt(func->body_);
 template <ScopeKind Kind>
 class ScopeKindAbsenceVerifier : public IRVisitor {
@@ -824,8 +851,6 @@ class ScopeKindAbsenceVerifier : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const InCoreScopeStmtPtr& op) override { CheckKind(op); }
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { CheckKind(op); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { CheckKind(op); }

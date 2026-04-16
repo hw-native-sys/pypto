@@ -44,7 +44,6 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::NoNestedCalls, CreateNoNestedCallPropertyVerifier);
   Register(IRProperty::NormalizedStmtStructure, CreateNormalizedStmtPropertyVerifier);
   Register(IRProperty::NoRedundantBlocks, CreateNoRedundantBlocksPropertyVerifier);
-  Register(IRProperty::SplitIncoreOrch, CreateSplitIncoreOrchPropertyVerifier);
   Register(IRProperty::ClusterOutlined, CreateClusterOutlinedPropertyVerifier);
   Register(IRProperty::HierarchyOutlined, CreateHierarchyOutlinedPropertyVerifier);
   Register(IRProperty::HasMemRefs, CreateHasMemRefsPropertyVerifier);
@@ -57,7 +56,6 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::UseAfterDef, CreateUseAfterDefPropertyVerifier);
   Register(IRProperty::StructuredCtrlFlow, CreateStructuredCtrlFlowPropertyVerifier);
   Register(IRProperty::OutParamNotShadowed, CreateOutParamNotShadowedPropertyVerifier);
-  Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
   Register(IRProperty::InOutUseValid, CreateInOutUseValidPropertyVerifier);
 }
 

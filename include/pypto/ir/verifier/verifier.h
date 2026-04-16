@@ -107,12 +107,6 @@ PropertyVerifierPtr CreateNormalizedStmtPropertyVerifier();
 PropertyVerifierPtr CreateNoRedundantBlocksPropertyVerifier();
 
 /**
- * @brief Factory function for creating SplitIncoreOrch property verifier
- * @return Shared pointer to SplitIncoreOrch PropertyVerifier
- */
-PropertyVerifierPtr CreateSplitIncoreOrchPropertyVerifier();
-
-/**
  * @brief Factory function for creating ClusterOutlined property verifier
  * @return Shared pointer to ClusterOutlined PropertyVerifier
  */
@@ -212,14 +206,6 @@ PropertyVerifierPtr CreateStructuredCtrlFlowPropertyVerifier();
  * @return Shared pointer to OutParamNotShadowed PropertyVerifier
  */
 PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
-
-/**
- * @brief Factory function for creating NoNestedInCore property verifier
- *
- * Verifies that no ScopeStmt(InCore) is nested inside another ScopeStmt(InCore).
- * @return Shared pointer to NoNestedInCore PropertyVerifier
- */
-PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
 
 /**
  * @brief Factory function for creating InOutUseValid property verifier

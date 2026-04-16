@@ -124,8 +124,6 @@ class PassManager:
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]
         tensor_only_passes: list[PassSpec] = [
-            ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
-            ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
             ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
             ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
             ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for ScopeStmt Hierarchy kind (Step 03)."""
+"""Tests for the typed ScopeStmt class hierarchy."""
 
 import pypto.language as pl
 import pytest
@@ -22,7 +22,7 @@ def _span():
     return ir.Span("test", 1, 0)
 
 
-# ─── ScopeKind.Hierarchy value ────────────────────────────────────────────────
+# ─── ScopeKind values ────────────────────────────────────────────────────────
 
 
 def test_hierarchy_scope_kind_exists():
@@ -30,21 +30,14 @@ def test_hierarchy_scope_kind_exists():
     assert hasattr(ir.ScopeKind, "Hierarchy")
 
 
-def test_hierarchy_scope_kind_distinct():
-    """Hierarchy is distinct from existing ScopeKind values."""
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.AutoInCore
+def test_scope_kinds_are_distinct():
+    """Each surviving ScopeKind is distinct."""
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
+    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Spmd
+    assert ir.ScopeKind.Cluster != ir.ScopeKind.Spmd
 
 
 # ─── Construction with derived classes (issue #1047) ────────────────────────
-
-
-def test_in_core_scope_construction():
-    """InCoreScopeStmt construction works."""
-    s = ir.InCoreScopeStmt(body=_empty_body(), span=_span())
-    assert s.scope_kind == ir.ScopeKind.InCore
-    assert isinstance(s, ir.ScopeStmt)
 
 
 def test_cluster_scope_construction():
@@ -114,11 +107,11 @@ def test_structural_equal_different_role():
 
 
 def test_structural_equal_different_kinds():
-    """Different scope kinds (InCore vs Hierarchy) compare as unequal."""
-    s_in = ir.InCoreScopeStmt(body=_empty_body(), span=_span())
+    """Different scope kinds compare as unequal."""
+    s_cluster = ir.ClusterScopeStmt(body=_empty_body(), span=_span())
     s_hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, body=_empty_body(), span=_span())
     with pytest.raises(ValueError):
-        ir.assert_structural_equal(s_in, s_hier)
+        ir.assert_structural_equal(s_cluster, s_hier)
 
 
 # ─── Python printer ──────────────────────────────────────────────────────────
@@ -134,46 +127,59 @@ def test_printer_hierarchy_scope():
     assert "Role.Worker" in printed
 
 
-def test_printer_incore_scope_unchanged():
+def test_printer_core_group_scope():
     body = _empty_body()
-    scope = ir.InCoreScopeStmt(body=body, span=_span())
+    scope = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, body=body, span=_span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
     assert "pl.at(level=pl.Level.CORE_GROUP)" in printed
 
 
-def test_printer_incore_scope_with_split():
+def test_printer_core_group_scope_with_split():
     body = _empty_body()
-    scope = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=body, span=_span())
+    scope = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.UP_DOWN, body=body, span=_span()
+    )
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
-    assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
+    assert "pl.at(level=pl.Level.CORE_GROUP" in printed
+    assert "pl.split(pl.SplitMode.UP_DOWN)" in printed
 
 
-def test_scope_stmt_incore_with_split():
-    s = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
-    assert s.scope_kind == ir.ScopeKind.InCore
+def test_scope_stmt_core_group_with_split():
+    s = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span()
+    )
+    assert s.scope_kind == ir.ScopeKind.Hierarchy
     assert s.split == ir.SplitMode.UP_DOWN
 
 
-def test_structural_equal_incore_with_split():
-    s1 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
-    s2 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
+def test_structural_equal_core_group_with_split():
+    s1 = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span()
+    )
+    s2 = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span()
+    )
     ir.assert_structural_equal(s1, s2)
 
 
-def test_structural_equal_incore_different_split():
-    s1 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
-    s2 = ir.InCoreScopeStmt(split=ir.SplitMode.LEFT_RIGHT, body=_empty_body(), span=_span())
+def test_structural_equal_core_group_different_split():
+    s1 = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span()
+    )
+    s2 = ir.HierarchyScopeStmt(
+        level=ir.Level.CORE_GROUP, split=ir.SplitMode.LEFT_RIGHT, body=_empty_body(), span=_span()
+    )
     with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
-# ─── Outline pass safety ─────────────────────────────────────────────────────
+# ─── Outline pass ────────────────────────────────────────────────────────────
 
 
-def test_outline_incore_works_with_normal_program():
-    """OutlineIncoreScopes works normally on programs without Hierarchy scopes."""
+def test_outline_hierarchy_works_with_core_group_program():
+    """OutlineHierarchyScopes outlines CORE_GROUP scopes into Function(InCore)."""
 
     @pl.program
     class P:
@@ -183,21 +189,8 @@ def test_outline_incore_works_with_normal_program():
                 y = pl.add(x, x)
             return y
 
-    After = passes.outline_incore_scopes()(P)
+    After = passes.outline_hierarchy_scopes()(P)
     assert After is not None
-
-
-def test_scope_outliner_ignores_hierarchy_kind():
-    """ScopeOutliner (used by OutlineIncoreScopes) only targets its configured
-    ScopeKind and naturally ignores Hierarchy scopes via the ScopeKind check."""
-    # The ScopeOutliner matches on target_scope_kind_ (InCore or Cluster).
-    # ScopeKind::Hierarchy (value 3) != InCore (0) != Cluster (2), so
-    # the outliner's VisitStmt_ will skip it via: if (scope_kind_ != target_) return.
-    # We verify this property at the enum level since we can't inject a Hierarchy
-    # scope via the DSL parser yet (pl.at() parsing is Step 04).
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.AutoInCore
 
 
 if __name__ == "__main__":

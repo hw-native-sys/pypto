@@ -147,8 +147,14 @@ class TestOutlineHierarchyScopes:
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_hierarchy_with_incore_preserved(self):
-        """Test that InCore scope inside Hierarchy scope is preserved (not outlined by this pass)."""
+    def test_outline_hierarchy_with_nested_core_group_preserves_core_group(self):
+        """CORE_GROUP scope nested inside HOST is preserved verbatim in the outlined function.
+
+        outline_hierarchy_scopes only outlines non-CORE_GROUP Hierarchy scopes.
+        After this pass, the HOST scope is outlined into a new Opaque function
+        whose body still contains the CORE_GROUP scope unchanged. The
+        CORE_GROUP scope is later outlined by outline_incore_scopes.
+        """
 
         @pl.program
         class Before:
@@ -159,23 +165,17 @@ class TestOutlineHierarchyScopes:
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        @pl.program
-        class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.Worker)
-            def main_host_worker_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.main_host_worker_0(x)
-                return y
-
         Before = passes.convert_to_ssa()(Before)
-        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_hierarchy_scopes()(Before)
-        ir.assert_structural_equal(After, Expected)
+        # The HOST scope was outlined into an Opaque function; main and the new
+        # function exist, no InCore function appears yet.
+        func_types = {gv.name: func.func_type for gv, func in After.functions.items()}
+        assert "main" in func_types
+        host_funcs = [n for n in func_types if "host_worker" in n]
+        assert len(host_funcs) == 1
+        assert func_types[host_funcs[0]] == ir.FunctionType.Opaque
+        # No CORE_GROUP InCore outlining happens in this pass
+        assert not any(t == ir.FunctionType.InCore for t in func_types.values())
 
     def test_outline_hierarchy_multiple_inputs(self):
         """Test outlining scope that uses multiple outer variables."""
@@ -292,8 +292,13 @@ class TestOutlineHierarchyScopes:
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_hierarchy_does_not_affect_incore_scopes(self):
-        """Test that OutlineHierarchyScopes does not outline InCore scopes."""
+    def test_hierarchy_preserves_core_group_scopes(self):
+        """CORE_GROUP hierarchy scopes are NOT outlined by outline_hierarchy_scopes.
+
+        OutlineHierarchyScopes is responsible for non-CORE_GROUP scopes only;
+        CORE_GROUP scopes survive intact and are outlined into InCore functions
+        by the subsequent OutlineIncoreScopes pass.
+        """
 
         @pl.program
         class Before:
@@ -305,7 +310,7 @@ class TestOutlineHierarchyScopes:
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
-        # InCore scopes should remain untouched by the hierarchy pass
+        # Nothing was outlined; main keeps Opaque, no InCore function appears.
         ir.assert_structural_equal(After, Before)
 
     def test_hierarchy_does_not_affect_cluster_scopes(self):
@@ -499,38 +504,6 @@ class TestOutlineHierarchyScopes:
         Reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(After, Reparsed)
 
-    def test_outline_then_incore(self):
-        """Test hierarchy outlined first, then InCore outlined from inside hierarchy function."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
-                    with pl.at(level=pl.Level.CORE_GROUP):
-                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
-
-        Before = passes.convert_to_ssa()(Before)
-
-        # Step 1: Outline hierarchy scopes
-        After1 = passes.outline_hierarchy_scopes()(Before)
-
-        # The outlined hierarchy function should contain the InCore scope
-        hierarchy_func = After1.get_function("main_host_worker_0")
-        assert hierarchy_func is not None
-        assert hierarchy_func.level == ir.Level.HOST
-        printed1 = After1.as_python()
-        assert "pl.at(level=pl.Level.CORE_GROUP)" in printed1
-
-        # Step 2: Outline incore scopes (processes Opaque functions including hierarchy-outlined ones)
-        After2 = passes.outline_incore_scopes()(After1)
-
-        # The InCore scope should now be outlined from the hierarchy function
-        incore_func = After2.get_function("main_host_worker_0_incore_0")
-        assert incore_func is not None
-        assert incore_func.func_type == ir.FunctionType.InCore
-
     def test_outline_hierarchy_with_alias_level(self):
         """Test that level aliases (POD = CLUSTER_0) resolve to canonical name."""
 
@@ -553,7 +526,12 @@ class TestOutlineHierarchyScopes:
 
 
 class TestHierarchyOutlinedVerifier:
-    """Tests for the HierarchyOutlined property verifier."""
+    """Tests for the HierarchyOutlined property verifier.
+
+    HierarchyOutlined is jointly established by OutlineHierarchyScopes (handles
+    non-CORE_GROUP) and OutlineIncoreScopes (handles CORE_GROUP). Verification
+    only passes once both have run (or once both kinds of scopes are absent).
+    """
 
     @staticmethod
     def _hierarchy_outlined_props():
@@ -576,6 +554,7 @@ class TestHierarchyOutlinedVerifier:
         with ctx:
             program = passes.convert_to_ssa()(Input)
             program = passes.outline_hierarchy_scopes()(program)
+            program = passes.outline_incore_scopes()(program)
 
         # Should not throw — no Hierarchy scopes remain
         passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
@@ -597,6 +576,26 @@ class TestHierarchyOutlinedVerifier:
             program = passes.convert_to_ssa()(Input)
 
         # verify_properties should throw because Hierarchy scope remains
+        with pytest.raises(Exception, match="Hierarchy ScopeStmt"):
+            passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
+
+    def test_remaining_core_group_scope_fails_verification(self):
+        """A surviving CORE_GROUP scope (only OutlineHierarchyScopes ran) fails verification."""
+
+        @pl.program
+        class Input:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx:
+            program = passes.convert_to_ssa()(Input)
+            # outline_hierarchy_scopes alone leaves CORE_GROUP scopes intact
+            program = passes.outline_hierarchy_scopes()(program)
+
         with pytest.raises(Exception, match="Hierarchy ScopeStmt"):
             passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
 

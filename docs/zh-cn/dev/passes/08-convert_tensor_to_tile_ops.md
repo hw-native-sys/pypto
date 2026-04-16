@@ -4,14 +4,14 @@
 
 ## 概述
 
-`OutlineIncoreScopes` 将 InCore 作用域提取为独立函数后，这些函数仍使用 `TensorType` 变量和 `tensor.*` 操作。本 pass 将其降级为直接映射到 PTO-ISA 指令的 `TileType` 变量和 `tile.*` 操作。
+`OutlineHierarchyScopes` 和 `OutlineIncoreScopes` 将 `HierarchyScopeStmt` 区域提取为独立函数（其中 `OutlineIncoreScopes` 对 `CORE_GROUP` 作用域产生 `Function(InCore)`）后，这些 InCore 函数仍使用 `TensorType` 变量和 `tensor.*` 操作。本 pass 将其降级为直接映射到 PTO-ISA 指令的 `TileType` 变量和 `tile.*` 操作。
 
 本 pass 还会更新编排/不透明函数中的调用点：为 InCore 函数新增的每个输出参数，在调用点插入 `tensor.create`。
 
 **前置条件**：
 
 - 输入 IR 必须为 SSA 形式
-- InCore 作用域必须已提取（需先运行 `OutlineIncoreScopes`）
+- Hierarchy 作用域必须已提取为独立函数（需先运行 `OutlineHierarchyScopes` 和 `OutlineIncoreScopes`）
 - 语句结构必须已规范化
 
 **使用时机**：在 `OutlineClusterScopes` 之后、`OptimizeOrchTensors` 之前运行。
@@ -119,7 +119,7 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| Required | SSAForm, SplitIncoreOrch, NormalizedStmtStructure |
+| Required | SSAForm, HierarchyOutlined, NormalizedStmtStructure |
 | Produced | SSAForm, IncoreTileOps, NormalizedStmtStructure |
 | Invalidated | — |
 

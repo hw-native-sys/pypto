@@ -12,7 +12,7 @@ This pass performs three tasks:
 
 Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace). Variables without `memory_space` default to DDR.
 
-**Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred.
+**Requires**: SSAForm, HierarchyOutlined, IncoreTileOps, TileOps2D, TileMemoryInferred.
 
 **Produces**: HasMemRefs, NormalizedStmtStructure.
 

@@ -210,6 +210,8 @@
 | `yield_` | `(*values: Any) -> Any \| tuple[Any, ...]` | 从 for/if 作用域 yield 值 |
 | `cond` | `(condition: bool \| Scalar) -> None` | 设置 while 循环条件（必须是第一条语句） |
 | `const` | `(value: int \| float, dtype: DataType) -> int \| float` | 类型化常量 |
-| `incore` | `() -> IncoreContext` | InCore 作用域的上下文管理器 |
+| `at` | `(*, level: Level, role: Role \| None = None, optimizations: Sequence[Optimization] \| None = None) -> AtContext` | 层级作用域的上下文管理器；`level=Level.CORE_GROUP` 即为 InCore 形式 |
+| `cluster` | `() -> ClusterContext` | cluster（AIC+AIV）作用域的上下文管理器 |
+| `spmd` | `(*, core_num: int \| Scalar, sync_start: bool = False) -> SpmdContext` | standalone SPMD 启动作用域的上下文管理器 |
 | `dynamic` | `(name: str) -> DynVar` | 创建动态维度变量 |
 | `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType) -> Tensor` | 创建张量（从 `pl.tensor` 提升） |

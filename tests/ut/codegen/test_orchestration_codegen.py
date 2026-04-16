@@ -1152,52 +1152,6 @@ class TestOrchestration:
         assert "acc__loop_state" not in code
         assert "params_t1.add_input(acc);" in code
 
-    def test_for_loop_with_inplace_return_after_passes(self):
-        """Test inplace detection when return var has compound auto-name suffixes from pass pipeline.
-
-        When an Opaque function with auto_incore + parallel(chunk=) goes through the full
-        pass pipeline (SSA → split_chunked_loops → interchange_chunk_loops → outline), the
-        return var acquires compound suffixes like "__co_l0_rv_v1". GetSSABaseName must
-        strip all of these to match the return var back to the original param name for correct
-        inplace detection (2 arg slots, not 3).
-        """
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        @pl.program
-        class ChunkedInplaceProgram:
-            @pl.function(type=pl.FunctionType.Opaque)
-            def add_one(
-                self,
-                input_tensor: pl.Tensor[[1024, 256], pl.FP32],
-                output_tensor: pl.Tensor[[1024, 256], pl.FP32],
-            ) -> pl.Tensor[[1024, 256], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for r in pl.parallel(0, 1024, 1, chunk=64, chunk_policy="leading_full"):
-                        row_tile = pl.slice(input_tensor, [1, 256], [r, 0])
-                        row_result = pl.add(row_tile, 1.0)
-                        output_tensor = pl.assemble(output_tensor, row_result, [r, 0])
-                return output_tensor
-
-        # Run the full pass pipeline to produce compound SSA suffixes
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(ChunkedInplaceProgram)
-
-        code = _generate_orch_code(transformed)
-
-        # Inplace detection: output_tensor return var should match the param,
-        # so only 2 orch arg slots (input_tensor + output_tensor), not 3
-        assert "expected_arg_count = 2" in code
-        assert "from_tensor_arg(orch_args.tensor(0))" in code  # input_tensor
-        assert "from_tensor_arg(orch_args.tensor(1))" in code  # output_tensor
-
-        # No third orch entry for the compound-named return var
-        assert "orch_args.tensor(2)" not in code
-
-        # Task params should use ext_output_tensor (the inplace param), not a separate buffer
-        assert "ext_output_tensor)" in code
-        assert "ext_output_tensor_iter" not in code
-
     def test_tensor_assemble_uses_precomputed_view(self):
         """tensor.assemble should lower to a pre-generated target view, not a host copy."""
 

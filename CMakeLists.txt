@@ -147,9 +147,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/mutator.cpp
     src/ir/transforms/normalize_stmt_structure_pass.cpp
     src/ir/transforms/op_conversion_registry.cpp
-    src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/outline_cluster_scopes_pass.cpp
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
+    src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
     src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp
@@ -159,8 +159,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/resolve_transpose_layout_pass.cpp
     src/ir/transforms/python_printer.cpp
     src/ir/transforms/simplify_pass.cpp
-    src/ir/transforms/split_chunked_loops_pass.cpp
-    src/ir/transforms/interchange_chunk_loops_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp
     src/ir/transforms/partial_unroll_tile_loops_pass.cpp
     src/ir/transforms/reorder_unrolled_io_pass.cpp

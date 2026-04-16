@@ -215,6 +215,8 @@ Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
 | `yield_` | `(*values: Any) -> Any \| tuple[Any, ...]` | Yield values from for/if scope |
 | `cond` | `(condition: bool \| Scalar) -> None` | Set while-loop condition (must be first statement) |
 | `const` | `(value: int \| float, dtype: DataType) -> int \| float` | Typed constant |
-| `incore` | `() -> IncoreContext` | Context manager for InCore scope |
+| `at` | `(*, level: Level, role: Role \| None = None, optimizations: Sequence[Optimization] \| None = None) -> AtContext` | Context manager for a hierarchy scope; `level=Level.CORE_GROUP` is the InCore form |
+| `cluster` | `() -> ClusterContext` | Context manager for a cluster (AIC+AIV) scope |
+| `spmd` | `(*, core_num: int \| Scalar, sync_start: bool = False) -> SpmdContext` | Context manager for a standalone SPMD launch scope |
 | `dynamic` | `(name: str) -> DynVar` | Create dynamic dimension variable |
 | `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None) -> Tensor` | Create tensor (promoted from `pl.tensor`) |

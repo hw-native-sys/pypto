@@ -33,7 +33,7 @@
 | `NoNestedCalls` | 无嵌套调用表达式 (Expression) |
 | `NormalizedStmtStructure` | 语句 (Statement) 结构已规范化 |
 | `NoRedundantBlocks` | 无单子节点或嵌套的 SeqStmts |
-| `SplitIncoreOrch` | InCore 作用域已提取为独立函数 |
+| `HierarchyOutlined` | `HierarchyScopeStmt` 区域已提取为函数（非 CORE_GROUP 由 `OutlineHierarchyScopes` 提取为 `Opaque`；`CORE_GROUP` 由 `OutlineIncoreScopes` 提取为 `InCore`）；当存在 `CORE_GROUP` 作用域被提取时，父函数由 `Opaque` 升级为 `Orchestration`。由 `OutlineIncoreScopes`（两个 outline Pass 中的后者）产生。 |
 | `ClusterOutlined` | Cluster 作用域已提取为 Group 函数 |
 | `HasMemRefs` | 变量上已初始化内存引用 (MemRef) 对象 |
 | `IncoreTileOps` | InCore 函数使用 tile 操作 |
@@ -61,21 +61,20 @@ struct PassProperties {
 | UnrollLoops | TypeChecked | TypeChecked | — |
 | CtrlFlowTransform | TypeChecked | TypeChecked, StructuredCtrlFlow | — |
 | ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
-| FlattenCallExpr | SSAForm | SSAForm, NoNestedCalls | NormalizedStmtStructure |
-| SplitChunkedLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
-| InterchangeChunkLoops | TypeChecked, SSAForm | TypeChecked, SSAForm | — |
 | NormalizeStmtStructure | TypeChecked | TypeChecked, NormalizedStmtStructure | — |
-| OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
+| FlattenCallExpr | SSAForm | SSAForm, NoNestedCalls | NormalizedStmtStructure |
+| OutlineHierarchyScopes | SSAForm | SSAForm | — |
+| OutlineIncoreScopes | SSAForm | SSAForm, HierarchyOutlined | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
-| ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| ConvertTensorToTileOps | HierarchyOutlined | IncoreTileOps | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
-| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
-| ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
-| NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
-| InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
-| MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
-| InsertSync | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
-| AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, HierarchyOutlined, TileOps2D | SSAForm, IncoreTileOps, HierarchyOutlined, TileOps2D | NormalizedStmtStructure |
+| ExpandMixedKernel | SSAForm, IncoreTileOps, HierarchyOutlined, TileOps2D | SSAForm, MixedKernelExpanded | — |
+| NormalizeReturnOrder | HierarchyOutlined, IncoreTileOps | — | — |
+| InitMemRef | TypeChecked, SSAForm, HierarchyOutlined, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
+| MemoryReuse | TypeChecked, HierarchyOutlined, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
+| InsertSync | TypeChecked, HierarchyOutlined, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
+| AllocateMemoryAddr | TypeChecked, HierarchyOutlined, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | Simplify | — | — | — |
 

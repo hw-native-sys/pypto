@@ -410,50 +410,23 @@ class Model:
 Mark a code region as InCore execution without making a separate function:
 
 ```python
-# Preferred (new API):
 with pl.at(level=pl.Level.CORE_GROUP):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# Deprecated (use pl.at instead):
-with pl.incore():
-    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 ```
 
-For compiler-driven chunked loop outlining (AutoInCore), pass `pl.auto_chunk` in
-the `optimizations` list:
+`OutlineIncoreScopes` later extracts this region into a
+`Function(InCore)` and re-types the parent `Opaque` function as
+`Orchestration`. (Non-CORE_GROUP `pl.at(level=...)` regions are extracted
+by the preceding `OutlineHierarchyScopes` pass into `Function(Opaque)`,
+without parent promotion.)
+
+To set a cross-core split mode (consumed by the `ExpandMixedKernel` pass),
+pass `pl.split(...)` in `optimizations`:
 
 ```python
-# Preferred (new API):
-with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
-
-# Deprecated (still works, emits DeprecationWarning):
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-    ...
-
-with pl.auto_incore():
-    ...
-```
-
-To set a cross-core split mode (consumed by the `ExpandMixedKernel` pass), use
-`pl.split(...)` — independent from `pl.auto_chunk`, so the two can be combined:
-
-```python
-# Plain InCore + split hint:
 with pl.at(level=pl.Level.CORE_GROUP,
            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-
-# AutoInCore + split hint (independent entries, combined freely):
-with pl.at(level=pl.Level.CORE_GROUP,
-           optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
-    for i in pl.parallel(0, 8, 1, chunk=4):
-        x = pl.add(x, x)
-
-# Deprecated single-kwarg form (still works, emits DeprecationWarning):
-with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-    ...
 ```
 
 ## Memory and Data Movement
@@ -541,22 +514,28 @@ The `Default` strategy runs these passes in order:
 1. **UnrollLoops** — unroll loop iterations
 2. **CtrlFlowTransform** — rewrite control flow to structured IR
 3. **ConvertToSSA** — convert to static single assignment form
-4. **FlattenCallExpr** — flatten nested function calls
-5. **SplitChunkedLoops** — split chunked loops into separate loops
-6. **InterchangeChunkLoops** — interchange chunk loop ordering
-7. **OutlineHierarchyScopes** — outline hierarchy scopes
-8. **OutlineIncoreScopes** — outline InCore scopes into separate functions
-9. **OutlineClusterScopes** — outline cluster scopes
-10. **ConvertTensorToTileOps** — convert tensor operations to tile operations
+4. **NormalizeStmtStructure** — flatten/unwrap redundant `SeqStmts`
+5. **FlattenCallExpr** — flatten nested function calls
+6. **OutlineHierarchyScopes** — outline non-CORE_GROUP `HierarchyScopeStmt` regions into `Function(Opaque)`
+7. **OutlineIncoreScopes** — outline CORE_GROUP `HierarchyScopeStmt` regions into `Function(InCore)`; promote parent to `Orchestration`
+8. **OutlineClusterScopes** — outline cluster scopes into Group functions
+9. **ConvertTensorToTileOps** — convert tensor operations to tile operations
+10. **OptimizeOrchTensors** — optimize orchestration-level tensor ops
 11. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
 12. **InferTileMemorySpace** — infer tile memory spaces
 13. **ResolveTransposeLayout** — repair transpose layout handling
 14. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
 15. **ExpandMixedKernel** — split mixed kernels when needed
-16. **InitMemRef** — assign memory spaces and insert buffer allocations
-17. **MemoryReuse** — share buffers with non-overlapping lifetimes
-18. **LegalizePTOBufferReuse** — legalize PTO buffer reuse patterns
-19. **AllocateMemoryAddr** — assign concrete memory addresses
+16. **SplitVectorKernel** — split vector kernels when needed
+17. **NormalizeReturnOrder** — reorder returns to match Out/InOut params
+18. **PartialUnrollTileLoops** — partially unroll tile-level loops
+19. **ReorderUnrolledIO** — group loads/stores of unrolled clones
+20. **InitMemRef** — assign memory spaces and insert buffer allocations
+21. **MemoryReuse** — share buffers with non-overlapping lifetimes
+22. **LegalizePTOBufferReuse** — legalize PTO buffer reuse patterns
+23. **AllocateMemoryAddr** — assign concrete memory addresses
+24. **FuseCreateAssembleToSlice** — fuse create + assemble ops
+25. **Simplify** — final simplification pass
 
 ### Debugging
 

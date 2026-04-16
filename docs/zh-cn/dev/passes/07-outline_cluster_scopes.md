@@ -11,7 +11,7 @@
 - 输入 IR 必须为静态单赋值 (SSA) 形式（需先运行 ConvertToSSA）
 - 仅处理 Opaque 和 Orchestration 函数
 
-**使用时机**：在 `OutlineIncoreScopes` 之后运行，当 IR 包含需要提取的 `with pl.cluster():` 作用域或 standalone `with pl.spmd(...):` 作用域时使用。
+**使用时机**：在 `OutlineHierarchyScopes` 和 `OutlineIncoreScopes` 之后运行，当 IR 包含需要提取的 `with pl.cluster():` 作用域或 standalone `with pl.spmd(...):` 作用域时使用。Cluster 体内可能仍包含由 `OutlineIncoreScopes` 先前生成的 `Function(InCore)` 调用。
 
 ## API
 
@@ -42,7 +42,9 @@ program_outlined = outline_pass(program)
 
 ## 示例
 
-**之前**：
+**之前**（假设 `OutlineIncoreScopes` 已经把内层的
+`with pl.at(level=pl.Level.CORE_GROUP): ...` 作用域提取为 `Function(InCore)`
+`main_core_group_0`）：
 
 ```python
 @pl.program
@@ -50,8 +52,7 @@ class Before:
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
         with pl.cluster():
-            with pl.incore():
-                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+            y: pl.Tensor[[64], pl.FP32] = self.main_core_group_0(x)
         return y
 ```
 
@@ -62,8 +63,7 @@ class Before:
 class After:
     @pl.function(type=pl.FunctionType.Group)
     def main_cluster_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.incore():
-            y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+        y: pl.Tensor[[64], pl.FP32] = self.main_core_group_0(x)
         return y
 
     @pl.function
@@ -72,7 +72,9 @@ class After:
         return y
 ```
 
-注意：Cluster 内部的 InCore 作用域在提取的 Group 函数中被保留。可以先运行 `OutlineIncoreScopes` 提取 InCore 作用域再进行聚簇，也可以之后在 Group 函数内提取。
+注意：`OutlineHierarchyScopes` 与 `OutlineIncoreScopes` 均先于本 Pass 运行，
+因此 Cluster 体内已经是对 `Function(InCore)` 的调用，而非内联的
+`HierarchyScopeStmt` 节点。提取出的 Group 函数会保留这些调用。
 
 ## Standalone Spmd 示例
 
@@ -132,12 +134,12 @@ class After:
 | 产生 | SSAForm, ClusterOutlined |
 | 失效 | — |
 
-## 与 OutlineIncoreScopes 的关系
+## 与 OutlineHierarchyScopes / OutlineIncoreScopes 的关系
 
-| 方面 | OutlineIncoreScopes | OutlineClusterScopes |
-| ---- | ------------------- | -------------------- |
-| 作用域类型 | `ScopeKind::InCore` | `ScopeKind::Cluster` / standalone `ScopeKind::Spmd` |
-| 输出函数类型 | `FunctionType::InCore` | `FunctionType::Group` / `FunctionType::Spmd` |
-| 命名模式 | `{func}_incore_{n}` | `{func}_cluster_{n}` / `{func}_spmd_{n}` |
-| 提升父函数为 | Orchestration | *（不变）* |
-| 处理对象 | 仅 Opaque 函数 | Opaque + Orchestration |
+| 方面 | OutlineHierarchyScopes | OutlineIncoreScopes | OutlineClusterScopes |
+| ---- | ---------------------- | ------------------- | -------------------- |
+| 作用域类型 | `HierarchyScopeStmt`（非 CORE_GROUP） | `HierarchyScopeStmt`（CORE_GROUP） | `ClusterScopeStmt` / standalone `SpmdScopeStmt` |
+| 输出函数类型 | `FunctionType::Opaque` | `FunctionType::InCore` | `FunctionType::Group` / `FunctionType::Spmd` |
+| 命名模式 | `{func}_{level}_{n}` | `{func}_core_group_{n}` | `{func}_cluster_{n}` / `{func}_spmd_{n}` |
+| 提升父函数为 | *（不变）* | `Orchestration` | *（不变）* |
+| 处理对象 | 仅 `Opaque` 函数 | 仅 `Opaque` 函数 | `Opaque` + `Orchestration` |

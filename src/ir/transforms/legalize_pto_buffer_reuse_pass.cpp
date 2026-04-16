@@ -477,7 +477,7 @@ FunctionPtr TransformLegalizePTOBufferReuse(const FunctionPtr& func) {
 namespace pass {
 
 Pass LegalizePTOBufferReuse() {
-  static const PassProperties kProps{.required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+  static const PassProperties kProps{.required = {IRProperty::HierarchyOutlined, IRProperty::IncoreTileOps,
                                                   IRProperty::HasMemRefs, IRProperty::TileOps2D}};
   return CreateFunctionPass(TransformLegalizePTOBufferReuse, "LegalizePTOBufferReuse", kProps);
 }

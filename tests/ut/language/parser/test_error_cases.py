@@ -122,29 +122,6 @@ class TestErrorCases:
 
                 return result
 
-    def test_chunked_loop_requires_auto_incore(self):
-        """Test that chunked loops are rejected outside auto_incore scope."""
-        code = """
-import pypto.language as pl
-
-@pl.program
-class ChunkedLoopProgram:
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(
-        self,
-        x: pl.Tensor[[16, 4], pl.FP32],
-        seq_lens: pl.Tensor[[16], pl.INT32],
-    ) -> pl.Tensor[[16, 4], pl.FP32]:
-        for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
-            _ctx_len = pl.tensor.read(seq_lens, [b])
-        return x
-"""
-        with pytest.raises(
-            ParserSyntaxError,
-            match=r"chunk=\.\.\. loops are only valid inside with pl\.at",
-        ):
-            pl.parse_program(code)
-
     def test_unknown_tensor_operation(self):
         """Test error on unknown tensor operation."""
 

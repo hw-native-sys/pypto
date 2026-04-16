@@ -32,7 +32,12 @@ This document provides a complete reference of all IR node types, organized by c
 <return_stmt> ::= "return" [ <var_list> ]
 <eval_stmt>  ::= <expr>
 <seq_stmts>  ::= <stmt> { ";" <stmt> }
-<scope_stmt> ::= "with" "pl.incore" "(" ")" ":" <stmt_list>
+<scope_stmt> ::= "with" "pl.at" "(" "level" "=" <level> [ "," "role" "=" <role> ]
+                 [ "," "optimizations" "=" "[" <optimization_list> "]" ] ")"
+                 ":" <stmt_list>
+               | "with" "pl.cluster" "(" ")" ":" <stmt_list>
+               | "with" "pl.spmd" "(" "core_num" "=" <expr>
+                 [ "," "sync_start" "=" <expr> ] ")" ":" <stmt_list>
 <break_stmt> ::= "break"
 <continue_stmt> ::= "continue"
 
@@ -153,10 +158,8 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | While loop with condition and iteration args |
-| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | InCore region; outlined to `Function(InCore)` |
-| **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | Auto-InCore region; consumed by `InterchangeChunkLoops` |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
-| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
+| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional), `split_` (optional) | Pipeline-stage region for a given Level/Role; outlined to `Function(InCore)` when `level_ == CORE_GROUP` and to `Function(Opaque)` otherwise |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
@@ -252,31 +255,34 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 ### ScopeStmt Details
 
 `ScopeStmt` is an **abstract base class** that marks a region with a specific
-execution context. The five concrete subclasses below each carry only the
+execution context. The three concrete subclasses below each carry only the
 fields valid for their kind — invalid combinations are unrepresentable at
 construction. Use `s.scope_kind` (or `s.GetScopeKind()` in C++) to recover the
-kind from a `ScopeStmt`-typed reference, or `isinstance(s, InCoreScopeStmt)`
+kind from a `ScopeStmt`-typed reference, or `isinstance(s, HierarchyScopeStmt)`
 to dispatch on the concrete type.
 
-All five share the common base fields `name_hint_: str` and `body_: StmtPtr`.
-Note that `pl.at(level=Level.CORE_GROUP)` lowers to `InCoreScopeStmt` /
-`AutoInCoreScopeStmt`, not `HierarchyScopeStmt` — the parser rejects `role=`
-at `CORE_GROUP`. `HierarchyScopeStmt` is reserved for non-`CORE_GROUP` levels
-(host, cluster, global) and is not a general replacement for in-core scopes.
+All three share the common base fields `name_hint_: str` and `body_: StmtPtr`.
+`pl.at(level=...)` always lowers to `HierarchyScopeStmt` — including the
+`level=Level.CORE_GROUP` form, which produces a `HierarchyScopeStmt` with
+`level_ == CORE_GROUP` and an optional `split_`. `OutlineIncoreScopes`
+later turns that `CORE_GROUP` scope into a `Function(InCore)` and re-types
+the parent `Opaque` function as `Orchestration`. Non-`CORE_GROUP`
+`HierarchyScopeStmt`s are outlined into `Function(Opaque)` by
+`OutlineHierarchyScopes` (which runs immediately before `OutlineIncoreScopes`).
 
 ```python
-# with pl.incore(): y = pl.add(x, x)
-in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
-
-# with pl.auto_incore():       (split is optional)
-auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
-
 # with pl.cluster():
 cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
 
 # with pl.at(level=Level.HOST, role=Role.Worker):
 hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
+
+# with pl.at(level=Level.CORE_GROUP,
+#            optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+hier_core = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP,
+                                  split=ir.SplitMode.UP_DOWN,
+                                  name_hint="", body=body, span=span)
 
 # with pl.spmd(core_num=8):
 spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
@@ -289,20 +295,33 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
   are not control flow (execute once, linearly).
 - Required fields are enforced at construction: `HierarchyScopeStmt.level_`
   is non-optional; `SpmdScopeStmt` rejects `core_num <= 0`.
-- `InCoreScopeStmt` / `AutoInCoreScopeStmt` are scheduled for deprecation;
-  prefer `HierarchyScopeStmt` or other surviving kinds in new code.
+- `HierarchyScopeStmt.split_` is optional and is only meaningful at
+  `Level.CORE_GROUP`. It is copied onto the outlined `InCore` function's
+  attrs so `ExpandMixedKernel` can read the hint.
 - Pass behavior:
-  - `InterchangeChunkLoops` consumes `AutoInCoreScopeStmt`
-  - `OutlineIncoreScopes` extracts `InCoreScopeStmt` into `Function(InCore)`
+  - `OutlineHierarchyScopes` extracts every non-`CORE_GROUP`
+    `HierarchyScopeStmt` into a dedicated `FunctionType::Opaque` function.
+    Parent function types are preserved.
+  - `OutlineIncoreScopes` (runs immediately after) extracts every
+    `CORE_GROUP` `HierarchyScopeStmt` into a dedicated `FunctionType::InCore`
+    function. Parents that contained at least one `CORE_GROUP` scope are
+    re-typed from `Opaque` to `Orchestration`.
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
-    and standalone `SpmdScopeStmt` into `Function(Spmd)`
-  - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
+    and standalone `SpmdScopeStmt` into `Function(Spmd)`.
 
 **Transformation:**
 
 ```python
-# Before: with pl.incore(): y = pl.add(x, x); return y
-# After: main_incore_0(x) -> y; main(x): y = main_incore_0(x); return y
+# Before:
+# def main(x):
+#     with pl.at(level=pl.Level.CORE_GROUP):
+#         y = pl.add(x, x)
+#     return y
+# After:
+# def main_core_group_0(x) -> y: ...         # FunctionType.InCore
+# def main(x) -> y:                           # FunctionType.Orchestration
+#     y = main_core_group_0(x)
+#     return y
 ```
 
 **Parallel for loop (ForKind):**
@@ -444,7 +463,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 15 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, AutoInCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **Statements** | 13 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

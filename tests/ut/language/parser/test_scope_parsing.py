@@ -133,7 +133,7 @@ class TestScopeNameParsing:
             scope_stmt = body
         assert isinstance(scope_stmt, ir.ScopeStmt)
         assert scope_stmt.name_hint == "my_kernel"
-        assert scope_stmt.scope_kind == ir.ScopeKind.InCore
+        assert scope_stmt.scope_kind == ir.ScopeKind.Hierarchy
 
     def test_parse_unnamed_scope_has_empty_name(self):
         """Test that unnamed scopes have empty name."""

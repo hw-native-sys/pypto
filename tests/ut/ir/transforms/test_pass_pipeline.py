@@ -161,22 +161,22 @@ class TestPassContext:
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
-                passes.outline_incore_scopes()(program)
+                passes.outline_hierarchy_scopes()(program)
 
     def test_before_mode_succeeds_when_property_holds(self):
         """BEFORE mode passes when the required property actually holds."""
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE)]):
             program = _make_non_ssa_program()
             program = passes.convert_to_ssa()(program)
-            result = passes.outline_incore_scopes()(program)
+            result = passes.outline_hierarchy_scopes()(program)
             assert result is not None
 
     def test_empty_context_disables_verification(self):
         """Empty instrument list overrides conftest's verification context."""
         with passes.PassContext([]):
-            # OutlineIncoreScopes requires SSAForm, but empty context = no check
+            # OutlineHierarchyScopes requires SSAForm, but empty context = no check
             program = _make_non_ssa_program()
-            result = passes.outline_incore_scopes()(program)
+            result = passes.outline_hierarchy_scopes()(program)
             assert result is not None
 
     def test_before_and_after_succeeds_on_valid_pipeline(self):
@@ -193,7 +193,7 @@ class TestPassContext:
             # Same Var assigned twice — genuine SSA violation
             program = _make_ssa_violating_program()
             with pytest.raises(Exception, match="Pre-verification failed"):
-                passes.outline_incore_scopes()(program)
+                passes.outline_hierarchy_scopes()(program)
 
     def test_pipeline_with_context(self):
         """PassPipeline respects active PassContext instruments."""

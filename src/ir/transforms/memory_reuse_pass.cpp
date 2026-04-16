@@ -118,8 +118,6 @@ class LifetimeAnalyzer : public IRVisitor {
     }
   }
 
-  void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
-  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const ClusterScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override { VisitStmt(op->body_); }
   void VisitStmt_(const SpmdScopeStmtPtr& op) override { VisitStmt(op->body_); }

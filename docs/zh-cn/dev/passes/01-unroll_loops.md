@@ -77,10 +77,10 @@ class After:
 UnrollLoops 在 `Default` 和 `DebugTileOptimization` 中都只**运行一次**，位于控制流结构化之前：
 
 ```text
-UnrollLoops → CtrlFlowTransform → ConvertToSSA → FlattenCallExpr → SplitChunkedLoops → InterchangeChunkLoops → OutlineIncoreScopes → ...
+UnrollLoops → CtrlFlowTransform → ConvertToSSA → NormalizeStmtStructure → FlattenCallExpr → OutlineHierarchyScopes → OutlineIncoreScopes → OutlineClusterScopes → ...
 ```
 
-UnrollLoops 展开非分块的 `pl.unroll()` 循环（跳过分块展开循环，保留 `chunk` 供后续 `SplitChunkedLoops` 处理）。
+UnrollLoops 将 `pl.unroll()` 循环展开为其内联复制。
 
 ## Pass 属性
 

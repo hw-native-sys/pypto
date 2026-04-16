@@ -48,7 +48,6 @@ void BindPass(nb::module_& m) {
       .value("NoNestedCalls", IRProperty::NoNestedCalls, "No nested call expressions")
       .value("NormalizedStmtStructure", IRProperty::NormalizedStmtStructure, "Statement structure normalized")
       .value("NoRedundantBlocks", IRProperty::NoRedundantBlocks, "No single-child or nested SeqStmts")
-      .value("SplitIncoreOrch", IRProperty::SplitIncoreOrch, "InCore scopes outlined into separate functions")
       .value("HasMemRefs", IRProperty::HasMemRefs, "MemRef objects initialized on variables")
       .value("IncoreTileOps", IRProperty::IncoreTileOps,
              "InCore functions use tile ops (tile types, load/store)")
@@ -69,9 +68,7 @@ void BindPass(nb::module_& m) {
              "No BreakStmt/ContinueStmt — only structured control flow")
       .value("VectorKernelSplit", IRProperty::VectorKernelSplit,
              "AIV functions with split mode have tpop shapes and store offsets adjusted")
-      .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned")
-      .value("NoNestedInCore", IRProperty::NoNestedInCore,
-             "No nested InCore scopes (ScopeStmt inside ScopeStmt)");
+      .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -318,10 +315,6 @@ void BindPass(nb::module_& m) {
       .value("USE_BEFORE_DEF", use_after_def::ErrorType::USE_BEFORE_DEF,
              "Variable used before any definition in scope");
 
-  passes.def("split_chunked_loops", &pass::SplitChunkedLoops,
-             "Create a pass that splits chunked loops into nested loops");
-  passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
-             "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
   passes.def("partial_unroll_tile_loops", &pass::PartialUnrollTileLoops,
              "Lower ``pl.range(N, unroll=F)`` loops at the tile level: replicate the body F\n"
@@ -334,13 +327,15 @@ void BindPass(nb::module_& m) {
   passes.def("ctrl_flow_transform", &pass::CtrlFlowTransform,
              "Create a control flow structuring pass (eliminate break/continue)");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
-  passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
-             "Create a pass that outlines InCore scopes into separate functions");
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
              "Create a pass that outlines Cluster scopes into Group functions "
              "and standalone Spmd scopes into Spmd functions");
   passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
-             "Create a pass that outlines Hierarchy scopes into separate level/role functions");
+             "Create a pass that outlines non-CORE_GROUP Hierarchy scopes into separate Opaque "
+             "level/role functions. CORE_GROUP scopes are left for outline_incore_scopes.");
+  passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
+             "Create a pass that outlines CORE_GROUP Hierarchy scopes into InCore functions "
+             "and promotes the parent function from Opaque to Orchestration");
   passes.def("convert_tensor_to_tile_ops", &pass::ConvertTensorToTileOps,
              "Create a pass that converts tensor ops to tile ops in InCore functions");
   passes.def("optimize_orch_tensors", &pass::OptimizeOrchTensors,

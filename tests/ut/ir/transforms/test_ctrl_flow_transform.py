@@ -2023,13 +2023,14 @@ def test_pipeline_integration():
             return x
 
     after_ssa = passes.convert_to_ssa()(Input)
-    after_outline = passes.outline_incore_scopes()(after_ssa)
+    after_outline_h = passes.outline_hierarchy_scopes()(after_ssa)
+    after_outline = passes.outline_incore_scopes()(after_outline_h)
     After = passes.ctrl_flow_transform()(after_outline)
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
-        def main_incore_0(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CORE_GROUP, strict_ssa=True)
+        def main_core_group_0(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
@@ -2041,7 +2042,7 @@ def test_pipeline_integration():
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            x_rv: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x_0)
+            x_rv: pl.Tensor[[64], pl.FP32] = self.main_core_group_0(x_0)
             return x_rv
 
     ir.assert_structural_equal(After, Expected)
