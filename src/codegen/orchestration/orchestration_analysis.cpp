@@ -373,7 +373,7 @@ void CallSiteDirectionResolver::VisitExpr_(const CallPtr& call) {
   }
 
   std::vector<ParamDirection> effective_dirs = callee->param_directions_;
-  if (callee->func_type_ == FunctionType::Group) {
+  if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
     effective_dirs = ComputeGroupEffectiveDirections(callee, program_);
   }
 
