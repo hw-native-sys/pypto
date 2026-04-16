@@ -35,8 +35,6 @@ namespace pypto {
 namespace ir {
 namespace {
 
-constexpr const char* kUnrollReplicatedAttr = "unroll_replicated";
-
 /// IO category used for priority during the topological sort. Lower is emitted first.
 enum class IOCategory : int { Load = 0, Compute = 1, Store = 2 };
 
@@ -85,7 +83,7 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
 }
 
 /**
- * @brief Mutator that reorders statements inside ``unroll_replicated`` SeqStmts:
+ * @brief Mutator that reorders every multi-stmt ``SeqStmts`` in the program:
  *        loads pulled to the top, stores pushed to the bottom, compute in the middle —
  *        all subject to the dependency graph.
  */
@@ -94,31 +92,27 @@ class ReorderUnrolledIOMutator : public IRMutator {
   explicit ReorderUnrolledIOMutator(ProgramPtr program)
       : program_(std::move(program)), io_ops_(IOCategoryOps::Build()) {}
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Recurse first so any inner unroll-replicated regions are reordered too.
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    // Recurse first so any nested SeqStmts are reordered bottom-up.
     auto visited = IRMutator::VisitStmt_(op);
-    auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(visited);
-    if (!for_stmt || !for_stmt->HasAttr(kUnrollReplicatedAttr)) {
-      return visited;
-    }
-    auto seq = std::dynamic_pointer_cast<const SeqStmts>(for_stmt->body_);
+    auto seq = std::dynamic_pointer_cast<const SeqStmts>(visited);
     if (!seq || seq->stmts_.size() < 2) {
       return visited;  // single stmt — nothing to reorder
     }
-    auto reordered = ReorderRegion(seq);
-    if (reordered.get() == seq.get()) {
+    // Regions that violate the InOut-use discipline are left alone: under
+    // strict verification they would be caught earlier, but with
+    // VerificationLevel.NONE a pre-existing violation can reach us and we
+    // shouldn't reorder potentially-unsound dataflow.
+    if (!stmt_dep::CollectInOutUseDisciplineDiagnostics(seq, program_).empty()) {
       return visited;
     }
-    auto new_for = MutableCopy(for_stmt);
-    new_for->body_ = reordered;
-    return new_for;
+    return ReorderRegion(seq);
   }
 
  private:
-  /// Stable, priority-aware topological sort.
+  /// Stable, priority-aware topological sort. Caller is responsible for
+  /// verifying the InOut-use discipline before invoking.
   StmtPtr ReorderRegion(const SeqStmtsPtr& seq) {
-    // Discipline check ensures dataflow soundness — see RFC #1026 / PR #1029.
-    stmt_dep::CheckInOutUseDiscipline(seq, program_);
     auto graph = stmt_dep::BuildStmtDependencyGraph(seq, program_);
 
     const auto& stmts = seq->stmts_;

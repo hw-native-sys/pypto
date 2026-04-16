@@ -216,11 +216,9 @@ Pass UnrollLoops();
  * Lowers ``for i in pl.range(N, unroll=F)`` into an outer loop of ``N/F``
  * iterations whose body is a ``SeqStmts`` of ``F`` deep-cloned copies of the
  * original body, each with the loop variable substituted as
- * ``new_var + k * step``. A trailing remainder loop covers ``N % F`` if non-zero.
- * The new outer loop carries ``attrs_["unroll_replicated"] = F`` so the
- * downstream ``ReorderUnrolledIO`` pass can identify the replicated region.
- *
- * First-cut restrictions: static bounds only, no iter_args/init_values.
+ * ``new_var + k * step``. A trailing remainder covers ``N % F`` if non-zero —
+ * a bare ``SeqStmts`` flattened into the outer scope for static bounds, or a
+ * cascaded ``IfStmt`` dispatch on ``rem`` for dynamic bounds.
  *
  * Runs at the tile level (after NormalizeReturnOrder, before InitMemRef) so
  * each clone's tile variables become candidates for distinct MemRef allocations
@@ -229,18 +227,21 @@ Pass UnrollLoops();
 Pass PartialUnrollTileLoops();
 
 /**
- * @brief Cluster tile.load and tile.store calls within unroll-replicated regions
+ * @brief Canonicalize IO order inside every ``SeqStmts`` in the program
  *
- * For every ForStmt carrying ``attrs_["unroll_replicated"]``, performs a
- * priority-aware stable topological sort over the body's top-level statements:
- *   - tile.load assignments are pulled as far up as the dependency graph permits
- *   - tile.store calls are pushed as far down as the dependency graph permits
+ * For every ``SeqStmts`` with two or more statements, performs a priority-aware
+ * stable topological sort over its members:
+ *   - ``tile.load`` / ``tile.read`` assignments are pulled as far up as the
+ *     dependency graph permits
+ *   - ``tile.store`` / ``tile.write`` calls are pushed as far down as the
+ *     dependency graph permits
  *   - compute statements settle in the middle
  *
  * The result is `[loads…, compute…, stores…]` whenever the dataflow allows.
- * Input tiles for sibling clones become co-live near the top, output tiles
- * become co-live near the bottom — preventing MemoryReuse from coalescing them
- * and enabling symmetric ping-pong execution.
+ * Within replicated regions produced by ``PartialUnrollTileLoops``, sibling
+ * clones' input tiles become co-live near the top and output tiles co-live
+ * near the bottom — preventing ``MemoryReuse`` from coalescing them and
+ * enabling symmetric ping-pong execution.
  *
  * Uses ``stmt_dep::BuildStmtDependencyGraph`` and
  * ``stmt_dep::CheckInOutUseDiscipline`` for soundness.

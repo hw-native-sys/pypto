@@ -328,18 +328,21 @@ def unroll_loops() -> Pass:
 def partial_unroll_tile_loops() -> Pass:
     """Create a tile-level partial-unroll pass for ``pl.range(N, unroll=F)`` loops.
 
-    Replicates each loop body F times per outer iteration, optionally appending a
-    remainder loop. Produces an ``unroll_replicated`` marker attr consumed by
-    ``reorder_unrolled_io``.
+    Replicates each loop body F times per outer iteration. Static bounds emit a
+    bare ``SeqStmts`` tail flattened into the outer scope; dynamic bounds emit a
+    cascaded ``IfStmt`` dispatch on ``rem`` whose branch bodies are bare
+    ``SeqStmts``.
     """
 
 def reorder_unrolled_io() -> Pass:
-    """Create a pass that clusters tile.load to the top and tile.store to the bottom
-    within unroll-replicated regions.
+    """Create an IO-order canonicalization pass.
 
-    Performs a priority-aware stable topological sort over each marked SeqStmts so
-    sibling clones' input and output tiles become co-live, enabling ping-pong
-    buffering once MemoryReuse runs.
+    Performs a priority-aware stable topological sort over every ``SeqStmts`` in
+    the program: ``tile.load`` floats to the top, ``tile.store`` sinks to the
+    bottom, compute settles in the middle — subject to the SSA dependency graph.
+    Within replicated regions from ``partial_unroll_tile_loops``, sibling clones'
+    input and output tiles become co-live, enabling ping-pong buffering once
+    ``MemoryReuse`` runs.
     """
 
 def ctrl_flow_transform() -> Pass:

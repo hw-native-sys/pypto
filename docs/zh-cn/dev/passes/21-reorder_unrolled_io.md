@@ -1,18 +1,18 @@
 # ReorderUnrolledIO Pass
 
-在每个 `unroll_replicated` 区域内，把 `tile.load` 上拉到顶部、`tile.store` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而启用对称的 ping-pong 缓冲。
+在全程序的每一个 `SeqStmts` 内部，把 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `PartialUnrollTileLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。
 
 ## 概述
 
 `PartialUnrollTileLoops` 生成的外层 `ForStmt` 体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[load_0, compute_0, store_0, load_1, compute_1, store_1, …]`。这种布局下，相邻克隆的 tile 生命周期不重叠，`MemoryReuse` 会把它们合并为同一缓冲区，ping-pong 失效。
 
-本 Pass 重排每个标记的 `SeqStmts`：
+本 Pass 对全程序的每一个 `SeqStmts`（包括函数体、`ForStmt` body、`IfStmt` 分支 body 等）做重排：
 
-- 每个 `tile.load` 上拉到依赖图允许的最早位置。
-- 每个 `tile.store` 下沉到依赖图允许的最晚位置。
+- 每个 `tile.load` / `tile.read` 上拉到依赖图允许的最早位置。
+- 每个 `tile.store` / `tile.write` 下沉到依赖图允许的最晚位置。
 - 计算语句留在中间。
 
-只要数据流允许，结果即为 `[loads…, compute…, stores…]`。各克隆的输入 tile 在顶部同时活跃，输出 tile 在底部同时活跃 —— `MemoryReuse` 无法合并它们，每个克隆保留独立的 MemRef，从而 ping-pong 缓冲成为可能。
+只要数据流允许，结果即为 `[loads…, compute…, stores…]`。对于复制区域，各克隆的输入 tile 在顶部同时活跃，输出 tile 在底部同时活跃 —— `MemoryReuse` 无法合并它们，每个克隆保留独立的 MemRef，从而 ping-pong 缓冲成为可能。
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
@@ -31,13 +31,13 @@ result = passes.reorder_unrolled_io()(program)
 
 ## 算法
 
-优先级感知的稳定拓扑排序。把标记 `SeqStmts` 内的每条语句分类：
+对所有两条及以上语句的 `SeqStmts` 做优先级感知的稳定拓扑排序。每条语句分类：
 
 | 类别 | 优先级 | 示例 |
 | ---- | ------ | ---- |
-| `Load` | 0（最先发射） | `AssignStmt(tile, Call("tile.load", …))` |
+| `Load` | 0（最先发射） | `AssignStmt(tile, Call("tile.load", …))`、`AssignStmt(scalar, Call("tile.read", …))` |
 | `Compute` | 1 | 区域内其余语句 |
-| `Store` | 2（最后发射） | `AssignStmt(_, Call("tile.store", …))` 或 `EvalStmt(Call("tile.store", …))` |
+| `Store` | 2（最后发射） | `AssignStmt(_, Call("tile.store", …))` / `EvalStmt(Call("tile.store", …))` / `tile.write` 变体 |
 
 每一步：
 
@@ -64,15 +64,14 @@ ready={store_1}               仅 store 就绪 → 发射 store_1
 
 重排是对 SSA def-use 依赖图的拓扑排序，因此保留所有数据流。可靠性依赖于 `stmt_dependency_analysis.h` 中的两个工具：
 
-1. `CheckInOutUseDiscipline(region, program)` —— 若某个用户函数调用以 `InOut`/`Out` 方式传入变量，且后续语句读取该变量，则中止编译。该规约（RFC #1026）保证物理内存变更对应 SSA 版本变化，因此 SSA def-use 即捕获所有真实依赖。
+1. `CheckInOutUseDiscipline(region, program)` —— 若某个用户函数调用以 `InOut`/`Out` 方式传入变量，且后续语句读取该变量，则中止编译。自 PR #1039 起该规约已是结构化 IR 不变式（RFC #1026）：所有合法 IR 的每个 `SeqStmts` 都满足它，重排在任何位置都是安全的。
 2. `BuildStmtDependencyGraph(region, program)` —— 在规约成立时，构造区域顶层语句的可靠 def-use DAG。
 
 ## 约束
 
 | 约束 | 原因 |
 | ---- | ---- |
-| 仅在带 `attrs_["unroll_replicated"]` 的 `ForStmt` 内部生效 | 否则会无意中重排无关 SeqStmts |
-| 区域必须满足 InOut-use 规约 | 数据流分析的可靠性前提（RFC #1026） |
+| 区域必须满足 InOut-use 规约 | 数据流分析的可靠性前提（自 PR #1039 起为结构化不变式） |
 | 依赖图存在环时中止 | SSA 区域不应出现环；以 `INTERNAL_CHECK` 抛出 |
 
 ## 示例
@@ -80,7 +79,7 @@ ready={store_1}               仅 store 就绪 → 发射 store_1
 **变换前**（来自 `PartialUnrollTileLoops` 的输入）:
 
 ```python
-for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
+for i in pl.range(0, 8, 4):
     tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)
     pl.tile.store(tile_y_0, [i * 128], output)
@@ -93,7 +92,7 @@ for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
 **变换后**:
 
 ```python
-for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
+for i in pl.range(0, 8, 4):
     tile_x_0 = pl.tile.load(input_a, [i * 128], [128])
     tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128])
     tile_x_2 = pl.tile.load(input_a, [(i + 2) * 128], [128])
@@ -112,7 +111,8 @@ for i in pl.range(0, 8, 4, attrs={"unroll_replicated": 4}):
 
 ## 相关
 
-- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) —— 生成本 Pass 消费的 `unroll_replicated` 标记
-- [`MemoryReuse`](16-memory_reuse.md) —— 在本 Pass 之后运行；受益于同时活跃的 tile
-- RFC #1025 —— 设计文档
+- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) —— 上游复制区域生成者，本 Pass 在此区域上效果最显著
+- [`MemoryReuse`](16-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
+- RFC #1025 —— 复制区域设计
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具
+- RFC #1048 —— 移除 `unroll_replicated` 标记；将本 Pass 作用域扩展到每一个 `SeqStmts`

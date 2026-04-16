@@ -42,7 +42,6 @@ using Attrs = std::vector<std::pair<std::string, std::any>>;
 namespace {
 
 constexpr const char* kUnrollFactorAttr = "unroll_factor";
-constexpr const char* kUnrollReplicatedAttr = "unroll_replicated";
 
 /// Extract a compile-time integer from a ConstInt or Neg(ConstInt) expression.
 int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
@@ -93,18 +92,13 @@ ExprPtr OffsetIndex(const ExprPtr& base, int64_t offset_val, const Span& span) {
   return MakeAdd(base, MakeConstIndex(offset_val, span), span);
 }
 
-/// Copy `original` while removing `kUnrollFactorAttr` and (optionally) adding
-/// `kUnrollReplicatedAttr` with `factor` as an int.
-Attrs RewriteAttrs(const Attrs& original, std::optional<int64_t> replicated_factor) {
+/// Copy `original` while stripping `kUnrollFactorAttr`.
+Attrs StripUnrollFactorAttr(const Attrs& original) {
   Attrs out;
-  out.reserve(original.size() + 1);
+  out.reserve(original.size());
   for (const auto& [k, v] : original) {
     if (k == kUnrollFactorAttr) continue;
-    if (k == kUnrollReplicatedAttr) continue;  // never preserve a stale marker
     out.emplace_back(k, v);
-  }
-  if (replicated_factor.has_value()) {
-    out.emplace_back(kUnrollReplicatedAttr, static_cast<int>(*replicated_factor));
   }
   return out;
 }
@@ -149,11 +143,13 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
  * @brief Mutator that lowers ForStmt nodes carrying `attrs_["unroll_factor"]`
  *        into a replicated main loop plus a modulo-dispatch remainder.
  *
- * Static bounds → single-branch tail with exactly rem_iters clones.
+ * Static bounds → bare `SeqStmts` tail with exactly rem_iters clones flattened
+ *   into the outer scope (plus trailing `AssignStmt`s to bind the outer loop's
+ *   `return_vars` when iter_args exist).
  * Dynamic bounds (start and/or stop are runtime Exprs) → a cascaded
- *   `if rem == k` dispatch for k in [1, factor), each branch containing
- *   k cloned bodies tagged `unroll_replicated = k`. Step must always be a
- *   compile-time constant.
+ *   `if rem == k` dispatch for k in [1, factor); each branch body is a bare
+ *   `SeqStmts` of k cloned bodies (followed by a `YieldStmt` when iter_args
+ *   exist). Step must always be a compile-time constant.
  *
  * `iter_args` are supported: loop-carried state threads sequentially through the
  * F replicated clones in the main loop (each clone consumes the previous clone's
@@ -197,7 +193,7 @@ class PartialUnrollMutator : public IRMutator {
   StmtPtr CleanupUnrollAttr(const ForStmtPtr& op, const StmtPtr& inner_body) {
     auto cleaned = MutableCopy(op);
     cleaned->body_ = inner_body;
-    cleaned->attrs_ = RewriteAttrs(op->attrs_, std::nullopt);
+    cleaned->attrs_ = StripUnrollFactorAttr(op->attrs_);
     return cleaned;
   }
 
@@ -266,19 +262,6 @@ class PartialUnrollMutator : public IRMutator {
     return result;
   }
 
-  /// Fresh iter_args for a wrapper ForStmt, taking initial values from `init_values`.
-  std::vector<IterArgPtr> MakeFreshIterArgs(const std::vector<IterArgPtr>& originals,
-                                            const std::vector<ExprPtr>& init_values) {
-    INTERNAL_CHECK(originals.size() == init_values.size())
-        << "Internal error: iter_arg/init_value count mismatch";
-    std::vector<IterArgPtr> result;
-    result.reserve(originals.size());
-    for (size_t j = 0; j < originals.size(); ++j) {
-      result.push_back(MakeFreshIterArg(originals[j], init_values[j]));
-    }
-    return result;
-  }
-
   /// Fresh return_vars matching the originals' types, with a suffix applied to names.
   std::vector<VarPtr> MakeFreshReturnVars(const std::vector<VarPtr>& originals, const std::string& suffix) {
     std::vector<VarPtr> result;
@@ -325,58 +308,37 @@ class PartialUnrollMutator : public IRMutator {
     auto new_body = SeqStmts::Flatten(std::move(body_parts), sp);
 
     ExprPtr new_step = MakeConstIndex(factor * step, sp);
-    Attrs new_attrs = RewriteAttrs(op->attrs_, factor);
+    Attrs new_attrs = StripUnrollFactorAttr(op->attrs_);
     return std::make_shared<ForStmt>(new_loop_var, main_start, main_stop, new_step, new_iter_args, new_body,
                                      main_return_vars, sp, op->kind_,
                                      /*chunk_config=*/std::nullopt, new_attrs, op->leading_comments_);
   }
 
   /**
-   * @brief Build a trip-1 ForStmt wrapping `k_clones` cloned bodies at offsets
-   *        `base_index + j*step` (j in [0, k_clones)), tagged with
-   *        `unroll_replicated = k_clones` so ReorderUnrolledIO processes it.
+   * @brief Build the tail as a bare `SeqStmts` of `k_clones` cloned bodies at
+   *        offsets `base_index + j*step` (j in [0, k_clones)).
    *
-   * SeqStmts has no attrs_, so the wrapper exists purely to carry the marker.
-   * When the source loop has iter_args, the wrapper also threads loop-carried
-   * state: its fresh iter_args are seeded from `iter_init_values`, its clones
-   * are chained via the previous clone's yields, and a trailing YieldStmt feeds
-   * the wrapper's `return_vars`.
+   * Iter-args of the source loop are substituted directly with `iter_init_values`
+   * for the first clone and with the previous clone's yields for subsequent
+   * clones. Callers thread loop-carried state explicitly — either by wiring
+   * `final_yields` into the enclosing IfStmt's `YieldStmt` (dynamic cascade) or
+   * by emitting `AssignStmt`s that bind the outer loop's `return_vars` to the
+   * final yields (static tail after a main loop).
    */
-  StmtPtr BuildTailBranch(const ForStmtPtr& op, const StmtPtr& body, int64_t k_clones, int64_t step,
-                          const ExprPtr& base_index, const std::vector<ExprPtr>& iter_init_values,
-                          const std::vector<VarPtr>& return_vars) {
-    Span sp = op->span_;
-    auto fresh_iter_args = MakeFreshIterArgs(op->iter_args_, iter_init_values);
-    std::vector<ExprPtr> initial_substitutes;
-    initial_substitutes.reserve(fresh_iter_args.size());
-    for (const auto& ia : fresh_iter_args) initial_substitutes.push_back(ia);
-
-    auto region = ReplicateBody(op, body, k_clones, step, base_index, initial_substitutes);
-
-    std::vector<StmtPtr> body_parts = {region.body};
-    if (!op->iter_args_.empty()) {
-      body_parts.push_back(std::make_shared<YieldStmt>(region.final_yields, sp));
-    }
-    auto seq_body = SeqStmts::Flatten(std::move(body_parts), sp);
-
-    auto dummy_var = std::make_shared<Var>("_tail_iter_" + std::to_string(k_clones),
-                                           std::make_shared<ScalarType>(DataType::INDEX), sp);
-    Attrs attrs = {{kUnrollReplicatedAttr, static_cast<int>(k_clones)}};
-    return std::make_shared<ForStmt>(dummy_var, MakeConstIndex(0, sp), MakeConstIndex(1, sp),
-                                     MakeConstIndex(1, sp), fresh_iter_args, seq_body, return_vars, sp,
-                                     ForKind::Sequential,
-                                     /*chunk_config=*/std::nullopt, attrs,
-                                     /*leading_comments=*/std::vector<std::string>{});
+  ReplicatedRegion BuildTailSeq(const ForStmtPtr& op, const StmtPtr& body, int64_t k_clones, int64_t step,
+                                const ExprPtr& base_index, const std::vector<ExprPtr>& iter_init_values) {
+    return ReplicateBody(op, body, k_clones, step, base_index, iter_init_values);
   }
 
   /**
    * @brief Static lowering: compile-time trip count → main loop + (optional)
-   *        single-branch tail with exactly rem_iters clones. No dispatch needed
-   *        because the remainder count is known.
+   *        bare-SeqStmts tail with exactly rem_iters clones, flattened into the
+   *        outer scope. No dispatch needed because the remainder count is known.
    *
    * When iter_args are present, the main loop's return_vars forward loop-carried
-   * state to the tail branch's iter_args; the tail branch inherits the original
-   * outer loop's return_vars so downstream references stay valid.
+   * state to the tail clones as their iter_arg substitutes; the tail's final
+   * yields bind to the outer loop's `return_vars` via trailing `AssignStmt`s so
+   * downstream references to those vars stay valid.
    */
   StmtPtr LowerStatic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t start, int64_t stop,
                       int64_t step) {
@@ -410,8 +372,16 @@ class PartialUnrollMutator : public IRMutator {
       // init_values.
       std::vector<ExprPtr> tail_init_values =
           (main_iters > 0) ? ReturnVarsAsExprs(main_return_vars) : InitValueExprs(op->iter_args_);
-      result.push_back(
-          BuildTailBranch(op, body, rem_iters, step, base_index, tail_init_values, op->return_vars_));
+      auto region = BuildTailSeq(op, body, rem_iters, step, base_index, tail_init_values);
+      // Push the bare SeqStmts of clones — SeqStmts::Flatten will splice them
+      // directly into the outer result sequence.
+      result.push_back(region.body);
+      // Bind the original loop's return_vars to the tail's final yields so
+      // downstream references to op->return_vars_ remain valid.
+      for (size_t j = 0; j < op->return_vars_.size(); ++j) {
+        result.push_back(
+            std::make_shared<AssignStmt>(op->return_vars_[j], region.final_yields[j], op->span_));
+      }
     }
     return SeqStmts::Flatten(std::move(result), op->span_);
   }
@@ -422,7 +392,7 @@ class PartialUnrollMutator : public IRMutator {
    *   trip_iters    = ceil_div(stop - start, step)
    *   main_iters    = trip_iters / factor                       (compile-time: `/ factor`)
    *   main_end      = start + main_iters * (factor * step)      (SSA-bound to `unroll_main_end`)
-   *   for i in range(start, main_end, F*step) [unroll_replicated=F]: <F clones>
+   *   for i in range(start, main_end, F*step): <F clones>
    *   rem_iters     = trip_iters - main_iters * factor          (SSA-bound to `unroll_rem`)
    *   if rem_iters == 1: <1 clone>      # outermost
    *   else if rem_iters == 2: <2 clones>
@@ -492,22 +462,20 @@ class PartialUnrollMutator : public IRMutator {
     // every IfStmt carries return_vars (fresh at inner levels, the original
     // outer return_vars at the outermost level) and every branch ends with a
     // YieldStmt — including the innermost else, which yields main_return_exprs
-    // for the rem == 0 case.
+    // for the rem == 0 case. Each branch body is a bare SeqStmts of k cloned
+    // bodies (the IfStmt provides the enclosing scope that declares its
+    // return_vars; no inner ForStmt wrapper is required).
     std::optional<StmtPtr> inner;
     std::vector<VarPtr> inner_return_vars;
     for (int64_t k = factor - 1; k >= 1; --k) {
-      // Each branch's tail seeds its iter_args from the main-loop return_vars:
-      // the cascade is a dispatch on `rem`, so every live branch starts from
-      // the same post-main state.
-      auto tail_branch_return_vars = op->return_vars_.empty()
-                                         ? op->return_vars_
-                                         : MakeFreshReturnVars(op->return_vars_, "_tail" + std::to_string(k));
-      StmtPtr tail =
-          BuildTailBranch(op, body, k, step, main_end_var, main_return_exprs, tail_branch_return_vars);
+      // Each branch's tail clones seed iter-arg uses with the main-loop's
+      // return_vars directly: the cascade is a dispatch on `rem`, so every
+      // live branch starts from the same post-main state.
+      auto region = BuildTailSeq(op, body, k, step, main_end_var, main_return_exprs);
 
-      std::vector<StmtPtr> then_parts = {tail};
+      std::vector<StmtPtr> then_parts = {region.body};
       if (has_iter_args) {
-        then_parts.push_back(std::make_shared<YieldStmt>(ReturnVarsAsExprs(tail_branch_return_vars), sp));
+        then_parts.push_back(std::make_shared<YieldStmt>(region.final_yields, sp));
       }
       auto then_body = SeqStmts::Flatten(std::move(then_parts), sp);
 

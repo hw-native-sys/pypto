@@ -9,10 +9,9 @@
 
 """DSL-style Before/Expected tests for the ReorderUnrolledIO pass.
 
-The pass walks ``ForStmt``s carrying ``attrs_["unroll_replicated"]`` and
-reorders their top-level SeqStmts so tile.load floats to the top, tile.store
-sinks to the bottom, compute settles in the middle — subject to the SSA
-dependency graph.
+The pass walks every ``SeqStmts`` in the program and reorders its top-level
+statements so tile.load floats to the top, tile.store sinks to the bottom, and
+compute settles in the middle — subject to the SSA dependency graph.
 """
 
 import pypto.language as pl
@@ -39,7 +38,7 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     tc0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
                     pl.tile.store(tc0, [0, 0], out)
@@ -51,7 +50,7 @@ class TestReorderUnrolledIO:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
                     tc0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
@@ -69,7 +68,7 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     off: pl.Scalar[pl.INDEX] = 64
                     ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [off, 0], [64, 64])
@@ -82,7 +81,7 @@ class TestReorderUnrolledIO:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     off: pl.Scalar[pl.INDEX] = 64
                     ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [off, 0], [64, 64])
@@ -92,41 +91,67 @@ class TestReorderUnrolledIO:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_skip_unmarked_for(self):
-        """A ForStmt without ``unroll_replicated`` is left untouched."""
+    def test_already_ordered_region_is_noop(self):
+        """A region already in canonical [load, compute, store] order is unchanged —
+        the reorder preserves IR identity when no swap would help."""
 
         @pl.program
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                # No attrs — pass should ignore.
                 for i in pl.range(0, 2, 1):
                     ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     tc: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta, ta)
                     pl.tile.store(tc, [0, 0], out)
 
         After = _run_pass(Before)
-        # IR identity preserved when no marker is present.
+        # IR identity preserved — the reorder detects no change is needed.
         assert After is Before
 
+    def test_reorder_on_function_body_seqstmts(self):
+        """The reorder applies to any ``SeqStmts`` — including the function body
+        itself, which is not inside any ForStmt."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                # Store placed before load in source — the pass should reorder.
+                ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                pl.tile.store(ta, [0, 0], out)
+                tb: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                pl.tile.store(tb, [0, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                tb: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                pl.tile.store(ta, [0, 0], out)
+                pl.tile.store(tb, [0, 0], out)
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_no_io_ops_is_noop(self):
-        """A marked region with neither loads nor stores is unchanged."""
+        """A region with neither loads nor stores is unchanged."""
 
         @pl.program
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, a: pl.Tile[[64, 64], pl.FP32], b: pl.Tile[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
-                    x: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, a)  # noqa: F841
-                    y: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(b, b)  # noqa: F841
+                for i in pl.range(0, 2, 1):
+                    _x: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, a)
+                    _y: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(b, b)
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, a: pl.Tile[[64, 64], pl.FP32], b: pl.Tile[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
-                    x: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, a)  # noqa: F841
-                    y: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(b, b)  # noqa: F841
+                for i in pl.range(0, 2, 1):
+                    _x: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(a, a)
+                    _y: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(b, b)
 
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
@@ -139,7 +164,7 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     t1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     pl.tile.store(t1, [0, 0], out)
                     t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
@@ -149,7 +174,7 @@ class TestReorderUnrolledIO:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     t1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
                     pl.tile.store(t1, [0, 0], out)
@@ -170,20 +195,20 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     # Store placed before read in source — reorder should swap them.
                     pl.tile.store(t, [0, 0], out)
-                    elem: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])  # noqa: F841
+                    _elem: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])
 
         @pl.program
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     # tile.read (Load category) lifts above the store.
-                    elem: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])  # noqa: F841
+                    _elem: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])
                     # tile.store sinks to the bottom.
                     pl.tile.store(t, [0, 0], out)
 
@@ -197,11 +222,11 @@ class TestReorderUnrolledIO:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[192, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     tc: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
-                    ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])  # noqa: F841
-                    ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [128, 0], [64, 64])  # noqa: F841
+                    _ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
+                    _ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [128, 0], [64, 64])
                     pl.tile.store(tc, [0, 0], out)
 
         # ta0, ta1, ta2 are independent → all cluster at the top in original
@@ -210,10 +235,10 @@ class TestReorderUnrolledIO:
         class Expected:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[192, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1, attrs={"unroll_replicated": 2}):
+                for i in pl.range(0, 2, 1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
-                    ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])  # noqa: F841
-                    ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [128, 0], [64, 64])  # noqa: F841
+                    _ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
+                    _ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [128, 0], [64, 64])
                     tc: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
                     pl.tile.store(tc, [0, 0], out)
 
