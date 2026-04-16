@@ -47,6 +47,7 @@ from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .task_interface import (
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
+    ChipCallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
@@ -493,15 +494,14 @@ def execute_on_device(
     worker = Worker(level=2, device_id=device_id, platform=platform, runtime=runtime_name)
     worker.init()
 
+    cfg = ChipCallConfig()
+    cfg.block_dim = block_dim
+    cfg.aicpu_thread_num = aicpu_thread_num
+    cfg.enable_profiling = enable_profiling
+
     env = runtime_env or {}
     with _temporary_env(env):
-        worker.run(
-            chip_callable,
-            orch_args,
-            block_dim=block_dim,
-            aicpu_thread_num=aicpu_thread_num,
-            enable_profiling=enable_profiling,
-        )
+        worker.run(chip_callable, orch_args, cfg)
 
     worker.close()
 
