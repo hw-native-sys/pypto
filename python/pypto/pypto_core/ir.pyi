@@ -1799,57 +1799,90 @@ class SplitMode(enum.Enum):
     """Split horizontally (width halved)."""
 
 class ScopeStmt(Stmt):
-    """Scope statement: marks a region with specific execution context."""
+    """Scope statement: marks a region with specific execution context (abstract base)."""
 
     scope_kind: Final[ScopeKind]
-    """The kind of scope."""
-
-    level: Final[Level | None]
-    """Hierarchy level (None for non-Hierarchy scopes)."""
-
-    role: Final[Role | None]
-    """Function role (None for non-Hierarchy scopes)."""
-
-    split: Final[SplitMode | None]
-    """Split mode for cross-core transfer (None for no split)."""
+    """The kind of scope (discriminator)."""
 
     name_hint: Final[str]
     """User-provided scope name hint (empty string = auto-generate)."""
 
-    core_num: Final[int | None]
-    """SPMD block count (None for single block)."""
-
-    sync_start: Final[bool | None]
-    """Require sync-start for SPMD dispatch (None or False for default)."""
-
     body: Final[Stmt]
     """The nested statements."""
 
+class InCoreScopeStmt(ScopeStmt):
+    """InCore scope: AICore sub-graph region."""
+
+    split: Final[SplitMode | None]
+    """Split mode for cross-core transfer (None or SplitMode.None for no split)."""
+
     def __init__(
         self,
-        scope_kind: ScopeKind,
-        body: Stmt,
-        span: Span,
-        level: Level | None = None,
-        role: Role | None = None,
         split: SplitMode | None = None,
         name_hint: str = "",
-        core_num: int | None = None,
-        sync_start: bool | None = None,
+        body: Stmt = ...,
+        span: Span = ...,
     ) -> None:
-        """Create a scope statement.
+        """Create an InCore scope statement."""
 
-        Args:
-            scope_kind: The kind of scope (e.g., ScopeKind.InCore, ScopeKind.Hierarchy)
-            body: The nested statements
-            span: Source location
-            level: Hierarchy level (for Hierarchy scopes)
-            role: Function role (for Hierarchy scopes)
-            split: Split mode for cross-core transfer (for AutoInCore scopes)
-            name_hint: User-provided scope name hint (empty = auto-generate)
-            core_num: SPMD block count (for Spmd scopes)
-            sync_start: Require sync-start for SPMD dispatch
-        """
+class AutoInCoreScopeStmt(ScopeStmt):
+    """AutoInCore scope: InCore region with automatic chunking."""
+
+    split: Final[SplitMode | None]
+    """Split mode for cross-core transfer (None or SplitMode.None for no split)."""
+
+    def __init__(
+        self,
+        split: SplitMode | None = None,
+        name_hint: str = "",
+        body: Stmt = ...,
+        span: Span = ...,
+    ) -> None:
+        """Create an AutoInCore scope statement."""
+
+class ClusterScopeStmt(ScopeStmt):
+    """Cluster scope: co-scheduled AIC + AIV group."""
+
+    def __init__(self, name_hint: str = "", body: Stmt = ..., span: Span = ...) -> None:
+        """Create a Cluster scope statement."""
+
+class HierarchyScopeStmt(ScopeStmt):
+    """Hierarchy scope: distributed-hierarchy region."""
+
+    level: Final[Level]
+    """Hierarchy level (required)."""
+
+    role: Final[Role | None]
+    """Function role (Orchestrator or Worker; None for unspecified)."""
+
+    def __init__(
+        self,
+        level: Level,
+        role: Role | None = None,
+        name_hint: str = "",
+        body: Stmt = ...,
+        span: Span = ...,
+    ) -> None:
+        """Create a Hierarchy scope statement."""
+
+class SpmdScopeStmt(ScopeStmt):
+    """SPMD dispatch scope."""
+
+    core_num: Final[int]
+    """SPMD block count (required, >0)."""
+
+    sync_start: Final[bool]
+    """Require sync-start for SPMD dispatch."""
+
+    def __init__(
+        self,
+        core_num: int,
+        sync_start: bool = False,
+        name_hint: str = "",
+        body: Stmt = ...,
+        span: Span = ...,
+    ) -> None:
+        """Create an SPMD scope statement."""
 
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""

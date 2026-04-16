@@ -57,7 +57,11 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
-  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
@@ -289,32 +293,61 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
   return result;
 }
 
-StmtPtr FlattenCallExprMutator::VisitStmt_(const ScopeStmtPtr& op) {
-  auto outer_pending = std::move(pending_stmts_);
-  pending_stmts_.clear();
+// Shared scope-body flattening: returns the new body (which may equal the
+// original pointer if no statements changed). Caller constructs the matching
+// derived ScopeStmt.
+namespace {
+StmtPtr FlattenScopeBody(FlattenCallExprMutator* self, std::vector<StmtPtr>& pending,
+                         const StmtPtr& original_body) {
+  auto outer_pending = std::move(pending);
+  pending.clear();
 
-  auto new_body = VisitStmt(op->body_);
+  auto new_body = self->VisitStmt(original_body);
 
-  // When body is a SeqStmts, VisitStmt_(SeqStmts) already flushed pending
-  // stmts as siblings inside the sequence.  Only single-statement bodies
-  // need explicit flushing here.
-  if (!As<SeqStmts>(op->body_) && !pending_stmts_.empty()) {
+  if (!As<SeqStmts>(original_body) && !pending.empty()) {
     std::vector<StmtPtr> body_stmts;
-    body_stmts.reserve(pending_stmts_.size() + 1);
-    for (const auto& pending : pending_stmts_) {
-      body_stmts.push_back(pending);
-    }
+    body_stmts.reserve(pending.size() + 1);
+    for (const auto& p : pending) body_stmts.push_back(p);
     body_stmts.push_back(new_body);
-    new_body = SeqStmts::Flatten(std::move(body_stmts), op->body_->span_);
+    new_body = SeqStmts::Flatten(std::move(body_stmts), original_body->span_);
   }
 
-  pending_stmts_ = std::move(outer_pending);
+  pending = std::move(outer_pending);
+  return new_body;
+}
+}  // namespace
 
-  if (new_body.get() != op->body_.get()) {
-    return std::make_shared<const ScopeStmt>(op->scope_kind_, std::move(new_body), op->span_, op->level_,
-                                             op->role_, op->split_, op->name_hint_);
-  }
-  return op;
+StmtPtr FlattenCallExprMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const InCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body), op->span_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const AutoInCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body),
+                                                     op->span_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const ClusterScopeStmt>(op->name_hint_, std::move(new_body), op->span_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const HierarchyScopeStmt>(op->level_, op->role_, op->name_hint_,
+                                                    std::move(new_body), op->span_);
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const SpmdScopeStmt>(op->core_num_, op->sync_start_, op->name_hint_,
+                                               std::move(new_body), op->span_);
 }
 
 // Expression visitors implementation

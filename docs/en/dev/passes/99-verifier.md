@@ -68,12 +68,12 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
 | **NormalizedStmtStructure** | NormalizedStmtStructure | Nested `SeqStmts` flattened and single-child `SeqStmts` unwrapped |
 | **NoRedundantBlocks** | NoRedundantBlocks | No single-child or nested `SeqStmts` |
-| **SplitIncoreOrch** | SplitIncoreOrch | No InCore ScopeStmts remain in Opaque functions |
+| **SplitIncoreOrch** | SplitIncoreOrch | No `InCoreScopeStmt` nodes remain in Opaque functions |
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned with tensor-creating ops |
-| **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (ScopeStmt inside ScopeStmt) |
+| **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
 | **InOutUseValid** | InOutUseValid | Variables passed as InOut/Out to user-function calls are not read after the call (RFC #1026). Group-typed function bodies are skipped pending follow-up. |
 
 ### SSAVerify

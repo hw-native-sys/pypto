@@ -213,8 +213,28 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
-void IRVisitor::VisitStmt_(const ScopeStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ScopeStmt has null body";
+void IRVisitor::VisitStmt_(const InCoreScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "InCoreScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const HierarchyScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
+void IRVisitor::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "SpmdScopeStmt has null body";
   VisitStmt(op->body_);
 }
 

@@ -239,7 +239,11 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ReturnStmtPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
-  void VisitStmt_(const ScopeStmtPtr& op) override;
+  void VisitStmt_(const InCoreScopeStmtPtr& op) override;
+  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
+  void VisitStmt_(const ClusterScopeStmtPtr& op) override;
+  void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
+  void VisitStmt_(const SpmdScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -1024,73 +1028,72 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
-void IRPythonPrinter::VisitStmt_(const ScopeStmtPtr& op) {
-  // Helper: append name= kwarg when user-provided name is non-empty
-  auto append_name_hint = [&]() {
-    if (!op->name_hint_.empty()) {
-      stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
-    }
-  };
-
-  if (op->scope_kind_ == ScopeKind::Hierarchy) {
-    // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y):
-    stream_ << "with " << prefix_ << ".at(";
-    bool first = true;
-    if (op->level_.has_value()) {
-      stream_ << "level=" << prefix_ << ".Level." << LevelToString(*op->level_);
-      first = false;
-    }
-    if (op->role_.has_value()) {
-      if (!first) stream_ << ", ";
-      stream_ << "role=" << prefix_ << ".Role." << RoleToString(*op->role_);
-    }
-    append_name_hint();
-    stream_ << "):\n";
-  } else if (op->scope_kind_ == ScopeKind::InCore) {
-    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
-    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-      stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
-    }
-    append_name_hint();
-    stream_ << "):\n";
-  } else if (op->scope_kind_ == ScopeKind::AutoInCore) {
-    stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
-    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-      stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
-              << SplitModeToPythonString(op->split_.value()) << ")";
-    } else {
-      stream_ << prefix_ << ".chunked_loop_optimizer";
-    }
-    append_name_hint();
-    stream_ << "):\n";
-  } else if (op->scope_kind_ == ScopeKind::Cluster) {
-    stream_ << "with " << prefix_ << ".cluster(";
-    if (!op->name_hint_.empty()) {
-      stream_ << "name_hint=\"" << op->name_hint_ << "\"";
-    }
-    stream_ << "):\n";
-  } else if (op->scope_kind_ == ScopeKind::Spmd) {
-    stream_ << "with " << prefix_ << ".spmd(";
-    bool first_kwarg = true;
-    if (op->core_num_.has_value()) {
-      stream_ << "core_num=" << *op->core_num_;
-      first_kwarg = false;
-    }
-    if (op->sync_start_.has_value()) {
-      if (!first_kwarg) stream_ << ", ";
-      stream_ << "sync_start=" << (*op->sync_start_ ? "True" : "False");
-      first_kwarg = false;
-    }
-    if (!op->name_hint_.empty()) {
-      if (!first_kwarg) stream_ << ", ";
-      stream_ << "name_hint=\"" << op->name_hint_ << "\"";
-    }
-    stream_ << "):\n";
-  } else {
-    INTERNAL_CHECK_SPAN(false, op->span_)
-        << "Internal error: Unknown ScopeKind in python_printer: " << static_cast<int>(op->scope_kind_);
+void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
+  // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y, [name_hint="..."]):
+  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level." << LevelToString(op->level_);
+  if (op->role_.has_value()) {
+    stream_ << ", role=" << prefix_ << ".Role." << RoleToString(*op->role_);
   }
+  if (!op->name_hint_.empty()) {
+    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+  }
+  stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
 
+void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
+  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
+  if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
+    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
+  }
+  if (!op->name_hint_.empty()) {
+    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+  }
+  stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
+  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
+  if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
+    stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
+            << SplitModeToPythonString(op->split_.value()) << ")";
+  } else {
+    stream_ << prefix_ << ".chunked_loop_optimizer";
+  }
+  if (!op->name_hint_.empty()) {
+    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+  }
+  stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
+  stream_ << "with " << prefix_ << ".cluster(";
+  if (!op->name_hint_.empty()) {
+    stream_ << "name_hint=\"" << op->name_hint_ << "\"";
+  }
+  stream_ << "):\n";
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  stream_ << "with " << prefix_ << ".spmd(core_num=" << op->core_num_;
+  if (op->sync_start_) {
+    stream_ << ", sync_start=True";
+  }
+  if (!op->name_hint_.empty()) {
+    stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+  }
+  stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();

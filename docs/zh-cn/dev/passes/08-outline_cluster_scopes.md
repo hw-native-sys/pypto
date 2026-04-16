@@ -4,7 +4,7 @@
 
 ## 概述
 
-该 Pass 将 `ScopeStmt(Cluster)` 节点变换为独立的 `Function(Group)` 定义，并将原作用域替换为对提取函数的调用。它还会把未嵌套在 Cluster 内部的 standalone `ScopeStmt(Spmd)` 提取为 `Function(Spmd)`。Group 函数表示共享同一物理集群 (Cluster) 资源的协同调度 AIC（Cube）+ AIV（Vector）内核组，而 Spmd 函数保留 standalone 调度所需的 `core_num` / `sync_start` 语义。
+该 Pass 将 `ClusterScopeStmt` 节点变换为独立的 `Function(Group)` 定义，并将原作用域替换为对提取函数的调用。它还会把未嵌套在 Cluster 内部的 standalone `SpmdScopeStmt` 提取为 `Function(Spmd)`。Group 函数表示共享同一物理集群 (Cluster) 资源的协同调度 AIC（Cube）+ AIV（Vector）内核组，而 Spmd 函数保留 standalone 调度所需的 `core_num` / `sync_start` 语义。
 
 **前置条件**：
 
@@ -30,12 +30,12 @@ program_outlined = outline_pass(program)
 
 ## 算法
 
-1. **扫描 Cluster 作用域**：在 Opaque/Orchestration 函数中查找所有 `ScopeStmt(scope_kind=Cluster)`
+1. **扫描 Cluster 作用域**：在 Opaque/Orchestration 函数中查找所有 `ClusterScopeStmt` 节点
 2. **提取 Cluster 作用域**：将每个 Cluster 作用域体提取为 `Function(func_type=Group)`
-3. **扫描 standalone Spmd 作用域**：在变换后的函数体中查找所有未嵌套在 Cluster 内部的 `ScopeStmt(scope_kind=Spmd)`
+3. **扫描 standalone Spmd 作用域**：在变换后的函数体中查找所有未嵌套在 Cluster 内部的 `SpmdScopeStmt` 节点
 4. **提取 standalone Spmd 作用域**：将每个 standalone Spmd 作用域体提取为 `Function(func_type=Spmd)`，并把 `core_num` / `sync_start` 复制到函数 attrs
 5. **展开 Group 内嵌 Spmd**：对于 `pl.cluster(): with pl.spmd(...): ...`，保留单一 Group 函数，并把 `core_num` / `sync_start` 提升到 Group attrs
-6. **替换作用域**：将 `ScopeStmt` 替换为对提取函数的调用 + 输出赋值
+6. **替换作用域**：将作用域语句替换为对提取函数的调用 + 输出赋值
 7. **添加到程序**：将提取的函数前置到程序的函数列表中
 
 **命名规则**：`{原函数名}_cluster_{计数器}`（例如 `main_cluster_0`）

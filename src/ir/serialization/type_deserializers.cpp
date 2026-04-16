@@ -568,70 +568,111 @@ static IRNodePtr DeserializeWhileStmt(const msgpack::object& fields_obj, msgpack
                                      DeserializeLeadingComments(fields_obj));
 }
 
-// Deserialize ScopeStmt
-static IRNodePtr DeserializeScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                      DeserializerContext& ctx) {
+// Helpers shared across the per-kind ScopeStmt deserializers.
+static std::string DeserializeScopeNameHint(const msgpack::object& fields_obj, DeserializerContext& ctx) {
+  std::string name_hint;
+  auto name_hint_obj = GetOptionalFieldObj(fields_obj, "name_hint", ctx);
+  if (name_hint_obj.has_value() && name_hint_obj->type == msgpack::type::STR) {
+    name_hint = name_hint_obj->as<std::string>();
+  }
+  return name_hint;
+}
+
+static std::optional<SplitMode> DeserializeScopeSplit(const msgpack::object& fields_obj,
+                                                      DeserializerContext& ctx) {
+  std::optional<SplitMode> split = std::nullopt;
+  auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
+  if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
+    split = static_cast<SplitMode>(split_obj->via.u64);
+  }
+  return split;
+}
+
+// Deserialize InCoreScopeStmt
+static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                            DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto split = DeserializeScopeSplit(fields_obj, ctx);
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<InCoreScopeStmt>(split, std::move(name_hint), body, span,
+                                           DeserializeLeadingComments(fields_obj));
+}
+
+// Deserialize AutoInCoreScopeStmt
+static IRNodePtr DeserializeAutoInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                                DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto split = DeserializeScopeSplit(fields_obj, ctx);
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<AutoInCoreScopeStmt>(split, std::move(name_hint), body, span,
+                                               DeserializeLeadingComments(fields_obj));
+}
+
+// Deserialize ClusterScopeStmt
+static IRNodePtr DeserializeClusterScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                             DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<ClusterScopeStmt>(std::move(name_hint), body, span,
+                                            DeserializeLeadingComments(fields_obj));
+}
+
+// Deserialize HierarchyScopeStmt
+static IRNodePtr DeserializeHierarchyScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                               DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  // Deserialize scope_kind
-  auto scope_kind_str = GET_FIELD_OBJ("scope_kind").as<std::string>();
-  auto scope_kind = StringToScopeKind(scope_kind_str);
+  // level is required
+  auto level_obj = GET_FIELD_OBJ("level");
+  CHECK(level_obj.type != msgpack::type::NIL) << "HierarchyScopeStmt requires a level";
+  Level level = static_cast<Level>(level_obj.via.u64);
 
-  // Deserialize optional level
-  std::optional<Level> level = std::nullopt;
-  auto level_obj = GetOptionalFieldObj(fields_obj, "level", ctx);
-  if (level_obj.has_value() && level_obj->type != msgpack::type::NIL) {
-    level = static_cast<Level>(level_obj->via.u64);
-  }
-
-  // Deserialize optional role
+  // role is optional
   std::optional<Role> role = std::nullopt;
   auto role_obj = GetOptionalFieldObj(fields_obj, "role", ctx);
   if (role_obj.has_value() && role_obj->type != msgpack::type::NIL) {
     role = static_cast<Role>(role_obj->via.u64);
   }
 
-  // Deserialize optional split mode
-  std::optional<SplitMode> split = std::nullopt;
-  auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
-  if (split_obj.has_value() && split_obj->type != msgpack::type::NIL) {
-    split = static_cast<SplitMode>(split_obj->via.u64);
-  }
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<HierarchyScopeStmt>(level, role, std::move(name_hint), body, span,
+                                              DeserializeLeadingComments(fields_obj));
+}
 
-  // Deserialize optional name_hint (backward compatible: missing field = empty)
-  std::string name_hint;
-  auto name_hint_obj = GetOptionalFieldObj(fields_obj, "name_hint", ctx);
-  if (name_hint_obj.has_value() && name_hint_obj->type == msgpack::type::STR) {
-    name_hint = name_hint_obj->as<std::string>();
-  }
+// Deserialize SpmdScopeStmt
+static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                          DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  // Deserialize optional core_num
-  std::optional<int> core_num = std::nullopt;
-  auto core_num_obj = GetOptionalFieldObj(fields_obj, "core_num", ctx);
-  if (core_num_obj.has_value() && core_num_obj->type != msgpack::type::NIL) {
-    CHECK(core_num_obj->type == msgpack::type::POSITIVE_INTEGER ||
-          core_num_obj->type == msgpack::type::NEGATIVE_INTEGER)
-        << "core_num must be an integer, got msgpack type " << static_cast<int>(core_num_obj->type);
-    auto raw = core_num_obj->as<int64_t>();
-    CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
-        << "core_num must be a positive integer that fits in int, got " << raw;
-    core_num = static_cast<int>(raw);
-  }
+  // core_num is required
+  auto core_num_obj = GET_FIELD_OBJ("core_num");
+  CHECK(core_num_obj.type == msgpack::type::POSITIVE_INTEGER ||
+        core_num_obj.type == msgpack::type::NEGATIVE_INTEGER)
+      << "SpmdScopeStmt core_num must be an integer, got msgpack type "
+      << static_cast<int>(core_num_obj.type);
+  auto raw = core_num_obj.as<int64_t>();
+  CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
+      << "SpmdScopeStmt core_num must be a positive integer that fits in int, got " << raw;
+  int core_num = static_cast<int>(raw);
 
-  // Deserialize optional sync_start
-  std::optional<bool> sync_start = std::nullopt;
+  // sync_start is required (bool, defaults to false if missing)
+  bool sync_start = false;
   auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
   if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
     CHECK(sync_start_obj->type == msgpack::type::BOOLEAN)
-        << "sync_start must be a bool, got msgpack type " << static_cast<int>(sync_start_obj->type);
+        << "SpmdScopeStmt sync_start must be a bool, got msgpack type "
+        << static_cast<int>(sync_start_obj->type);
     sync_start = sync_start_obj->as<bool>();
   }
 
-  // Deserialize body
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
-
-  return std::make_shared<ScopeStmt>(scope_kind, body, span, level, role, split, std::move(name_hint),
-                                     core_num, sync_start, DeserializeLeadingComments(fields_obj));
+  return std::make_shared<SpmdScopeStmt>(core_num, sync_start, std::move(name_hint), body, span,
+                                         DeserializeLeadingComments(fields_obj));
 }
 
 // Deserialize SeqStmts
@@ -868,7 +909,12 @@ static TypeRegistrar _yield_stmt_registrar("YieldStmt", DeserializeYieldStmt);
 static TypeRegistrar _return_stmt_registrar("ReturnStmt", DeserializeReturnStmt);
 static TypeRegistrar _for_stmt_registrar("ForStmt", DeserializeForStmt);
 static TypeRegistrar _while_stmt_registrar("WhileStmt", DeserializeWhileStmt);
-static TypeRegistrar _scope_stmt_registrar("ScopeStmt", DeserializeScopeStmt);
+static TypeRegistrar _in_core_scope_stmt_registrar("InCoreScopeStmt", DeserializeInCoreScopeStmt);
+static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
+                                                        DeserializeAutoInCoreScopeStmt);
+static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
+static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
+static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);

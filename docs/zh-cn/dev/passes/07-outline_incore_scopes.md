@@ -4,7 +4,7 @@
 
 ## 概述
 
-该 Pass 将 `ScopeStmt(InCore)` 节点变换为独立的 `Function(InCore)` 定义，并将原作用域替换为对提取函数的调用。
+该 Pass 将 `InCoreScopeStmt` 节点变换为独立的 `Function(InCore)` 定义，并将原作用域替换为对提取函数的调用。
 
 **前置条件**：
 
@@ -36,14 +36,14 @@ program_outlined = outline_pass(program)
 
 ## 算法
 
-1. **扫描 InCore 作用域**：在 Opaque 函数中查找所有 `ScopeStmt(scope_type=InCore)`
+1. **扫描 InCore 作用域**：在 Opaque 函数中查找所有 `InCoreScopeStmt` 节点
 2. **分析输入**：确定外部变量引用（在作用域外定义、在作用域内使用的变量）
 3. **分析输出**：确定在作用域之后仍被使用的内部定义（在作用域内定义、在作用域外使用的变量）
 4. **创建函数**：将作用域体提取为新的 `Function(scope_type=InCore)`，其中：
    - 参数 = 输入变量
    - 返回值 = 输出变量
    - 函数体 = 作用域体
-5. **替换作用域**：将 `ScopeStmt` 替换为：
+5. **替换作用域**：将 `InCoreScopeStmt` 替换为：
    - 带有输入参数的提取函数调用
    - 每个输出变量对应一个 AssignStmt
 6. **添加到程序**：将提取的函数添加到程序的函数列表中
@@ -51,7 +51,7 @@ program_outlined = outline_pass(program)
 **命名规则**：
 
 - 默认：`{原函数名}_incore_{计数器}`（如 `main_incore_0`、`main_incore_1`）
-- 用户自定义：当 `ScopeStmt.name_hint` 非空时，直接使用该名称
+- 用户自定义：当 `InCoreScopeStmt.name_hint` 非空时，直接使用该名称
   - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → 函数名为 `fused_add`
 
 ## 示例
@@ -145,7 +145,7 @@ Pass OutlineIncoreScopes();
 
 - 使用 SSA 分析确定输入/输出
 - 创建带有 InCore 作用域类型的新 Function 节点
-- 将 ScopeStmt 替换为 Call + AssignStmt
+- 将 InCoreScopeStmt 替换为 Call + AssignStmt
 - 管理函数命名和计数器
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`

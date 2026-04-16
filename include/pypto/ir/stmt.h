@@ -697,17 +697,27 @@ class WhileStmt : public Stmt {
 using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
 
 /**
- * @brief Scope statement
+ * @brief Scope statement (abstract base — see derived classes below)
  *
  * Represents a scoped region of code with a specific execution context.
  * This is NOT a control flow node — it executes its body exactly once, linearly.
  *
+ * **Class hierarchy** (issue #1047):
+ * - `ScopeStmt` (abstract): common fields `name_hint_`, `body_`
+ *   - `InCoreScopeStmt`: optional `split_`
+ *   - `AutoInCoreScopeStmt`: optional `split_`
+ *   - `ClusterScopeStmt`: no extra fields
+ *   - `HierarchyScopeStmt`: required `level_`, optional `role_`
+ *   - `SpmdScopeStmt`: required `core_num_`, `sync_start_` (default false)
+ *
  * **Syntax:**
- * with pl.incore():    # InCore scope
+ * with pl.incore():    # InCore scope -> InCoreScopeStmt
  *     body
- * with pl.cluster():   # Cluster scope
+ * with pl.cluster():   # Cluster scope -> ClusterScopeStmt
  *     body
- * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # Hierarchy scope
+ * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # -> HierarchyScopeStmt
+ *     body
+ * with pl.spmd(core_num=8):  # -> SpmdScopeStmt
  *     body
  *
  * **Semantics:**
@@ -717,100 +727,168 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * - SSA conversion treats it as transparent (just visits body)
  * - OutlineIncoreScopes extracts InCore scopes into InCore functions
  * - OutlineClusterScopes extracts Cluster scopes into Group functions
- * - Hierarchy scopes (planned) will be outlined into level-/role-annotated functions
- *
- * **Key Properties:**
- * - scope_kind: The kind of scope (InCore, AutoInCore, Cluster, or Hierarchy)
- * - body: The nested statements to execute within this scope
- * - level: (Hierarchy only) Target hierarchy level
- * - role: (Hierarchy only) Function role (Orchestrator or Worker)
+ * - Hierarchy scopes are outlined into level-/role-annotated functions
  */
 class ScopeStmt : public Stmt {
  public:
-  /**
-   * @brief Create a scope statement (legacy 3-arg constructor)
-   *
-   * @param scope_kind The kind of scope
-   * @param body The nested statements
-   * @param span Source location
-   */
-  ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::vector<std::string> leading_comments = {})
-      : Stmt(std::move(span), std::move(leading_comments)), scope_kind_(scope_kind), body_(std::move(body)) {}
-
-  /**
-   * @brief Create a scope statement with hierarchy level, role, and split mode
-   *
-   * @param scope_kind The kind of scope
-   * @param body The nested statements
-   * @param span Source location
-   * @param level Hierarchy level (for Hierarchy scopes)
-   * @param role Function role (for Hierarchy scopes)
-   * @param split Split mode for cross-core transfer (for AutoInCore scopes)
-   * @param core_num Number of SPMD blocks (for Spmd scopes)
-   * @param sync_start Whether to require sync-start for SPMD dispatch
-   */
-  ScopeStmt(ScopeKind scope_kind, StmtPtr body, Span span, std::optional<Level> level,
-            std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-            std::string name_hint = "", std::optional<int> core_num = std::nullopt,
-            std::optional<bool> sync_start = std::nullopt, std::vector<std::string> leading_comments = {})
+  ScopeStmt(std::string name_hint, StmtPtr body, Span span, std::vector<std::string> leading_comments = {})
       : Stmt(std::move(span), std::move(leading_comments)),
-        scope_kind_(scope_kind),
-        body_(std::move(body)),
-        level_(level),
-        role_(role),
-        split_(split),
         name_hint_(std::move(name_hint)),
-        core_num_(core_num),
-        sync_start_(sync_start) {
-    CHECK(scope_kind != ScopeKind::Hierarchy || level_.has_value()) << "Hierarchy scope requires a level";
-    if (core_num_.has_value() || sync_start_.has_value()) {
-      CHECK(scope_kind == ScopeKind::Spmd)
-          << "core_num/sync_start are only valid on Spmd scopes, got " << ScopeKindToString(scope_kind);
-    }
-    if (scope_kind == ScopeKind::Spmd) {
-      CHECK(core_num_.has_value()) << "Spmd scope requires core_num";
-      // Normalize sync_start: treat absent as false for canonical representation.
-      if (!sync_start_.has_value()) {
-        sync_start_ = false;
-      }
-    }
-    if (core_num_.has_value()) {
-      CHECK(*core_num_ > 0) << "core_num must be positive, got " << *core_num_;
-    }
-  }
+        body_(std::move(body)) {}
 
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ScopeStmt; }
+  /// Each derived class returns its ScopeKind. Used for switch-style dispatch.
+  [[nodiscard]] virtual ScopeKind GetScopeKind() const = 0;
+
   [[nodiscard]] std::string TypeName() const override { return "ScopeStmt"; }
 
-  /**
-   * @brief Get field descriptors for reflection-based visitation
-   *
-   * @return Tuple of field descriptors (scope_kind, level, role, split, and body as USUAL fields)
-   */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&ScopeStmt::scope_kind_, "scope_kind"),
-                                          reflection::UsualField(&ScopeStmt::level_, "level"),
-                                          reflection::UsualField(&ScopeStmt::role_, "role"),
-                                          reflection::UsualField(&ScopeStmt::split_, "split"),
-                                          reflection::UsualField(&ScopeStmt::name_hint_, "name_hint"),
-                                          reflection::UsualField(&ScopeStmt::core_num_, "core_num"),
-                                          reflection::UsualField(&ScopeStmt::sync_start_, "sync_start"),
+                          std::make_tuple(reflection::UsualField(&ScopeStmt::name_hint_, "name_hint"),
                                           reflection::UsualField(&ScopeStmt::body_, "body")));
   }
 
  public:
-  ScopeKind scope_kind_;            // The kind of scope (e.g., InCore, Hierarchy)
-  std::optional<Level> level_;      // Hierarchy level (nullopt for non-Hierarchy scopes)
-  std::optional<Role> role_;        // Function role (nullopt for non-Hierarchy scopes)
-  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
-  std::string name_hint_;           // User-provided scope name hint (empty = auto-generate)
-  std::optional<int> core_num_;     // SPMD block count (for Spmd scopes)
-  std::optional<bool> sync_start_;  // Require sync-start for SPMD dispatch
-  StmtPtr body_;                    // The nested statements
+  std::string name_hint_;  // User-provided scope name hint (empty = auto-generate)
+  StmtPtr body_;           // The nested statements
 };
 
 using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
+
+/**
+ * @brief InCore scope: AICore sub-graph region.
+ *
+ * Carries an optional `split` for cross-core transfer mode.
+ */
+class InCoreScopeStmt : public ScopeStmt {
+ public:
+  InCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
+                  std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+        split_(split) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::InCoreScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::InCore; }
+  [[nodiscard]] std::string TypeName() const override { return "InCoreScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&InCoreScopeStmt::split_, "split")));
+  }
+
+ public:
+  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
+};
+
+using InCoreScopeStmtPtr = std::shared_ptr<const InCoreScopeStmt>;
+
+/**
+ * @brief AutoInCore scope: InCore region with automatic chunking.
+ *
+ * Carries an optional `split` for cross-core transfer mode.
+ */
+class AutoInCoreScopeStmt : public ScopeStmt {
+ public:
+  AutoInCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
+                      std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+        split_(split) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AutoInCoreScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::AutoInCore; }
+  [[nodiscard]] std::string TypeName() const override { return "AutoInCoreScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&AutoInCoreScopeStmt::split_, "split")));
+  }
+
+ public:
+  std::optional<SplitMode> split_;  // Split mode (nullopt or None for no split)
+};
+
+using AutoInCoreScopeStmtPtr = std::shared_ptr<const AutoInCoreScopeStmt>;
+
+/**
+ * @brief Cluster scope: co-scheduled AIC + AIV group.
+ *
+ * No kind-specific fields; only inherits `name_hint_` and `body_` from base.
+ */
+class ClusterScopeStmt : public ScopeStmt {
+ public:
+  ClusterScopeStmt(std::string name_hint, StmtPtr body, Span span,
+                   std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ClusterScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Cluster; }
+  [[nodiscard]] std::string TypeName() const override { return "ClusterScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() { return ScopeStmt::GetFieldDescriptors(); }
+};
+
+using ClusterScopeStmtPtr = std::shared_ptr<const ClusterScopeStmt>;
+
+/**
+ * @brief Hierarchy scope: distributed-hierarchy region.
+ *
+ * Required `level`, optional `role`. Outlined into level-/role-annotated functions.
+ */
+class HierarchyScopeStmt : public ScopeStmt {
+ public:
+  HierarchyScopeStmt(Level level, std::optional<Role> role, std::string name_hint, StmtPtr body, Span span,
+                     std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+        level_(level),
+        role_(role) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::HierarchyScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Hierarchy; }
+  [[nodiscard]] std::string TypeName() const override { return "HierarchyScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&HierarchyScopeStmt::level_, "level"),
+                                          reflection::UsualField(&HierarchyScopeStmt::role_, "role")));
+  }
+
+ public:
+  Level level_;               ///< Hierarchy level (required)
+  std::optional<Role> role_;  ///< Function role (Orchestrator or Worker)
+};
+
+using HierarchyScopeStmtPtr = std::shared_ptr<const HierarchyScopeStmt>;
+
+/**
+ * @brief SPMD dispatch scope.
+ *
+ * Required `core_num` (>0); `sync_start` defaults to false.
+ */
+class SpmdScopeStmt : public ScopeStmt {
+ public:
+  SpmdScopeStmt(int core_num, bool sync_start, std::string name_hint, StmtPtr body, Span span,
+                std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+        core_num_(core_num),
+        sync_start_(sync_start) {
+    CHECK(core_num_ > 0) << "core_num must be positive, got " << core_num_;
+  }
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SpmdScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Spmd; }
+  [[nodiscard]] std::string TypeName() const override { return "SpmdScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&SpmdScopeStmt::core_num_, "core_num"),
+                                          reflection::UsualField(&SpmdScopeStmt::sync_start_, "sync_start")));
+  }
+
+ public:
+  int core_num_;     ///< SPMD block count (required, >0)
+  bool sync_start_;  ///< Require sync-start for SPMD dispatch
+};
+
+using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
 
 /**
  * @brief Sequence of statements

@@ -43,15 +43,12 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
     std::optional<bool> sync_start;
 
    protected:
-    StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
-      if (op->scope_kind_ == ScopeKind::Spmd) {
-        CHECK(!core_num.has_value())  // NOLINT(misc-include-cleaner)
-            << "Only one pl.spmd() block is allowed per cluster scope";
-        core_num = op->core_num_;
-        sync_start = op->sync_start_;
-        return VisitStmt(op->body_);
-      }
-      return IRMutator::VisitStmt_(op);
+    StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
+      CHECK(!core_num.has_value())  // NOLINT(misc-include-cleaner)
+          << "Only one pl.spmd() block is allowed per cluster scope";
+      core_num = op->core_num_;
+      sync_start = op->sync_start_;
+      return VisitStmt(op->body_);
     }
   };
 

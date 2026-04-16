@@ -68,9 +68,13 @@ static bool ContainsInCoreScope(const StmtPtr& stmt) {
 
   auto kind = stmt->GetKind();
   switch (kind) {
-    case ObjectKind::ScopeStmt: {
+    case ObjectKind::InCoreScopeStmt:
+      return true;
+    case ObjectKind::AutoInCoreScopeStmt:
+    case ObjectKind::ClusterScopeStmt:
+    case ObjectKind::HierarchyScopeStmt:
+    case ObjectKind::SpmdScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
-      if (scope->scope_kind_ == ScopeKind::InCore) return true;
       return ContainsInCoreScope(scope->body_);
     }
     case ObjectKind::SeqStmts: {
@@ -174,7 +178,11 @@ static bool ContainsChunkLoop(const StmtPtr& stmt) {
       }
       return false;
     }
-    case ObjectKind::ScopeStmt: {
+    case ObjectKind::InCoreScopeStmt:
+    case ObjectKind::AutoInCoreScopeStmt:
+    case ObjectKind::ClusterScopeStmt:
+    case ObjectKind::HierarchyScopeStmt:
+    case ObjectKind::SpmdScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
       return ContainsChunkLoop(scope->body_);
     }
@@ -237,7 +245,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   auto seq = std::dynamic_pointer_cast<const SeqStmts>(body);
   if (!seq) {
     if (NeedsInCoreWrapping(body)) {
-      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span, std::nullopt, std::nullopt, split);
+      return std::make_shared<InCoreScopeStmt>(split, "", body, span);
     }
     return maybe_recurse_into_compound(body);
   }
@@ -264,8 +272,7 @@ static StmtPtr WrapNonIncoreStatementsInInCore(const StmtPtr& body, const Span& 
   auto flush = [&]() {
     if (pending.empty()) return;
     StmtPtr content = SeqStmts::Flatten(std::vector<StmtPtr>(pending), span);
-    result.push_back(
-        std::make_shared<ScopeStmt>(ScopeKind::InCore, content, span, std::nullopt, std::nullopt, split));
+    result.push_back(std::make_shared<InCoreScopeStmt>(split, "", content, span));
     pending.clear();
   };
 
@@ -309,21 +316,18 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     return IRMutator::VisitExpr_(op);
   }
 
-  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
-    if (op->scope_kind_ == ScopeKind::AutoInCore) {
-      bool prev = inside_auto_incore_;
-      auto prev_split = current_split_;
-      inside_auto_incore_ = true;
-      current_split_ = op->split_;
-      auto new_body = VisitStmt(op->body_);
-      inside_auto_incore_ = prev;
-      current_split_ = prev_split;
-      // Consume the AutoInCore wrapper — return body directly.
-      // Wrap any statements that lack InCore coverage, propagating split.
-      new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_, op->split_);
-      return new_body;
-    }
-    return IRMutator::VisitStmt_(op);
+  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override {
+    bool prev = inside_auto_incore_;
+    auto prev_split = current_split_;
+    inside_auto_incore_ = true;
+    current_split_ = op->split_;
+    auto new_body = VisitStmt(op->body_);
+    inside_auto_incore_ = prev;
+    current_split_ = prev_split;
+    // Consume the AutoInCore wrapper — return body directly.
+    // Wrap any statements that lack InCore coverage, propagating split.
+    new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_, op->split_);
+    return new_body;
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -559,8 +563,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       bool changed = false;
       for (const auto& s : seq->stmts_) {
         if (should_wrap(s)) {
-          new_stmts.push_back(
-              std::make_shared<ScopeStmt>(ScopeKind::InCore, s, span, std::nullopt, std::nullopt, split));
+          new_stmts.push_back(std::make_shared<InCoreScopeStmt>(split, "", s, span));
           changed = true;
         } else {
           new_stmts.push_back(s);
@@ -572,7 +575,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
     // Single statement
     if (should_wrap(body)) {
-      return std::make_shared<ScopeStmt>(ScopeKind::InCore, body, span, std::nullopt, std::nullopt, split);
+      return std::make_shared<InCoreScopeStmt>(split, "", body, span);
     }
     return body;
   }
@@ -621,8 +624,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
 
     // Wrap in InCore — skip if a parent chain already provides InCore context
     if (!prev_incore) {
-      current = std::make_shared<ScopeStmt>(ScopeKind::InCore, current, span, std::nullopt, std::nullopt,
-                                            current_split_);
+      current = std::make_shared<InCoreScopeStmt>(current_split_, "", current, span);
     }
 
     // Build outers inside-out, preserving the original ForKind.
@@ -774,8 +776,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
             incore_content = SeqStmts::Flatten(std::move(incore_stmts), span);
           }
 
-          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_content, span,
-                                                          std::nullopt, std::nullopt, current_split_);
+          auto incore_scope = std::make_shared<InCoreScopeStmt>(current_split_, "", incore_content, span);
           auto new_body = SeqStmts::Flatten(std::vector<StmtPtr>{incore_scope, last_stmt}, span);
 
           current = std::make_shared<ForStmt>(
@@ -784,8 +785,7 @@ class InterchangeChunkLoopsMutator : public IRMutator {
               std::nullopt, MakeLoopAttrs(outer_for->attrs_, LoopOrigin::ChunkOuter));
         } else {
           // No yield, wrap entire body
-          auto incore_scope = std::make_shared<ScopeStmt>(ScopeKind::InCore, incore_body, span, std::nullopt,
-                                                          std::nullopt, current_split_);
+          auto incore_scope = std::make_shared<InCoreScopeStmt>(current_split_, "", incore_body, span);
           current = std::make_shared<ForStmt>(
               outer_for->loop_var_, outer_for->start_, outer_for->stop_, outer_for->step_,
               outer_for->iter_args_, incore_scope, outer_for->return_vars_, outer_for->span_,
@@ -844,22 +844,18 @@ class NestedInCoreScopeDetector : public IRVisitor {
  public:
   explicit NestedInCoreScopeDetector(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
-  void VisitStmt_(const ScopeStmtPtr& op) override {
+  void VisitStmt_(const InCoreScopeStmtPtr& op) override {
     if (!op) return;
-    if (op->scope_kind_ == ScopeKind::InCore) {
-      if (inside_incore_) {
-        diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoNestedInCore", kNestedIncoreCode,
-                                  "Nested InCore scope detected — InCore scopes must not contain other "
-                                  "InCore scopes",
-                                  op->span_);
-      }
-      bool prev = inside_incore_;
-      inside_incore_ = true;
-      IRVisitor::VisitStmt_(op);
-      inside_incore_ = prev;
-    } else {
-      IRVisitor::VisitStmt_(op);
+    if (inside_incore_) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "NoNestedInCore", kNestedIncoreCode,
+                                "Nested InCore scope detected — InCore scopes must not contain other "
+                                "InCore scopes",
+                                op->span_);
     }
+    bool prev = inside_incore_;
+    inside_incore_ = true;
+    IRVisitor::VisitStmt_(op);
+    inside_incore_ = prev;
   }
 
  private:

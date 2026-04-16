@@ -255,7 +255,11 @@ void CollectDefVars(const StmtPtr& stmt, std::vector<VarPtr>& result) {
       }
       break;
     }
-    case ObjectKind::ScopeStmt: {
+    case ObjectKind::InCoreScopeStmt:
+    case ObjectKind::AutoInCoreScopeStmt:
+    case ObjectKind::ClusterScopeStmt:
+    case ObjectKind::HierarchyScopeStmt:
+    case ObjectKind::SpmdScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
       CollectDefVars(scope->body_, result);
       break;

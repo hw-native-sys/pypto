@@ -429,7 +429,7 @@ def test_scope_is_transparent():
     b = _tensor_var("b", [64])
     call = _op_call("tensor.neg", [a])
     assign = ir.AssignStmt(b, call, _span())
-    scope = ir.ScopeStmt(ir.ScopeKind.InCore, assign, _span())
+    scope = ir.InCoreScopeStmt(body=assign, span=_span())
     func = _simple_function("f", [a], scope)
     code = torch_codegen(func)
     assert "torch.neg(a)" in code

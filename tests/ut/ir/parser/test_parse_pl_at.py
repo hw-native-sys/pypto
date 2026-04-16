@@ -10,20 +10,23 @@
 """Tests for parsing pl.at(level=..., role=...) (Step 04)."""
 
 import warnings
+from typing import TypeVar
 
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
+T = TypeVar("T", bound=ir.ScopeStmt)
 
-def _find_scope_stmt(stmt):
-    """Recursively find first ScopeStmt in an IR tree."""
-    if isinstance(stmt, ir.ScopeStmt):
+
+def _find_scope(stmt, scope_type: type[T]) -> T | None:
+    """Recursively find first scope statement of `scope_type` in an IR tree."""
+    if isinstance(stmt, scope_type):
         return stmt
     if isinstance(stmt, ir.SeqStmts):
         for s in stmt.stmts:
-            r = _find_scope_stmt(s)
+            r = _find_scope(s, scope_type)
             if r is not None:
                 return r
     return None
@@ -41,7 +44,7 @@ def test_parse_pl_at_host_worker():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
     assert scope.level == ir.Level.HOST
@@ -57,7 +60,7 @@ def test_parse_pl_at_global_orchestrator():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
     assert scope.level == ir.Level.GLOBAL
@@ -73,7 +76,7 @@ def test_parse_pl_at_level_only():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
     assert scope.level == ir.Level.CHIP
@@ -89,7 +92,7 @@ def test_parse_pl_at_alias_pod():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert scope is not None
     assert scope.level is not None
     # POD is an alias for CLUSTER_0; nanobind enums compare by underlying value
@@ -109,11 +112,11 @@ def test_parse_pl_at_nested():
                 y = pl.add(x, x)
         return y
 
-    outer = _find_scope_stmt(f.body)
+    outer = _find_scope(f.body, ir.HierarchyScopeStmt)
     assert outer is not None
     assert outer.level == ir.Level.GLOBAL
 
-    inner = _find_scope_stmt(outer.body)
+    inner = _find_scope(outer.body, ir.HierarchyScopeStmt)
     assert inner is not None
     assert inner.level == ir.Level.HOST
     assert inner.role == ir.Role.Worker
@@ -156,11 +159,10 @@ def test_backward_compat_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.level is None
-    assert scope.role is None
+    assert not isinstance(scope, ir.HierarchyScopeStmt)
 
 
 def test_backward_compat_cluster():
@@ -173,10 +175,9 @@ def test_backward_compat_cluster():
                 y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.ClusterScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Cluster
-    assert scope.level is None
 
 
 # ─── Printer round-trip ───────────────────────────────────────────────────
@@ -201,7 +202,7 @@ def test_printer_hierarchy_scope_roundtrip():
 
 
 def test_parse_pl_at_core_group_incore():
-    """pl.at(level=CORE_GROUP) creates ScopeStmt(InCore)."""
+    """pl.at(level=CORE_GROUP) creates InCoreScopeStmt."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -209,11 +210,9 @@ def test_parse_pl_at_core_group_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.level is None
-    assert scope.role is None
 
 
 def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
@@ -226,7 +225,7 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.AutoInCore
     assert scope.split == ir.SplitMode.UP_DOWN
@@ -245,7 +244,7 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.AutoInCore
     assert scope.split == ir.SplitMode.LEFT_RIGHT
@@ -334,7 +333,7 @@ def test_auto_incore_deprecation_warning():
 
 
 def test_parse_pl_incore_with_split():
-    """pl.incore(split=UP_DOWN) creates ScopeStmt(InCore) with split."""
+    """pl.incore(split=UP_DOWN) creates InCoreScopeStmt with split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -342,14 +341,14 @@ def test_parse_pl_incore_with_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_pl_incore_with_split_left_right():
-    """pl.incore(split=LEFT_RIGHT) creates ScopeStmt(InCore) with LEFT_RIGHT split."""
+    """pl.incore(split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -357,14 +356,14 @@ def test_parse_pl_incore_with_split_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.LEFT_RIGHT
 
 
 def test_parse_pl_at_core_group_with_split():
-    """pl.at(level=CORE_GROUP, split=UP_DOWN) creates ScopeStmt(InCore) with split."""
+    """pl.at(level=CORE_GROUP, split=UP_DOWN) creates InCoreScopeStmt with split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -372,14 +371,14 @@ def test_parse_pl_at_core_group_with_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_pl_at_core_group_with_split_left_right():
-    """pl.at(level=CORE_GROUP, split=LEFT_RIGHT) creates ScopeStmt(InCore) with LEFT_RIGHT."""
+    """pl.at(level=CORE_GROUP, split=LEFT_RIGHT) creates InCoreScopeStmt with LEFT_RIGHT."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -387,7 +386,7 @@ def test_parse_pl_at_core_group_with_split_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope_stmt(f.body)
+    scope = _find_scope(f.body, ir.InCoreScopeStmt)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
     assert scope.split == ir.SplitMode.LEFT_RIGHT

@@ -37,37 +37,29 @@ def test_hierarchy_scope_kind_distinct():
     assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
 
 
-# ─── ScopeStmt backward compatibility ────────────────────────────────────────
+# ─── Construction with derived classes (issue #1047) ────────────────────────
 
 
-def test_scope_stmt_backward_compat_3arg():
-    """Existing 3-arg ScopeStmt(InCore, body, span) still works."""
-    s = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span())
+def test_in_core_scope_construction():
+    """InCoreScopeStmt construction works."""
+    s = ir.InCoreScopeStmt(body=_empty_body(), span=_span())
     assert s.scope_kind == ir.ScopeKind.InCore
-    assert s.level is None
-    assert s.role is None
+    assert isinstance(s, ir.ScopeStmt)
 
 
-def test_scope_stmt_backward_compat_cluster():
-    """Existing ScopeStmt(Cluster) still works."""
-    s = ir.ScopeStmt(ir.ScopeKind.Cluster, _empty_body(), _span())
+def test_cluster_scope_construction():
+    """ClusterScopeStmt construction works."""
+    s = ir.ClusterScopeStmt(body=_empty_body(), span=_span())
     assert s.scope_kind == ir.ScopeKind.Cluster
-    assert s.level is None
-    assert s.role is None
+    assert isinstance(s, ir.ScopeStmt)
 
 
-# ─── ScopeStmt with Hierarchy kind ───────────────────────────────────────────
+# ─── HierarchyScopeStmt ─────────────────────────────────────────────────────
 
 
 def test_scope_stmt_hierarchy_with_level_and_role():
-    """ScopeStmt(Hierarchy) carries level and role."""
-    s = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
+    """HierarchyScopeStmt carries level and role."""
+    s = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=_empty_body(), span=_span())
     assert s.scope_kind == ir.ScopeKind.Hierarchy
     assert s.level == ir.Level.HOST
     assert s.role == ir.Role.Worker
@@ -75,39 +67,22 @@ def test_scope_stmt_hierarchy_with_level_and_role():
 
 def test_scope_stmt_hierarchy_orchestrator():
     """Orchestrator role at cluster level."""
-    s = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.POD,
-        role=ir.Role.Orchestrator,
-    )
+    s = ir.HierarchyScopeStmt(level=ir.Level.POD, role=ir.Role.Orchestrator, body=_empty_body(), span=_span())
     assert s.role == ir.Role.Orchestrator
-    # POD and CLUSTER_0 share the same Linqu level
-    assert s.level is not None
     assert ir.level_to_linqu_level(s.level) == 4
 
 
 def test_scope_stmt_hierarchy_level_only():
     """Hierarchy scope with level but no explicit role."""
-    s = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.GLOBAL,
-    )
+    s = ir.HierarchyScopeStmt(level=ir.Level.GLOBAL, body=_empty_body(), span=_span())
     assert s.level == ir.Level.GLOBAL
     assert s.role is None
 
 
 def test_scope_stmt_hierarchy_global():
     """Global coordinator hierarchy scope."""
-    s = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.GLOBAL,
-        role=ir.Role.Orchestrator,
+    s = ir.HierarchyScopeStmt(
+        level=ir.Level.GLOBAL, role=ir.Role.Orchestrator, body=_empty_body(), span=_span()
     )
     assert s.level == ir.Level.GLOBAL
     assert ir.level_to_linqu_level(s.level) == 7
@@ -117,91 +92,41 @@ def test_scope_stmt_hierarchy_global():
 
 
 def test_structural_equal_hierarchy_scope():
-    """structural_equal compares level and role on ScopeStmt."""
-    s1 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
-    s2 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
+    s1 = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=_empty_body(), span=_span())
+    s2 = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=_empty_body(), span=_span())
     ir.assert_structural_equal(s1, s2)
 
 
 def test_structural_equal_different_level():
-    """structural_equal detects different levels."""
-    s1 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
-    s2 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.GLOBAL,
-        role=ir.Role.Worker,
-    )
+    s1 = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=_empty_body(), span=_span())
+    s2 = ir.HierarchyScopeStmt(level=ir.Level.GLOBAL, role=ir.Role.Worker, body=_empty_body(), span=_span())
     with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
 def test_structural_equal_different_role():
-    """structural_equal detects different roles."""
-    s1 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
-    s2 = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Orchestrator,
+    s1 = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=_empty_body(), span=_span())
+    s2 = ir.HierarchyScopeStmt(
+        level=ir.Level.HOST, role=ir.Role.Orchestrator, body=_empty_body(), span=_span()
     )
     with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 
 
-def test_structural_equal_none_vs_set_level():
-    """structural_equal detects None vs set level on ScopeStmt."""
-    s_none = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span())
-    s_set = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        _empty_body(),
-        _span(),
-        level=ir.Level.HOST,
-    )
+def test_structural_equal_different_kinds():
+    """Different scope kinds (InCore vs Hierarchy) compare as unequal."""
+    s_in = ir.InCoreScopeStmt(body=_empty_body(), span=_span())
+    s_hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, body=_empty_body(), span=_span())
     with pytest.raises(Exception):
-        ir.assert_structural_equal(s_none, s_set)
+        ir.assert_structural_equal(s_in, s_hier)
 
 
 # ─── Python printer ──────────────────────────────────────────────────────────
 
 
 def test_printer_hierarchy_scope():
-    """Python printer renders Hierarchy scope as pl.at(...)."""
     body = _empty_body()
-    scope = ir.ScopeStmt(
-        ir.ScopeKind.Hierarchy,
-        body,
-        _span(),
-        level=ir.Level.HOST,
-        role=ir.Role.Worker,
-    )
-    # Wrap in a function to print
+    scope = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker, body=body, span=_span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
     assert "pl.at(" in printed
@@ -210,41 +135,36 @@ def test_printer_hierarchy_scope():
 
 
 def test_printer_incore_scope_unchanged():
-    """Python printer renders InCore scope as pl.at(level=pl.Level.CORE_GROUP)."""
     body = _empty_body()
-    scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, _span())
+    scope = ir.InCoreScopeStmt(body=body, span=_span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
     assert "pl.at(level=pl.Level.CORE_GROUP)" in printed
 
 
 def test_printer_incore_scope_with_split():
-    """Python printer renders InCore scope with split as pl.at(level=..., split=...)."""
     body = _empty_body()
-    scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, _span(), split=ir.SplitMode.UP_DOWN)
+    scope = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=body, span=_span())
     func = ir.Function("test_fn", [], [], scope, _span())
     printed = str(func)
     assert "pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN)" in printed
 
 
 def test_scope_stmt_incore_with_split():
-    """ScopeStmt(InCore) can carry a split mode."""
-    s = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    s = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
     assert s.scope_kind == ir.ScopeKind.InCore
     assert s.split == ir.SplitMode.UP_DOWN
 
 
 def test_structural_equal_incore_with_split():
-    """structural_equal compares split on InCore ScopeStmt."""
-    s1 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
-    s2 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
+    s1 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
+    s2 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
     ir.assert_structural_equal(s1, s2)
 
 
 def test_structural_equal_incore_different_split():
-    """structural_equal detects different split modes."""
-    s1 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.UP_DOWN)
-    s2 = ir.ScopeStmt(ir.ScopeKind.InCore, _empty_body(), _span(), split=ir.SplitMode.LEFT_RIGHT)
+    s1 = ir.InCoreScopeStmt(split=ir.SplitMode.UP_DOWN, body=_empty_body(), span=_span())
+    s2 = ir.InCoreScopeStmt(split=ir.SplitMode.LEFT_RIGHT, body=_empty_body(), span=_span())
     with pytest.raises(ValueError):
         ir.assert_structural_equal(s1, s2)
 

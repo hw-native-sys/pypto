@@ -4,7 +4,7 @@ Outlines InCore scopes into separate functions.
 
 ## Overview
 
-This pass transforms `ScopeStmt(InCore)` nodes into separate `Function(InCore)` definitions and replaces the scope with a Call to the outlined function.
+This pass transforms `InCoreScopeStmt` nodes into separate `Function(InCore)` definitions and replaces the scope with a Call to the outlined function.
 
 **Requirements**:
 
@@ -36,14 +36,14 @@ program_outlined = outline_pass(program)
 
 ## Algorithm
 
-1. **Scan for InCore Scopes**: Find all `ScopeStmt(scope_type=InCore)` in Opaque functions
+1. **Scan for InCore Scopes**: Find all `InCoreScopeStmt` nodes in Opaque functions
 2. **Analyze Inputs**: Determine external variable references (variables defined outside scope, used inside)
 3. **Analyze Outputs**: Determine internal definitions used after scope (variables defined inside, used outside)
 4. **Create Function**: Extract scope body into new `Function(scope_type=InCore)` with:
    - Parameters = input variables
    - Returns = output variables
    - Body = scope body
-5. **Replace Scope**: Replace `ScopeStmt` with:
+5. **Replace Scope**: Replace `InCoreScopeStmt` with:
    - Call to outlined function with input arguments
    - AssignStmt for each output variable
 6. **Add to Program**: Add outlined function to program's function list
@@ -51,7 +51,7 @@ program_outlined = outline_pass(program)
 **Naming**:
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)
-- User-provided: when `ScopeStmt.name_hint` is non-empty, that name is used directly
+- User-provided: when `InCoreScopeStmt.name_hint` is non-empty, that name is used directly
   - `with pl.at(level=pl.Level.CORE_GROUP, name_hint="fused_add"):` → function named `fused_add`
 
 ## Example
@@ -145,7 +145,7 @@ Pass OutlineIncoreScopes();
 
 - Uses SSA analysis to determine inputs/outputs
 - Creates new Function nodes with InCore scope type
-- Replaces ScopeStmt with Call + AssignStmt
+- Replaces InCoreScopeStmt with Call + AssignStmt
 - Manages function naming and counters
 
 **Python binding**: `python/bindings/modules/passes.cpp`

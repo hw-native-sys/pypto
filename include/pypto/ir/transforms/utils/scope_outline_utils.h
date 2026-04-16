@@ -244,7 +244,7 @@ class ScopeOutliner : public IRMutator {
 
     for (size_t i = 0; i < op->stmts_.size(); ++i) {
       auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
-      if (scope && scope->scope_kind_ == target_scope_kind_) {
+      if (scope && scope->GetScopeKind() == target_scope_kind_) {
         // Collect variables referenced in all subsequent statements
         VarDefUseCollector after_ref_collector;
         for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
@@ -294,21 +294,25 @@ class ScopeOutliner : public IRMutator {
    *
    * When a scope appears outside a SeqStmts, all defined variables are outputs.
    */
-  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
-    if (op->scope_kind_ != target_scope_kind_) {
+  // Shared per-kind logic: outline if kind matches, else fall through to base default.
+  template <typename ScopeT>
+  StmtPtr VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
+    if (op->GetScopeKind() != target_scope_kind_) {
       return IRMutator::VisitStmt_(op);
     }
-
-    // Without context, treat all defined variables + store targets as outputs
     VarDefUseCollector def_collector;
     def_collector.VisitStmt(op->body_);
-
     StoreTargetCollector store_collector;
     store_collector.VisitStmt(op->body_);
     def_collector.var_defs.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
-
     return OutlineScope(op, def_collector.var_defs);
   }
+
+  StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
+  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
+  StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return VisitScopeKind(op); }
+  StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override { return VisitScopeKind(op); }
+  StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return VisitScopeKind(op); }
 
  private:
   /**
@@ -325,9 +329,10 @@ class ScopeOutliner : public IRMutator {
       outlined_func_name = op->name_hint_;
       scope_counter_++;  // Keep counter stable for unnamed scopes
     } else {
-      std::string suffix = (op->scope_kind_ == ScopeKind::Hierarchy && op->level_.has_value())
-                               ? GenerateHierarchySuffix(op->level_.value(), op->role_)
-                               : name_suffix_;
+      std::string suffix = name_suffix_;
+      if (auto hier = As<HierarchyScopeStmt>(op)) {
+        suffix = GenerateHierarchySuffix(hier->level_, hier->role_);
+      }
       std::ostringstream name_stream;
       name_stream << func_name_ << suffix << scope_counter_++;
       outlined_func_name = name_stream.str();
@@ -537,18 +542,30 @@ class ScopeOutliner : public IRMutator {
 
     // Register the outlined function (propagate level/role from ScopeStmt, convert split/core_num to attrs)
     std::vector<std::pair<std::string, std::any>> outlined_attrs;
-    if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-      outlined_attrs.emplace_back("split", static_cast<int>(op->split_.value()));
+    auto append_split_attr = [&](std::optional<SplitMode> split) {
+      if (split.has_value() && split.value() != SplitMode::None) {
+        outlined_attrs.emplace_back("split", static_cast<int>(split.value()));
+      }
+    };
+    if (auto incore = As<InCoreScopeStmt>(op)) {
+      append_split_attr(incore->split_);
+    } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
+      append_split_attr(auto_incore->split_);
+    } else if (auto spmd = As<SpmdScopeStmt>(op)) {
+      outlined_attrs.emplace_back("core_num", spmd->core_num_);
+      if (spmd->sync_start_) {
+        outlined_attrs.emplace_back("sync_start", true);
+      }
     }
-    if (op->core_num_.has_value()) {
-      outlined_attrs.emplace_back("core_num", *op->core_num_);
-    }
-    if (op->sync_start_.has_value() && *op->sync_start_) {
-      outlined_attrs.emplace_back("sync_start", true);
+    std::optional<Level> outlined_level;
+    std::optional<Role> outlined_role;
+    if (auto hier = As<HierarchyScopeStmt>(op)) {
+      outlined_level = hier->level_;
+      outlined_role = hier->role_;
     }
     auto outlined_func = std::make_shared<Function>(
         outlined_func_name, input_params, input_param_directions, return_types, outlined_body, op->span_,
-        outlined_func_type_, op->level_, op->role_, std::move(outlined_attrs));
+        outlined_func_type_, outlined_level, outlined_role, std::move(outlined_attrs));
     outlined_functions_.push_back(outlined_func);
 
     // Build the call site in the parent function
@@ -798,13 +815,20 @@ class ScopeKindAbsenceVerifier : public IRVisitor {
   ScopeKindAbsenceVerifier(std::vector<Diagnostic>& diagnostics, std::string pass_name, std::string message)
       : diagnostics_(diagnostics), pass_name_(std::move(pass_name)), message_(std::move(message)) {}
 
-  void VisitStmt_(const ScopeStmtPtr& op) override {
+  template <typename ScopeT>
+  void CheckKind(const std::shared_ptr<const ScopeT>& op) {
     if (!op) return;
-    if (op->scope_kind_ == Kind) {
+    if (op->GetScopeKind() == Kind) {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, pass_name_, 0, message_, op->span_);
     }
     IRVisitor::VisitStmt_(op);
   }
+
+  void VisitStmt_(const InCoreScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const ClusterScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const HierarchyScopeStmtPtr& op) override { CheckKind(op); }
+  void VisitStmt_(const SpmdScopeStmtPtr& op) override { CheckKind(op); }
 
  private:
   std::vector<Diagnostic>& diagnostics_;

@@ -268,13 +268,30 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // ScopeStmt: recurse into body
+    // ScopeStmt: recurse into body — dispatch on the concrete derived class
+    // since ScopeStmt is abstract and MutableCopy needs a concrete type.
     if (auto scope = As<ScopeStmt>(stmt)) {
       auto body_stmts = FlattenToStmts(scope->body_);
       auto inner = TransformBody(body_stmts, ctx, op_registry, span);
-      auto new_scope = MutableCopy(scope);
-      new_scope->body_ = SeqStmts::Flatten(std::move(inner), scope->body_->span_);
-      result.push_back(new_scope);
+      auto new_body = SeqStmts::Flatten(std::move(inner), scope->body_->span_);
+      auto rewrite = [&](auto&& concrete) -> StmtPtr {
+        auto new_scope = MutableCopy(concrete);
+        new_scope->body_ = new_body;
+        return new_scope;
+      };
+      if (auto in_core = As<InCoreScopeStmt>(stmt)) {
+        result.push_back(rewrite(in_core));
+      } else if (auto auto_in_core = As<AutoInCoreScopeStmt>(stmt)) {
+        result.push_back(rewrite(auto_in_core));
+      } else if (auto cluster = As<ClusterScopeStmt>(stmt)) {
+        result.push_back(rewrite(cluster));
+      } else if (auto hier = As<HierarchyScopeStmt>(stmt)) {
+        result.push_back(rewrite(hier));
+      } else if (auto spmd = As<SpmdScopeStmt>(stmt)) {
+        result.push_back(rewrite(spmd));
+      } else {
+        INTERNAL_UNREACHABLE_SPAN(scope->span_) << "Unknown ScopeStmt subclass: " << scope->TypeName();
+      }
       continue;
     }
 

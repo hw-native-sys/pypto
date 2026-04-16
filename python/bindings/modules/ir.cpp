@@ -941,16 +941,53 @@ void BindIR(nb::module_& m) {
       .value("LEFT_RIGHT", SplitMode::LeftRight, "Split horizontally (width halved)")
       .export_values();
 
-  // ScopeStmt - const shared_ptr
+  // ScopeStmt - abstract base class for all scope statements (issue #1047).
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(
-      ir, "ScopeStmt", "Scope statement: marks a region with specific execution context");
-  scope_stmt_class.def(
-      nb::init<ScopeKind, const StmtPtr&, const Span&, std::optional<Level>, std::optional<Role>,
-               std::optional<SplitMode>, std::string, std::optional<int>, std::optional<bool>>(),
-      nb::arg("scope_kind"), nb::arg("body"), nb::arg("span"), nb::arg("level") = nb::none(),
-      nb::arg("role") = nb::none(), nb::arg("split") = nb::none(), nb::arg("name_hint") = "",
-      nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(), "Create a scope statement");
-  BindFields<ScopeStmt>(scope_stmt_class);
+      ir, "ScopeStmt", "Scope statement: marks a region with specific execution context (abstract base)");
+  scope_stmt_class.def_prop_ro("scope_kind", &ScopeStmt::GetScopeKind, "Discriminator for the scope kind");
+  BindFields<ScopeStmt>(scope_stmt_class);  // exposes name_hint, body
+
+  // InCoreScopeStmt
+  auto in_core_scope_stmt_class =
+      nb::class_<InCoreScopeStmt, ScopeStmt>(ir, "InCoreScopeStmt", "InCore scope: AICore sub-graph region");
+  in_core_scope_stmt_class.def(nb::init<std::optional<SplitMode>, std::string, const StmtPtr&, const Span&>(),
+                               nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"),
+                               nb::arg("span"), "Create an InCore scope statement");
+  BindFields<InCoreScopeStmt>(in_core_scope_stmt_class);
+
+  // AutoInCoreScopeStmt
+  auto auto_in_core_scope_stmt_class = nb::class_<AutoInCoreScopeStmt, ScopeStmt>(
+      ir, "AutoInCoreScopeStmt", "AutoInCore scope: InCore region with automatic chunking");
+  auto_in_core_scope_stmt_class.def(
+      nb::init<std::optional<SplitMode>, std::string, const StmtPtr&, const Span&>(),
+      nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
+      "Create an AutoInCore scope statement");
+  BindFields<AutoInCoreScopeStmt>(auto_in_core_scope_stmt_class);
+
+  // ClusterScopeStmt
+  auto cluster_scope_stmt_class = nb::class_<ClusterScopeStmt, ScopeStmt>(
+      ir, "ClusterScopeStmt", "Cluster scope: co-scheduled AIC + AIV group");
+  cluster_scope_stmt_class.def(nb::init<std::string, const StmtPtr&, const Span&>(),
+                               nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
+                               "Create a Cluster scope statement");
+  BindFields<ClusterScopeStmt>(cluster_scope_stmt_class);
+
+  // HierarchyScopeStmt
+  auto hierarchy_scope_stmt_class = nb::class_<HierarchyScopeStmt, ScopeStmt>(
+      ir, "HierarchyScopeStmt", "Hierarchy scope: distributed-hierarchy region");
+  hierarchy_scope_stmt_class.def(
+      nb::init<Level, std::optional<Role>, std::string, const StmtPtr&, const Span&>(), nb::arg("level"),
+      nb::arg("role") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
+      "Create a Hierarchy scope statement");
+  BindFields<HierarchyScopeStmt>(hierarchy_scope_stmt_class);
+
+  // SpmdScopeStmt
+  auto spmd_scope_stmt_class =
+      nb::class_<SpmdScopeStmt, ScopeStmt>(ir, "SpmdScopeStmt", "SPMD dispatch scope");
+  spmd_scope_stmt_class.def(nb::init<int, bool, std::string, const StmtPtr&, const Span&>(),
+                            nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "",
+                            nb::arg("body"), nb::arg("span"), "Create an SPMD scope statement");
+  BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);
 
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =

@@ -89,7 +89,12 @@ enum class ObjectKind {
   ReturnStmt,
   ForStmt,
   WhileStmt,
-  ScopeStmt,
+  // Scope statement kinds (split from former ScopeStmt — see issue #1047)
+  InCoreScopeStmt,
+  AutoInCoreScopeStmt,
+  ClusterScopeStmt,
+  HierarchyScopeStmt,
+  SpmdScopeStmt,
   SeqStmts,
   EvalStmt,
   BreakStmt,

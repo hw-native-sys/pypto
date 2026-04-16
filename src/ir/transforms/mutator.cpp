@@ -589,10 +589,58 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   return op;
 }
 
-StmtPtr IRMutator::VisitStmt_(const ScopeStmtPtr& op) {
-  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ScopeStmt has null body";
+StmtPtr IRMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "InCoreScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
-  INTERNAL_CHECK_SPAN(new_body, op->span_) << "ScopeStmt body mutated to null";
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "InCoreScopeStmt body mutated to null";
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "AutoInCoreScopeStmt body mutated to null";
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "ClusterScopeStmt body mutated to null";
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "HierarchyScopeStmt body mutated to null";
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "SpmdScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "SpmdScopeStmt body mutated to null";
   if (new_body.get() != op->body_.get()) {
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);

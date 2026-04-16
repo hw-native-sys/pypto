@@ -153,7 +153,11 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | Conditional branching |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | For loop with optional iteration args |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | While loop with condition and iteration args |
-| **ScopeStmt** | `scope_kind_`, `body_` | Marks a region with specific execution context (e.g., InCore) |
+| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | InCore region; outlined to `Function(InCore)` |
+| **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | Auto-InCore region; consumed by `InterchangeChunkLoops` |
+| **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
+| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
+| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -247,20 +251,48 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 
 ### ScopeStmt Details
 
-Marks a region with specific execution context (e.g., InCore for AICore sub-graphs).
+`ScopeStmt` is an **abstract base class** that marks a region with a specific
+execution context. The five concrete subclasses below each carry only the
+fields valid for their kind — invalid combinations are unrepresentable at
+construction. Use `s.scope_kind` (or `s.GetScopeKind()` in C++) to recover the
+kind from a `ScopeStmt`-typed reference, or `isinstance(s, InCoreScopeStmt)`
+to dispatch on the concrete type.
+
+All five share the common base fields `name_hint_: str` and `body_: StmtPtr`.
 
 ```python
 # with pl.incore(): y = pl.add(x, x)
-scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.auto_incore():       (split is optional)
+auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.cluster():
+cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.at(level=Level.CORE_GROUP, role=Role.AIC):
+hier = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, role=ir.Role.AIC,
+                             name_hint="", body=body, span=span)
+
+# with pl.spmd(core_num=8):
+spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
+                        name_hint="", body=body, span=span)
 ```
 
 **Properties:**
 
-- `scope_kind_`: Execution context (`ScopeKind.InCore`)
-- `body_`: Nested statements
-- Transparent to SSA (no iter_args/return_vars)
-- Not control flow (executes once, linearly)
-- `OutlineIncoreScopes` pass extracts into `Function(InCore)`
+- All scope statements are transparent to SSA (no iter_args/return_vars) and
+  are not control flow (execute once, linearly).
+- Required fields are enforced at construction: `HierarchyScopeStmt.level_`
+  is non-optional; `SpmdScopeStmt` rejects `core_num <= 0`.
+- `InCoreScopeStmt` / `AutoInCoreScopeStmt` are scheduled for deprecation;
+  prefer `HierarchyScopeStmt` or other surviving kinds in new code.
+- Pass behavior:
+  - `InterchangeChunkLoops` consumes `AutoInCoreScopeStmt`
+  - `OutlineIncoreScopes` extracts `InCoreScopeStmt` into `Function(InCore)`
+  - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
+    and standalone `SpmdScopeStmt` into `Function(Spmd)`
+  - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
 
 **Transformation:**
 
@@ -408,7 +440,7 @@ Functions stored in sorted map for deterministic ordering. GlobalVar names must 
 | **Unary Ops** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **Call/Access** | 2 | Call, TupleGetItemExpr |
 | **Operations** | 2 | Op, GlobalVar |
-| **Statements** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **Statements** | 15 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, AutoInCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **Types** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **Functions** | 2 | Function, Program |
 

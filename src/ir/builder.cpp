@@ -326,8 +326,30 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
 
   // Create scope statement before popping context so that if construction throws
   // (e.g. validation CHECK fails) the builder state stays consistent.
-  auto scope_stmt = std::make_shared<ScopeStmt>(scope_kind, body, combined_span, level, role, split,
-                                                std::move(name_hint), core_num, sync_start);
+  // Dispatch on scope_kind to the matching derived class (issue #1047).
+  ScopeStmtPtr scope_stmt;
+  switch (scope_kind) {
+    case ScopeKind::InCore:
+      scope_stmt = std::make_shared<const InCoreScopeStmt>(split, std::move(name_hint), body, combined_span);
+      break;
+    case ScopeKind::AutoInCore:
+      scope_stmt =
+          std::make_shared<const AutoInCoreScopeStmt>(split, std::move(name_hint), body, combined_span);
+      break;
+    case ScopeKind::Cluster:
+      scope_stmt = std::make_shared<const ClusterScopeStmt>(std::move(name_hint), body, combined_span);
+      break;
+    case ScopeKind::Hierarchy:
+      CHECK(level.has_value()) << "Hierarchy scope requires a level";
+      scope_stmt =
+          std::make_shared<const HierarchyScopeStmt>(*level, role, std::move(name_hint), body, combined_span);
+      break;
+    case ScopeKind::Spmd:
+      CHECK(core_num.has_value()) << "Spmd scope requires core_num";
+      scope_stmt = std::make_shared<const SpmdScopeStmt>(*core_num, sync_start.value_or(false),
+                                                         std::move(name_hint), body, combined_span);
+      break;
+  }
   context_stack_.pop_back();
 
   // Emit to parent context if it exists

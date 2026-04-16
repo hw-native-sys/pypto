@@ -88,7 +88,11 @@ DEFINE_KIND_TRAIT(YieldStmt, ObjectKind::YieldStmt)
 DEFINE_KIND_TRAIT(ReturnStmt, ObjectKind::ReturnStmt)
 DEFINE_KIND_TRAIT(ForStmt, ObjectKind::ForStmt)
 DEFINE_KIND_TRAIT(WhileStmt, ObjectKind::WhileStmt)
-DEFINE_KIND_TRAIT(ScopeStmt, ObjectKind::ScopeStmt)
+DEFINE_KIND_TRAIT(InCoreScopeStmt, ObjectKind::InCoreScopeStmt)
+DEFINE_KIND_TRAIT(AutoInCoreScopeStmt, ObjectKind::AutoInCoreScopeStmt)
+DEFINE_KIND_TRAIT(ClusterScopeStmt, ObjectKind::ClusterScopeStmt)
+DEFINE_KIND_TRAIT(HierarchyScopeStmt, ObjectKind::HierarchyScopeStmt)
+DEFINE_KIND_TRAIT(SpmdScopeStmt, ObjectKind::SpmdScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
 DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
@@ -120,11 +124,24 @@ DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 // Stmt base class - matches any statement kind
 template <>
 struct KindTrait<Stmt> {
-  static constexpr ObjectKind kinds[] = {
-      ObjectKind::AssignStmt, ObjectKind::IfStmt,    ObjectKind::YieldStmt,   ObjectKind::ReturnStmt,
-      ObjectKind::ForStmt,    ObjectKind::WhileStmt, ObjectKind::ScopeStmt,   ObjectKind::SeqStmts,
-      ObjectKind::EvalStmt,   ObjectKind::BreakStmt, ObjectKind::ContinueStmt};
-  static constexpr size_t count = 11;
+  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt,       ObjectKind::IfStmt,
+                                         ObjectKind::YieldStmt,        ObjectKind::ReturnStmt,
+                                         ObjectKind::ForStmt,          ObjectKind::WhileStmt,
+                                         ObjectKind::InCoreScopeStmt,  ObjectKind::AutoInCoreScopeStmt,
+                                         ObjectKind::ClusterScopeStmt, ObjectKind::HierarchyScopeStmt,
+                                         ObjectKind::SpmdScopeStmt,    ObjectKind::SeqStmts,
+                                         ObjectKind::EvalStmt,         ObjectKind::BreakStmt,
+                                         ObjectKind::ContinueStmt};
+  static constexpr size_t count = 15;
+};
+
+// ScopeStmt base class - matches any scope kind (5 derived classes)
+template <>
+struct KindTrait<ScopeStmt> {
+  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt, ObjectKind::AutoInCoreScopeStmt,
+                                         ObjectKind::ClusterScopeStmt, ObjectKind::HierarchyScopeStmt,
+                                         ObjectKind::SpmdScopeStmt};
+  static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
 // Expr base class - matches any expression kind

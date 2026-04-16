@@ -152,7 +152,11 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **IfStmt** | `condition_`, `then_stmts_`, `else_stmts_`, `return_vars_` | 条件分支 |
 | **ForStmt** | `loop_var_` (DefField), `start_`, `stop_`, `step_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField), `kind_` | 带可选迭代参数的 for 循环 |
 | **WhileStmt** | `condition_`, `iter_args_` (DefField), `body_`, `return_vars_` (DefField) | 带条件和迭代参数的 while 循环 |
-| **ScopeStmt** | `scope_kind_`, `body_` | 标记具有特定执行上下文的区域（如 InCore） |
+| **InCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | InCore 区域；由 `OutlineIncoreScopes` 提取为 `Function(InCore)` |
+| **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | Auto-InCore 区域；由 `InterchangeChunkLoops` 消费 |
+| **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
+| **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
+| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
@@ -216,20 +220,46 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 
 ### ScopeStmt 详细说明
 
-标记具有特定执行上下文的区域（如用于 AICore 子图的 InCore）。
+`ScopeStmt` 是一个**抽象基类**，用于标记具有特定执行上下文的区域。下列五个具体子类
+各自只携带其类型有效的字段——非法组合在构造时即不可表达。在 `ScopeStmt` 类型的引用上，
+可使用 `s.scope_kind`（C++ 中为 `s.GetScopeKind()`）来取回类型，或使用
+`isinstance(s, InCoreScopeStmt)` 在具体类型上分派。
+
+五个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。
 
 ```python
 # with pl.incore(): y = pl.add(x, x)
-scope_stmt = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+in_core = ir.InCoreScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.auto_incore():       (split 可选)
+auto = ir.AutoInCoreScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.cluster():
+cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
+
+# with pl.at(level=Level.CORE_GROUP, role=Role.AIC):
+hier = ir.HierarchyScopeStmt(level=ir.Level.CORE_GROUP, role=ir.Role.AIC,
+                             name_hint="", body=body, span=span)
+
+# with pl.spmd(core_num=8):
+spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
+                        name_hint="", body=body, span=span)
 ```
 
 **属性：**
 
-- `scope_kind_`：执行上下文（`ScopeKind.InCore`）
-- `body_`：嵌套语句
-- 对 SSA 透明（无 iter_args/return_vars）
-- 不是控制流（执行一次，线性执行）
-- `OutlineIncoreScopes` Pass 将其提取为 `Function(InCore)`
+- 所有作用域语句对 SSA 透明（无 iter_args/return_vars），且不是控制流
+  （执行一次，线性执行）。
+- 必填字段在构造时强制校验：`HierarchyScopeStmt.level_` 不可为空；
+  `SpmdScopeStmt` 拒绝 `core_num <= 0`。
+- `InCoreScopeStmt` / `AutoInCoreScopeStmt` 已计划弃用；新代码应优先使用
+  `HierarchyScopeStmt` 或其它将保留的子类。
+- Pass 行为：
+  - `InterchangeChunkLoops` 消费 `AutoInCoreScopeStmt`
+  - `OutlineIncoreScopes` 将 `InCoreScopeStmt` 提取为 `Function(InCore)`
+  - `OutlineClusterScopes` 将 `ClusterScopeStmt` 提取为 `Function(Group)`，
+    将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`
+  - `OutlineHierarchyScopes` 提取 `HierarchyScopeStmt`
 
 **变换示例：**
 
@@ -377,7 +407,7 @@ add_func = program.get_function("add")  # Access by name
 | **一元运算** | 5 | Abs, Neg, Not, BitNot, Cast |
 | **调用/访问** | 2 | Call, TupleGetItemExpr |
 | **操作** | 2 | Op, GlobalVar |
-| **语句** | 11 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, ScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
+| **语句** | 15 | AssignStmt, IfStmt, ForStmt, WhileStmt, ReturnStmt, InCoreScopeStmt, AutoInCoreScopeStmt, ClusterScopeStmt, HierarchyScopeStmt, SpmdScopeStmt, YieldStmt, EvalStmt, SeqStmts, BreakStmt, ContinueStmt |
 | **类型** | 6 | ScalarType, TensorType, TileType, TupleType, PipeType, UnknownType |
 | **函数** | 2 | Function, Program |
 

@@ -176,7 +176,11 @@ static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::st
       }
       break;
     }
-    case ObjectKind::ScopeStmt: {
+    case ObjectKind::InCoreScopeStmt:
+    case ObjectKind::AutoInCoreScopeStmt:
+    case ObjectKind::ClusterScopeStmt:
+    case ObjectKind::HierarchyScopeStmt:
+    case ObjectKind::SpmdScopeStmt: {
       auto scope = std::static_pointer_cast<const ScopeStmt>(stmt);
       CollectDeclaredNames(scope->body_, result);
       break;
@@ -234,20 +238,17 @@ class ChunkedLoopSplitter : public IRMutator {
     CollectDeclaredNames(func->body_, function_used_names_);
   }
 
-  StmtPtr VisitStmt_(const ScopeStmtPtr& op) override {
-    if (op->scope_kind_ == ScopeKind::AutoInCore) {
-      bool prev = inside_auto_incore_;
-      inside_auto_incore_ = true;
-      auto new_body = VisitStmt(op->body_);
-      inside_auto_incore_ = prev;
-      if (new_body.get() == op->body_.get()) {
-        return op;
-      }
-      auto new_scope = MutableCopy(op);
-      new_scope->body_ = std::move(new_body);
-      return new_scope;
+  StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override {
+    bool prev = inside_auto_incore_;
+    inside_auto_incore_ = true;
+    auto new_body = VisitStmt(op->body_);
+    inside_auto_incore_ = prev;
+    if (new_body.get() == op->body_.get()) {
+      return op;
     }
-    return IRMutator::VisitStmt_(op);
+    auto new_scope = MutableCopy(op);
+    new_scope->body_ = std::move(new_body);
+    return new_scope;
   }
 
   ExprPtr VisitExpr_(const VarPtr& op) override {

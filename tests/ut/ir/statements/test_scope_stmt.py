@@ -12,39 +12,37 @@
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
+from pypto.pypto_core.ir import Level, Role
 
 
 class TestScopeStmt:
     """Test ScopeStmt construction, fields, and operations."""
 
     def test_scope_stmt_construction(self):
-        """Test basic ScopeStmt construction."""
+        """Test basic InCoreScopeStmt construction."""
         span = ir.Span("test.py", 1, 1, 1, 10)
         var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
 
-        # Create a simple assignment as body
         body = ir.AssignStmt(var_y, var_x, span)
-
-        # Create ScopeStmt
-        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+        scope = ir.InCoreScopeStmt(body=body, span=span)
 
         assert scope.scope_kind == ir.ScopeKind.InCore
+        assert isinstance(scope, ir.ScopeStmt)
         assert isinstance(scope.body, ir.AssignStmt)
 
     def test_scope_stmt_structural_equality(self):
-        """Test structural equality for ScopeStmt."""
+        """Test structural equality for InCoreScopeStmt."""
         span = ir.Span("test.py", 1, 1, 1, 10)
         var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
 
         body1 = ir.AssignStmt(var_y, var_x, span)
-        scope1 = ir.ScopeStmt(ir.ScopeKind.InCore, body1, span)
+        scope1 = ir.InCoreScopeStmt(body=body1, span=span)
 
         body2 = ir.AssignStmt(var_y, var_x, span)
-        scope2 = ir.ScopeStmt(ir.ScopeKind.InCore, body2, span)
+        scope2 = ir.InCoreScopeStmt(body=body2, span=span)
 
-        # Should be structurally equal
         assert ir.structural_equal(scope1, scope2)
 
     def test_scope_stmt_printing(self):
@@ -58,18 +56,17 @@ class TestScopeStmt:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        # Print and verify it contains "with pl.at(level=pl.Level.CORE_GROUP):"
         printed = TestProgram.as_python()
         assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
 
     def test_scope_stmt_with_name(self):
-        """Test ScopeStmt construction with a user-provided name."""
+        """Test InCoreScopeStmt construction with a user-provided name."""
         span = ir.Span("test.py", 1, 1, 1, 10)
         var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
         body = ir.AssignStmt(var_y, var_x, span)
 
-        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span, name_hint="my_kernel")
+        scope = ir.InCoreScopeStmt(name_hint="my_kernel", body=body, span=span)
         assert scope.name_hint == "my_kernel"
         assert scope.scope_kind == ir.ScopeKind.InCore
 
@@ -80,8 +77,30 @@ class TestScopeStmt:
         var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
         body = ir.AssignStmt(var_y, var_x, span)
 
-        scope = ir.ScopeStmt(ir.ScopeKind.InCore, body, span)
+        scope = ir.InCoreScopeStmt(body=body, span=span)
         assert scope.name_hint == ""
+
+    def test_spmd_scope_requires_positive_core_num(self):
+        """SpmdScopeStmt enforces core_num > 0 at construction (compile-time guarantee for type)."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
+        var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
+        body = ir.AssignStmt(var_y, var_x, span)
+
+        with pytest.raises(Exception):
+            ir.SpmdScopeStmt(core_num=0, body=body, span=span)
+
+    def test_hierarchy_scope_typed_fields(self):
+        """HierarchyScopeStmt exposes level (required) and role (optional)."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
+        var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
+        body = ir.AssignStmt(var_y, var_x, span)
+
+        scope = ir.HierarchyScopeStmt(level=Level.HOST, role=Role.Worker, body=body, span=span)
+        assert scope.level == Level.HOST
+        assert scope.role == Role.Worker
+        assert scope.scope_kind == ir.ScopeKind.Hierarchy
 
 
 if __name__ == "__main__":

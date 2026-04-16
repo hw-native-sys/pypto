@@ -10,7 +10,7 @@ After `SplitChunkedLoops` splits chunked loops into nested `ChunkOuter→ChunkIn
 i_out[ChunkOuter] → i_in[ChunkInner,Parallel] → j_out[ChunkOuter] → j_in[ChunkInner,Parallel] → body
 ```
 
-This pass reorders so all outer loops are on top and wraps the inner loops + body in `ScopeStmt(InCore)`:
+This pass reorders so all outer loops are on top and wraps the inner loops + body in `InCoreScopeStmt`:
 
 ```text
 i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[ChunkInner] → body }
@@ -41,8 +41,8 @@ result = passes.interchange_chunk_loops()(program)
 | SSA-only | Runs after `SplitChunkedLoops` (requires `SSAForm`) |
 | Parallel-only interchange | Only interchanges when ALL ChunkInner loops have `ForKind::Parallel` |
 | Sequential chunked loops | Not interchanged, but wrapped in InCore if inside `auto_incore` |
-| Existing InCore | If chain body already contains `ScopeStmt(InCore)`, skip |
-| Requires `auto_incore` scope | Only loops inside `ScopeStmt(AutoInCore)` are processed; the scope is consumed |
+| Existing InCore | If chain body already contains `InCoreScopeStmt`, skip |
+| Requires `auto_incore` scope | Only loops inside `AutoInCoreScopeStmt` are processed; the scope is consumed |
 
 ## Algorithm
 
@@ -55,7 +55,7 @@ result = passes.interchange_chunk_loops()(program)
 4. **Reconstruct** (inside-out build):
    - Visit the innermost body
    - Wrap inners around body (preserving order), reconnecting iter_args
-   - Wrap in `ScopeStmt(ScopeKind::InCore)`
+   - Wrap in `InCoreScopeStmt`
    - Wrap outers around InCore (preserving order), reconnecting iter_args and yields
 
 5. **Handle remainders** — `ChunkRemainder` loops: recurse into body. Wrap standalone parallel remainder sub-loops in InCore.
@@ -143,9 +143,9 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 
 ## Non-Chunk Statement Handling
 
-When `auto_incore` is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `ScopeStmt(InCore)` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
+When `auto_incore` is consumed, statements that were not handled by chunk interchange (standalone tensor ops, non-chunked loops, sequential chunked loops that failed the parallel guard) are wrapped in `InCoreScopeStmt` to ensure they get outlined into InCore functions by `OutlineIncoreScopes`.
 
-Consecutive non-InCore statements are grouped into a single `ScopeStmt(InCore)`. Control flow statements (`YieldStmt`, `ReturnStmt`) and pure scalar assignments (e.g., index arithmetic like `offset = ob * 32`) are never wrapped — they stay in the orchestration scope.
+Consecutive non-InCore statements are grouped into a single `InCoreScopeStmt`. Control flow statements (`YieldStmt`, `ReturnStmt`) and pure scalar assignments (e.g., index arithmetic like `offset = ob * 32`) are never wrapped — they stay in the orchestration scope.
 
 **Example** — standalone op + parallel chunk:
 

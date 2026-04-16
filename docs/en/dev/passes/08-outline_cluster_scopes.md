@@ -4,7 +4,7 @@ Outlines Cluster scopes into Group functions and standalone Spmd scopes into Spm
 
 ## Overview
 
-This pass transforms `ScopeStmt(Cluster)` nodes into separate `Function(Group)` definitions and replaces the scope with a Call to the outlined function. It also transforms standalone `ScopeStmt(Spmd)` nodes, those not nested inside a Cluster, into `Function(Spmd)` definitions. Group functions represent co-scheduled AIC (Cube) + AIV (Vector) kernel groups that share the same physical cluster resources, while Spmd functions preserve standalone launch semantics such as `core_num` and `sync_start`.
+This pass transforms `ClusterScopeStmt` nodes into separate `Function(Group)` definitions and replaces the scope with a Call to the outlined function. It also transforms standalone `SpmdScopeStmt` nodes, those not nested inside a Cluster, into `Function(Spmd)` definitions. Group functions represent co-scheduled AIC (Cube) + AIV (Vector) kernel groups that share the same physical cluster resources, while Spmd functions preserve standalone launch semantics such as `core_num` and `sync_start`.
 
 **Requirements**:
 
@@ -30,9 +30,9 @@ program_outlined = outline_pass(program)
 
 ## Algorithm
 
-1. **Scan for Cluster Scopes**: Find all `ScopeStmt(scope_kind=Cluster)` in Opaque/Orchestration functions
+1. **Scan for Cluster Scopes**: Find all `ClusterScopeStmt` nodes in Opaque/Orchestration functions
 2. **Outline Cluster Scopes**: Extract each Cluster body into `Function(func_type=Group)`
-3. **Scan for Standalone Spmd Scopes**: On the transformed body, find `ScopeStmt(scope_kind=Spmd)` that are not nested inside a Cluster
+3. **Scan for Standalone Spmd Scopes**: On the transformed body, find `SpmdScopeStmt` nodes that are not nested inside a Cluster
 4. **Outline Standalone Spmd Scopes**: Extract each standalone Spmd body into `Function(func_type=Spmd)` and copy `core_num` / `sync_start` into function attrs
 5. **Unwrap Nested Spmd in Group**: For `pl.cluster(): with pl.spmd(...): ...`, keep a single Group function and move `core_num` / `sync_start` onto the Group attrs
 6. **Replace Scope**: Replace each outlined scope with a Call to the outlined function + output assignments

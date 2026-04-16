@@ -10,7 +10,7 @@
 i_out[ChunkOuter] → i_in[ChunkInner,Parallel] → j_out[ChunkOuter] → j_in[ChunkInner,Parallel] → body
 ```
 
-此 Pass 重新排列，使所有外层循环在顶部，并将内层循环 + 循环体包裹在 `ScopeStmt(InCore)` 中：
+此 Pass 重新排列，使所有外层循环在顶部，并将内层循环 + 循环体包裹在 `InCoreScopeStmt` 中：
 
 ```text
 i_out[ChunkOuter] → j_out[ChunkOuter] → InCore{ i_in[ChunkInner] → j_in[ChunkInner] → body }
@@ -41,8 +41,8 @@ result = passes.interchange_chunk_loops()(program)
 | 仅 SSA | 在 `SplitChunkedLoops` 之后运行（需要 `SSAForm`） |
 | 仅并行交换 | 仅当所有 ChunkInner 循环具有 `ForKind::Parallel` 时才交换 |
 | 顺序分块循环 | 不交换，但如果在 `auto_incore` 内则包裹在 InCore 中 |
-| 已有 InCore | 如果链体已包含 `ScopeStmt(InCore)`，则跳过 |
-| 需要 `auto_incore` 作用域 | 仅处理 `ScopeStmt(AutoInCore)` 内的循环；该作用域会被消费 |
+| 已有 InCore | 如果链体已包含 `InCoreScopeStmt`，则跳过 |
+| 需要 `auto_incore` 作用域 | 仅处理 `AutoInCoreScopeStmt` 内的循环；该作用域会被消费 |
 
 ## 算法
 
@@ -55,7 +55,7 @@ result = passes.interchange_chunk_loops()(program)
 4. **重建**（由内到外构建）：
    - 访问最内层循环体
    - 将 inners 包裹在循环体外（保持顺序），重新连接 iter_args
-   - 包裹在 `ScopeStmt(ScopeKind::InCore)` 中
+   - 包裹在 `InCoreScopeStmt` 中
    - 将 outers 包裹在 InCore 外（保持顺序），重新连接 iter_args 和 yields
 
 5. **处理余数** — `ChunkRemainder` 循环：递归进入循环体。将独立的并行余数子循环包裹在 InCore 中。
@@ -143,9 +143,9 @@ for i_rem, (...) in pl.parallel(2, init_values=(...)):   # ChunkRemainder
 
 ## 非分块语句处理
 
-当 `auto_incore` 被消费时，未被分块交换处理的语句（独立张量算子、非分块循环、未通过并行守卫检查的顺序分块循环）会被包裹在 `ScopeStmt(InCore)` 中，以确保它们被 `OutlineIncoreScopes` 提取到 InCore 函数中。
+当 `auto_incore` 被消费时，未被分块交换处理的语句（独立张量算子、非分块循环、未通过并行守卫检查的顺序分块循环）会被包裹在 `InCoreScopeStmt` 中，以确保它们被 `OutlineIncoreScopes` 提取到 InCore 函数中。
 
-连续的非 InCore 语句会被分组到单个 `ScopeStmt(InCore)` 中。控制流语句（`YieldStmt`、`ReturnStmt`）和纯标量赋值（例如索引运算 `offset = ob * 32`）不会被包裹——它们留在编排作用域中。
+连续的非 InCore 语句会被分组到单个 `InCoreScopeStmt` 中。控制流语句（`YieldStmt`、`ReturnStmt`）和纯标量赋值（例如索引运算 `offset = ob * 32`）不会被包裹——它们留在编排作用域中。
 
 **示例** — 独立算子 + 并行分块：
 
