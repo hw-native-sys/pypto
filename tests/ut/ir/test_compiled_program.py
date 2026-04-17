@@ -357,6 +357,17 @@ class TestCompiledProgramScalarCall:
         coerced_args = mock_exec.call_args.args[1]
         assert coerced_args[1] is scalar
 
+    def test_scalar_param_rejects_wrong_ctypes(self, tmp_path):
+        """Passing a ctypes scalar with mismatched dtype should raise TypeError."""
+        prog = _make_program_with_scalar()  # n is INT64
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+        c = torch.zeros(128, 128)
+
+        with pytest.raises(TypeError, match="int64"):
+            cp(a, ctypes.c_int32(5), c)  # wrong: c_int32 for INT64 param
+
     def test_scalar_param_rejects_tensor(self, tmp_path):
         """Passing a torch.Tensor for a scalar param should raise TypeError."""
         prog = _make_program_with_scalar()

@@ -69,8 +69,10 @@ del _name, _torch_dtype
 # Used to wrap Python int/float/bool values into the correct ctypes scalar
 # when calling a compiled program with scalar parameters.
 _DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
+    "fp16": ctypes.c_float,  # no native half; promote to float
     "fp32": ctypes.c_float,
     "fp64": ctypes.c_double,
+    "bfloat16": ctypes.c_float,  # no native bfloat16; promote to float
     "int8": ctypes.c_int8,
     "int16": ctypes.c_int16,
     "int32": ctypes.c_int32,
@@ -337,6 +339,12 @@ class CompiledProgram:
                 if isinstance(arg, torch.Tensor):
                     raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
                 if isinstance(arg, ctypes._SimpleCData):
+                    expected_ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+                    if expected_ctype is not None and not isinstance(arg, expected_ctype):
+                        raise TypeError(
+                            f"Parameter {info.name!r} expects {expected_ctype.__name__} "
+                            f"for dtype {info.dtype}; got {type(arg).__name__}"
+                        )
                     coerced.append(arg)
                 else:
                     ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
