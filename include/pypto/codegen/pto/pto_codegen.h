@@ -365,6 +365,37 @@ class PTOCodegen : public CodegenBase {
   void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
+   * @brief Bundle of fields needed to emit a `pto.alloc_tile` op.
+   *
+   * Centralises the rules that decide:
+   *   - whether the type string carries `v_row=?` / `v_col=?` (dynamic),
+   *   - whether the `valid_row`/`valid_col` operands must be present
+   *     (only when the type is dynamic, no pad, no fillpad consumer, ...),
+   *   - whether physical or runtime SSA values feed those operands.
+   *
+   * Returned by ComputeAllocTileFields and consumed by EmitAllocTileForVar
+   * (single-statement allocs) and the IfStmt return-tile path
+   * (deferred allocs via AllocNewTileBuf).
+   */
+  struct AllocTileFields {
+    std::string type_str;       ///< pto.tile_buf<...> type string
+    std::string addr_ssa;       ///< Optional addr operand SSA value
+    std::string valid_row_ssa;  ///< Optional valid_row operand SSA value
+    std::string valid_col_ssa;  ///< Optional valid_col operand SSA value
+  };
+
+  /**
+   * @brief Compute the type string and (addr, valid_row, valid_col) operands
+   *        for a pto.alloc_tile op in a way that mirrors PTOAS verifier rules.
+   *
+   * @param owning_var Var that owns the tile (used to detect fillpad consumers).
+   *                   May be nullptr for deferred allocs that have no owning Var.
+   * @param tile_type  Tile type carrying shape/tile_view/memref metadata.
+   */
+  AllocTileFields ComputeAllocTileFields(const ir::Var* owning_var,
+                                         const std::shared_ptr<const ir::TileType>& tile_type);
+
+  /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
    */
   void EmitExtraAllocTiles();

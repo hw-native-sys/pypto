@@ -633,6 +633,55 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
+PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
+    const ir::Var* owning_var, const std::shared_ptr<const ir::TileType>& tile_type) {
+  AllocTileFields fields;
+
+  // Type string first — ExtractTileTypeInfo decides v_row=?/v_col=?. For tiles
+  // consumed by fillpad, force ALL dynamic dims (pto.set_validshape needs both ?).
+  bool has_fillpad = (owning_var != nullptr) && HasFillpadConsumer(owning_var);
+  fields.type_str = GetTileBufTypeStringFromTileType(tile_type, has_fillpad);
+  bool type_is_dynamic = (fields.type_str.find("v_row=?") != std::string::npos ||
+                          fields.type_str.find("v_col=?") != std::string::npos);
+
+  if (tile_type->tile_view_.has_value()) {
+    const auto& tv = tile_type->tile_view_.value();
+    bool has_pad = (tv.pad != ir::PadValue::null);
+    // PTOAS requires valid_row/valid_col operands to be ABSENT when the type is
+    // static (has_pad encodes static dims) and PRESENT when v_row=? / v_col=?.
+    if (!has_pad && type_is_dynamic) {
+      if (has_fillpad) {
+        // fillpad consumer: alloc_tile uses physical dims so TLOAD DMA gets the
+        // correct stride; the actual valid region is set later by set_validshape.
+        if (tile_type->shape_.size() >= 1) {
+          if (auto c = As<ir::ConstInt>(tile_type->shape_[0])) {
+            fields.valid_row_ssa = GetOrEmitConstant(c->value_, DataType::INDEX);
+          }
+        }
+        if (tile_type->shape_.size() >= 2) {
+          if (auto c = As<ir::ConstInt>(tile_type->shape_[1])) {
+            fields.valid_col_ssa = GetOrEmitConstant(c->value_, DataType::INDEX);
+          }
+        }
+      } else {
+        // No fillpad: lower dynamic valid_shape exprs (Var, Call, BinaryOp, ...)
+        // to SSA values via GetExprAsCode so PTOAS receives the runtime extent.
+        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+        if (valid_row_expr) fields.valid_row_ssa = GetExprAsCode(valid_row_expr);
+        if (valid_col_expr) fields.valid_col_ssa = GetExprAsCode(valid_col_expr);
+      }
+    }
+  }
+
+  auto memref = ir::GetDefinedMemRef(tile_type);
+  if (memref) {
+    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
+      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
+    }
+  }
+  return fields;
+}
+
 void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
                                      const std::shared_ptr<const ir::TileType>& tile_type) {
   auto var_key = GetVarKey(tile_var);
@@ -645,61 +694,17 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
       << "Tile var " << tile_var->name_hint_ << " not found in fs_.var_to_mlir";
   std::string tile_buf = mlir_it->second;
 
-  // Generate type string first — ExtractTileTypeInfo already decides v_row=?/v_col=?.
-  // For tiles consumed by fillpad, force ALL dynamic dims (pto.set_validshape requires both ?).
-  bool has_fillpad = HasFillpadConsumer(tile_var.get());
-  std::string type_str = GetTileBufTypeStringFromTileType(tile_type, has_fillpad);
-  bool type_is_dynamic =
-      (type_str.find("v_row=?") != std::string::npos || type_str.find("v_col=?") != std::string::npos);
-
-  std::string valid_row_mlir;
-  std::string valid_col_mlir;
-  if (tile_type->tile_view_.has_value()) {
-    const auto& tv = tile_type->tile_view_.value();
-    bool has_pad = (tv.pad != ir::PadValue::null);
-    if (!has_pad && type_is_dynamic) {
-      // Check if this tile is consumed by fillpad.
-      // If yes: use physical dims so TLOAD DMA uses correct stride; set_validshape sets actual region.
-      // If no: use dynamic variable as operand (TLOAD respects valid_shape for DMA).
-      if (has_fillpad) {
-        if (tile_type->shape_.size() >= 1) {
-          if (auto c = As<ir::ConstInt>(tile_type->shape_[0])) {
-            valid_row_mlir = GetOrEmitConstant(c->value_, DataType::INDEX);
-          }
-        }
-        if (tile_type->shape_.size() >= 2) {
-          if (auto c = As<ir::ConstInt>(tile_type->shape_[1])) {
-            valid_col_mlir = GetOrEmitConstant(c->value_, DataType::INDEX);
-          }
-        }
-      } else {
-        // No fillpad: lower dynamic valid_shape exprs (Var, Call, BinaryOp, ...)
-        // to SSA values via GetExprAsCode so PTOAS receives the runtime extent.
-        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
-        if (valid_row_expr) valid_row_mlir = GetExprAsCode(valid_row_expr);
-        if (valid_col_expr) valid_col_mlir = GetExprAsCode(valid_col_expr);
-      }
-    }
-    // Static v_row/v_col: type string already encodes the values (e.g. v_row=48).
-    // PTOAS requires valid_row/valid_col operands to be ABSENT when static.
-  }
-  auto memref = ir::GetDefinedMemRef(tile_type);
-  std::string addr_ssa;
-  if (memref) {
-    if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
-    }
-  }
+  AllocTileFields fields = ComputeAllocTileFields(tile_var.get(), tile_type);
 
   std::ostringstream line;
   line << tile_buf << " = pto.alloc_tile";
-  if (!addr_ssa.empty()) line << " addr = " << addr_ssa;
-  if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
-  if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
-  line << " : " << type_str;
+  if (!fields.addr_ssa.empty()) line << " addr = " << fields.addr_ssa;
+  if (!fields.valid_row_ssa.empty()) line << " valid_row = " << fields.valid_row_ssa;
+  if (!fields.valid_col_ssa.empty()) line << " valid_col = " << fields.valid_col_ssa;
+  line << " : " << fields.type_str;
   Emit(line.str());
 
-  fs_.ssa_to_tile_buf_type[tile_buf] = type_str;
+  fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
 }
 
 // ========================================================================

@@ -30,7 +30,6 @@ namespace codegen {
 
 using ir::As;
 using ir::EvalStmtPtr;
-using ir::ExprPtr;
 using ir::ForStmtPtr;
 using ir::IfStmtPtr;
 using ir::ScalarType;
@@ -39,30 +38,6 @@ using ir::TensorType;
 using ir::TileType;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
-
-// Extract the (row, col) valid_shape expressions from a TileType's tile_view.
-// Returns nullptr for a dimension when it is missing or is a ConstInt (static).
-// Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
-// and must be lowered to MLIR via GetExprAsCode at the call site.
-static std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
-    const std::shared_ptr<const ir::TileType>& tile_type) {
-  ExprPtr valid_row_expr;
-  ExprPtr valid_col_expr;
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return {valid_row_expr, valid_col_expr};
-  }
-
-  const auto& tile_view = tile_type->tile_view_.value();
-  if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
-      !As<ir::ConstInt>(tile_view.valid_shape[0])) {
-    valid_row_expr = tile_view.valid_shape[0];
-  }
-  if (tile_view.valid_shape.size() >= 2 && tile_view.valid_shape[1] &&
-      !As<ir::ConstInt>(tile_view.valid_shape[1])) {
-    valid_col_expr = tile_view.valid_shape[1];
-  }
-  return {valid_row_expr, valid_col_expr};
-}
 
 /// Join a vector of strings with ", " separator
 static std::string JoinCommaSep(const std::vector<std::string>& items) {
@@ -170,18 +145,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
-        std::string tile_type_string = GetTileBufTypeStringFromTileType(tile_type);
-        std::string addr_ssa;
-        std::string valid_row_ssa;
-        std::string valid_col_ssa;
-        if (auto const_offset = As<ir::ConstInt>(tile_type->memref_.value()->byte_offset_)) {
-          addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
-        }
-        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
-        if (valid_row_expr) valid_row_ssa = GetExprAsCode(valid_row_expr);
-        if (valid_col_expr) valid_col_ssa = GetExprAsCode(valid_col_expr);
-        std::string ret_name =
-            AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
+        // Reuse the same alloc_tile rules as EmitAllocTileForVar so this
+        // deferred alloc honours pad / fillpad / dynamic gating identically.
+        AllocTileFields fields = ComputeAllocTileFields(return_var.get(), tile_type);
+        std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
+                                               fields.valid_row_ssa, fields.valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
       } else {
         INTERNAL_CHECK_SPAN(false, op->span_)
