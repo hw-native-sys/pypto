@@ -231,13 +231,21 @@ class ConsumerSpaceCollector : public IRVisitor {
   /// that a chain of pass-through ops between a producer (e.g. tensor.slice)
   /// and a consumer (e.g. tensor.matmul) correctly forwards the required
   /// memory space to the producer.  Call after VisitStmt() on the function.
+  ///
+  /// Only the memory space is propagated; the transpose flag is forced to
+  /// false.  Pass-through ops such as reshape may change rank/shape, so a
+  /// downstream transpose requirement is not generally valid for the upstream
+  /// producer — e.g. propagating transpose=true onto an ND tensor.slice would
+  /// later emit an invalid tile.load (transpose is only supported for 2D loads
+  /// to Mat).  The downstream consumer's auto-bridge still handles transposes.
   void PropagatePassThrough() {
     for (auto it = pass_through_edges_.rbegin(); it != pass_through_edges_.rend(); ++it) {
       auto out_req = GetConsumerReq(it->output_var);
       if (!out_req || out_req->space == MemorySpace::Vec) continue;
-      auto [entry_it, inserted] = consumer_reqs_.try_emplace(it->input_var.get(), *out_req);
+      ConsumerSpaceReq in_req{out_req->space, /*transpose=*/false};
+      auto [entry_it, inserted] = consumer_reqs_.try_emplace(it->input_var, in_req);
       if (!inserted && entry_it->second.space == MemorySpace::Vec) {
-        entry_it->second = *out_req;
+        entry_it->second = in_req;
       }
     }
   }
@@ -277,7 +285,7 @@ class ConsumerSpaceCollector : public IRVisitor {
       size_t idx = *entry->pass_through_arg;
       if (idx < call->args_.size()) {
         if (auto in_var = As<Var>(call->args_[idx])) {
-          pass_through_edges_.push_back({op->var_.get(), in_var});
+          pass_through_edges_.push_back({op->var_.get(), in_var.get()});
         }
       }
     }
@@ -289,8 +297,10 @@ class ConsumerSpaceCollector : public IRVisitor {
   struct PassThroughEdge {
     /// Transient key for consumer_reqs_ lookup; never dereferenced.
     const Var* output_var;
-    /// Held as shared_ptr so the Var stays alive until PropagatePassThrough runs.
-    VarPtr input_var;
+    /// Transient key for consumer_reqs_ lookup; never dereferenced.
+    /// Safe as a raw pointer — the function body keeps all Var nodes alive
+    /// for the lifetime of the collector (no mutation until the mutator runs).
+    const Var* input_var;
   };
 
   const OpConversionRegistry& registry_;
