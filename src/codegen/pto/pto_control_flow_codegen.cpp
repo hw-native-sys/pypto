@@ -13,14 +13,12 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
