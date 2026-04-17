@@ -18,6 +18,7 @@ torch tensors::
     compiled(a, b, c, device=1)          # specify device at call time
 """
 
+import ctypes
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,11 @@ from pypto.pypto_core.ir import (
     ScalarType,
     ShapedType,
 )
+
+# Type alias for arguments accepted by CompiledProgram.__call__().
+# Tensor params expect torch.Tensor; scalar params accept Python primitives
+# or ctypes scalars (which are coerced to the correct ctypes type internally).
+CallArg = torch.Tensor | int | float | bool | ctypes._SimpleCData
 
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
@@ -58,6 +64,24 @@ for _name in ("uint16", "uint32", "uint64"):
     if _torch_dtype is not None:
         _DATATYPE_TO_TORCH[_name] = _torch_dtype
 del _name, _torch_dtype
+
+# IR DataType -> ctypes scalar constructor mapping.
+# Used to wrap Python int/float/bool values into the correct ctypes scalar
+# when calling a compiled program with scalar parameters.
+_DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
+    "fp32": ctypes.c_float,
+    "fp64": ctypes.c_double,
+    "int8": ctypes.c_int8,
+    "int16": ctypes.c_int16,
+    "int32": ctypes.c_int32,
+    "int64": ctypes.c_int64,
+    "uint8": ctypes.c_uint8,
+    "uint16": ctypes.c_uint16,
+    "uint32": ctypes.c_uint32,
+    "uint64": ctypes.c_uint64,
+    "bool": ctypes.c_bool,
+    "index": ctypes.c_int64,
+}
 
 
 def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
@@ -258,18 +282,23 @@ class CompiledProgram:
 
     def __call__(
         self,
-        *args: torch.Tensor,
+        *args: CallArg,
         config: Any = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
-        """Execute the compiled program with torch tensors.
+        """Execute the compiled program with torch tensors and/or scalars.
 
         Args match the orchestration function's parameter order.  For
         **in-place** style, pass all tensors (including outputs) and the
         output tensors are modified on device.  For **return** style,
         pass only input tensors and the outputs are allocated and returned.
 
+        Scalar parameters (``pl.Scalar[...]``) accept Python ``int``,
+        ``float``, ``bool``, or ``ctypes`` scalar values.
+
         Args:
-            *args: Positional ``torch.Tensor`` arguments.
+            *args: Positional arguments — ``torch.Tensor`` for tensor
+                params, ``int | float | bool | ctypes._SimpleCData`` for
+                scalar params.
             config: Optional :class:`~pypto.runtime.runner.RunConfig` for
                 device index, profiling, etc.  Defaults to ``RunConfig()``.
 
@@ -278,7 +307,7 @@ class CompiledProgram:
             ``tuple`` for return-style calls.
 
         Raises:
-            TypeError: If argument count does not match.
+            TypeError: If argument count or types do not match.
         """
         param_infos, output_indices, return_types = self._get_metadata()
         n_params = len(param_infos)
@@ -288,9 +317,9 @@ class CompiledProgram:
 
         # Determine calling convention
         if len(args) == n_params:
-            all_tensors = list(args)
+            all_args: list[CallArg] = list(args)
         elif return_style:
-            all_tensors = self._build_full_args(args, param_infos, output_indices)
+            all_args = self._build_full_args(args, param_infos, output_indices)
         else:
             expected = f"{n_params} (in-place)"
             if has_return:
@@ -300,6 +329,26 @@ class CompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
+        # Coerce args: wrap Python scalars into ctypes, validate tensor vs scalar
+        coerced: list[torch.Tensor | ctypes._SimpleCData] = []
+        for info, arg in zip(param_infos, all_args, strict=True):
+            if info.shape is None:
+                # Scalar parameter
+                if isinstance(arg, torch.Tensor):
+                    raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
+                if isinstance(arg, ctypes._SimpleCData):
+                    coerced.append(arg)
+                else:
+                    ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+                    if ctype is None:
+                        raise TypeError(f"Unsupported scalar dtype {info.dtype} for parameter {info.name!r}")
+                    coerced.append(ctype(arg))
+            else:
+                # Tensor parameter
+                if not isinstance(arg, torch.Tensor):
+                    raise TypeError(f"Parameter {info.name!r} is a tensor; got {type(arg).__name__}")
+                coerced.append(arg)
+
         from pypto.runtime.runner import RunConfig, execute_compiled  # noqa: PLC0415
 
         if config is None:
@@ -307,7 +356,7 @@ class CompiledProgram:
 
         execute_compiled(
             self._output_dir,
-            all_tensors,
+            coerced,
             platform=self._platform,
             device_id=config.device_id,
             pto_isa_commit=config.pto_isa_commit,
@@ -316,18 +365,21 @@ class CompiledProgram:
 
         if not return_style:
             return None
-        outputs = [all_tensors[i] for i in output_indices]
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)
+        # Output indices always correspond to tensor params (scalars cannot be Out
+        # direction), so the elements are guaranteed to be torch.Tensor.
+        outputs = [coerced[i] for i in output_indices]
+        assert all(isinstance(o, torch.Tensor) for o in outputs)
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
 
     @staticmethod
     def _build_full_args(
-        input_args: tuple[torch.Tensor, ...],
+        input_args: tuple[CallArg, ...],
         param_infos: list[_ParamInfo],
         output_indices: list[int],
-    ) -> list[torch.Tensor]:
+    ) -> list[CallArg]:
         """Allocate output tensors and interleave with input args."""
         output_set = set(output_indices)
-        all_tensors: list[torch.Tensor] = []
+        all_tensors: list[CallArg] = []
         input_idx = 0
 
         for i, info in enumerate(param_infos):

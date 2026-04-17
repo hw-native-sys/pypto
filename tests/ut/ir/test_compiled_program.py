@@ -9,7 +9,9 @@
 
 """Tests for CompiledProgram callable API."""
 
+import ctypes
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -77,6 +79,26 @@ def _make_program_with_inout() -> ir.Program:
     body = ir.SeqStmts([], span)
     orch = ir.Function("orchestrator", params, [], body, span, ir.FunctionType.Orchestration)
     return ir.Program([orch], "InOutProgram", span)
+
+
+def _make_program_with_scalar() -> ir.Program:
+    """Build a Program with tensor and scalar params: a (In), n (Scalar INT64), c (Out)."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([128, 128], DataType.FP32)
+    scalar_type = ir.ScalarType(DataType.INT64)
+
+    a_var = ir.Var("a", tensor_type, span)
+    n_var = ir.Var("n", scalar_type, span)
+    c_var = ir.Var("c", tensor_type, span)
+
+    params = [
+        (a_var, ir.ParamDirection.In),
+        (n_var, ir.ParamDirection.In),
+        (c_var, ir.ParamDirection.Out),
+    ]
+    body = ir.SeqStmts([], span)
+    orch = ir.Function("orchestrator", params, [tensor_type], body, span, ir.FunctionType.Orchestration)
+    return ir.Program([orch], "ScalarProgram", span)
 
 
 class TestCompiledProgramBackwardCompat:
@@ -244,9 +266,11 @@ class TestBuildFullArgs:
         assert full_args[0] is a
         assert full_args[1] is b
         # Output tensor should be allocated with correct shape/dtype
-        assert full_args[2].shape == (128, 128)
-        assert full_args[2].dtype == torch.float32
-        assert torch.all(full_args[2] == 0)
+        out = full_args[2]
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == (128, 128)
+        assert out.dtype == torch.float32
+        assert torch.all(out == 0)
 
 
 class TestCompileReturnsCompiledProgram:
@@ -279,6 +303,96 @@ class TestCompileReturnsCompiledProgram:
         assert result.output_dir.is_dir()
         # Metadata works on the original program
         assert result.param_names == ["a", "b", "c"]
+
+
+class TestExtractParamInfosScalar:
+    """Verify metadata extraction for scalar parameters."""
+
+    def test_scalar_param_shape_is_none(self):
+        prog = _make_program_with_scalar()
+        infos, _, _ = _extract_param_infos(prog)
+        assert infos[1].name == "n"
+        assert infos[1].shape is None
+        assert infos[1].dtype == DataType.INT64
+
+    def test_scalar_param_not_in_output_indices(self):
+        prog = _make_program_with_scalar()
+        _, out_idx, _ = _extract_param_infos(prog)
+        # Only index 2 (c, Out tensor) should be auto-allocatable
+        assert out_idx == [2]
+
+
+class TestCompiledProgramScalarCall:
+    """Verify __call__ handles scalar parameters correctly."""
+
+    def test_scalar_param_wraps_python_int(self, tmp_path):
+        """Passing a Python int to a scalar param should wrap it as ctypes.c_int64."""
+        prog = _make_program_with_scalar()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+        c = torch.zeros(128, 128)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(a, 5, c)
+
+        coerced_args = mock_exec.call_args.args[1]  # second positional arg is the args list
+        assert isinstance(coerced_args[0], torch.Tensor)
+        assert isinstance(coerced_args[1], ctypes.c_int64)
+        assert coerced_args[1].value == 5
+        assert isinstance(coerced_args[2], torch.Tensor)
+
+    def test_scalar_param_passes_through_ctypes(self, tmp_path):
+        """Passing a ctypes scalar directly should pass through without re-wrapping."""
+        prog = _make_program_with_scalar()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+        c = torch.zeros(128, 128)
+        scalar = ctypes.c_int64(42)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(a, scalar, c)
+
+        coerced_args = mock_exec.call_args.args[1]
+        assert coerced_args[1] is scalar
+
+    def test_scalar_param_rejects_tensor(self, tmp_path):
+        """Passing a torch.Tensor for a scalar param should raise TypeError."""
+        prog = _make_program_with_scalar()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+        c = torch.zeros(128, 128)
+
+        with pytest.raises(TypeError, match="scalar"):
+            cp(a, torch.tensor([5]), c)
+
+    def test_tensor_param_rejects_scalar(self, tmp_path):
+        """Passing a Python int for a tensor param should raise TypeError."""
+        prog = _make_program_with_scalar()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        with pytest.raises(TypeError, match="tensor"):
+            cp(5, 10, torch.zeros(128, 128))
+
+    def test_return_style_with_scalar(self, tmp_path):
+        """Return-style call with scalar: compiled(a, n) should allocate output."""
+        prog = _make_program_with_scalar()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            result = cp(a, 7)
+
+        # Should have called execute_compiled with 3 args (a, scalar, allocated c)
+        coerced_args = mock_exec.call_args.args[1]
+        assert len(coerced_args) == 3
+        assert isinstance(coerced_args[1], ctypes.c_int64)
+        assert coerced_args[1].value == 7
+        # Output should be returned
+        assert isinstance(result, torch.Tensor)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 import time
+from ctypes import _SimpleCData
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -579,25 +580,25 @@ def _add_headers_to_file(cpp_file: Path) -> None:
 
 def execute_compiled(
     work_dir: str | Path,
-    tensors: list[torch.Tensor],
+    args: list[torch.Tensor | _SimpleCData],
     *,
     platform: str,
     device_id: int,
     pto_isa_commit: str | None = None,
     runtime_profiling: bool = False,
 ) -> None:
-    """Execute a pre-compiled program with user-provided tensors.
+    """Execute a pre-compiled program with user-provided tensors and scalars.
 
     Reuses :func:`device_runner.compile_and_assemble` for binary compilation
     (with caching and parallel kernel compilation) and
     :func:`device_runner.execute_on_device` for device dispatch.  Output
-    tensors in *tensors* are modified in-place with device results.
+    tensors in *args* are modified in-place with device results.
 
     Args:
         work_dir: Root output directory from :func:`ir.compile`, containing
             ``kernels/``, ``orchestration/``, and ``kernel_config.py``.
-        tensors: Ordered list of torch tensors matching the orchestration
-            function's parameter order.
+        args: Ordered list of ``torch.Tensor`` or ``ctypes._SimpleCData``
+            arguments matching the orchestration function's parameter order.
         platform: Target execution platform.
         device_id: Hardware device index.
         pto_isa_commit: Optional git commit to pin pto-isa clone.
@@ -614,26 +615,32 @@ def execute_compiled(
         compile_and_assemble,
         execute_on_device,
         make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+        scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
 
     chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
-    # Build orch args directly from user tensors.
-    # Tensors must be CPU and contiguous so that device execution writes
-    # results back into the caller's buffers (in-place semantics).
+    # Build orch args from user-provided tensors and scalars.
     orch_args = ChipStorageTaskArgs()
-    for i, tensor in enumerate(tensors):
-        if not tensor.is_contiguous():
-            raise ValueError(
-                f"Tensor at position {i} is not contiguous. "
-                f"Call .contiguous() before passing to execute_compiled()."
+    for i, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor):
+            if not arg.is_contiguous():
+                raise ValueError(
+                    f"Tensor at position {i} is not contiguous. "
+                    f"Call .contiguous() before passing to execute_compiled()."
+                )
+            if arg.device.type != "cpu":
+                raise ValueError(
+                    f"Tensor at position {i} is on {arg.device}, expected CPU. "
+                    f"Call .cpu() before passing to execute_compiled()."
+                )
+            orch_args.add_tensor(make_tensor_arg(arg))
+        elif isinstance(arg, _SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(arg))
+        else:
+            raise TypeError(
+                f"Argument at position {i} must be torch.Tensor or ctypes scalar, got {type(arg).__name__}"
             )
-        if tensor.device.type != "cpu":
-            raise ValueError(
-                f"Tensor at position {i} is on {tensor.device}, expected CPU. "
-                f"Call .cpu() before passing to execute_compiled()."
-            )
-        orch_args.add_tensor(make_tensor_arg(tensor))
 
     # Snapshot profiling state before execution
     if runtime_profiling:
