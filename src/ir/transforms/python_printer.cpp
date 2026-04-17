@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1245,11 +1246,28 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    auto func_split_mode = func->GetSplitMode();
-    bool has_split = func_split_mode.has_value();
-    bool has_core_num = func->HasAttr("core_num");
-    bool has_sync_start = func->HasAttr("sync_start") && func->GetAttr<bool>("sync_start", false);
-    if (has_type || has_level || has_role || has_split || has_core_num || has_sync_start) {
+    bool has_attrs = !func->attrs_.empty();
+    auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
+      if (key == "split") {
+        int split_value = AnyCast<int>(value, "func attr key: " + key);
+        auto split_mode = static_cast<SplitMode>(split_value);
+        stream_ << prefix_ << ".SplitMode." << SplitModeToPythonString(split_mode);
+      } else if (value.type() == typeid(int)) {
+        stream_ << AnyCast<int>(value, "func attr key: " + key);
+      } else if (value.type() == typeid(double)) {
+        stream_ << FormatFloatLiteral(AnyCast<double>(value, "func attr key: " + key));
+      } else if (value.type() == typeid(float)) {
+        stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, "func attr key: " + key)));
+      } else if (value.type() == typeid(bool)) {
+        stream_ << (AnyCast<bool>(value, "func attr key: " + key) ? "True" : "False");
+      } else if (value.type() == typeid(std::string)) {
+        stream_ << std::quoted(AnyCast<std::string>(value, "func attr key: " + key));
+      } else {
+        INTERNAL_CHECK(false) << "Unsupported function attrs value type for key '" << key
+                              << "': " << DemangleTypeName(value.type().name());
+      }
+    };
+    if (has_type || has_level || has_role || has_attrs) {
       stream_ << "(";
       bool first = true;
       if (has_type) {
@@ -1266,22 +1284,15 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "role=" << prefix_ << ".Role." << RoleToString(*func->role_);
         first = false;
       }
-      if (has_split || has_core_num || has_sync_start) {
+      if (has_attrs) {
         if (!first) stream_ << ", ";
         stream_ << "attrs={";
         bool first_attr = true;
-        if (has_split) {
-          stream_ << "\"split\": " << prefix_ << ".SplitMode." << SplitModeToPythonString(*func_split_mode);
-          first_attr = false;
-        }
-        if (has_core_num) {
+        for (const auto& [key, value] : func->attrs_) {
           if (!first_attr) stream_ << ", ";
-          stream_ << "\"core_num\": " << func->GetAttr<int>("core_num", 0);
+          stream_ << std::quoted(key) << ": ";
+          print_func_attr_value(key, value);
           first_attr = false;
-        }
-        if (has_sync_start) {
-          if (!first_attr) stream_ << ", ";
-          stream_ << "\"sync_start\": True";
         }
         stream_ << "}";
       }

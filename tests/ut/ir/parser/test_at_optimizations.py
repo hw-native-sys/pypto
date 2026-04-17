@@ -16,23 +16,25 @@ new ``optimizations=`` with either deprecated kwarg is a hard error.
 """
 
 import warnings
-from typing import TypeVar
+from typing import Protocol, cast
 
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
-T = TypeVar("T", bound=ir.ScopeStmt)
+
+class _HasSplit(Protocol):
+    split: ir.SplitMode | None
 
 
-def _find_scope(stmt, scope_type: type[T]) -> T | None:
-    """Recursively find the first scope of ``scope_type`` in an IR tree."""
-    if isinstance(stmt, scope_type):
+def _find_scope_stmt(stmt: ir.Stmt) -> ir.ScopeStmt | None:
+    """Recursively find the first scope statement in an IR tree."""
+    if isinstance(stmt, ir.ScopeStmt):
         return stmt
     if isinstance(stmt, ir.SeqStmts):
         for s in stmt.stmts:
-            r = _find_scope(s, scope_type)
+            r = _find_scope_stmt(s)
             if r is not None:
                 return r
     return None
@@ -50,9 +52,10 @@ def test_parse_optimizations_split_only_up_down():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_optimizations_split_only_left_right():
@@ -64,9 +67,10 @@ def test_parse_optimizations_split_only_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
 # ─── New API: optimizations=[pl.auto_chunk] → AutoInCore (no split) ──────────
@@ -82,9 +86,10 @@ def test_parse_optimizations_auto_chunk_only():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split is None
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
+    assert cast(_HasSplit, scope).split is None
 
 
 # ─── New API: optimizations=[pl.auto_chunk, pl.split(...)] → AutoInCore + split
@@ -103,9 +108,10 @@ def test_parse_optimizations_auto_chunk_with_split():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_optimizations_order_independent():
@@ -131,10 +137,11 @@ def test_parse_optimizations_order_independent():
                 x = pl.add(x, x)
         return x
 
-    s1 = _find_scope(f1.body, ir.AutoInCoreScopeStmt)
-    s2 = _find_scope(f2.body, ir.AutoInCoreScopeStmt)
+    s1 = _find_scope_stmt(f1.body)
+    s2 = _find_scope_stmt(f2.body)
     assert s1 is not None and s2 is not None
-    assert s1.split == s2.split == ir.SplitMode.LEFT_RIGHT
+    assert s1.scope_kind == s2.scope_kind == ir.ScopeKind.AutoInCore
+    assert cast(_HasSplit, s1).split == cast(_HasSplit, s2).split == ir.SplitMode.LEFT_RIGHT
 
 
 def test_parse_optimizations_empty_list_is_plain_incore():
@@ -146,16 +153,17 @@ def test_parse_optimizations_empty_list_is_plain_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split is None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split is None
 
 
 # ─── Equivalence with deprecated API ──────────────────────────────────────────
 
 
 def test_legacy_chunked_loop_optimizer_matches_new_form():
-    """Legacy bare optimizer (defaults to UP_DOWN) ≡ new auto_chunk + split(UP_DOWN)."""
+    """Legacy bare optimizer (defaults to no split) ≡ new auto_chunk only."""
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -169,18 +177,17 @@ def test_legacy_chunked_loop_optimizer_matches_new_form():
 
     @pl.function
     def new(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP,
-            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
             for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                 x = pl.add(x, x)
         return x
 
-    s_legacy = _find_scope(legacy.body, ir.AutoInCoreScopeStmt)
-    s_new = _find_scope(new.body, ir.AutoInCoreScopeStmt)
+    s_legacy = _find_scope_stmt(legacy.body)
+    s_new = _find_scope_stmt(new.body)
     assert s_legacy is not None and s_new is not None
-    assert s_legacy.split == s_new.split == ir.SplitMode.UP_DOWN
+    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.AutoInCore
+    assert cast(_HasSplit, s_legacy).split is None
+    assert cast(_HasSplit, s_new).split is None
 
 
 def test_legacy_split_kwarg_matches_new_form():
@@ -201,10 +208,11 @@ def test_legacy_split_kwarg_matches_new_form():
             y = pl.add(x, x)
         return y
 
-    s_legacy = _find_scope(legacy.body, ir.InCoreScopeStmt)
-    s_new = _find_scope(new.body, ir.InCoreScopeStmt)
+    s_legacy = _find_scope_stmt(legacy.body)
+    s_new = _find_scope_stmt(new.body)
     assert s_legacy is not None and s_new is not None
-    assert s_legacy.split == s_new.split == ir.SplitMode.LEFT_RIGHT
+    assert s_legacy.scope_kind == s_new.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, s_legacy).split == cast(_HasSplit, s_new).split == ir.SplitMode.LEFT_RIGHT
 
 
 # ─── DeprecationWarning emission ──────────────────────────────────────────────
@@ -331,27 +339,26 @@ def test_unsupported_entry_errors():
             return y
 
 
-def test_split_none_in_list_errors():
-    """pl.split(SplitMode.NONE) is rejected."""
-    with pytest.raises(ParserSyntaxError, match=r"SplitMode\.NONE"):
+def test_split_none_in_list_is_explicit_nosplit():
+    """pl.split(SplitMode.NONE) is accepted and preserved explicitly."""
 
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
-                y = pl.add(x, x)
-            return y
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
 
 
-def test_split_factory_rejects_none_at_runtime():
-    """pl.split() also rejects SplitMode.NONE at construction time.
+def test_split_factory_accepts_none_at_runtime():
+    """pl.split() accepts explicit SplitMode.NONE construction at runtime."""
 
-    The parser-level check above catches DSL source. This factory-level
-    check guards runtime construction (e.g., in scripts that build Split
-    instances directly), per the project rule that DSL helpers should
-    validate user input rather than relying on backend C++ checks.
-    """
-    with pytest.raises(ValueError, match=r"SplitMode\.NONE"):
-        pl.split(pl.SplitMode.NONE)
+    entry = pl.split(pl.SplitMode.NONE)
+    assert entry.mode == ir.SplitMode.NONE
 
 
 def test_auto_chunk_on_non_core_group_errors():
@@ -389,8 +396,9 @@ def test_fully_qualified_auto_chunk():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
 
 
 def test_fully_qualified_split():
@@ -405,9 +413,10 @@ def test_fully_qualified_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
 if __name__ == "__main__":

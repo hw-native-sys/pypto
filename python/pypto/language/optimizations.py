@@ -52,9 +52,8 @@ class Split(Optimization):
       (split metadata still attached).
 
     Args:
-        mode: Split mode (``SplitMode.UP_DOWN`` or ``SplitMode.LEFT_RIGHT``).
-            ``SplitMode.NONE`` is rejected — omit the entry instead to
-            indicate "no split".
+        mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
+            ``SplitMode.LEFT_RIGHT``).
     """
 
     mode: SplitMode
@@ -76,20 +75,13 @@ def split(mode: SplitMode) -> Split:
     """Create a ``Split`` optimization entry.
 
     Args:
-        mode: Split mode. Must be ``SplitMode.UP_DOWN`` or
-            ``SplitMode.LEFT_RIGHT``. ``SplitMode.NONE`` is rejected — omit
-            the entry instead to indicate "no split".
+        mode: Split mode. May be ``SplitMode.NONE``,
+            ``SplitMode.UP_DOWN``, or ``SplitMode.LEFT_RIGHT``.
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
 
-    Raises:
-        ValueError: if ``mode`` is ``SplitMode.NONE``.
     """
-    if mode == SplitMode.NONE:
-        raise ValueError(
-            "pl.split(pl.SplitMode.NONE) is not supported; omit the entry instead to indicate 'no split'."
-        )
     return Split(mode=mode)
 
 

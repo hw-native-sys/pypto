@@ -26,9 +26,13 @@ class _ChunkedLoopOptimizerCall:
     """Result of calling chunked_loop_optimizer(split=...).
 
     Stores the split mode to pass to the AutoInCore scope.
+
+    Bare ``pl.chunked_loop_optimizer`` intentionally maps to ``SplitMode.NONE``.
+    Callers that want explicit cross-core work splitting must pass
+    ``split=pl.SplitMode.UP_DOWN`` or ``split=pl.SplitMode.LEFT_RIGHT``.
     """
 
-    def __init__(self, split: SplitMode = SplitMode.UP_DOWN) -> None:
+    def __init__(self, split: SplitMode = SplitMode.NONE) -> None:
         self.split = split
 
     def __repr__(self) -> str:
@@ -40,14 +44,17 @@ class _ChunkedLoopOptimizer:
 
     Can be used bare or called with a split mode:
     - ``optimization=pl.chunked_loop_optimizer``
-    - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)``
+    - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE)``
+
+    The bare form intentionally means "no split". Explicit splitting remains
+    opt-in via the ``split=...`` call form.
     """
 
-    def __call__(self, *, split: SplitMode = SplitMode.UP_DOWN) -> _ChunkedLoopOptimizerCall:
+    def __call__(self, *, split: SplitMode = SplitMode.NONE) -> _ChunkedLoopOptimizerCall:
         """Create an optimizer specification with an explicit split mode.
 
         Args:
-            split: Split mode for cross-core data transfer (default: SplitMode.UP_DOWN)
+            split: Split mode for cross-core data transfer (default: SplitMode.NONE)
 
         Returns:
             Optimizer call with the given split mode
@@ -64,7 +71,11 @@ chunked_loop_optimizer: _ChunkedLoopOptimizer = _ChunkedLoopOptimizer()
 Use with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
 to request compiler-driven chunked loop outlining (replaces pl.auto_incore()).
 Can also be called with a split mode:
-pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN))
+pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE))
+
+Bare ``pl.chunked_loop_optimizer`` intentionally defaults to ``SplitMode.NONE``.
+Use the call form with ``split=pl.SplitMode.UP_DOWN`` or
+``split=pl.SplitMode.LEFT_RIGHT`` when explicit cross-core splitting is desired.
 """
 
 # Range argument type: int literal or Scalar variable
@@ -676,14 +687,14 @@ class AutoIncoreContext:
         pass
 
 
-def auto_incore(split: SplitMode = SplitMode.UP_DOWN, *, name_hint: str = "") -> AutoIncoreContext:
+def auto_incore(split: SplitMode = SplitMode.NONE, *, name_hint: str = "") -> AutoIncoreContext:
     """Mark a region of code for automatic incore chunking.
 
     This function returns a context manager that should be used with the 'with' statement.
     The parser recognizes this pattern and creates a ScopeStmt with ScopeKind.AutoInCore.
 
     Args:
-        split: Split mode for cross-core data transfer (default: SplitMode.UP_DOWN)
+        split: Split mode for cross-core data transfer (default: SplitMode.NONE)
 
     Returns:
         Context manager for AutoInCore scope
@@ -692,12 +703,10 @@ def auto_incore(split: SplitMode = SplitMode.UP_DOWN, *, name_hint: str = "") ->
         >>> with pl.auto_incore():
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
-        >>> with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
+        >>> with pl.auto_incore(split=pl.SplitMode.NONE):
         ...     for i in pl.parallel(0, 8, 1, chunk=4):
         ...         x = pl.add(x, x)
     """
-    if split == SplitMode.NONE:
-        raise ValueError("SplitMode.NONE is not supported by pto-isa now")
     return AutoIncoreContext(split=split, name_hint=name_hint)
 
 

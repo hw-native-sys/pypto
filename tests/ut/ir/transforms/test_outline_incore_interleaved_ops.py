@@ -78,7 +78,7 @@ class TestNonParallelCodeBetweenChunks:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -87,12 +87,12 @@ class TestNonParallelCodeBetweenChunks:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 y0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x0, 2.0)
                 return y0
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(
                 self,
                 x0: pl.Tensor[[8, 64], pl.FP32],
@@ -152,7 +152,7 @@ class TestNonParallelCodeBetweenChunks:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -161,7 +161,7 @@ class TestNonParallelCodeBetweenChunks:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(
                 self,
                 x0: pl.Tensor[[8, 64], pl.FP32],
@@ -174,7 +174,7 @@ class TestNonParallelCodeBetweenChunks:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for j1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -232,7 +232,7 @@ class TestNonParallelCodeBetweenChunks:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -241,12 +241,12 @@ class TestNonParallelCodeBetweenChunks:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 y0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x0, 2.0)
                 return y0
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(
                 self,
                 x0: pl.Tensor[[8, 64], pl.FP32],
@@ -306,7 +306,7 @@ class TestNestedForStmtRecursion:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -315,12 +315,12 @@ class TestNestedForStmtRecursion:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 y0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x0, 3.0)
                 return y0
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(
                 self,
                 x0: pl.Tensor[[8, 64], pl.FP32],
@@ -379,7 +379,7 @@ class TestNestedForStmtRecursion:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -388,7 +388,7 @@ class TestNestedForStmtRecursion:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 x1: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x0, 2.0)
                 return x1
@@ -431,7 +431,7 @@ class TestNestedForStmtRecursion:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -440,14 +440,14 @@ class TestNestedForStmtRecursion:
                     x3: pl.Tensor[[8, 64], pl.FP32] = pl.yield_(x2)
                 return x3
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_1(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 y0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(x0, 2.0)
                 z0: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.add(x0, y0)
                 x1: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.muls(z0, 0.5)
                 return x1
 
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_2(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for j1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
@@ -499,7 +499,7 @@ class TestNestedForStmtRecursion:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 64], pl.FP32]:
                 for b0, (x1,) in pl.range(0, 8, 4, init_values=(x0,)):
                     x2: pl.Tensor[[8, 64], pl.FP32] = pl.tensor.adds(x1, 1.0)
@@ -537,7 +537,7 @@ class TestHostSideTailOps:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(self, x0: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
                 for i1, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}

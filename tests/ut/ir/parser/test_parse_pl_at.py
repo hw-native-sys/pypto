@@ -10,23 +10,30 @@
 """Tests for parsing pl.at(level=..., role=...) (Step 04)."""
 
 import warnings
-from typing import TypeVar
+from typing import Protocol, cast
 
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
 from pypto.pypto_core import ir
 
-T = TypeVar("T", bound=ir.ScopeStmt)
+
+class _HasSplit(Protocol):
+    split: ir.SplitMode | None
 
 
-def _find_scope(stmt, scope_type: type[T]) -> T | None:
-    """Recursively find first scope statement of `scope_type` in an IR tree."""
-    if isinstance(stmt, scope_type):
+class _HasLevelRole(Protocol):
+    level: ir.Level | None
+    role: ir.Role | None
+
+
+def _find_scope_stmt(stmt: ir.Stmt) -> ir.ScopeStmt | None:
+    """Recursively find first ScopeStmt in an IR tree."""
+    if isinstance(stmt, ir.ScopeStmt):
         return stmt
     if isinstance(stmt, ir.SeqStmts):
         for s in stmt.stmts:
-            r = _find_scope(s, scope_type)
+            r = _find_scope_stmt(s)
             if r is not None:
                 return r
     return None
@@ -44,11 +51,12 @@ def test_parse_pl_at_host_worker():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
-    assert scope.level == ir.Level.HOST
-    assert scope.role == ir.Role.Worker
+    hierarchy_scope = cast(_HasLevelRole, scope)
+    assert hierarchy_scope.level == ir.Level.HOST
+    assert hierarchy_scope.role == ir.Role.Worker
 
 
 def test_parse_pl_at_global_orchestrator():
@@ -60,11 +68,12 @@ def test_parse_pl_at_global_orchestrator():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
-    assert scope.level == ir.Level.GLOBAL
-    assert scope.role == ir.Role.Orchestrator
+    hierarchy_scope = cast(_HasLevelRole, scope)
+    assert hierarchy_scope.level == ir.Level.GLOBAL
+    assert hierarchy_scope.role == ir.Role.Orchestrator
 
 
 def test_parse_pl_at_level_only():
@@ -76,11 +85,12 @@ def test_parse_pl_at_level_only():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Hierarchy
-    assert scope.level == ir.Level.CHIP
-    assert scope.role is None
+    hierarchy_scope = cast(_HasLevelRole, scope)
+    assert hierarchy_scope.level == ir.Level.CHIP
+    assert hierarchy_scope.role is None
 
 
 def test_parse_pl_at_alias_pod():
@@ -92,11 +102,12 @@ def test_parse_pl_at_alias_pod():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.HierarchyScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
-    assert scope.level is not None
+    hierarchy_scope = cast(_HasLevelRole, scope)
+    assert hierarchy_scope.level is not None
     # POD is an alias for CLUSTER_0; nanobind enums compare by underlying value
-    assert ir.level_to_linqu_level(scope.level) == ir.level_to_linqu_level(ir.Level.CLUSTER_0)
+    assert ir.level_to_linqu_level(hierarchy_scope.level) == ir.level_to_linqu_level(ir.Level.CLUSTER_0)
 
 
 # ─── Nested pl.at() blocks ────────────────────────────────────────────────
@@ -112,14 +123,18 @@ def test_parse_pl_at_nested():
                 y = pl.add(x, x)
         return y
 
-    outer = _find_scope(f.body, ir.HierarchyScopeStmt)
+    outer = _find_scope_stmt(f.body)
     assert outer is not None
-    assert outer.level == ir.Level.GLOBAL
+    assert outer.scope_kind == ir.ScopeKind.Hierarchy
+    outer_scope = cast(_HasLevelRole, outer)
+    assert outer_scope.level == ir.Level.GLOBAL
 
-    inner = _find_scope(outer.body, ir.HierarchyScopeStmt)
+    inner = _find_scope_stmt(outer.body)
     assert inner is not None
-    assert inner.level == ir.Level.HOST
-    assert inner.role == ir.Role.Worker
+    assert inner.scope_kind == ir.ScopeKind.Hierarchy
+    inner_scope = cast(_HasLevelRole, inner)
+    assert inner_scope.level == ir.Level.HOST
+    assert inner_scope.role == ir.Role.Worker
 
 
 # ─── Error cases ──────────────────────────────────────────────────────────
@@ -159,10 +174,9 @@ def test_backward_compat_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert not isinstance(scope, ir.HierarchyScopeStmt)
 
 
 def test_backward_compat_cluster():
@@ -175,7 +189,7 @@ def test_backward_compat_cluster():
                 y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.ClusterScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.Cluster
 
@@ -210,13 +224,13 @@ def test_parse_pl_at_core_group_incore():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
 
 
 def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
-    """pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer) → AutoInCore, split=UP_DOWN."""
+    """pl.at(level=CORE_GROUP, optimization=pl.chunked_loop_optimizer) → AutoInCore, no split."""
 
     @pl.function
     def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -225,10 +239,10 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_bare():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert cast(_HasSplit, scope).split is None
 
 
 def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
@@ -244,10 +258,10 @@ def test_parse_pl_at_core_group_chunked_loop_optimizer_with_split():
                 x = pl.add(x, x)
         return x
 
-    scope = _find_scope(f.body, ir.AutoInCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.AutoInCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
+    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
 def test_parse_pl_at_optimization_on_non_core_group_errors():
@@ -272,19 +286,57 @@ def test_parse_pl_at_unknown_optimization_errors():
             return y
 
 
-def test_parse_pl_at_split_mode_none_errors():
-    """chunked_loop_optimizer(split=SplitMode.NONE) raises error."""
-    with pytest.raises(ParserSyntaxError, match=r"SplitMode\.NONE"):
+def test_parse_pl_at_unknown_optimization_hint_mentions_generic_split_mode():
+    """Invalid optimization hints should describe the generic split call form."""
+    with pytest.raises(ParserSyntaxError) as exc_info:
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP, optimization=42):  # type: ignore[arg-type]
+                y = pl.add(x, x)
+            return y
+
+    err = exc_info.value
+    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.message
+    assert err.hint is not None
+    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.hint
+
+
+def test_parse_pl_at_split_mode_none_is_explicit_nosplit():
+    """chunked_loop_optimizer(split=SplitMode.NONE) preserves explicit no-split."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+        ):
+            for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                x = pl.add(x, x)
+        return x
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.AutoInCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
+
+
+def test_parse_pl_at_chunked_loop_optimizer_unexpected_keyword_hint_is_generic():
+    """Unexpected keyword hints should not imply SplitMode.NONE is the only accepted mode."""
+    with pytest.raises(ParserSyntaxError) as exc_info:
 
         @pl.function
         def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             with pl.at(
                 level=pl.Level.CORE_GROUP,
-                optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+                optimization=pl.chunked_loop_optimizer(bogus=pl.SplitMode.NONE),  # type: ignore[call-arg]
             ):
-                for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
-                    x = pl.add(x, x)
-            return x
+                y = pl.add(x, x)
+            return y
+
+    err = exc_info.value
+    assert err.hint is not None
+    assert "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)" in err.hint
 
 
 def test_parse_pl_at_role_with_core_group_errors():
@@ -341,10 +393,10 @@ def test_parse_pl_incore_with_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_pl_incore_with_split_left_right():
@@ -356,10 +408,10 @@ def test_parse_pl_incore_with_split_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
+    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
 def test_parse_pl_at_core_group_with_split():
@@ -371,10 +423,10 @@ def test_parse_pl_at_core_group_with_split():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.UP_DOWN
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
 def test_parse_pl_at_core_group_with_split_left_right():
@@ -386,10 +438,10 @@ def test_parse_pl_at_core_group_with_split_left_right():
             y = pl.add(x, x)
         return y
 
-    scope = _find_scope(f.body, ir.InCoreScopeStmt)
+    scope = _find_scope_stmt(f.body)
     assert scope is not None
     assert scope.scope_kind == ir.ScopeKind.InCore
-    assert scope.split == ir.SplitMode.LEFT_RIGHT
+    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
 
 
 def test_parse_pl_at_optimization_and_split_conflict():
