@@ -2087,6 +2087,142 @@ class TestTileScatterUpdateOps:
             tile.scatter_update(input_var, -1, index_var, src_var)
 
 
+class TestTileMscatterOps:
+    """Test suite for tile.mscatter operation."""
+
+    def test_tile_mscatter_basic(self):
+        """Test tile.mscatter constructs a Call returning a TensorType."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+        tensor_n = ir.ConstInt(1024, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+        tensor_type = ir.TensorType([tensor_n], DataType.FP32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        call = tile.mscatter(src_var, idx_var, out_var)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.mscatter"
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.dtype == DataType.FP32
+
+    def test_tile_mscatter_fp16(self):
+        """Test tile.mscatter works with FP16 dtype."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(8, DataType.INT32, span)
+        cols = ir.ConstInt(16, DataType.INT32, span)
+        tensor_n = ir.ConstInt(512, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP16)
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+        tensor_type = ir.TensorType([tensor_n], DataType.FP16)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        call = tile.mscatter(src_var, idx_var, out_var)
+        assert call.op.name == "tile.mscatter"
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.dtype == DataType.FP16
+
+    def test_tile_mscatter_src_dtype_error(self):
+        """Test tile.mscatter rejects unsupported src dtype."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+        tensor_n = ir.ConstInt(1024, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.UINT8)  # unsupported
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+        tensor_type = ir.TensorType([tensor_n], DataType.UINT8)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="src dtype"):
+            tile.mscatter(src_var, idx_var, out_var)
+
+    def test_tile_mscatter_idx_dtype_error(self):
+        """Test tile.mscatter rejects non-INT32 idx dtype."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+        tensor_n = ir.ConstInt(1024, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)
+        idx_type = ir.TileType([rows, cols], DataType.INT16)  # wrong dtype
+        tensor_type = ir.TensorType([tensor_n], DataType.FP32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="idx dtype"):
+            tile.mscatter(src_var, idx_var, out_var)
+
+    def test_tile_mscatter_rank_mismatch_error(self):
+        """Test tile.mscatter rejects idx with different rank than src."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+        tensor_n = ir.ConstInt(1024, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)  # 2D
+        idx_type = ir.TileType([rows], DataType.INT32)  # 1D
+        tensor_type = ir.TensorType([tensor_n], DataType.FP32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="idx rank"):
+            tile.mscatter(src_var, idx_var, out_var)
+
+    def test_tile_mscatter_dtype_mismatch_error(self):
+        """Test tile.mscatter rejects output_tensor with dtype different from src."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+        tensor_n = ir.ConstInt(1024, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+        tensor_type = ir.TensorType([tensor_n], DataType.FP16)  # mismatched
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="output_tensor dtype"):
+            tile.mscatter(src_var, idx_var, out_var)
+
+    def test_tile_mscatter_arg_count_error(self):
+        """Test tile.mscatter rejects wrong number of arguments."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+
+        with pytest.raises(ValueError, match="3 arguments"):
+            # Missing output_tensor; call the op directly via create_op_call
+            ir.create_op_call("tile.mscatter", [src_var, idx_var], {}, span)
+
+
 class TestTileConcatOps:
     """Test suite for tile.concat operation."""
 

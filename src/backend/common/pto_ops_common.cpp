@@ -737,6 +737,84 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+// tile.mscatter(src, idx, output_tensor) -> pto.mscatter
+// Generates:
+//   %pview = pto.partition_view %tensor_view, offsets=[0,...], sizes=[d0,...] : ... -> ...
+//   pto.mscatter ins(%src, %idx : !pto.tile_buf<...>, !pto.tile_buf<...>)
+//                outs(%pview : !pto.partition_tensor_view<...>)
+static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  INTERNAL_CHECK(op->args_.size() == 3)
+      << "tile.mscatter requires 3 arguments (src, idx, output_tensor), got " << op->args_.size();
+
+  auto src = AsVarLike(op->args_[0]);
+  INTERNAL_CHECK(src) << "tile.mscatter src must be a Var or IterArg";
+  auto idx = AsVarLike(op->args_[1]);
+  INTERNAL_CHECK(idx) << "tile.mscatter idx must be a Var or IterArg";
+  auto output_tensor = AsVarLike(op->args_[2]);
+  INTERNAL_CHECK(output_tensor) << "tile.mscatter output_tensor must be a Var or IterArg";
+
+  auto tensor_type = As<TensorType>(output_tensor->GetType());
+  INTERNAL_CHECK(tensor_type) << "tile.mscatter output_tensor must have TensorType";
+
+  std::string src_name = codegen.GetVarName(src);
+  std::string idx_name = codegen.GetVarName(idx);
+  std::string src_type_annot = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string idx_type_annot = codegen.GetExprTypeAnnotation(op->args_[1]);
+
+  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+  std::string tensor_view = codegen.GetOrCreateTensorView(output_tensor);
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+
+  // Build pto.partition_view covering the entire tensor (mscatter uses per-element
+  // indices, so the partition is the whole tensor — offsets all zero, sizes = shape).
+  std::string partition_view = codegen.NewNamedTemp(output_tensor->name_hint_ + "_pview");
+  std::ostringstream partition_line;
+  partition_line << partition_view << " = pto.partition_view " << tensor_view;
+  partition_line << ", offsets = [";
+  for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
+    if (i > 0) partition_line << ", ";
+    partition_line << codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  }
+  partition_line << "], sizes = [";
+  std::string partition_type = "!pto.partition_tensor_view<";
+  for (size_t i = 0; i < tensor_type->shape_.size(); ++i) {
+    if (i > 0) {
+      partition_line << ", ";
+      partition_type += "x";
+    }
+    if (auto c = As<ir::ConstInt>(tensor_type->shape_[i])) {
+      partition_line << codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+      partition_type += std::to_string(c->value_);
+    } else {
+      partition_line << codegen.GetExprAsCode(tensor_type->shape_[i]);
+      partition_type += "?";
+    }
+  }
+  partition_line << "]";
+  partition_type += "x" + dtype_str + ">";
+  partition_line << " : " << tensor_view_type << " -> " << partition_type;
+  codegen.Emit(partition_line.str());
+
+  // Emit pto.mscatter with partition_view in outs()
+  std::ostringstream mscatter_line;
+  mscatter_line << "pto.mscatter ins(" << src_name << ", " << idx_name;
+  if (!src_type_annot.empty() && !idx_type_annot.empty()) {
+    mscatter_line << " : " << src_type_annot << ", " << idx_type_annot;
+  }
+  mscatter_line << ") outs(" << partition_view << " : " << partition_type << ")";
+  codegen.Emit(mscatter_line.str());
+
+  // Propagate tensor_view to the result var so downstream ops see the updated tensor
+  auto result_var = codegen.GetCurrentResultVar();
+  if (result_var != nullptr) {
+    codegen.RegisterTensorView(result_var, tensor_view);
+    codegen.RegisterVarToMlir(result_var, tensor_view);
+  }
+
+  return "";
+}
+
 // Helper function for tile.alloc (no-op: allocation handled elsewhere)
 static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   (void)op;
@@ -1195,7 +1273,6 @@ struct SimpleOpEntry {
 static const SimpleOpEntry kSimpleOps[] = {
     // Memory operations
     {"tile.mgather",         "pto.tmgather",         2},
-    {"tile.mscatter",        "pto.tmscatter",        2},
     // Tile x Tile arithmetic operations
     {"tile.add",             "pto.tadd",             2},
     {"tile.sub",             "pto.tsub",             2},
@@ -1348,6 +1425,15 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileStoreCodegenPTO(op, codegen);
   });
+  // tile.mscatter: src and idx must be row_major (MTE3 DMA reads UB linearly)
+  if (exclude_ops.count("tile.mscatter") == 0) {
+    backend.RegisterOp("tile.mscatter")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileMscatterCodegenPTO(op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major);
+  }
   reg("tile.alloc", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAllocCodegenPTO(op, codegen);
   });

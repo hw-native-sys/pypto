@@ -86,8 +86,8 @@ jobs:
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.24
-      PTOAS_SHA256: 31a1f14767f23f0e530faeea0b0dea481ec22c09f9bee5045287b444df00b5bd
+      PTOAS_VERSION: v0.26
+      PTOAS_SHA256: 8e8239f92b169d88fd117f7d4841739c129ecbdd8d3a01f96087df576ecd7814
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -137,19 +137,19 @@ jobs:
         run: pip install -v ./runtime
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=d96c8784
+        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=ed0b4643
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device=$DEVICE_ID --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=d96c8784
+            -v --device=$DEVICE_ID --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=ed0b4643
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.16
-      PTOAS_SHA256: 37bae58a015fe64be1cc105898317fb38f422992e87963ac90fcef5d595d00ec
+      PTOAS_VERSION: v0.26
+      PTOAS_SHA256: 5abf99f9729997e171bee08bdb25662a7a24b62921c5ecfc05790a56a6e1b076
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:
@@ -185,7 +185,7 @@ jobs:
         run: pip install -v ./runtime
 
       - name: Test A5 system tests (simulator)
-        run: pytest tests/st -v --platform a5sim --forked --pto-isa-commit=d96c8784 -m a5
+        run: pytest tests/st -v --platform a5sim --forked --pto-isa-commit=ed0b4643 -m a5
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest

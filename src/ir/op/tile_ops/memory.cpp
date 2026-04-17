@@ -555,6 +555,65 @@ REGISTER_OP("tile.store")
       return DeduceTileStoreType(args, kwargs, "tile.store");
     });
 
+// ============================================================================
+// tile.mscatter: scatter-store tile elements to tensor via per-element indices
+// Maps to pto.mscatter: mem[idx[i, j]] = src[i, j]
+// ============================================================================
+
+TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires 3 arguments (src, idx, output_tensor), but got " << args.size();
+
+  // First arg: src tile (FP16/FP32/INT16/INT32)
+  auto src_type = As<TileType>(args[0]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32 ||
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
+      << src_type->dtype_.ToString();
+
+  // Second arg: idx tile (INT32, same rank as src)
+  auto idx_type = As<TileType>(args[1]->GetType());
+  CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(idx_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires idx dtype to be INT32, but got "
+      << idx_type->dtype_.ToString();
+  CHECK(idx_type->shape_.size() == src_type->shape_.size())
+      << "The operator " << op_name << " requires idx rank to match src rank (" << src_type->shape_.size()
+      << "), but got " << idx_type->shape_.size();
+
+  // Third arg: output tensor (same dtype as src)
+  auto tensor_type = As<TensorType>(args[2]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name << " requires third argument to be a TensorType, but got "
+                     << args[2]->GetType()->TypeName();
+  CHECK(tensor_type->dtype_ == src_type->dtype_)
+      << "The operator " << op_name << " requires output_tensor dtype (" << tensor_type->dtype_.ToString()
+      << ") to match src dtype (" << src_type->dtype_.ToString() << ")";
+
+  // mscatter returns the output tensor (same type)
+  return tensor_type;
+}
+
+REGISTER_OP("tile.mscatter")
+    .set_op_category("TileOp")
+    .set_description(
+        "Scatter-store elements from src tile to tensor at per-element indices "
+        "(maps to pto.mscatter)")
+    .add_argument("src", "Source tile (FP16, FP32, INT16, or INT32)")
+    .add_argument("idx", "Index tile (INT32, same rank as src)")
+    .add_argument("output_tensor", "Output tensor (TensorType, same dtype as src)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_reuses_input(2)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileMscatterType(args, kwargs, "tile.mscatter");
+    });
+
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right)")
