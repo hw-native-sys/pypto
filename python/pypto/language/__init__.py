@@ -286,6 +286,7 @@ __all__ = [
     "load",
     "store",
     "move",
+    "mscatter",
     "sqrt",
     "rsqrt",
     "log",

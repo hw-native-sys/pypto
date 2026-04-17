@@ -2222,6 +2222,43 @@ class TestTileMscatterOps:
             # Missing output_tensor; call the op directly via create_op_call
             ir.create_op_call("tile.mscatter", [src_var, idx_var], {}, span)
 
+    def test_tile_mscatter_shape_mismatch_error(self):
+        """Test tile.mscatter rejects idx with different shape than src."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(16, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        idx_type = ir.TileType(
+            [ir.ConstInt(16, DataType.INT32, span), ir.ConstInt(64, DataType.INT32, span)],
+            DataType.INT32,
+        )
+        tensor_type = ir.TensorType([ir.ConstInt(1024, DataType.INT32, span)], DataType.FP32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="idx shape to match src shape"):
+            tile.mscatter(src_var, idx_var, out_var)
+
+    def test_tile_mscatter_scalar_output_error(self):
+        """Test tile.mscatter rejects scalar (rank-0) output tensor."""
+        span = ir.Span.unknown()
+        rows = ir.ConstInt(16, DataType.INT32, span)
+        cols = ir.ConstInt(32, DataType.INT32, span)
+
+        src_type = ir.TileType([rows, cols], DataType.FP32)
+        idx_type = ir.TileType([rows, cols], DataType.INT32)
+        tensor_type = ir.TensorType([], DataType.FP32)
+
+        src_var = ir.Var("src", src_type, span)
+        idx_var = ir.Var("idx", idx_type, span)
+        out_var = ir.Var("out", tensor_type, span)
+
+        with pytest.raises(ValueError, match="at least 1 dimension"):
+            tile.mscatter(src_var, idx_var, out_var)
+
 
 class TestTileConcatOps:
     """Test suite for tile.concat operation."""

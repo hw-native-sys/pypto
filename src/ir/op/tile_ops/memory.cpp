@@ -585,11 +585,23 @@ TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
   CHECK(idx_type->shape_.size() == src_type->shape_.size())
       << "The operator " << op_name << " requires idx rank to match src rank (" << src_type->shape_.size()
       << "), but got " << idx_type->shape_.size();
+  for (size_t i = 0; i < src_type->shape_.size(); ++i) {
+    auto src_dim = As<ConstInt>(src_type->shape_[i]);
+    auto idx_dim = As<ConstInt>(idx_type->shape_[i]);
+    if (src_dim && idx_dim) {
+      CHECK(src_dim->value_ == idx_dim->value_)
+          << "The operator " << op_name << " requires idx shape to match src shape at dimension " << i
+          << ", but got " << idx_dim->value_ << " vs " << src_dim->value_;
+    }
+  }
 
-  // Third arg: output tensor (same dtype as src)
+  // Third arg: output tensor (same dtype as src, must not be scalar)
   auto tensor_type = As<TensorType>(args[2]->GetType());
   CHECK(tensor_type) << "The operator " << op_name << " requires third argument to be a TensorType, but got "
                      << args[2]->GetType()->TypeName();
+  CHECK(!tensor_type->shape_.empty())
+      << "The operator " << op_name
+      << " requires output_tensor to have at least 1 dimension (scalar not supported)";
   CHECK(tensor_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires output_tensor dtype (" << tensor_type->dtype_.ToString()
       << ") to match src dtype (" << src_type->dtype_.ToString() << ")";

@@ -338,7 +338,7 @@ class MscatterFP32StridedTestCase(PTOTestCase):
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
             TensorSpec("idx_tensor", [8, 32], DataType.INT32, init_value=_init_strided_8x32),
-            TensorSpec("output", [512], DataType.FP32, is_output=True),
+            TensorSpec("output", [512], DataType.FP32, is_output=True, init_value=torch.zeros),
         ]
 
     def get_program(self) -> Any:
