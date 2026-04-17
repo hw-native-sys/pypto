@@ -29,11 +29,22 @@ def fresh_env_manager(monkeypatch):
 class TestGetSimplerRoot:
     """Verify each resolution branch of ``get_simpler_root``."""
 
-    def test_source_tree_install(self, fresh_env_manager):
-        """Editable install: ``<repo>/runtime`` is found via ``__file__`` anchor."""
+    def test_source_tree_install(self, fresh_env_manager, tmp_path, monkeypatch):
+        """Editable install: ``<repo>/runtime`` is found via the ``__file__`` anchor.
+
+        Hermetic: build a fake repo with the expected ``python/pypto/runtime/``
+        depth so the ``parents[3] / "runtime"`` lookup hits a controlled dir,
+        and ensure the test passes regardless of how/where pypto is installed.
+        """
+        fake_repo = tmp_path / "fake_repo"
+        fake_runtime = fake_repo / "runtime"
+        fake_runtime.mkdir(parents=True)
+        fake_module_dir = fake_repo / "python" / "pypto" / "runtime"
+        fake_module_dir.mkdir(parents=True)
+        monkeypatch.setattr(fresh_env_manager, "__file__", str(fake_module_dir / "env_manager.py"))
+
         root = fresh_env_manager.get_simpler_root()
-        assert root.is_dir()
-        assert (root / "src").is_dir(), "expected runtime/src to exist in source tree"
+        assert root == fake_runtime
 
     def test_simpler_setup_fallback(self, fresh_env_manager, tmp_path, monkeypatch):
         """Pip-installed pypto + pip-installed simpler.
@@ -110,8 +121,22 @@ class TestGetSimplerRoot:
         with pytest.raises(OSError, match=r"Cannot find runtime/"):
             fresh_env_manager.get_simpler_root()
 
-    def test_result_is_cached(self, fresh_env_manager):
-        """Repeated calls return the cached path object without re-resolving."""
+    def test_result_is_cached(self, fresh_env_manager, tmp_path, monkeypatch):
+        """Repeated calls return the cached path object without re-resolving.
+
+        Hermetic: seed a guaranteed-success resolution path via the
+        ``simpler_setup`` fallback so the cache check does not depend on the
+        ambient environment having a real source tree or git checkout.
+        """
+        fake_install = tmp_path / "fake_site_packages" / "pypto" / "runtime"
+        fake_install.mkdir(parents=True)
+        monkeypatch.setattr(fresh_env_manager, "__file__", str(fake_install / "env_manager.py"))
+
+        fake_assets = tmp_path / "simpler_assets"
+        (fake_assets / "src").mkdir(parents=True)
+        monkeypatch.setattr(fresh_env_manager, "_SIMPLER_SETUP_PROJECT_ROOT", fake_assets)
+
         first = fresh_env_manager.get_simpler_root()
         second = fresh_env_manager.get_simpler_root()
         assert first is second
+        assert first == fake_assets

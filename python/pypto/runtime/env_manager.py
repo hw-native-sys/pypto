@@ -20,8 +20,10 @@ from pathlib import Path
 
 _SIMPLER_SETUP_PROJECT_ROOT: Path | None
 try:
-    _SIMPLER_SETUP_PROJECT_ROOT = Path(importlib.import_module("simpler_setup.environment").PROJECT_ROOT)
-except ImportError:
+    _simpler_env_module = importlib.import_module("simpler_setup.environment")
+    _project_root_attr = getattr(_simpler_env_module, "PROJECT_ROOT", None)
+    _SIMPLER_SETUP_PROJECT_ROOT = Path(_project_root_attr) if _project_root_attr is not None else None
+except (ImportError, TypeError, ValueError):
     _SIMPLER_SETUP_PROJECT_ROOT = None
 
 _cache: dict[str, str | None] = {}
