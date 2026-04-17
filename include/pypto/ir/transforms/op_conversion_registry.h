@@ -79,6 +79,10 @@ struct InputSpaceReq {
 struct ConversionEntry {
   ConversionFunc func;
   std::unordered_map<size_t, InputSpaceReq> input_reqs;  ///< Per-input space requirements (key = arg index)
+  /// If set, consumer memory-space requirements on the op's result propagate
+  /// backward to this positional arg (e.g. tensor.reshape preserves the
+  /// input's memory space, so a Mat requirement on its output flows to arg 0).
+  std::optional<size_t> pass_through_arg;
 };
 
 /**
@@ -109,9 +113,12 @@ class OpConversionRegistry {
    * @param from_op Source op name (e.g., "tensor.add")
    * @param to_op Target op name (e.g., "tile.add")
    * @param input_reqs Per-input memory space requirements (default: none)
+   * @param pass_through_arg If set, downstream memory-space requirements on the
+   *        result flow backward to this positional arg (default: none)
    */
   void RegisterSimple(const std::string& from_op, const std::string& to_op,
-                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {},
+                      std::optional<size_t> pass_through_arg = std::nullopt);
 
   /**
    * @brief Register a custom conversion function
@@ -121,9 +128,12 @@ class OpConversionRegistry {
    * @param from_op Source op name (e.g., "tensor.matmul")
    * @param func Custom conversion function
    * @param input_reqs Per-input memory space requirements (default: none)
+   * @param pass_through_arg If set, downstream memory-space requirements on the
+   *        result flow backward to this positional arg (default: none)
    */
   void RegisterCustom(const std::string& from_op, ConversionFunc func,
-                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {},
+                      std::optional<size_t> pass_through_arg = std::nullopt);
 
   /**
    * @brief Look up a conversion entry for an op

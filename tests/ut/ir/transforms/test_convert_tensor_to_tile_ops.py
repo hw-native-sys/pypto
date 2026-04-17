@@ -2214,6 +2214,76 @@ class TestSliceMatmulConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_slice_reshape_then_matmul(self):
+        """slice -> reshape -> matmul: the Mat requirement on matmul's lhs
+        must propagate backward through reshape to the slice, so the slice
+        emits tile.load(Mat) directly (no redundant Vec->Mat move)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                combine_buf: pl.Tensor[[4, 16, 128], pl.BF16],
+                wo: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                row_3d: pl.Tensor[[1, 16, 128], pl.BF16] = pl.slice(combine_buf, [1, 16, 128], [0, 0, 0])
+                a_chunk: pl.Tensor[[16, 128], pl.BF16] = pl.reshape(row_3d, [16, 128])
+                result: pl.Tensor[[16, 64], pl.BF16] = pl.matmul(a_chunk, wo)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                combine_buf: pl.Tensor[[4, 16, 128], pl.BF16],
+                wo: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(combine_buf, wo)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                combine_buf: pl.Tensor[[4, 16, 128], pl.BF16],
+                wo: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                row_3d_tile: pl.Tile[[1, 16, 128], pl.BF16] = pl.load(
+                    combine_buf,
+                    [0, 0, 0],
+                    [1, 16, 128],
+                    [1, 16, 128],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=False,
+                )
+                a_chunk_tile: pl.Tile[[16, 128], pl.BF16] = pl.tile.reshape(row_3d_tile, [16, 128])
+                rhs_mat: pl.Tile[[128, 64], pl.BF16] = pl.load(
+                    wo,
+                    [0, 0],
+                    [128, 64],
+                    [128, 64],
+                    target_memory=pl.MemorySpace.Mat,
+                    transpose=False,
+                )
+                result_tile: pl.Tile[[16, 64], pl.FP32] = pl.matmul(a_chunk_tile, rhs_mat)
+                out_0_store: pl.Tensor[[16, 64], pl.BF16] = pl.store(result_tile, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function
+            def main(
+                self,
+                combine_buf: pl.Tensor[[4, 16, 128], pl.BF16],
+                wo: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                result: pl.Tensor[[16, 64], pl.BF16] = self.main_incore_0(combine_buf, wo, out_0)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestScatterUpdateConversion:
     """Tests for tensor.scatter_update → tile.scatter_update conversion."""

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -121,7 +122,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.col_expand_div", "tile.col_expand_div");
   RegisterSimple("tensor.expands", "tile.expands");
 
-  RegisterSimple("tensor.reshape", "tile.reshape");
+  RegisterSimple("tensor.reshape", "tile.reshape", /*input_reqs=*/{}, /*pass_through_arg=*/0);
   RegisterSimple("tensor.transpose", "tile.transpose");
   RegisterSimple("tensor.concat", "tile.concat");
   RegisterSimple("tensor.set_validshape", "tile.set_validshape");
@@ -524,7 +525,8 @@ void OpConversionRegistry::RegisterReductionOps() {
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
-                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs,
+                                          std::optional<size_t> pass_through_arg) {
   // Capture to_op by value for the lambda
   ConversionFunc func = [to_op](const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -538,12 +540,13 @@ void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std:
     }
     return ConversionResult{call};
   };
-  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
+  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs), pass_through_arg};
 }
 
 void OpConversionRegistry::RegisterCustom(const std::string& from_op, ConversionFunc func,
-                                          std::unordered_map<size_t, InputSpaceReq> input_reqs) {
-  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs)};
+                                          std::unordered_map<size_t, InputSpaceReq> input_reqs,
+                                          std::optional<size_t> pass_through_arg) {
+  conversions_[from_op] = ConversionEntry{std::move(func), std::move(input_reqs), pass_through_arg};
 }
 
 const ConversionEntry* OpConversionRegistry::Lookup(const std::string& op_name) const {

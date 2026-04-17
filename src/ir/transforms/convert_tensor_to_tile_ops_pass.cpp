@@ -226,6 +226,22 @@ class ConsumerSpaceCollector : public IRVisitor {
     return it != consumer_reqs_.end() ? std::optional{it->second} : std::nullopt;
   }
 
+  /// Propagate non-Vec consumer requirements backward through pass-through ops
+  /// (e.g., tensor.reshape).  Walks recorded edges in reverse program order so
+  /// that a chain of pass-through ops between a producer (e.g. tensor.slice)
+  /// and a consumer (e.g. tensor.matmul) correctly forwards the required
+  /// memory space to the producer.  Call after VisitStmt() on the function.
+  void PropagatePassThrough() {
+    for (auto it = pass_through_edges_.rbegin(); it != pass_through_edges_.rend(); ++it) {
+      auto out_req = GetConsumerReq(it->output_var);
+      if (!out_req || out_req->space == MemorySpace::Vec) continue;
+      auto [entry_it, inserted] = consumer_reqs_.try_emplace(it->input_var.get(), *out_req);
+      if (!inserted && entry_it->second.space == MemorySpace::Vec) {
+        entry_it->second = *out_req;
+      }
+    }
+  }
+
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
@@ -236,7 +252,7 @@ class ConsumerSpaceCollector : public IRVisitor {
     }
 
     const auto* entry = registry_.Lookup(call->op_->name_);
-    if (!entry || entry->input_reqs.empty()) {
+    if (!entry) {
       IRVisitor::VisitStmt_(op);
       return;
     }
@@ -254,12 +270,32 @@ class ConsumerSpaceCollector : public IRVisitor {
         }
       }
     }
+
+    // Record a pass-through edge so non-Vec requirements on this op's result
+    // can later be propagated backward to the designated input arg.
+    if (entry->pass_through_arg && op->var_) {
+      size_t idx = *entry->pass_through_arg;
+      if (idx < call->args_.size()) {
+        if (auto in_var = As<Var>(call->args_[idx])) {
+          pass_through_edges_.push_back({op->var_.get(), in_var});
+        }
+      }
+    }
+
     IRVisitor::VisitStmt_(op);
   }
 
  private:
+  struct PassThroughEdge {
+    /// Transient key for consumer_reqs_ lookup; never dereferenced.
+    const Var* output_var;
+    /// Held as shared_ptr so the Var stays alive until PropagatePassThrough runs.
+    VarPtr input_var;
+  };
+
   const OpConversionRegistry& registry_;
   std::unordered_map<const Var*, ConsumerSpaceReq> consumer_reqs_;
+  std::vector<PassThroughEdge> pass_through_edges_;
 };
 
 // ============================================================================
@@ -1185,8 +1221,11 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
   // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.
+  // Then propagate non-Vec requirements backward through pass-through ops (e.g. reshape)
+  // so that patterns like slice → reshape → matmul still load directly into Mat.
   ConsumerSpaceCollector consumer_collector(conv_registry);
   consumer_collector.VisitStmt(func->body_);
+  consumer_collector.PropagatePassThrough();
 
   // Create the body mutator
   TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector);
