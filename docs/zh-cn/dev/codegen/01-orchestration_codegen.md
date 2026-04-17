@@ -226,6 +226,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 | `tensor.create` | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` | scope 级批量分配；`const Tensor& var = alloc_N.get_ref(i)` |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | 从主机张量读取标量 |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | 创建现有张量的视图 |
+| `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | 零拷贝交换两个维度的元数据（lower 到运行时 `Tensor::transpose`） |
 | `tensor.dim`（静态） | `int64_t d0 = 16` | 编译时常量维度值 |
 | `tensor.dim`（动态） | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | 从 ChipStorageTaskArgs 获取运行时维度 |
 
