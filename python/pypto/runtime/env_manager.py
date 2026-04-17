@@ -14,8 +14,15 @@ Provides :func:`ensure` to validate and cache required environment variables,
 :func:`get_simpler_root` to locate the simpler ``runtime/`` submodule.
 """
 
+import importlib
 import os
 from pathlib import Path
+
+_SIMPLER_SETUP_PROJECT_ROOT: Path | None
+try:
+    _SIMPLER_SETUP_PROJECT_ROOT = Path(importlib.import_module("simpler_setup.environment").PROJECT_ROOT)
+except ImportError:
+    _SIMPLER_SETUP_PROJECT_ROOT = None
 
 _cache: dict[str, str | None] = {}
 
@@ -44,10 +51,14 @@ def get_simpler_root() -> Path:
 
     Resolution order:
 
-    1. Editable / source-tree install: ``<pypto-repo>/simpler/`` relative to
+    1. Editable / source-tree install: ``<pypto-repo>/runtime/`` relative to
        this file (``python/pypto/runtime/env_manager.py`` → 3 parents up).
-    2. Non-editable (pip) install: walk up from ``cwd()`` looking for a git
-       repository that contains a ``simpler/`` submodule.
+    2. Wheel install of ``simpler``: ``simpler_setup.environment.PROJECT_ROOT``,
+       which resolves to ``site-packages/simpler_setup/_assets/`` after a
+       ``pip install <pypto-repo>/runtime`` and contains the runtime ``src/``
+       installed by simpler's CMakeLists.
+    3. Legacy fallback: walk up from ``cwd()`` looking for a git repository
+       that contains a ``runtime/`` submodule (kept for ad-hoc setups).
 
     The result is cached after the first successful lookup.
     """
@@ -60,6 +71,10 @@ def get_simpler_root() -> Path:
         _simpler_root = candidate
         return _simpler_root
 
+    if _SIMPLER_SETUP_PROJECT_ROOT is not None and (_SIMPLER_SETUP_PROJECT_ROOT / "src").is_dir():
+        _simpler_root = _SIMPLER_SETUP_PROJECT_ROOT
+        return _simpler_root
+
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
         candidate = parent / "runtime"
@@ -69,7 +84,8 @@ def get_simpler_root() -> Path:
 
     raise OSError(
         "Cannot find runtime/ submodule directory.\n"
-        "Ensure you are running from within the pypto repository with "
-        "submodules initialized:\n"
-        "  git submodule update --init"
+        "Either run from within the pypto repository with submodules initialised\n"
+        "  git submodule update --init\n"
+        "or install the runtime wheel so simpler_setup is importable\n"
+        "  pip install <pypto-repo>/runtime"
     )
