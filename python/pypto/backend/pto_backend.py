@@ -311,7 +311,9 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
     # Deduplicate by IR variable identity (same_as), not by name_hint, so that
     # distinct Var objects sharing a cosmetic name are never incorrectly merged.
     seen_dyn_vars: list[_ir_core.Var] = []
-    used_c_names: set[str] = set()
+    used_c_names: set[str] = set(var_names)
+    used_c_names.update(f"{p.name_hint}_tensor" for p in tensor_params)
+    used_c_names.update(f"{p.name_hint}_conv" for p in scalar_params)
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
