@@ -142,6 +142,78 @@ class DynOrchAddTestCase(PTOTestCase):
         tensors["c"][:] = tensors["a"] + tensors["b"]
 
 
+class DynOrchReshapeAddTestCase(PTOTestCase):
+    """Test add kernel where the orchestration uses ``pl.reshape`` on dynamic 1D inputs.
+
+    Validates that ``tensor.reshape`` is supported in Orchestration functions and lowers
+    to the runtime ``Tensor::reshape`` interface (issue #1068).  The orchestration takes
+    flat 1D tensors of length ``rows*cols`` and reshapes them to ``[rows, cols]`` before
+    forwarding them to a 2D InCore add kernel.
+    Expected result: c = a + b over the full rows×cols tile.
+    """
+
+    __test__ = False
+
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        *,
+        backend_type: BackendType | None = None,
+        config: RunConfig | None = None,
+    ):
+        super().__init__(config, backend_type=backend_type)
+        self._rows, self._cols = shape
+
+    def get_name(self) -> str:
+        return f"dyn_orch_reshape_add_{self._rows}x{self._cols}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        flat = self._rows * self._cols
+        return [
+            TensorSpec("a_flat", [flat], DataType.FP32, init_value=2.0),
+            TensorSpec("b_flat", [flat], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [self._rows, self._cols], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        rows = self._rows
+        cols = self._cols
+
+        @pl.program
+        class DynOrchReshapeAddProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                """Add two dynamic-shape 2D tiles element-wise."""
+                a_tile = pl.load(a, [0, 0], [rows, cols], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [rows, cols])
+                result = pl.add(a_tile, b_tile)
+                out = pl.store(result, [0, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a_flat: pl.Tensor[[M], pl.FP32],
+                b_flat: pl.Tensor[[M], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                a2d: pl.Tensor[[rows, cols], pl.FP32] = pl.reshape(a_flat, [rows, cols])
+                b2d: pl.Tensor[[rows, cols], pl.FP32] = pl.reshape(b_flat, [rows, cols])
+                c_out = self.add_kernel(a2d, b2d, c)
+                return c_out
+
+        return DynOrchReshapeAddProgram
+
+    def compute_expected(self, tensors, params=None):
+        rows, cols = self._rows, self._cols
+        tensors["c"][:] = (tensors["a_flat"] + tensors["b_flat"]).reshape(rows, cols)
+
+
 class DynOrchValidShapeAddTestCase(PTOTestCase):
     """Test add with dynamic M×N orchestration and valid_shapes from a scalar tensor.
 
@@ -603,6 +675,16 @@ class TestDynOrchShapeOperations:
     def test_dyn_orch_add(self, test_runner, shape, backend):
         """Test add where both InCore and orchestration use dynamic M×N dims."""
         result = test_runner.run(DynOrchAddTestCase(shape, backend_type=backend))
+        assert result.passed, f"Test failed for shape {shape}: {result.error}"
+
+    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("shape", _DYN_SHAPES)
+    def test_dyn_orch_reshape_add(self, test_runner, shape, backend):
+        """Test add where the orchestration reshapes dynamic 1D inputs to 2D before dispatch.
+
+        Validates ``pl.reshape`` (issue #1068) inside an Orchestration function.
+        """
+        result = test_runner.run(DynOrchReshapeAddTestCase(shape, backend_type=backend))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
     @pytest.mark.parametrize("backend", PLATFORMS)

@@ -881,6 +881,53 @@ class TestOrchestration:
         assert "uint32_t chunk_offsets[2] = {0, 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
+    def test_tensor_reshape_external_input(self):
+        """tensor.reshape on an external orchestration input emits Tensor::reshape on ext_<name>."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ReshapeExternalProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_reshape(
+                self,
+                data: pl.Tensor[[256], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                r: pl.Tensor[[16, 16], pl.FP32] = pl.reshape(data, [16, 16])
+                return r
+
+        code = _generate_orch_code(ReshapeExternalProgram)
+
+        # Shape array emitted with the result variable name as prefix.
+        assert "uint32_t r_shapes[2] = {16, 16};" in code
+        # Reshape lowers to runtime Tensor::reshape on the external tensor handle.
+        assert "Tensor r = ext_data.reshape(r_shapes, 2);" in code
+
+    def test_tensor_reshape_after_slice(self):
+        """slice -> reshape chain: reshape input is a local Tensor (no ext_ prefix)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ReshapeAfterSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice_reshape(
+                self,
+                data: pl.Tensor[[4, 16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                chunk: pl.Tensor[[1, 16, 16], pl.FP32] = pl.slice(data, [1, 16, 16], [0, 0, 0])
+                r: pl.Tensor[[16, 16], pl.FP32] = pl.reshape(chunk, [16, 16])
+                return r
+
+        code = _generate_orch_code(ReshapeAfterSliceProgram)
+
+        # slice still emits view on the external tensor.
+        assert "uint32_t chunk_shapes[3] = {1, 16, 16};" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        # reshape emits its shape array and calls .reshape on the local Tensor (no ext_ prefix).
+        assert "uint32_t r_shapes[2] = {16, 16};" in code
+        assert "Tensor r = chunk.reshape(r_shapes, 2);" in code
+
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()

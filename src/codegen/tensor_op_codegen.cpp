@@ -252,6 +252,46 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   return oss.str();
 }
 
+REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
+  // tensor.reshape(input, shape_tuple[, valid_shape_tuple]) -> Generate shape array variable and call
+  // .reshape() on the runtime Tensor (see runtime/.../tensor.h: Tensor::reshape).
+  CHECK(op->args_.size() == 2 || op->args_.size() == 3)
+      << "tensor.reshape requires 2 or 3 arguments (input, shape[, valid_shape])";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.reshape input must be a variable";
+
+  std::string ext_input_name = codegen.GetExternalTensorName(input_name);
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  // Extract shape elements from MakeTuple
+  auto shape_tuple = As<MakeTuple>(op->args_[1]);
+  CHECK(shape_tuple) << "tensor.reshape shape must be MakeTuple";
+  size_t ndim = shape_tuple->elements_.size();
+
+  std::ostringstream oss;
+
+  // Generate shape array
+  oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
+  for (size_t i = 0; i < ndim; ++i) {
+    if (i > 0) oss << ", ";
+    oss << EmitAsUint32(shape_tuple->elements_[i], codegen);
+  }
+  oss << "};\n";
+
+  if (op->args_.size() == 3) {
+    auto valid_shape_tuple = As<MakeTuple>(op->args_[2]);
+    CHECK(valid_shape_tuple) << "tensor.reshape valid_shape must be MakeTuple";
+    CHECK(valid_shape_tuple->elements_.size() == ndim)
+        << "tensor.reshape valid_shape must have same rank as shape";
+  }
+
+  // Runtime Tensor::reshape requires the source to be contiguous; valid_shape only affects IR metadata.
+  oss << "Tensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
+      << ndim << ");";
+  return oss.str();
+}
+
 REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
   // tensor.dim(tensor, axis) -> extract shape dimension as scalar
   // Validation already performed by DeduceTensorDimType during type deduction.
