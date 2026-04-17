@@ -134,7 +134,8 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
     if (!has_pad && tv.valid_shape.size() >= 1) {
       if (auto c0 = As<ir::ConstInt>(tv.valid_shape[0])) {
         c.v_row = c0->value_;
-      } else if (As<ir::Var>(tv.valid_shape[0])) {
+      } else if (tv.valid_shape[0]) {
+        // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
         c.v_row_dynamic = true;
         has_any_dynamic = true;
       }
@@ -142,7 +143,8 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
     if (!has_pad && tv.valid_shape.size() >= 2) {
       if (auto c1 = As<ir::ConstInt>(tv.valid_shape[1])) {
         c.v_col = c1->value_;
-      } else if (As<ir::Var>(tv.valid_shape[1])) {
+      } else if (tv.valid_shape[1]) {
+        // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
         c.v_col_dynamic = true;
         has_any_dynamic = true;
       }

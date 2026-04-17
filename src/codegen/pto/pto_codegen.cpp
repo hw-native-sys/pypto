@@ -65,21 +65,28 @@ using ir::VarPtr;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
-static std::pair<VarPtr, VarPtr> GetTileValidShapeVars(const std::shared_ptr<const ir::TileType>& tile_type) {
-  VarPtr valid_row_var;
-  VarPtr valid_col_var;
+// Extract the (row, col) valid_shape expressions from a TileType's tile_view.
+// Returns nullptr for a dimension when it is missing or is a ConstInt (static).
+// Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
+// and must be lowered to MLIR via GetExprAsCode at the call site.
+static std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  ExprPtr valid_row_expr;
+  ExprPtr valid_col_expr;
   if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return {valid_row_var, valid_col_var};
+    return {valid_row_expr, valid_col_expr};
   }
 
   const auto& tile_view = tile_type->tile_view_.value();
-  if (tile_view.valid_shape.size() >= 1) {
-    valid_row_var = As<ir::Var>(tile_view.valid_shape[0]);
+  if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[0])) {
+    valid_row_expr = tile_view.valid_shape[0];
   }
-  if (tile_view.valid_shape.size() >= 2) {
-    valid_col_var = As<ir::Var>(tile_view.valid_shape[1]);
+  if (tile_view.valid_shape.size() >= 2 && tile_view.valid_shape[1] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[1])) {
+    valid_col_expr = tile_view.valid_shape[1];
   }
-  return {valid_row_var, valid_col_var};
+  return {valid_row_expr, valid_col_expr};
 }
 
 // Visitor to collect all MemRef objects from TileType variables
@@ -666,10 +673,11 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
           }
         }
       } else {
-        // No fillpad: use dynamic variable as operand (old behavior).
-        auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
-        if (valid_row_var) valid_row_mlir = GetVarName(valid_row_var);
-        if (valid_col_var) valid_col_mlir = GetVarName(valid_col_var);
+        // No fillpad: lower dynamic valid_shape exprs (Var, Call, BinaryOp, ...)
+        // to SSA values via GetExprAsCode so PTOAS receives the runtime extent.
+        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+        if (valid_row_expr) valid_row_mlir = GetExprAsCode(valid_row_expr);
+        if (valid_col_expr) valid_col_mlir = GetExprAsCode(valid_col_expr);
       }
     }
     // Static v_row/v_col: type string already encodes the values (e.g. v_row=48).

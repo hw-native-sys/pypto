@@ -99,14 +99,16 @@ struct TileBufSignature {
       if (tv.valid_shape.size() >= 1) {
         if (auto c0 = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
           sig.v_row = c0->value_;
-        } else if (ir::As<ir::Var>(tv.valid_shape[0])) {
+        } else if (tv.valid_shape[0]) {
+          // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
           sig.v_row_dynamic = true;
         }
       }
       if (tv.valid_shape.size() >= 2) {
         if (auto c1 = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
           sig.v_col = c1->value_;
-        } else if (ir::As<ir::Var>(tv.valid_shape[1])) {
+        } else if (tv.valid_shape[1]) {
+          // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
           sig.v_col_dynamic = true;
         }
       }

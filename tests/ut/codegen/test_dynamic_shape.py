@@ -63,6 +63,28 @@ class AddKernelValidShape:
 
 
 @pl.program
+class AddKernelValidShapeExpr:
+    """Add kernel with valid_shapes computed from a runtime expression (regression for #707)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        b: pl.Tensor[[128, 128], pl.FP32],
+        output: pl.Tensor[[128, 128], pl.FP32],
+        M: pl.Scalar[pl.INDEX],
+        N: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        """valid_shape elements come from pl.min(...) — i.e. ir::Call, not ir::Var."""
+        valid_m = pl.min(M, N)
+        a_tile = pl.load(a, [0, 0], [128, 128], valid_shapes=[valid_m, N])
+        b_tile = pl.load(b, [0, 0], [128, 128], valid_shapes=[valid_m, N])
+        result = pl.add(a_tile, b_tile)
+        out = pl.store(result, [0, 0], output)
+        return out
+
+
+@pl.program
 class AddKernelLoopDynamic:
     """Add kernel with dynamic shape tensor parameters."""
 
@@ -142,6 +164,34 @@ def test_add_kernel_valid_shape_pto_codegen():
     assert "valid_col = %arg4" in mlir_code
     # No set_validshape without fillpad (TLOAD respects valid_shape directly)
     assert "pto.set_validshape" not in mlir_code
+
+
+def test_add_kernel_valid_shape_expr_pto_codegen():
+    """Regression for #707: alloc_tile must emit valid_row/valid_col operands when the
+    valid_shape element is an arbitrary expression (e.g. pl.min(...)), not just an ir::Var.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    func = AddKernelValidShapeExpr.get_function("add_kernel")
+    assert func is not None
+    program = ir.Program([func], "test_add_kernel_valid_shape_expr", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    optimized = pm.run_passes(program)
+
+    gen = codegen.PTOCodegen()
+    mlir_code = gen.generate(optimized)
+
+    # The runtime min(M, N) must lower to an MLIR arith.minsi op.
+    assert "arith.minsi" in mlir_code, "pl.min should lower to arith.minsi; codegen did not visit the expr"
+    # alloc_tile type must be dynamic in the row dim (computed from min result).
+    assert "v_row=?" in mlir_code
+    # alloc_tile must carry a valid_row operand referencing the min SSA value
+    # (without the fix this was empty, causing PTOAS verification to fail).
+    assert "valid_row = %" in mlir_code, (
+        "alloc_tile must emit valid_row operand even when the source is ir::Call"
+    )
+    # The N dimension still uses the scalar arg directly.
+    assert "valid_col = %" in mlir_code
 
 
 def test_add_kernel_loop_dynamic_pto_codegen():

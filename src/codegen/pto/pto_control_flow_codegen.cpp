@@ -37,25 +37,31 @@ using ir::ScalarType;
 using ir::StmtPtr;
 using ir::TensorType;
 using ir::TileType;
-using ir::VarPtr;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
-static std::pair<VarPtr, VarPtr> GetTileValidShapeVars(const std::shared_ptr<const ir::TileType>& tile_type) {
-  VarPtr valid_row_var;
-  VarPtr valid_col_var;
+// Extract the (row, col) valid_shape expressions from a TileType's tile_view.
+// Returns nullptr for a dimension when it is missing or is a ConstInt (static).
+// Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
+// and must be lowered to MLIR via GetExprAsCode at the call site.
+static std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
+    const std::shared_ptr<const ir::TileType>& tile_type) {
+  ExprPtr valid_row_expr;
+  ExprPtr valid_col_expr;
   if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return {valid_row_var, valid_col_var};
+    return {valid_row_expr, valid_col_expr};
   }
 
   const auto& tile_view = tile_type->tile_view_.value();
-  if (tile_view.valid_shape.size() >= 1) {
-    valid_row_var = As<ir::Var>(tile_view.valid_shape[0]);
+  if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[0])) {
+    valid_row_expr = tile_view.valid_shape[0];
   }
-  if (tile_view.valid_shape.size() >= 2) {
-    valid_col_var = As<ir::Var>(tile_view.valid_shape[1]);
+  if (tile_view.valid_shape.size() >= 2 && tile_view.valid_shape[1] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[1])) {
+    valid_col_expr = tile_view.valid_shape[1];
   }
-  return {valid_row_var, valid_col_var};
+  return {valid_row_expr, valid_col_expr};
 }
 
 /// Join a vector of strings with ", " separator
@@ -171,9 +177,9 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         if (auto const_offset = As<ir::ConstInt>(tile_type->memref_.value()->byte_offset_)) {
           addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
         }
-        auto [valid_row_var, valid_col_var] = GetTileValidShapeVars(tile_type);
-        if (valid_row_var) valid_row_ssa = GetVarName(valid_row_var);
-        if (valid_col_var) valid_col_ssa = GetVarName(valid_col_var);
+        auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+        if (valid_row_expr) valid_row_ssa = GetExprAsCode(valid_row_expr);
+        if (valid_col_expr) valid_col_ssa = GetExprAsCode(valid_col_expr);
         std::string ret_name =
             AllocNewTileBuf(tile_type_string, return_var->name_hint_, addr_ssa, valid_row_ssa, valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
