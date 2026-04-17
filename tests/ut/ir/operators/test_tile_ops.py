@@ -289,6 +289,17 @@ class TestTileUnaryOps:
         ir_str = str(Program)
         assert "tile.sqrt" in ir_str
 
+    def test_tile_rsqrt_rejects_tmp_shape_mismatch(self):
+        """tile.rsqrt rejects a tmp tile whose per-dim shape differs from the input."""
+        span = ir.Span.unknown()
+        input_type = ir.TileType([16, 64], DataType.FP32)
+        tmp_type = ir.TileType([32, 64], DataType.FP32)  # rank matches, dim 0 differs
+        input_var = ir.Var("src", input_type, span)
+        tmp_var = ir.Var("tmp", tmp_type, span)
+
+        with pytest.raises(ValueError, match="shape mismatch"):
+            tile.rsqrt(input_var, tmp_var)
+
     def test_tile_rsqrt_high_precision(self):
         """tile.rsqrt accepts an optional tmp tile for the high-precision path."""
 

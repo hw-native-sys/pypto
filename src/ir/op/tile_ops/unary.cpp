@@ -77,6 +77,11 @@ TypePtr DeduceTileRsqrtType(const std::vector<ExprPtr>& args,
     CHECK(tmp_type->shape_.size() == tile_type->shape_.size())
         << op_name << ": tmp tile rank (" << tmp_type->shape_.size() << ") must match input rank ("
         << tile_type->shape_.size() << ")";
+    for (size_t i = 0; i < tile_type->shape_.size(); ++i) {
+      CHECK(DimensionsEqual(tmp_type->shape_[i], tile_type->shape_[i]))
+          << op_name << ": tmp tile shape mismatch at dimension " << i << " (tmp: " << tmp_type->shape_[i]
+          << ", input: " << tile_type->shape_[i] << ")";
+    }
   }
 
   TileView tile_view;
