@@ -327,11 +327,13 @@ void BindPass(nb::module_& m) {
              "Lower ``pl.range(N, unroll=F)`` loops at the tile level: replicate the body F\n"
              "times per outer iteration with a bare-SeqStmts remainder (or a cascaded IfStmt\n"
              "dispatch for dynamic bounds) covering N % F when needed.");
-  passes.def("reorder_unrolled_io", &pass::ReorderUnrolledIO,
-             "Canonicalize IO order inside every SeqStmts in the program: lift tile.load to\n"
-             "the top and sink tile.store to the bottom, subject to the SSA dependency graph.\n"
-             "Enables symmetric ping-pong buffering by making replicated clones' input and\n"
-             "output tiles co-live.");
+  passes.def("canonicalize_io_order", &pass::CanonicalizeIOOrder,
+             "Canonicalize statement order inside every SeqStmts in the program using a\n"
+             "4-tier schedule: lift scalar-producing assigns (e.g. address arithmetic) as\n"
+             "high as possible, then cluster tile.load near the top, then remaining tile\n"
+             "compute, and finally sink tile.store to the bottom — all subject to the SSA\n"
+             "dependency graph. Enables symmetric ping-pong buffering by making replicated\n"
+             "clones' input and output tiles co-live.");
   passes.def("ctrl_flow_transform", &pass::CtrlFlowTransform,
              "Create a control flow structuring pass (eliminate break/continue)");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");

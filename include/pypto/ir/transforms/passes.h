@@ -230,23 +230,27 @@ Pass PartialUnrollTileLoops();
  * @brief Canonicalize IO order inside every ``SeqStmts`` in the program
  *
  * For every ``SeqStmts`` with two or more statements, performs a priority-aware
- * stable topological sort over its members:
- *   - ``tile.load`` / ``tile.read`` assignments are pulled as far up as the
+ * stable topological sort over its members, using four priority tiers:
+ *   - scalar-producing assigns (e.g. address arithmetic) — lifted as far up as
+ *     the dependency graph permits so downstream loads become ready together
+ *   - ``tile.load`` / ``tile.read`` assignments — clustered next, near the top
+ *   - remaining tile/tensor compute — settles in the middle
+ *   - ``tile.store`` / ``tile.write`` calls — sunk as far down as the
  *     dependency graph permits
- *   - ``tile.store`` / ``tile.write`` calls are pushed as far down as the
- *     dependency graph permits
- *   - compute statements settle in the middle
  *
- * The result is `[loads…, compute…, stores…]` whenever the dataflow allows.
- * Within replicated regions produced by ``PartialUnrollTileLoops``, sibling
- * clones' input tiles become co-live near the top and output tiles co-live
- * near the bottom — preventing ``MemoryReuse`` from coalescing them and
- * enabling symmetric ping-pong execution.
+ * The result is `[scalar…, loads…, tile compute…, stores…]` whenever the
+ * dataflow allows. Within replicated regions produced by
+ * ``PartialUnrollTileLoops``, sibling clones' input tiles become co-live near
+ * the top and output tiles co-live near the bottom — preventing ``MemoryReuse``
+ * from coalescing them and enabling symmetric ping-pong execution.
  *
- * Uses ``stmt_dep::BuildStmtDependencyGraph`` and
- * ``stmt_dep::CheckInOutUseDiscipline`` for soundness.
+ * Soundness is enforced by checking the InOut-use discipline via
+ * ``stmt_dep::CollectInOutUseDisciplineDiagnostics`` once per function before
+ * any reordering. If any diagnostics are present, the pass leaves the function
+ * untouched rather than attempting to reorder. Dependency constraints inside
+ * each region are derived from ``stmt_dep::BuildStmtDependencyGraph``.
  */
-Pass ReorderUnrolledIO();
+Pass CanonicalizeIOOrder();
 
 /**
  * @brief Transform break/continue into structured control flow

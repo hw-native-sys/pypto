@@ -1,4 +1,4 @@
-# ReorderUnrolledIO Pass
+# CanonicalizeIOOrder Pass
 
 Inside every `SeqStmts` in the program, lifts scalar compute and `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph — to canonicalize IO order. Within replicated regions produced by `PartialUnrollTileLoops`, this enables symmetric ping-pong buffering.
 
@@ -25,11 +25,11 @@ Lifting scalar compute is what unlocks the load cluster: without it, each clone'
 
 | C++ | Python | Level |
 | --- | ------ | ----- |
-| `pass::ReorderUnrolledIO()` | `passes.reorder_unrolled_io()` | Program-level |
+| `pass::CanonicalizeIOOrder()` | `passes.canonicalize_io_order()` | Program-level |
 
 ```python
 from pypto import passes
-result = passes.reorder_unrolled_io()(program)
+result = passes.canonicalize_io_order()(program)
 ```
 
 ## Algorithm
@@ -66,14 +66,14 @@ Output: `[scalar_0, scalar_1, load_0, load_1, compute_0, compute_1, store_0, sto
 
 The reorder is a topological sort over the SSA def-use dependency graph, so it preserves all dataflow. Soundness rests on two utilities from `stmt_dependency_analysis.h`:
 
-1. `CheckInOutUseDiscipline(region, program)` — aborts compilation if any user-function call passes a variable as `InOut`/`Out` and a later statement reads that same variable. Since PR #1039 this is a structural IR invariant (RFC #1026): every `SeqStmts` in valid IR satisfies it, so the reorder is sound everywhere.
-2. `BuildStmtDependencyGraph(region, program)` — produces a sound def-use DAG over the region's top-level statements, given the discipline holds.
+1. `CollectInOutUseDisciplineDiagnostics(region, program)` — reports any user-function call that passes a variable as `InOut`/`Out` while a later statement still reads it. Since PR #1039 this is a structural IR invariant (RFC #1026): every function in valid IR satisfies it. The pass runs this check once per function — not per `SeqStmts`, since variable scopes don't cross function boundaries — and skips reordering for any function that reports a violation (to stay sound even under `VerificationLevel.NONE`).
+2. `BuildStmtDependencyGraph(region, program)` — produces a sound def-use DAG over the region's top-level statements, given the discipline holds. The pass passes `nullptr` for `program` since the discipline check has already been performed at function scope.
 
 ## Constraints
 
 | Constraint | Reason |
 | ---------- | ------ |
-| Region must satisfy the InOut-use discipline | Required for sound dataflow analysis (structural invariant since PR #1039) |
+| Function must satisfy the InOut-use discipline | Required for sound dataflow analysis (structural invariant since PR #1039); per-function check skips reordering otherwise |
 | Aborts on cyclic dependency graph | Should be impossible for an SSA region; raised as `INTERNAL_CHECK` |
 
 ## Example

@@ -334,14 +334,15 @@ def partial_unroll_tile_loops() -> Pass:
     ``SeqStmts``.
     """
 
-def reorder_unrolled_io() -> Pass:
+def canonicalize_io_order() -> Pass:
     """Create an IO-order canonicalization pass.
 
     Performs a priority-aware stable topological sort over every ``SeqStmts`` in
-    the program: ``tile.load`` floats to the top, ``tile.store`` sinks to the
-    bottom, compute settles in the middle — subject to the SSA dependency graph.
-    Within replicated regions from ``partial_unroll_tile_loops``, sibling clones'
-    input and output tiles become co-live, enabling ping-pong buffering once
+    the program with four tiers: scalar-producing assigns (e.g. address
+    arithmetic) lift first, then ``tile.load``, then remaining tile compute, and
+    finally ``tile.store`` — all subject to the SSA dependency graph. Within
+    replicated regions from ``partial_unroll_tile_loops``, sibling clones' input
+    and output tiles become co-live, enabling ping-pong buffering once
     ``MemoryReuse`` runs.
     """
 
@@ -526,7 +527,7 @@ __all__ = [
     "create_program_pass",
     "stmt_dependency_analysis",
     "partial_unroll_tile_loops",
-    "reorder_unrolled_io",
+    "canonicalize_io_order",
 ]
 
 class PassProperties:

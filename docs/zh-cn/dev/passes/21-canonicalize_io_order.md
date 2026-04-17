@@ -1,4 +1,4 @@
-# ReorderUnrolledIO Pass
+# CanonicalizeIOOrder Pass
 
 在全程序的每一个 `SeqStmts` 内部，把标量计算与 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `PartialUnrollTileLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。
 
@@ -25,11 +25,11 @@
 
 | C++ | Python | 级别 |
 | --- | ------ | ---- |
-| `pass::ReorderUnrolledIO()` | `passes.reorder_unrolled_io()` | 程序级 |
+| `pass::CanonicalizeIOOrder()` | `passes.canonicalize_io_order()` | 程序级 |
 
 ```python
 from pypto import passes
-result = passes.reorder_unrolled_io()(program)
+result = passes.canonicalize_io_order()(program)
 ```
 
 ## 算法
@@ -66,14 +66,14 @@ ready={store_1}                         发射 store_1
 
 重排是对 SSA def-use 依赖图的拓扑排序，因此保留所有数据流。可靠性依赖于 `stmt_dependency_analysis.h` 中的两个工具：
 
-1. `CheckInOutUseDiscipline(region, program)` —— 若某个用户函数调用以 `InOut`/`Out` 方式传入变量，且后续语句读取该变量，则中止编译。自 PR #1039 起该规约已是结构化 IR 不变式（RFC #1026）：所有合法 IR 的每个 `SeqStmts` 都满足它，重排在任何位置都是安全的。
-2. `BuildStmtDependencyGraph(region, program)` —— 在规约成立时，构造区域顶层语句的可靠 def-use DAG。
+1. `CollectInOutUseDisciplineDiagnostics(region, program)` —— 报告任何以 `InOut`/`Out` 传入变量而后续语句仍读取该变量的用户函数调用。自 PR #1039 起该规约已是结构化 IR 不变式（RFC #1026）：所有合法 IR 的每个函数都满足它。变量作用域不跨函数边界，故本 Pass 在函数级别运行该检查一次（而非在每个 `SeqStmts` 上）；若某函数报告违规，则整个函数跳过重排（即使在 `VerificationLevel.NONE` 下也保证可靠）。
+2. `BuildStmtDependencyGraph(region, program)` —— 在规约成立时，构造区域顶层语句的可靠 def-use DAG。由于已在函数级别完成规约检查，调用时对 `program` 传入 `nullptr`。
 
 ## 约束
 
 | 约束 | 原因 |
 | ---- | ---- |
-| 区域必须满足 InOut-use 规约 | 数据流分析的可靠性前提（自 PR #1039 起为结构化不变式） |
+| 函数必须满足 InOut-use 规约 | 数据流分析的可靠性前提（自 PR #1039 起为结构化不变式）；函数级检查未通过时跳过重排 |
 | 依赖图存在环时中止 | SSA 区域不应出现环；以 `INTERNAL_CHECK` 抛出 |
 
 ## 示例

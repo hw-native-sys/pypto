@@ -7,11 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""DSL-style Before/Expected tests for the ReorderUnrolledIO pass.
+"""DSL-style Before/Expected tests for the CanonicalizeIOOrder pass.
 
 The pass walks every ``SeqStmts`` in the program and reorders its top-level
-statements so tile.load floats to the top, tile.store sinks to the bottom, and
-compute settles in the middle — subject to the SSA dependency graph.
+statements into four priority tiers — scalar compute first, then tile.load,
+then tile compute, and finally tile.store — all subject to the SSA dependency
+graph.
 """
 
 import pypto.language as pl
@@ -20,14 +21,14 @@ from pypto import ir, passes
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
-    """Run ReorderUnrolledIO with structural verification disabled — our
+    """Run CanonicalizeIOOrder with structural verification disabled — our
     Before programs use minimal tile IR that doesn't satisfy the full set of
     structural prerequisites the pipeline normally enforces."""
     with passes.PassContext([], passes.VerificationLevel.NONE):
-        return passes.reorder_unrolled_io()(program)
+        return passes.canonicalize_io_order()(program)
 
 
-class TestReorderUnrolledIO:
+class TestCanonicalizeIOOrder:
     """Before/Expected pairs verifying the priority-aware topological reorder."""
 
     def test_symmetric_pingpong_layout(self):

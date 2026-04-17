@@ -122,11 +122,11 @@ else:
             <偏移 unroll_main_end + 0、+1、+2 的 3 份克隆体>
 ```
 
-本 Pass 之后，`ReorderUnrolledIO` 作用于全程序的每一个 `SeqStmts`，将 load 上拉、store 下沉，使各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。主循环与尾部克隆都能从 ping-pong 缓冲中受益。
+本 Pass 之后，`CanonicalizeIOOrder` 作用于全程序的每一个 `SeqStmts`，将 load 上拉、store 下沉，使各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。主循环与尾部克隆都能从 ping-pong 缓冲中受益。
 
 ## 相关
 
-- [`ReorderUnrolledIO`](21-reorder_unrolled_io.md) —— 下一个 Pass，对全程序每一个 `SeqStmts` 做 IO 顺序规范化
+- [`CanonicalizeIOOrder`](21-canonicalize_io_order.md) —— 下一个 Pass，对全程序每一个 `SeqStmts` 做 IO 顺序规范化
 - [`UnrollLoops`](01-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径
 - RFC #1025 —— 设计文档
 - RFC #1048 —— 移除 `unroll_replicated` 标记

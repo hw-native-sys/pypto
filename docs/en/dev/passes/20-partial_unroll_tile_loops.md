@@ -122,11 +122,11 @@ else:
             <3 clones at offsets unroll_main_end + 0, +1, +2>
 ```
 
-After this pass, `ReorderUnrolledIO` runs over every `SeqStmts` in the program and clusters loads at the top and stores at the bottom — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers. Ping-pong buffering applies to both the bulk main loop and the tail clones.
+After this pass, `CanonicalizeIOOrder` runs over every `SeqStmts` in the program and clusters loads at the top and stores at the bottom — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers. Ping-pong buffering applies to both the bulk main loop and the tail clones.
 
 ## Related
 
-- [`ReorderUnrolledIO`](21-reorder_unrolled_io.md) — the IO-order canonicalization pass that runs next over every `SeqStmts`
+- [`CanonicalizeIOOrder`](21-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next over every `SeqStmts`
 - [`UnrollLoops`](01-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering
 - RFC #1025 — design document
 - RFC #1048 — removal of the `unroll_replicated` marker

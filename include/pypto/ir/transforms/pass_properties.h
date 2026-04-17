@@ -159,7 +159,7 @@ inline const PassProperties kAllocateMemoryAddrProperties{
 inline const PassProperties kNormalizeReturnOrderProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
 
-// -- Partial unroll + reorder passes (tile-level, before InitMemRef) ---------
+// -- Partial unroll + IO-order canonicalization passes (tile-level, before InitMemRef) ---------
 
 inline const PassProperties kPartialUnrollTileLoopsProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
@@ -167,7 +167,7 @@ inline const PassProperties kPartialUnrollTileLoopsProperties{
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
 
-inline const PassProperties kReorderUnrolledIOProperties{
+inline const PassProperties kCanonicalizeIOOrderProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
