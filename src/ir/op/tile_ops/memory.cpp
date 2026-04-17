@@ -17,6 +17,7 @@
  * These operations handle data movement between tensors and unified buffers (tiles).
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -134,8 +135,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       << " only supports transpose=true when target_memory is Mat (L1), but got "
       << static_cast<int>(target_memory);
 
-  CHECK(!transpose || shapes_tuple->elements_.size() == 2)
-      << "The operator " << op_name << " only supports transpose=true for 2D loads, but got "
+  CHECK(!transpose || shapes_tuple->elements_.size() >= 2)
+      << "The operator " << op_name << " requires at least 2D shapes for transpose=true, but got "
       << shapes_tuple->elements_.size() << "D";
 
   // Nz/Zn for transpose false/true
@@ -153,16 +154,16 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
 
   // Build tile shape from shapes tuple.
   // When transpose=true, shapes are in original (source tensor) coordinates;
-  // swap to transposed coordinates for the output TileType.
+  // swap the last two dimensions to transposed coordinates for the output TileType.
   auto shape_elements = shapes_tuple->elements_;
-  if (transpose && shape_elements.size() == 2) {
-    std::swap(shape_elements[0], shape_elements[1]);
+  if (transpose && shape_elements.size() >= 2) {
+    std::iter_swap(shape_elements.end() - 2, shape_elements.end() - 1);
   }
   std::vector<ExprPtr> tile_shape(shape_elements.begin(), shape_elements.end());
 
   auto valid_elements = valid_shapes_tuple->elements_;
-  if (transpose && valid_elements.size() == 2) {
-    std::swap(valid_elements[0], valid_elements[1]);
+  if (transpose && valid_elements.size() >= 2) {
+    std::iter_swap(valid_elements.end() - 2, valid_elements.end() - 1);
   }
   tile_view.valid_shape = valid_elements;
 
@@ -175,7 +176,8 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
                             const std::string& op_name) {
   // store signature: (tile, offsets_tuple, output_tensor[, shapes_tuple])
   // shapes_tuple is an optional 4th argument injected by FlattenTileNdTo2D
-  // for ND tensors to carry the original partition shape for codegen.
+  // for ND tensors to carry the ND partition shape for codegen.
+  // When present, shapes_tuple has the same rank as offsets_tuple (both ND).
   CHECK(args.size() == 3 || args.size() == 4)
       << "The operator " << op_name
       << " requires 3 or 4 arguments (tile, offsets, output_tensor[, shapes]), but got " << args.size();

@@ -26,11 +26,11 @@ def _load2d(
     flat_shape: list,
     dtype: DataType,
 ) -> ir.Call:
-    """Create tile.load Call with explicit 2D TileType (bypasses op registry type inference).
+    """Create tile.load Call with original tensor-rank offsets/shapes and a 2D TileType.
 
-    tile.load hardware semantics: ND tensor -> 2D tile. The pass changes the result type
-    directly to 2D without inserting a tile.reshape, preserving tile_view and memory_space
-    from the original ND type.
+    After the refactor, FlattenTileNdTo2D keeps the original tensor-rank
+    offsets/shapes in tile.load but overrides the result TileType to 2D.
+    This helper constructs that expected IR shape.
     """
     nd_call = tile_ops.load(tensor, offsets, shapes, span=ir.Span.unknown())
     # Create a reference 2D tile.load to get the correct type (with proper tile_view + memory_space)
@@ -1552,7 +1552,9 @@ class TestFlattenTileNdTo2DReduceAndCompute:
                 a_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.create([6, 4], dtype=pl.FP32)
                 b_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.full([6, 4], dtype=pl.FP32, value=1.0)
                 c_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(a_tile, b_tile)
-                out_store: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(c_tile, [0, 0, 0], out_0, [2, 3, 4])
+                out_store: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(
+                    c_tile, [0, 0, 0], out_0, shapes=[2, 3, 4]
+                )
                 return out_store
 
             @pl.function
@@ -1794,6 +1796,493 @@ class TestFlattenTileNdTo2DControlFlow:
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.TileOps2D)
         passes.verify_properties(props, After, "test_while_stmt_tile_iter_arg")
+
+
+class TestFlattenTileNdTo2DBatchMatmul:
+    """Tests for tile.batch_matmul lowering inside FlattenTileNdTo2D."""
+
+    @staticmethod
+    def _flattened_incore(before: ir.Program) -> ir.Function:
+        """Run FlattenTileNdTo2D and return `main_incore_0`."""
+        after = passes.flatten_tile_nd_to_2d()(before)
+        after_func = after.get_function("main_incore_0")
+        assert after_func is not None
+        return after_func
+
+    @staticmethod
+    def _top_level_calls(func: ir.Function) -> list[ir.Call]:
+        """Return top-level AssignStmt call values from a function body."""
+        body = cast(ir.SeqStmts, func.body)
+        calls: list[ir.Call] = []
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                calls.append(stmt.value)
+        return calls
+
+    @staticmethod
+    def _tuple_const_values(expr: ir.Expr) -> list[int]:
+        """Extract integer values from a MakeTuple of ConstInt expressions."""
+        tup = cast(ir.MakeTuple, expr)
+        return [cast(ir.ConstInt, elem).value for elem in tup.elements]
+
+    def test_batch_matmul_broadcasts_and_unrolls(self):
+        """Broadcasted tile.batch_matmul [2,1,M,K]x[1,3,K,N] expands to 6 per-batch 2D tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 3, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 1, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0, 0], [2, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[1, 3, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0, 0], [1, 3, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 3, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 3, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 3, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                lhs_load_0: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_0: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_0: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_0, rhs_load_0)
+                out_0_0: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_0, [0, 0, 0, 0], out_0, shapes=[1, 1, 16, 64]
+                )
+
+                lhs_load_1: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_1: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 1, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_1: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_1, rhs_load_1)
+                out_0_1: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_1, [0, 1, 0, 0], out_0_0, shapes=[1, 1, 16, 64]
+                )
+
+                lhs_load_2: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_2: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 2, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_2: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_2, rhs_load_2)
+                out_0_2: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_2, [0, 2, 0, 0], out_0_1, shapes=[1, 1, 16, 64]
+                )
+
+                lhs_load_3: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [1, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_3: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_3: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_3, rhs_load_3)
+                out_0_3: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_3, [1, 0, 0, 0], out_0_2, shapes=[1, 1, 16, 64]
+                )
+
+                lhs_load_4: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [1, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_4: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 1, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_4: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_4, rhs_load_4)
+                out_0_4: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_4, [1, 1, 0, 0], out_0_3, shapes=[1, 1, 16, 64]
+                )
+
+                lhs_load_5: pl.Tile[[16, 128], pl.FP16] = pl.load(
+                    lhs, [1, 0, 0, 0], [1, 1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_load_5: pl.Tile[[128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 2, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                matmul_5: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_5, rhs_load_5)
+                out_0_5: pl.Tensor[[2, 3, 16, 64], pl.FP16] = pl.store(
+                    matmul_5, [1, 2, 0, 0], out_0_4, shapes=[1, 1, 16, 64]
+                )
+                return out_0_5
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 3, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 3, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 3, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        after_func = self._flattened_incore(Before)
+        expected_func = Expected.get_function("main_incore_0")
+        assert expected_func is not None
+        ir.assert_structural_equal(after_func, expected_func)
+
+    def test_batch_matmul_with_both_operands_load_transpose_unrolls_per_batch(self):
+        """Both operands use load(transpose=True): per-batch load with transpose kwarg, no tile.transpose."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_load_0: pl.Tile[
+                    [16, 128],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(
+                        valid_shape=[16, 128],
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.col_major,
+                    ),
+                ] = pl.load(lhs, [0, 0, 0], [1, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True)
+                rhs_load_0: pl.Tile[
+                    [128, 64],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(
+                        valid_shape=[128, 64],
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.col_major,
+                    ),
+                ] = pl.load(rhs, [0, 0, 0], [1, 64, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                matmul_0: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_0, rhs_load_0)
+                out_0_0: pl.Tensor[[2, 16, 64], pl.FP16] = pl.store(
+                    matmul_0, [0, 0, 0], out_0, shapes=[1, 16, 64]
+                )
+
+                lhs_load_1: pl.Tile[
+                    [16, 128],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(
+                        valid_shape=[16, 128],
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.col_major,
+                    ),
+                ] = pl.load(lhs, [1, 0, 0], [1, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True)
+                rhs_load_1: pl.Tile[
+                    [128, 64],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(
+                        valid_shape=[128, 64],
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.col_major,
+                    ),
+                ] = pl.load(rhs, [1, 0, 0], [1, 64, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                matmul_1: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(lhs_load_1, rhs_load_1)
+                out_0_1: pl.Tensor[[2, 16, 64], pl.FP16] = pl.store(
+                    matmul_1, [1, 0, 0], out_0_0, shapes=[1, 16, 64]
+                )
+                return out_0_1
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        after_func = self._flattened_incore(Before)
+        expected_func = Expected.get_function("main_incore_0")
+        assert expected_func is not None
+        ir.assert_structural_equal(after_func, expected_func)
+
+    def test_batch_matmul_with_named_load_transpose_unrolls_per_batch(self):
+        """Named load(transpose=True) operands: same output as inline load transpose."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_t: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                rhs_t: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_t, rhs_t)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        func = self._flattened_incore(Before)
+        calls = self._top_level_calls(func)
+        assert [call.op.name for call in calls] == [
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+        ]
+        load_calls = [call for call in calls if call.op.name == "tile.load"]
+        assert len(load_calls) == 4
+        assert all(call.kwargs["transpose"] is True for call in load_calls)
+        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
+            [0, 0, 0],
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 0, 0],
+        ]
+        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
+            [1, 128, 16],
+            [1, 64, 128],
+            [1, 128, 16],
+            [1, 64, 128],
+        ]
+        store_calls = [call for call in calls if call.op.name == "tile.store"]
+        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
+        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
+
+    def test_batch_matmul_3d_no_transpose_unrolls(self):
+        """tile.batch_matmul [2,M,K]x[2,K,N] expands to 2 per-batch 2D tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        func = self._flattened_incore(Before)
+        calls = self._top_level_calls(func)
+        assert [call.op.name for call in calls] == [
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+        ]
+        load_calls = [call for call in calls if call.op.name == "tile.load"]
+        assert [call.kwargs["transpose"] for call in load_calls] == [False, False, False, False]
+        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
+            [0, 0, 0],
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 0, 0],
+        ]
+        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
+            [1, 16, 128],
+            [1, 128, 64],
+            [1, 16, 128],
+            [1, 128, 64],
+        ]
+        store_calls = [call for call in calls if call.op.name == "tile.store"]
+        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
+        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
+
+    def test_batch_matmul_single_batch_unrolls(self):
+        """tile.batch_matmul [1,M,K]x[1,K,N] expands to 1 per-batch 2D tile.matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[1, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[1, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_tile: pl.Tile[[1, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[1, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([1, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        func = self._flattened_incore(Before)
+        calls = self._top_level_calls(func)
+        assert [call.op.name for call in calls] == ["tile.load", "tile.load", "tile.matmul", "tile.store"]
+        load_calls = [call for call in calls if call.op.name == "tile.load"]
+        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [[0, 0, 0], [0, 0, 0]]
+        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [[1, 16, 128], [1, 128, 64]]
+        store_call = next(call for call in calls if call.op.name == "tile.store")
+        assert self._tuple_const_values(store_call.args[1]) == [0, 0, 0]
+        assert self._tuple_const_values(store_call.args[3]) == [1, 16, 64]
+
+    def test_batch_matmul_with_load_transpose_unrolls_per_batch(self):
+        """One operand uses load(transpose=True): per-batch load with transpose kwarg."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
+                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
+                y = self.main_incore_0(lhs, rhs, out_0)
+                return y
+
+        func = self._flattened_incore(Before)
+        calls = self._top_level_calls(func)
+        assert [call.op.name for call in calls] == [
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+            "tile.load",
+            "tile.load",
+            "tile.matmul",
+            "tile.store",
+        ]
+        load_calls = [call for call in calls if call.op.name == "tile.load"]
+        assert [call.kwargs["transpose"] for call in load_calls] == [True, False, True, False]
+        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
+            [0, 0, 0],
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 0, 0],
+        ]
+        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
+            [1, 128, 16],
+            [1, 128, 64],
+            [1, 128, 16],
+            [1, 128, 64],
+        ]
+        store_calls = [call for call in calls if call.op.name == "tile.store"]
+        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
+        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
 
 
 if __name__ == "__main__":

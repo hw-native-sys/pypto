@@ -524,6 +524,33 @@ class TestUnifiedBlockDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_batch_matmul(self):
+        @pl.function
+        def unified(
+            t1: pl.Tensor[[2, 64, 64], pl.FP16],
+            t2: pl.Tensor[[2, 64, 64], pl.FP16],
+            out: pl.Tensor[[2, 64, 64], pl.FP16],
+        ) -> pl.Tensor[[2, 64, 64], pl.FP16]:
+            a: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            b: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            c: pl.Tile[[2, 64, 64], pl.FP32] = pl.batch_matmul(a, b)
+            result: pl.Tensor[[2, 64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t1: pl.Tensor[[2, 64, 64], pl.FP16],
+            t2: pl.Tensor[[2, 64, 64], pl.FP16],
+            out: pl.Tensor[[2, 64, 64], pl.FP16],
+        ) -> pl.Tensor[[2, 64, 64], pl.FP16]:
+            a: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t1, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            b: pl.Tile[[2, 64, 64], pl.FP16] = pl.tile.load(t2, offsets=[0, 0, 0], shapes=[2, 64, 64])
+            c: pl.Tile[[2, 64, 64], pl.FP32] = pl.tile.batch_matmul(a, b)
+            result: pl.Tensor[[2, 64, 64], pl.FP16] = pl.tile.store(c, offsets=[0, 0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_row_sum(self):
         @pl.function
         def unified(
@@ -1010,6 +1037,19 @@ class TestUnifiedOpsTypeErrors:
             unified_ops.add(t, ti)  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="cannot mix Tensor and Tile"):
             unified_ops.add(ti, t)  # type: ignore[arg-type]
+
+    def test_batch_matmul_tensor_inputs(self):
+        """batch_matmul is tile-only; passing Tensors raises TypeError."""
+        span = ir.Span.unknown()
+        t1 = Tensor(expr=ir.Var("a", ir.TensorType([2, 64, 64], DataType.FP16), span))
+        t2 = Tensor(expr=ir.Var("b", ir.TensorType([2, 64, 64], DataType.FP16), span))
+        with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
+            unified_ops.batch_matmul(t1, t2)  # type: ignore[arg-type]
+
+    def test_batch_matmul_invalid_lhs(self):
+        """batch_matmul with non-Tensor/Tile input raises TypeError."""
+        with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
+            unified_ops.batch_matmul(1, 2)  # type: ignore
 
 
 if __name__ == "__main__":

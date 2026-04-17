@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -113,13 +112,9 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
       continue;
     }
 
-    if (transpose_results.end() !=
-        std::find_if(transpose_results.begin(), transpose_results.end(),
-                     [idx](const auto& info) { return info.param_index == idx; })) {
-      CHECK(old_tensor_type->shape_.size() == 2)
-          << "transpose layout resolution only supports 2D tensors, got " << old_tensor_type->shape_.size()
-          << "D";
-    }
+    CHECK(old_tensor_type->shape_.size() >= 2)
+        << "transpose layout resolution requires at least 2D tensors, got " << old_tensor_type->shape_.size()
+        << "D";
 
     auto new_tensor_type = std::make_shared<TensorType>(
         old_tensor_type->shape_, old_tensor_type->dtype_, old_tensor_type->memref_,

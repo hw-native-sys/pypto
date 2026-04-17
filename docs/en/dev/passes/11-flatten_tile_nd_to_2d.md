@@ -4,7 +4,12 @@ Flattens ND tile operations (3D+) to 2D in InCore functions by merging all dimen
 
 ## Overview
 
-PTO-ISA only accepts 2D tiles. After `ConvertTensorToTileOps`, tiles may be ND (matching tensor shapes). This pass flattens all >2D tile operations to 2D by merging higher axes into one dimension and keeping the last axis unchanged. For example, a tile `[2, 3, 4]` becomes `[6, 4]`.
+PTO-ISA only accepts 2D tiles. After `ConvertTensorToTileOps`, tiles may have rank > 2 (matching tensor shapes). This pass flattens all >2D tile operations to 2D by merging higher axes into one dimension and keeping the last axis unchanged. For example, a tile `[2, 3, 4]` becomes `[6, 4]`.
+
+For batched matrix multiplication, `ConvertTensorToTileOps` first preserves the
+high-level intent as `tile.batch_matmul`. `FlattenTileNdTo2D` then becomes the
+canonical legalization point that expands it into broadcast-aware per-batch
+2D `tile.matmul` operations.
 
 **Requirements**:
 
@@ -42,11 +47,12 @@ Per-statement handling:
 
 | Tile op | Transformation |
 | ------- | -------------- |
-| `tile.load` (>2D) | Change result type to 2D directly (load produces 2D tile from ND tensor) |
-| `tile.store` (ND tensor, >2D) | Inject original ND partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged |
+| `tile.load` (>2D) | Change result type to 2D directly (load produces a 2D tile from a rank>2 tensor window) |
+| `tile.store` (rank>2 tensor) | Inject the original tensor-rank partition `shapes` as an extra 4th operand in the transformed IR so backend codegen can reconstruct the `partition_view`; the DSL source is unchanged |
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
+| `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast and any explicit operand `tile.transpose` |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 
@@ -81,8 +87,8 @@ class After:
 ```
 
 The 3D tile `[2, 3, 4]` is flattened to `[6, 4]`. `tile.load` directly produces a 2D tile —
-no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the ND tensor. For ND
-tensors (>2D), the pass injects the original partition `shapes` as an extra 4th operand into the
+no `tile.reshape` is inserted. `tile.store` accepts the 2D tile and writes to the original rank>2 tensor. For
+rank>2 tensors, the pass injects the original partition `shapes` as an extra 4th operand into the
 transformed IR (e.g. `pl.store(y_tile, [0, 0, 0], out_0, (2, 3, 4))`); this operand is only
 present in the transformed IR and is not part of the source DSL.
 

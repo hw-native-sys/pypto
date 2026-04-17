@@ -323,6 +323,34 @@ def test_matmul_with_transpose_kwargs():
     assert isinstance(call.type, ir.TensorType)
 
 
+def test_tile_batch_matmul_type_deduction():
+    """Test tile.batch_matmul type deduction without transpose kwargs."""
+    span = ir.Span.unknown()
+
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+
+    type_a = ir.TileType([dim2, dim128, dim64], DataType.FP16)
+    type_b = ir.TileType([dim2, dim64, dim32], DataType.FP16)
+    var_a = ir.Var("a_tile", type_a, span)
+    var_b = ir.Var("b_tile", type_b, span)
+
+    call = ir.create_op_call("tile.batch_matmul", [var_a, var_b], span)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TileType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 3
+    assert isinstance(result_type.shape[0], ir.ConstInt)
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert isinstance(result_type.shape[2], ir.ConstInt)
+    assert result_type.shape[0].value == 2
+    assert result_type.shape[1].value == 128
+    assert result_type.shape[2].value == 32
+
+
 def test_matmul_with_unknown_kwarg():
     """Test tensor.matmul with unknown kwarg should raise error."""
     span = ir.Span.unknown()
@@ -415,6 +443,14 @@ def test_matmul_kwarg_schema():
     assert "out_dtype" in keys
     assert "a_trans" in keys
     assert "b_trans" in keys
+
+
+def test_tile_batch_matmul_kwarg_schema():
+    """Test that tile.batch_matmul does not add custom kwargs."""
+    batch_matmul_op = ir.get_op("tile.batch_matmul")
+
+    keys = batch_matmul_op.get_attr_keys()
+    assert not keys
 
 
 def test_cast_kwarg_schema():

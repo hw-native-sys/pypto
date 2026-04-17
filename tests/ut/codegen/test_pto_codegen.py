@@ -1628,6 +1628,40 @@ class TestColumnVectorCodegen:
         assert "layout = #pto.layout<nd>" in row_view
 
 
+def test_pto_codegen_3d_dn_tensor_view_uses_last_dim_stride():
+    """3D DN tensor emits swapped shape and DN strides based on the original last dim.
+
+    Regression test for non-square batch transpose cases such as B:[B, N, K] with N != K.
+    The DN stride for the last dimension must be K (the original last dim), not N.
+    """
+
+    @pl.program
+    class DN3DProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            b: pl.Tensor[[2, 48, 64], pl.FP32, pl.DN],
+            out: pl.Out[pl.Tensor[[2, 48, 64], pl.FP32]],
+        ) -> pl.Tensor[[2, 48, 64], pl.FP32]:
+            tile_b = pl.load(b, [0, 0, 0], [2, 48, 64])
+            return pl.store(tile_b, [0, 0, 0], out)
+
+    mlir_code = _generate_default_mlir(DN3DProgram)
+    lines = _get_mlir_lines(mlir_code)
+    b_view = _single_line(lines, "pto.make_tensor_view %arg0")
+    stride_mul_lines = _find_lines(lines, "arith.muli")
+
+    assert "shape = [%c2_index, %c64_index, %c48_index]" in b_view
+    assert "strides = [" in b_view and ", %c1_index, %c64_index]" in b_view, (
+        f"3D DN stride must end with [1, 64] for shape [2, 48, 64]: {b_view}"
+    )
+    assert any("%c64_index" in line and "%c48_index" in line for line in stride_mul_lines), (
+        "Expected batch stride to be computed from the original last two dims (64 * 48). "
+        f"Got muli lines: {stride_mul_lines}"
+    )
+    assert "layout = #pto.layout<dn>" in b_view
+
+
 def test_pto_codegen_constant_indent_consistency():
     """All arith.constant lines must have consistent 2-space indent.
 

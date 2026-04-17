@@ -45,6 +45,7 @@ __all__ = [
     "slice",
     "fillpad",
     "matmul",
+    "batch_matmul",
     "matmul_acc",
     "row_max",
     "row_sum",
@@ -380,6 +381,16 @@ def matmul(
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.matmul(lhs, rhs)
     _raise_type_dispatch_error("matmul", lhs, rhs)
+
+
+def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
+    """Tile-only batched matrix multiplication.
+
+    Tensor batched matmul continues to use ``pl.matmul`` / ``pl.tensor.matmul``.
+    """
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.batch_matmul(lhs, rhs)
+    _raise_type_dispatch_error("batch_matmul", lhs, rhs)
 
 
 # ---------------------------------------------------------------------------

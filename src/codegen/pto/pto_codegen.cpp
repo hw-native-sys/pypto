@@ -510,27 +510,61 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       // whose physical memory layout differs from the view shape).
       bool has_explicit_stride =
           tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty();
+      const size_t rank = tensor_type->shape_.size();
 
-      // For N-D (N > 2): pre-compute row-major strides as SSA values using arith.muli
-      // so that dynamic dimensions (ir::Var) are handled correctly. Emit any needed
-      // multiply instructions BEFORE the make_tensor_view line.
+      // Materialize one shape dimension as an MLIR SSA value.
+      auto get_shape_dim_mlir = [&](size_t dim_idx) -> std::string {
+        if (auto var = As<ir::Var>(tensor_type->shape_[dim_idx])) {
+          return GetVarName(var);
+        }
+        return GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[dim_idx]), DataType::INDEX);
+      };
+
+      // DN tensor views keep the original logical shape in IR typing, but the
+      // emitted make_tensor_view must expose the trailing two visible dimensions
+      // in DN order so PTOAS interprets shape/stride/layout consistently.
+      // Column vectors are handled separately.
+      auto get_shape_source_idx = [&](size_t dim_idx) -> size_t {
+        if (!(layout_DN && rank >= 2 && !is_column_vector)) return dim_idx;
+        if (dim_idx == rank - 2) return rank - 1;
+        if (dim_idx == rank - 1) return rank - 2;
+        return dim_idx;
+      };
+
+      // Emit one stride multiply and return the resulting SSA.
+      auto emit_stride_mul = [&](const std::string& lhs, size_t dim_idx, size_t stride_slot) -> std::string {
+        std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(stride_slot));
+        stream_ << GetIndent() << mul_name << " = arith.muli " << lhs << ", " << get_shape_dim_mlir(dim_idx)
+                << " : index\n";
+        return mul_name;
+      };
+
+      // For N-D (N > 2): pre-compute strides as SSA values using arith.muli.
+      // ND uses standard row-major strides. DN keeps the same outer batch/page
+      // walk as ND, but the trailing two strides must match the visible DN shape:
+      // for logical [B, N, K], emit visible shape [B, K, N] with strides [N*K, 1, K].
       // Skip when explicit strides are available.
       std::vector<std::string> nd_stride_names;
-      if (!has_explicit_stride && tensor_type->shape_.size() > 2) {
-        const size_t rank = tensor_type->shape_.size();
+      if (!has_explicit_stride && rank > 2) {
         nd_stride_names.resize(rank);
-        nd_stride_names[rank - 1] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-        for (int j = static_cast<int>(rank) - 2; j >= 0; j--) {
-          std::string dim_mlir;
-          if (auto var = As<ir::Var>(tensor_type->shape_[j + 1])) {
-            dim_mlir = GetVarName(var);
-          } else {
-            dim_mlir = GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j + 1]), DataType::INDEX);
+        if (layout_DN) {
+          // For shape [B, N, K], DN strides are [N*K, 1, K].
+          nd_stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+          nd_stride_names[rank - 1] = get_shape_dim_mlir(rank - 1);
+          if (rank > 2) {
+            nd_stride_names[rank - 3] = emit_stride_mul(nd_stride_names[rank - 1], rank - 2, rank - 3);
+            for (int j = static_cast<int>(rank) - 4; j >= 0; j--) {
+              size_t dim = static_cast<size_t>(j);
+              nd_stride_names[dim] = emit_stride_mul(nd_stride_names[dim + 1], dim + 1, dim);
+            }
           }
-          std::string mul_name = NewNamedTemp(param->name_hint_ + "_s" + std::to_string(j));
-          stream_ << GetIndent() << mul_name << " = arith.muli " << nd_stride_names[j + 1] << ", " << dim_mlir
-                  << " : index\n";
-          nd_stride_names[j] = mul_name;
+        } else {
+          // Standard row-major strides
+          nd_stride_names[rank - 1] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+          for (int j = static_cast<int>(rank) - 2; j >= 0; j--) {
+            size_t dim = static_cast<size_t>(j);
+            nd_stride_names[dim] = emit_stride_mul(nd_stride_names[dim + 1], dim + 1, dim);
+          }
         }
       }
 
@@ -538,26 +572,10 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << GetVarName(param);
 
       stream_ << ", shape = [";
-      if (layout_DN && tensor_type->shape_.size() == 2 && !is_column_vector) {
-        // General DN 2D: emit transposed shape [shape[1], shape[0]] so that PTOAS
-        // sees the column-major convention while the IR keeps original shape.
-        for (int j = 1; j >= 0; j--) {
-          if (j < 1) stream_ << ", ";
-          if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
-            stream_ << GetVarName(var);
-          } else {
-            stream_ << GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j]), DataType::INDEX);
-          }
-        }
-      } else {
-        for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
-          if (j > 0) stream_ << ", ";
-          if (auto var = As<ir::Var>(tensor_type->shape_[j])) {
-            stream_ << GetVarName(var);
-          } else {
-            stream_ << GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[j]), DataType::INDEX);
-          }
-        }
+      // DN swaps the last two visible shape dimensions; ND keeps the original order.
+      for (size_t j = 0; j < rank; j++) {
+        if (j > 0) stream_ << ", ";
+        stream_ << get_shape_dim_mlir(get_shape_source_idx(j));
       }
       stream_ << "],";
 
@@ -577,12 +595,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         // For column vector [M, 1]: stride dim is shape[0] (= M) → strides [1, M].
         // For other 2D: stride dim is shape[1] (= C) → DN [1, C] or ND [C, 1].
         int stride_idx = is_column_vector ? 0 : 1;
-        std::string row_stride;
-        if (auto var = As<ir::Var>(tensor_type->shape_[stride_idx])) {
-          row_stride = GetVarName(var);
-        } else {
-          row_stride = GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[stride_idx]), DataType::INDEX);
-        }
+        std::string row_stride = get_shape_dim_mlir(stride_idx);
         if (layout_DN) {
           stream_ << GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX) << ", " << row_stride;
         } else {
@@ -617,7 +630,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       stream_ << " {layout = #pto.layout<" << layout_str << ">}";
 
       stream_ << ": !pto.tensor_view<";
-      for (size_t j = 0; j < tensor_type->shape_.size(); j++) {
+      for (size_t j = 0; j < rank; j++) {
         if (j > 0) stream_ << "x";
         stream_ << "?";
       }

@@ -110,6 +110,12 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
+在 tile 层，`tile.batch_matmul` 为 `TileType` 操作数提供批量语义。它接受 rank >= 2 的
+tile，广播前导批量维度，并保持与 `tile.matmul` 相同的纯操作数接口风格。如果批量操作数
+需要转置语义，可以通过两种等价方式表达：在输入上显式使用 `tile.transpose(...)`，或让
+输入来自 `tile.load(..., transpose=True)`。在后续降级到 2D `tile.matmul` 时，这两种
+写法都会被统一识别为操作数转置语义。
+
 ## Python 用法
 
 ```python
