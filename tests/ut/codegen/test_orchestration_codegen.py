@@ -1405,7 +1405,41 @@ class TestOrchestration:
         assert "params_t0.add_inout(ret0__out)" in code
         assert "params_t1.add_inout(ret0__out_1)" in code
         assert "const Tensor& first = ret0__out;" in code
-        assert "const Tensor& second = ret0__out_1;" in code
+        assert "const Tensor& second" not in code
+
+    def test_unused_alias_not_emitted(self):
+        """Alias for a kernel result that is never consumed downstream should be omitted."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class UnusedAliasProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_op(
+                self,
+                a: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], a)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_unused(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                result: pl.Tensor[[16, 16], pl.FP32] = self.kernel_op(a, b)
+                return result
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(UnusedAliasProgram)
+        code = _generate_orch_code(transformed)
+
+        assert "pto2_rt_submit_" in code
+        assert "const Tensor& result" not in code
 
     def test_multi_scope_alloc_tensors_batching(self):
         """Each scope (function body, for body) batches its own alloc_tensors independently."""

@@ -40,6 +40,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -148,6 +149,11 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
   return oss.str();
 }
 
+class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
+ protected:
+  void VisitStmt_(const ReturnStmtPtr&) override {}
+};
+
 }  // namespace
 
 // Statement code generator for orchestration
@@ -183,6 +189,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
+
+  void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
 
   std::string GetGeneratedCode() const { return code_.str(); }
   // --- CodegenBase pure virtual implementations ---
@@ -305,7 +313,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         GenerateFunctionCallCode(call, result_key);
 
         if (!As<TupleType>(call->GetType())) {
-          GenerateSingleReturnAlias(call, var_name);
+          if (effective_uses_.count(assign->var_.get())) {
+            GenerateSingleReturnAlias(call, var_name);
+          }
         } else {
           GenerateTupleReturnAliases(call);
         }
@@ -1051,6 +1061,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (effective_dirs[param_idx] == ParamDirection::InOut) {
         continue;
       }
+      if (!effective_uses_.count(elem.var)) {
+        continue;
+      }
       std::string elem_name = ReserveVarEmitName(elem.var);
       EmitTensorAlias(elem_name, call, param_idx);
     }
@@ -1121,6 +1134,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_map<const Call*, std::vector<ParamDirection>> call_site_directions_;
+  std::unordered_set<const Var*> effective_uses_;
 
   const std::vector<ParamDirection>* LookupCallSiteDirections(const CallPtr& call) const {
     auto it = call_site_directions_.find(call.get());
@@ -1151,6 +1165,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   CallSiteDirectionResolver direction_resolver(program, root_collector.buffer_roots, func->params_);
   direction_resolver.VisitStmt(func->body_);
+
+  CodegenEffectiveUseCollector use_collector;
+  use_collector.VisitStmt(func->body_);
 
   std::unordered_map<const Var*, std::string> emit_name_map;
   std::set<std::string> param_name_set;
@@ -1192,6 +1209,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetCallSiteDirections(std::move(direction_resolver.call_site_directions));
+  stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);
 
