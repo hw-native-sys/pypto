@@ -243,7 +243,9 @@ def _register_ops() -> None:
         m[f"{prefix}.neg"] = _torch_fn("neg")
         m[f"{prefix}.exp"] = _torch_fn("exp")
         m[f"{prefix}.sqrt"] = _torch_fn("sqrt")
-        m[f"{prefix}.rsqrt"] = _torch_fn("rsqrt")
+        # rsqrt in tile form may carry an optional tmp_tile arg for the high-precision
+        # path; torch.rsqrt takes only the input, so ignore any extra operands.
+        m[f"{prefix}.rsqrt"] = lambda a, _kw: f"torch.rsqrt({a[0]})"
         m[f"{prefix}.recip"] = _torch_fn("reciprocal")
         m[f"{prefix}.abs"] = _torch_fn("abs")
 

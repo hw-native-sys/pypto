@@ -388,6 +388,21 @@ def test_tensor_rsqrt_wrong_type():
         ir.op.tensor.rsqrt(tile_var)
 
 
+def test_tensor_rsqrt_high_precision_kwarg():
+    """tensor.rsqrt carries the high_precision kwarg when requested."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.rsqrt(tensor_var, high_precision=True)
+
+    assert call.op.name == "tensor.rsqrt"
+    kwargs = dict(call.kwargs)
+    assert kwargs.get("high_precision") is True
+
+
 def test_tensor_cast():
     """Test tensor.cast operation."""
     span = ir.Span.unknown()

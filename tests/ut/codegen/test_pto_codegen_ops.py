@@ -541,6 +541,81 @@ class Test910BBlockOpsCodegen:
             validate_kernel_codegen(func_name, mlir_code)
 
 
+class TestRsqrtHighPrecisionCodegen:
+    """Tests for the high-precision path of tile.rsqrt (2-arg form)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_rsqrt_with_tmp_emits_two_operand_trsqrt(self):
+        """pl.tile.rsqrt(src, tmp=...) emits pto.trsqrt with two ins operands."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_rsqrt_hp(
+                self,
+                input_tensor: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                input_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
+                tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
+                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.rsqrt(input_tile, tmp=tmp_tile)
+                updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
+                return updated_output
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.trsqrt" in mlir
+        # Two ins operands separated by a comma must appear inside a single ins(...) clause.
+        trsqrt_line = next((line for line in mlir.splitlines() if "pto.trsqrt" in line), "")
+        assert trsqrt_line, f"pto.trsqrt not found in MLIR:\n{mlir}"
+        ins_start = trsqrt_line.find("ins(")
+        assert ins_start != -1, f"ins(...) clause not found in: {trsqrt_line}"
+        ins_end = trsqrt_line.find(")", ins_start)
+        ins_body = trsqrt_line[ins_start + len("ins(") : ins_end]
+        # 2-operand form: "<operand1>, <operand2> : ..." — check for a separator before the ":".
+        operand_str = ins_body.split(":", 1)[0]
+        assert operand_str.count(",") >= 1, (
+            f"Expected 2 ins operands for high-precision pto.trsqrt, got: {trsqrt_line}"
+        )
+
+    def test_tensor_rsqrt_high_precision_end_to_end(self):
+        """pl.rsqrt(x, high_precision=True) at the tensor level also emits the 2-operand form."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_rsqrt_hp_tensor(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                y: pl.Tensor[[16, 16], pl.FP32] = pl.rsqrt(x, high_precision=True)
+                return y
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.trsqrt" in mlir
+        trsqrt_line = next((line for line in mlir.splitlines() if "pto.trsqrt" in line), "")
+        ins_start = trsqrt_line.find("ins(")
+        ins_end = trsqrt_line.find(")", ins_start)
+        ins_body = trsqrt_line[ins_start + len("ins(") : ins_end]
+        operand_str = ins_body.split(":", 1)[0]
+        assert operand_str.count(",") >= 1, (
+            f"Expected 2 ins operands for tensor-level high_precision rsqrt, got: {trsqrt_line}"
+        )
+
+
 class TestTileReadWriteOffsetCodegen:
     """Tests verifying tile.read/write multi-dimensional indices generate correct flat offsets."""
 

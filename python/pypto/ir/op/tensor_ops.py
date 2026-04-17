@@ -738,18 +738,21 @@ def sqrt(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.sqrt", [input], {}, actual_span)
 
 
-def rsqrt(input: Expr, span: Span | None = None) -> Call:
+def rsqrt(input: Expr, high_precision: bool = False, span: Span | None = None) -> Call:
     """Element-wise reciprocal square root operation.
 
     Args:
         input: Input tensor
+        high_precision: If True, lower to the high-precision PTO path that
+            uses a scratch buffer (compiler-allocated during conversion).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise reciprocal square root
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.rsqrt", [input], {}, actual_span)
+    kwargs: dict = {"high_precision": high_precision} if high_precision else {}
+    return _ir_core.create_op_call("tensor.rsqrt", [input], kwargs, actual_span)
 
 
 def cast(

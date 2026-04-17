@@ -684,17 +684,19 @@ def sqrt(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def rsqrt(input: Tensor) -> Tensor:
+def rsqrt(input: Tensor, high_precision: bool = False) -> Tensor:
     """Element-wise reciprocal square root operation.
 
     Args:
         input: Input tensor
+        high_precision: If True, lower to the higher-precision PTO path. The
+            compiler allocates a scratch buffer during tensor-to-tile conversion.
 
     Returns:
         Tensor wrapping the rsqrt operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.rsqrt(input_expr)
+    call_expr = _ir_ops.rsqrt(input_expr, high_precision=high_precision)
     return Tensor(expr=call_expr)
 
 

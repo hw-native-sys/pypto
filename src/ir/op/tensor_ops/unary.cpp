@@ -190,8 +190,11 @@ REGISTER_OP("tensor.sqrt")
 
 REGISTER_OP("tensor.rsqrt")
     .set_op_category("TensorOp")
-    .set_description("Element-wise reciprocal square root operation")
+    .set_description(
+        "Element-wise reciprocal square root operation. "
+        "Passing high_precision=True opts into the higher-precision PTO path that uses a scratch buffer.")
     .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<bool>("high_precision")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorRsqrtType(args, kwargs);

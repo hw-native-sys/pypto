@@ -101,8 +101,39 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.recip", "tile.recip");
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.sqrt", "tile.sqrt");
-  RegisterSimple("tensor.rsqrt", "tile.rsqrt");
   RegisterSimple("tensor.cast", "tile.cast");
+
+  // tensor.rsqrt → tile.rsqrt (basic) or tile.rsqrt(src, tmp) (high-precision).
+  // The tmp scratch tile is allocated via tile.create when high_precision=True.
+  RegisterCustom(
+      "tensor.rsqrt",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 1) << "tensor.rsqrt conversion expects 1 arg, got " << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+
+        bool high_precision = GetKwargOr<bool>(kwargs, "high_precision", false);
+        if (!high_precision) {
+          return ConversionResult{op_reg.Create("tile.rsqrt", {input}, span)};
+        }
+
+        auto tile_type = As<TileType>(input->GetType());
+        CHECK(tile_type) << "tensor.rsqrt conversion: input must be TileType after memory promotion, got "
+                         << input->GetType()->TypeName();
+
+        auto shape_tuple = std::make_shared<MakeTuple>(tile_type->shape_, span);
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+
+        auto tmp_var = std::make_shared<Var>("rsqrt_tmp", create_call->GetType(), span);
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
+
+        auto rsqrt_call = op_reg.Create("tile.rsqrt", {input, tmp_var}, span);
+        return ConversionResult{std::move(prologue), rsqrt_call};
+      });
 }
 
 // ============================================================================

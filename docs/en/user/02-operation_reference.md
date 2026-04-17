@@ -24,6 +24,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
+| `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
 | `write` | `(dst: T, offset: IntLike \| Sequence[IntLike], value: Scalar) -> None` | Write scalar at indices (dispatched by destination type). Sugar: `A[i, j] = v` |
@@ -54,6 +55,7 @@ Operate on `Tensor` objects (DDR memory).
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Element-wise maximum |
 | `row_max` | `(input: Tensor) -> Tensor` | Row-wise max reduction |
 | `row_sum` | `(input: Tensor) -> Tensor` | Row-wise sum reduction |
+| `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` | Element-wise reciprocal square root; `high_precision=True` allocates a scratch tile during lowering for the higher-precision PTO path (requires static tile shape, same constraint as `row_max`/`row_sum`) |
 | `exp` | `(input: Tensor) -> Tensor` | Element-wise exponential |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | Type cast |
 | `matmul` | `(lhs: Tensor, rhs: Tensor, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> Tensor` | Matrix multiplication |
@@ -117,7 +119,7 @@ Transfer data between memory hierarchy levels.
 | `neg` | `(tile: Tile) -> Tile` | Negate |
 | `exp` | `(tile: Tile) -> Tile` | Exponential |
 | `sqrt` | `(tile: Tile) -> Tile` | Square root |
-| `rsqrt` | `(tile: Tile) -> Tile` | Reciprocal square root |
+| `rsqrt` | `(tile: Tile, tmp: Tile \| None = None) -> Tile` | Reciprocal square root; passing `tmp` (same shape/dtype as `tile`) selects the high-precision PTO lowering |
 | `recip` | `(tile: Tile) -> Tile` | Reciprocal (1/x) |
 | `log` | `(tile: Tile) -> Tile` | Natural logarithm |
 | `abs` | `(tile: Tile) -> Tile` | Absolute value |

@@ -342,6 +342,46 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_rsqrt_high_precision_conversion(self):
+        """tensor.rsqrt(high_precision=True) allocates a tmp tile and lowers to 2-arg tile.rsqrt."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.rsqrt(x, high_precision=True)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                rsqrt_tmp: pl.Tile[[64], pl.FP32] = pl.tile.create(
+                    [64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.rsqrt(x_tile, rsqrt_tmp)
+                out_0_store: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
+                return out_0_store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_sqrt_conversion(self):
         """tensor.sqrt -> tile.sqrt."""
 

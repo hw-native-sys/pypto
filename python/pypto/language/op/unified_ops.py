@@ -195,10 +195,16 @@ def sqrt(input: T) -> T:
     raise TypeError(f"sqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def rsqrt(input: T) -> T:
-    """Element-wise reciprocal square root, dispatched by input type."""
+def rsqrt(input: T, high_precision: bool = False) -> T:
+    """Element-wise reciprocal square root, dispatched by input type.
+
+    ``high_precision`` applies to the tensor path where the compiler inserts
+    the scratch allocation. At the tile level, callers that need the high-
+    precision path must call ``pl.tile.rsqrt(src, tmp=...)`` directly since
+    buffer lifetimes are user-managed there.
+    """
     if isinstance(input, Tensor):
-        return _tensor.rsqrt(input)
+        return _tensor.rsqrt(input, high_precision=high_precision)
     if isinstance(input, Tile):
         return _tile.rsqrt(input)
     raise TypeError(f"rsqrt: expected Tensor or Tile, got {type(input).__name__}")
