@@ -657,6 +657,25 @@ class TestScalarConstantPropagation:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_folds_nested_arithmetic_in_call_args(self):
+        """`K + 0` buried inside a tensor-op argument should fold to `K` even
+        though Analyzer::Simplify does not recurse into Call/MakeTuple."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]):
+                _t: pl.Tensor[[1, 8], pl.FP32] = pl.tensor.create([1 * 1, k + 0 - k + 8], dtype=pl.FP32)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]):  # noqa: ARG002
+                _t: pl.Tensor[[1, 8], pl.FP32] = pl.tensor.create([1, 8], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_not_propagated_when_reassigned(self):
         """A Var reassigned inside the function must NOT be bound to its
         initial value — pre-SSA safety via MultiAssignCollector.

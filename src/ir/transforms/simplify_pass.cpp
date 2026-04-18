@@ -83,6 +83,19 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
   }
 
+  /// Fold arithmetic nodes (Add/Sub/Mul/Div/Min/Max/compare/bitwise/logical)
+  /// after children are visited. Needed because Analyzer::Simplify at the
+  /// statement-level top does not recurse into non-arithmetic containers
+  /// (Call, MakeTuple), so an Add buried inside a shape arg would otherwise
+  /// reach downstream with patterns like `K + 0` un-folded.
+  ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op) override {
+    return analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op));
+  }
+
+  ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op) override {
+    return analyzer_->Simplify(IRMutator::VisitUnaryExpr_(op));
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = SimplifyExpr(op->value_);
     auto new_var = MaybeRebuildVar(op->var_);
@@ -309,6 +322,18 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       if (!changed) return type;
       return std::make_shared<TileType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv),
                                         t->memory_space_);
+    }
+    if (auto t = As<TupleType>(type)) {
+      bool changed = false;
+      std::vector<TypePtr> new_types;
+      new_types.reserve(t->types_.size());
+      for (const auto& inner : t->types_) {
+        auto new_inner = SimplifyType(inner);
+        if (new_inner.get() != inner.get()) changed = true;
+        new_types.push_back(std::move(new_inner));
+      }
+      if (!changed) return type;
+      return std::make_shared<TupleType>(std::move(new_types));
     }
     return type;
   }
