@@ -118,6 +118,13 @@ def _normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
     return type_
 
 
+def _shape_has_symbolic_dim(type_: ir.Type) -> bool:
+    """Return True when *type_* is a shaped type with at least one non-ConstInt dim."""
+    if not isinstance(type_, (ir.TensorType, ir.TileType)):
+        return False
+    return any(not isinstance(d, ir.ConstInt) for d in type_.shape)
+
+
 def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type:
     """Rebuild a TensorType/TileType with each outer shape dim passed through
     the arithmetic simplifier.
@@ -129,10 +136,9 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     (``valid_shape``, ``stride``, ``start_offset``) and TensorView
     fields retain their original expressions and still compare structurally.
     """
-    if not isinstance(type_, (ir.TensorType, ir.TileType)):
+    if not _shape_has_symbolic_dim(type_):
         return type_
-    if all(isinstance(d, ir.ConstInt) for d in type_.shape):
-        return type_
+    assert isinstance(type_, (ir.TensorType, ir.TileType))
     simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
     if isinstance(type_, ir.TensorType):
         return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view)
@@ -149,7 +155,9 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     authoritative memref via ``override_type``.
 
     Outer shape dimensions are simplified via a shared arithmetic analyzer
-    before comparison so expressions like ``(k + C) - k`` match ``C``.
+    before comparison so expressions like ``(k + C) - k`` match ``C``.  The
+    analyzer is only constructed when at least one shape actually contains a
+    symbolic dim, keeping the all-static fast path free of arith overhead.
     """
     if lhs is rhs:
         return True
@@ -161,9 +169,10 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     assert rhs is not None
     if type(lhs) is not type(rhs):
         return False
-    analyzer = _arith.Analyzer()
-    lhs = _simplify_shape_dims(lhs, analyzer)
-    rhs = _simplify_shape_dims(rhs, analyzer)
+    if _shape_has_symbolic_dim(lhs) or _shape_has_symbolic_dim(rhs):
+        analyzer = _arith.Analyzer()
+        lhs = _simplify_shape_dims(lhs, analyzer)
+        rhs = _simplify_shape_dims(rhs, analyzer)
     return lhs == rhs
 
 
@@ -311,6 +320,11 @@ class ASTParser:
         # Each entry is (col_offset, text) so the parser can distinguish
         # tail-of-block comments (inside body indent) from outer-scope comments.
         self._pending_comments: dict[int, list[tuple[int, str]]] = pending_comments or {}
+
+        # Cached arithmetic analyzer used to simplify symbolic slice extents at
+        # construction time. One instance per parser amortises the sub-analyzer
+        # setup across the many subscripts found in a typical function body.
+        self._arith_analyzer: _arith.Analyzer | None = None
 
     @contextmanager
     def _yield_tracking_scope(self) -> Iterator[None]:
@@ -3878,6 +3892,12 @@ class ASTParser:
             return list(slc.elts)
         return [slc]
 
+    def _get_arith_analyzer(self) -> "_arith.Analyzer":
+        """Return a parser-scoped, lazily-constructed arithmetic analyzer."""
+        if self._arith_analyzer is None:
+            self._arith_analyzer = _arith.Analyzer()
+        return self._arith_analyzer
+
     def _build_slice_shape_expr(
         self,
         upper_expr: int | ir.Expr,
@@ -3904,7 +3924,7 @@ class ASTParser:
             if isinstance(lower_expr, ir.Expr)
             else ir.ConstInt(lower_expr, DataType.INDEX, ir.Span.unknown())
         )
-        simplified = _arith.Analyzer().simplify(ir.sub(lhs, rhs))
+        simplified = self._get_arith_analyzer().simplify(ir.sub(lhs, rhs))
         const_value = _const_int_value(simplified)
         if const_value is not None:
             return const_value

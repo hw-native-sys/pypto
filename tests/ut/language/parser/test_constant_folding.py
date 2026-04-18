@@ -20,14 +20,30 @@ from pypto.pypto_core import ir
 
 
 def _collect_call_args(func: ir.Function, op_name: str) -> list[list]:
-    """Collect argument lists of all Calls matching *op_name* in a function body."""
+    """Collect argument lists of all Calls matching *op_name* anywhere in the
+    function body, recursing into ``ForStmt``/``WhileStmt``/``IfStmt``/``SeqStmts``
+    bodies so loop-local calls are not missed.
+    """
     results: list[list] = []
-    body = func.body
-    assert isinstance(body, ir.SeqStmts)
-    for stmt in body.stmts:
-        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == op_name:
-                results.append(list(stmt.value.args))
+
+    def visit(node: object) -> None:
+        if isinstance(node, ir.AssignStmt) and isinstance(node.value, ir.Call):
+            if node.value.op.name == op_name:
+                results.append(list(node.value.args))
+            return
+        if isinstance(node, ir.SeqStmts):
+            for s in node.stmts:
+                visit(s)
+            return
+        body = getattr(node, "body", None)
+        if body is not None:
+            visit(body)
+        for attr in ("then_body", "else_body"):
+            branch = getattr(node, attr, None)
+            if branch is not None:
+                visit(branch)
+
+    visit(func.body)
     return results
 
 
@@ -322,13 +338,29 @@ class TestScopeShadowingSafety:
         )
 
 
+def _assert_all_slice_extents_are_constint(func: ir.Function, expected_dims: list[int]) -> None:
+    """Verify every ``tensor.slice`` call in *func* has shape_tuple = expected_dims."""
+    slice_calls = _collect_call_args(func, "tensor.slice")
+    assert slice_calls, "expected tensor.slice calls to be emitted"
+    for args in slice_calls:
+        extent = args[1]  # tensor.slice(tensor, shape_tuple, offset_tuple)
+        assert isinstance(extent, ir.MakeTuple)
+        actual = []
+        for dim in extent.elements:
+            assert isinstance(dim, ir.ConstInt), (
+                f"slice extent dim should be folded to ConstInt, got {type(dim).__name__}: {dim}"
+            )
+            actual.append(dim.value)
+        assert actual == expected_dims, f"expected slice shape {expected_dims}, got {actual}"
+
+
 class TestSymbolicShapeEquality:
     """Symbolic dimension expressions that simplify to the same value should
     compare equal. Covers the subscript-slice pattern where extent is built
     as ``upper - lower`` with a loop induction variable on both sides."""
 
     def test_slice_extent_simplifies_to_constant(self):
-        """``x[:, k : k + C]`` produces a literal-C extent, not ``k + C - k``."""
+        """``x[:, k : k + C]`` inside a loop produces a literal-C extent."""
         C = 64
 
         @pl.function
@@ -339,15 +371,7 @@ class TestSymbolicShapeEquality:
             return out
 
         assert isinstance(func, ir.Function)
-        slice_calls = _collect_call_args(func, "tensor.slice")
-        assert slice_calls, "expected tensor.slice calls to be emitted"
-        for args in slice_calls:
-            extent = args[1]  # [tensor, shape_tuple, offset_tuple] -> shape_tuple
-            assert isinstance(extent, ir.MakeTuple)
-            for dim in extent.elements:
-                assert isinstance(dim, ir.ConstInt), (
-                    f"slice extent dim should be folded to ConstInt, got {type(dim).__name__}: {dim}"
-                )
+        _assert_all_slice_extents_are_constint(func, [8, C])
 
     def test_loop_induction_slice_extent_folds(self):
         """``x[:, i * s : (i + 1) * s]`` folds to extent ``s``."""
@@ -361,6 +385,7 @@ class TestSymbolicShapeEquality:
             return out
 
         assert isinstance(func, ir.Function)
+        _assert_all_slice_extents_are_constint(func, [8, S])
 
     def test_reassign_across_loop_with_symbolic_extent(self):
         """Reassignment of a tensor variable inside a loop with a symbolic

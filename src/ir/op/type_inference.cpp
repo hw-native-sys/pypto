@@ -227,7 +227,11 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
   // For symbolic dimensions, prove equality via expression simplification.
   // Handles cases like `(x + 64) - x` vs `(x + 128) - (x + 64)` which both
   // reduce to 64 but are not structurally identical.
-  arith::Analyzer analyzer;
+  //
+  // Uses a thread_local analyzer so repeated calls on the slow path (e.g.
+  // per-dim inside BroadcastShapes) reuse sub-analyzer state instead of
+  // paying full setup per call.
+  thread_local arith::Analyzer analyzer;
   return analyzer.CanProveEqual(dim1, dim2);
 }
 
