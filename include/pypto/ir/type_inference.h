@@ -148,7 +148,9 @@ std::optional<int64_t> GetConstantDimension(const ExprPtr& dim);
  *
  * Handles both constant and symbolic dimensions.
  * For constant dimensions, compares values.
- * For symbolic dimensions, uses structural equality.
+ * For symbolic dimensions, applies expression simplification and proves
+ * equality via the arithmetic analyzer (e.g. (x + 64) - x and
+ * (x + 128) - (x + 64) are both recognised as 64).
  *
  * @param dim1 First dimension
  * @param dim2 Second dimension

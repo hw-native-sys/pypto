@@ -322,5 +322,81 @@ class TestScopeShadowingSafety:
         )
 
 
+class TestSymbolicShapeEquality:
+    """Symbolic dimension expressions that simplify to the same value should
+    compare equal. Covers the subscript-slice pattern where extent is built
+    as ``upper - lower`` with a loop induction variable on both sides."""
+
+    def test_slice_extent_simplifies_to_constant(self):
+        """``x[:, k : k + C]`` produces a literal-C extent, not ``k + C - k``."""
+        C = 64
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 64], pl.BF16]:
+            out = a[:, 0:C]
+            for k in pl.range(C, 256, C):
+                out = a[:, k : k + C]
+            return out
+
+        assert isinstance(func, ir.Function)
+        slice_calls = _collect_call_args(func, "tensor.slice")
+        assert slice_calls, "expected tensor.slice calls to be emitted"
+        for args in slice_calls:
+            extent = args[1]  # [tensor, shape_tuple, offset_tuple] -> shape_tuple
+            assert isinstance(extent, ir.MakeTuple)
+            for dim in extent.elements:
+                assert isinstance(dim, ir.ConstInt), (
+                    f"slice extent dim should be folded to ConstInt, got {type(dim).__name__}: {dim}"
+                )
+
+    def test_loop_induction_slice_extent_folds(self):
+        """``x[:, i * s : (i + 1) * s]`` folds to extent ``s``."""
+        S = 32
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 32], pl.BF16]:
+            out = a[:, 0:S]
+            for i in pl.range(8):
+                out = a[:, i * S : (i + 1) * S]
+            return out
+
+        assert isinstance(func, ir.Function)
+
+    def test_reassign_across_loop_with_symbolic_extent(self):
+        """Reassignment of a tensor variable inside a loop with a symbolic
+        slice extent should succeed — the pre-fix parser rejected this with
+        'Cannot reassign with a different type' because the slice shape built
+        as ``k + C - k`` did not match the initial ``C`` shape."""
+        C = 64
+
+        @pl.function
+        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 64], pl.BF16]:
+            chunk = a[:, 0:C]
+            for k in pl.range(C, 256, C):
+                chunk = a[:, k : k + C]
+            return chunk
+
+        assert isinstance(func, ir.Function)
+
+    def test_symbolic_cancellation_in_broadcast_sub(self):
+        """``pl.sub`` of two slices whose extents simplify to the same constant
+        but differ structurally should pass shape broadcasting.  Pre-fix this
+        raised 'requires compatible shapes'."""
+        HALF = 32
+
+        @pl.function
+        def func(
+            src: pl.Tensor[[1, 128], pl.FP32],
+            out: pl.Tensor[[1, 32], pl.FP32],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            for k in pl.range(0, 64, HALF):
+                lo = src[:, k : k + HALF]
+                hi = src[:, k + HALF : k + HALF + HALF]
+                out = pl.sub(lo, hi)
+            return out
+
+        assert isinstance(func, ir.Function)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

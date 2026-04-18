@@ -21,6 +21,7 @@ from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.pypto_core import DataType, ir
+from pypto.pypto_core import arith as _arith
 
 from .diagnostics import (
     InvalidOperationError,
@@ -117,6 +118,27 @@ def _normalize_type_for_syntax_match(type_: ir.Type | None) -> ir.Type | None:
     return type_
 
 
+def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type:
+    """Rebuild a TensorType/TileType with each outer shape dim passed through
+    the arithmetic simplifier.
+
+    Needed so that symbolic dims that reduce to the same value — e.g.
+    ``(k + C) - k`` and ``C`` — compare equal under structural ``==``.
+
+    Scope: only the outer ``shape`` is simplified. TileView fields
+    (``valid_shape``, ``stride``, ``start_offset``) and TensorView
+    fields retain their original expressions and still compare structurally.
+    """
+    if not isinstance(type_, (ir.TensorType, ir.TileType)):
+        return type_
+    if all(isinstance(d, ir.ConstInt) for d in type_.shape):
+        return type_
+    simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
+    if isinstance(type_, ir.TensorType):
+        return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view)
+    return ir.TileType(simplified_shape, type_.dtype, type_.memref, type_.tile_view, type_.memory_space)
+
+
 def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     """Return whether two IR types are structurally equal after TileView normalization.
 
@@ -125,6 +147,9 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     field on TileType/TensorType — memref identity is not relevant for
     parser-level type matching because the Var (not the Call) carries the
     authoritative memref via ``override_type``.
+
+    Outer shape dimensions are simplified via a shared arithmetic analyzer
+    before comparison so expressions like ``(k + C) - k`` match ``C``.
     """
     if lhs is rhs:
         return True
@@ -136,6 +161,9 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     assert rhs is not None
     if type(lhs) is not type(rhs):
         return False
+    analyzer = _arith.Analyzer()
+    lhs = _simplify_shape_dims(lhs, analyzer)
+    rhs = _simplify_shape_dims(rhs, analyzer)
     return lhs == rhs
 
 
@@ -3855,7 +3883,14 @@ class ASTParser:
         upper_expr: int | ir.Expr,
         lower_expr: int | ir.Expr,
     ) -> int | ir.Expr:
-        """Build a slice extent, folding compile-time constants when possible."""
+        """Build a slice extent, folding compile-time constants when possible.
+
+        Symbolic extents are passed through the arithmetic simplifier so common
+        patterns like ``x * s + s - x * s`` or ``(k + C) - k`` collapse to the
+        scalar extent at construction time. This keeps downstream shape checks
+        and reassignment guards from seeing structurally-distinct-but-equal
+        expressions.
+        """
         folded_extent = _fold_const_slice_extent(upper_expr, lower_expr)
         if folded_extent is not None:
             return folded_extent
@@ -3869,7 +3904,11 @@ class ASTParser:
             if isinstance(lower_expr, ir.Expr)
             else ir.ConstInt(lower_expr, DataType.INDEX, ir.Span.unknown())
         )
-        return ir.sub(lhs, rhs)
+        simplified = _arith.Analyzer().simplify(ir.sub(lhs, rhs))
+        const_value = _const_int_value(simplified)
+        if const_value is not None:
+            return const_value
+        return simplified
 
     def _to_index_expr(self, expr: int | ir.Expr) -> ir.Expr:
         """Convert an integer-like slice bound into an INDEX expression."""

@@ -24,6 +24,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -223,8 +224,11 @@ bool DimensionsEqual(const ExprPtr& dim1, const ExprPtr& dim2) {
     return *const1 == *const2;
   }
 
-  // For symbolic dimensions, use pointer equality
-  return false;
+  // For symbolic dimensions, prove equality via expression simplification.
+  // Handles cases like `(x + 64) - x` vs `(x + 128) - (x + 64)` which both
+  // reduce to 64 but are not structurally identical.
+  arith::Analyzer analyzer;
+  return analyzer.CanProveEqual(dim1, dim2);
 }
 
 bool IsBroadcastable(const ExprPtr& source_dim, const ExprPtr& target_dim) {
