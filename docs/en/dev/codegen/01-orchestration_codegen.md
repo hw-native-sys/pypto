@@ -226,6 +226,7 @@ pto2_rt_submit_task(mixed_0, params_t0);
 | `tensor.create` | `TensorCreateInfo var_ci(...)` + `alloc_tensors(...)` | Scope-level batched alloc; `const Tensor& var = alloc_N.get_ref(i)` |
 | `tensor.read` | `*reinterpret_cast<T*>(arg_ptr + offset)` | Read scalar from host tensor |
 | `tensor.slice` | `make_tensor_external(ptr + byte_offset, ...)` | Create view into existing tensor |
+| `tensor.transpose` | `Tensor xt = ext_x.transpose(axis1, axis2)` | Zero-copy metadata swap of two axes (lowers to runtime `Tensor::transpose`) |
 | `tensor.dim` (static) | `int64_t d0 = 16` | Constant dimension value |
 | `tensor.dim` (dynamic) | `int64_t d0 = (int64_t)orch_args.tensor(N).shapes[axis]` | Runtime dimension from ChipStorageTaskArgs |
 

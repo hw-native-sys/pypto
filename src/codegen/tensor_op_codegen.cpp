@@ -292,6 +292,48 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
   return oss.str();
 }
 
+REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
+  // tensor.transpose(input, axis1, axis2) -> Tensor view with two axes swapped.
+  // Lowered to runtime Tensor::transpose(x, y), a zero-copy metadata swap of
+  // shapes / raw_shapes / offsets (see runtime tensor.h: Tensor::transpose).
+  // The optional 4th `valid_shape` argument from the IR op is intentionally
+  // ignored at the orchestration layer (it only affects IR metadata, mirroring
+  // how tensor.reshape handles valid_shape here).
+  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+      << "tensor.transpose requires 3 or 4 arguments (input, axis1, axis2[, valid_shape])";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.transpose input must be a variable";
+
+  auto input_type = As<TensorType>(op->args_[0]->GetType());
+  CHECK(input_type) << "tensor.transpose input must be TensorType";
+
+  auto axis1_const = As<ConstInt>(op->args_[1]);
+  CHECK(axis1_const) << "tensor.transpose requires second argument (axis1) to be a ConstInt";
+  auto axis2_const = As<ConstInt>(op->args_[2]);
+  CHECK(axis2_const) << "tensor.transpose requires third argument (axis2) to be a ConstInt";
+
+  // Normalize negative axes against the input rank (matches DeduceTensorTransposeType).
+  int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
+  int64_t axis1 = axis1_const->value_;
+  int64_t axis2 = axis2_const->value_;
+  if (axis1 < 0) axis1 += ndim;
+  if (axis2 < 0) axis2 += ndim;
+  CHECK(axis1 >= 0 && axis1 < ndim) << "tensor.transpose axis1 out of range: " << axis1_const->value_
+                                    << " for " << ndim << "D tensor";
+  CHECK(axis2 >= 0 && axis2 < ndim) << "tensor.transpose axis2 out of range: " << axis2_const->value_
+                                    << " for " << ndim << "D tensor";
+  CHECK(axis1 != axis2) << "tensor.transpose axis1 and axis2 must be different, got " << axis1;
+
+  std::string ext_input_name = codegen.GetExternalTensorName(input_name);
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  std::ostringstream oss;
+  oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << axis1 << ", " << axis2
+      << ");";
+  return oss.str();
+}
+
 REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
   // tensor.dim(tensor, axis) -> extract shape dimension as scalar
   // Validation already performed by DeduceTensorDimType during type deduction.

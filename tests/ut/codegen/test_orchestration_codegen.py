@@ -928,6 +928,69 @@ class TestOrchestration:
         assert "uint32_t r_shapes[2] = {16, 16};" in code
         assert "Tensor r = chunk.reshape(r_shapes, 2);" in code
 
+    def test_tensor_transpose_external_input(self):
+        """tensor.transpose on an external orchestration input emits Tensor::transpose on ext_<name>."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TransposeExternalProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_transpose(
+                self,
+                data: pl.Tensor[[16, 32], pl.FP16],
+            ) -> pl.Tensor[[32, 16], pl.FP16]:
+                t: pl.Tensor[[32, 16], pl.FP16] = pl.transpose(data, axis1=0, axis2=1)
+                return t
+
+        code = _generate_orch_code(TransposeExternalProgram)
+
+        # transpose lowers to runtime Tensor::transpose on the external tensor handle.
+        assert "Tensor t = ext_data.transpose(0, 1);" in code
+
+    def test_tensor_transpose_negative_axis(self):
+        """tensor.transpose with negative axis indices is normalized at codegen time."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TransposeNegativeProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_transpose_neg(
+                self,
+                data: pl.Tensor[[4, 8, 16], pl.FP16],
+            ) -> pl.Tensor[[4, 16, 8], pl.FP16]:
+                t: pl.Tensor[[4, 16, 8], pl.FP16] = pl.transpose(data, axis1=-1, axis2=-2)
+                return t
+
+        code = _generate_orch_code(TransposeNegativeProgram)
+
+        # -1 / -2 on a 3D tensor should normalize to axes 2 and 1 respectively.
+        assert "Tensor t = ext_data.transpose(2, 1);" in code
+
+    def test_tensor_transpose_after_slice(self):
+        """slice -> transpose chain: transpose input is a local Tensor (no ext_ prefix)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TransposeAfterSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice_transpose(
+                self,
+                data: pl.Tensor[[4, 16, 32], pl.FP16],
+            ) -> pl.Tensor[[1, 32, 16], pl.FP16]:
+                chunk: pl.Tensor[[1, 16, 32], pl.FP16] = pl.slice(data, [1, 16, 32], [0, 0, 0])
+                t: pl.Tensor[[1, 32, 16], pl.FP16] = pl.transpose(chunk, axis1=1, axis2=2)
+                return t
+
+        code = _generate_orch_code(TransposeAfterSliceProgram)
+
+        # slice still emits view on the external tensor.
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        # transpose calls .transpose on the local Tensor (no ext_ prefix).
+        assert "Tensor t = chunk.transpose(1, 2);" in code
+
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()
