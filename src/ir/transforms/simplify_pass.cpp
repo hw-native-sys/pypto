@@ -39,22 +39,43 @@ namespace ir {
 
 namespace {
 
-/// Collects Var pointers that appear as the LHS of more than one AssignStmt.
-/// Used by SimplifyMutator to skip binding a Var to its initial value when
-/// the Var is reassigned (pre-SSA safety).
+/// Collects Var pointers whose LHS assignment is NOT safe to bind as a
+/// dominating constant. Unsafe if assigned more than once, OR assigned inside
+/// a nested scope (IfStmt branch, ForStmt/WhileStmt body) where the
+/// assignment may not execute on all paths. This protects pre-SSA callers;
+/// in SSA form each Var is single-assigned so the nesting check is redundant
+/// but harmless.
 class MultiAssignCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> multi_assigned;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!seen_.insert(op->var_.get()).second) {
+    if (nesting_depth_ > 0 || !seen_.insert(op->var_.get()).second) {
       multi_assigned.insert(op->var_.get());
     }
     IRVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const IfStmtPtr& op) override {
+    WithNesting([&] { IRVisitor::VisitStmt_(op); });
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    WithNesting([&] { IRVisitor::VisitStmt_(op); });
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    WithNesting([&] { IRVisitor::VisitStmt_(op); });
+  }
+
  private:
+  template <typename F>
+  void WithNesting(F&& body) {
+    ++nesting_depth_;
+    body();
+    --nesting_depth_;
+  }
+
   std::unordered_set<const Var*> seen_;
+  int nesting_depth_ = 0;
 };
 
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
@@ -343,9 +364,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   /// Rebuild a Var with a simplified type, recording the remap so downstream
-  /// VarExpr references pick up the new identity.
+  /// VarExpr references pick up the new identity. If the Var was already
+  /// rebuilt earlier (e.g., at its defining AssignStmt during the body
+  /// traversal), return that existing remap so ForStmt.return_vars_ stays
+  /// identical to the body-side definition.
   VarPtr MaybeRebuildVar(const VarPtr& var) {
     if (!var) return var;
+    if (auto existing = LookupVarRemap(var.get())) return existing;
     auto new_type = SimplifyType(var->GetType());
     if (new_type.get() == var->GetType().get()) return var;
     auto new_var = std::make_shared<Var>(var->name_hint_, new_type, var->span_);
@@ -361,6 +386,12 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
     var_remap_[ia.get()] = new_ia;
     return new_ia;
+  }
+
+  VarPtr LookupVarRemap(const Var* key) {
+    auto it = var_remap_.find(key);
+    if (it == var_remap_.end()) return nullptr;
+    return std::dynamic_pointer_cast<const Var>(it->second);
   }
 
   std::unordered_set<const Var*> multi_assigned_;

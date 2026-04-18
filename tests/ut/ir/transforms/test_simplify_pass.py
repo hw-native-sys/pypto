@@ -676,6 +676,26 @@ class TestScalarConstantPropagation:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_not_propagated_when_assigned_in_branch(self):
+        """A scalar assigned inside a conditional branch must NOT be bound —
+        the assignment doesn't dominate uses outside the branch, so folding
+        the literal would be incorrect on paths where the branch didn't run.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL]):
+                k: pl.Scalar[pl.INDEX] = 7
+                if cond:
+                    k = 5
+                _y: pl.Scalar[pl.INDEX] = k + 1
+
+        # Expected: no folding of `k` — the binding inside the branch isn't
+        # safe to propagate past the merge point. `k + 1` stays symbolic.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
     def test_not_propagated_when_reassigned(self):
         """A Var reassigned inside the function must NOT be bound to its
         initial value — pre-SSA safety via MultiAssignCollector.
