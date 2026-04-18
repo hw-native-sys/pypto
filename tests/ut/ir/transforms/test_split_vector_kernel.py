@@ -600,3 +600,104 @@ class TestSplitVectorKernelLeftRight:
         assert "pl.tile.load(gamma__ssa_v0, [0, 0], [16, 1], [16, 1]" in printed
         assert "pl.tile.row_expand_mul(" in printed
         assert "pl.tile.store(" in printed
+
+
+class TestSplitVectorKernelNoSplitA2A3:
+    """Tests for Ascend910B no-split mixed-kernel dual-dispatch lowering."""
+
+    def test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                a_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                b_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                )
+                summed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(a_tile, b_tile)
+                pl.tpush_to_aic(summed, split=0)
+                return out
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "if subblock_idx == 0:" in printed
+        assert printed.count("pl.tile.tpush_to_aic(") == 2
+        assert printed.count("pl.tile.load(") == 4
+        assert printed.count("pl.tile.add(") == 2
+        assert "pl.tile.create(" not in printed
+        assert "pl.tile.move(" not in printed
+        assert printed.count("pl.system.reserve_buffer(") == 1
+        assert printed.count("pl.system.aiv_initialize_pipe(") == 1
+
+    def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                peer_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer_buf)
+                zero_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [16, 16], dtype=pl.FP32, value=0.0
+                )
+                pl.tpush_to_aic(zero_tile, split=0)
+                return out
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "if subblock_idx == 0:" in printed
+        assert printed.count("pl.system.import_peer_buffer(") == 1
+        assert printed.count("pl.system.aiv_initialize_pipe(") == 1
+        assert printed.count("pl.tile.tpush_to_aic(") == 2
+
+    def test_no_split_dual_dispatch_consumer_keeps_only_tpop_tfree_on_lane1(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                pl.tfree_to_aic(z_vec)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_vec, [0, 0], out)
+                return updated
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert "if subblock_idx == 0:" in printed
+        assert printed.count("pl.tile.tpop_from_aic(split=0)") == 2
+        assert printed.count("pl.system.tfree_to_aic(") == 2
+        assert printed.count("pl.tile.store(") == 1
+        assert printed.count("pl.system.reserve_buffer(") == 1
+        assert printed.count("pl.system.aiv_initialize_pipe(") == 1

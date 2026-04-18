@@ -90,6 +90,8 @@ CoreType InferFunctionCoreType(const FunctionPtr& func) {
 
 namespace {
 
+constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
+
 // ---------------------------------------------------------------------------
 // Template / boilerplate generation helpers
 // ---------------------------------------------------------------------------
@@ -131,8 +133,9 @@ std::string GenerateConfigFunction(int expected_arg_count) {
 bool IsA5Backend() { return pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend950; }
 
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
-  return aiv_func != nullptr && aiv_func->GetSplitMode().has_value() &&
-         aiv_func->GetSplitMode().value() != SplitMode::None;
+  return aiv_func != nullptr &&
+         ((aiv_func->GetSplitMode().has_value() && aiv_func->GetSplitMode().value() != SplitMode::None) ||
+          (aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false)));
 }
 
 // Returns the opening of a pto2_rt_submit_{aic,aiv}_task call.

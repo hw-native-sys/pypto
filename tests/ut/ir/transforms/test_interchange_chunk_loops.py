@@ -54,7 +54,7 @@ class TestSingleParallelChunk:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -93,7 +93,7 @@ class TestNestedParallelChunks:
                     for j0, (x2,) in pl.parallel(
                         3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
-                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             for i1, (x3,) in pl.parallel(
                                 4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                             ):
@@ -138,7 +138,7 @@ class TestNestedParallelChunks:
                     for j0, (x2,) in pl.parallel(
                         3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
-                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             for i1, (x3,) in pl.parallel(
                                 4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                             ):
@@ -191,7 +191,7 @@ class TestNestedChunkChainsInitSubstitution:
                     for h0, (x2,) in pl.parallel(
                         3, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
-                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             for b1, (x3,) in pl.parallel(
                                 4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                             ):
@@ -313,7 +313,7 @@ class TestNestedChunksWithInterveningStatements:
                 for b0, (x1,) in pl.parallel(
                     4, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for b1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -368,7 +368,7 @@ class TestChunkWithRemainderInChain:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -408,7 +408,7 @@ class TestChunkWithRemainderInChain:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -448,7 +448,7 @@ class TestRemainderLoops:
                 for i0, (x1,) in pl.parallel(
                     1, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -474,14 +474,14 @@ class TestRemainderLoops:
                     for j3, (x14,) in pl.parallel(
                         3, init_values=(x13,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
-                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             for j4, (x15,) in pl.parallel(
                                 4, init_values=(x14,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                             ):
                                 x16: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x15, 1.0)
                                 x17: pl.Tensor[[64], pl.FP32] = pl.yield_(x16)
                         x18: pl.Tensor[[64], pl.FP32] = pl.yield_(x17)
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for j5, (x19,) in pl.parallel(
                             2, init_values=(x18,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
                         ):
@@ -540,7 +540,7 @@ class TestSequentialChunks:
         class Expected:
             @pl.function
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     for i0, (x1,) in pl.range(
                         2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
@@ -572,7 +572,7 @@ class TestSequentialChunks:
         class Expected:
             @pl.function
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     for i0, (x1,) in pl.range(
                         2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
@@ -659,7 +659,7 @@ class TestAutoIncoreConsumed:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -768,7 +768,7 @@ class TestNonChunkStatementsWrapping:
         class Expected:
             @pl.function
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     x1: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x0, 1.0)
                 return x1
 
@@ -792,12 +792,12 @@ class TestNonChunkStatementsWrapping:
         class Expected:
             @pl.function
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     x1: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x0, 1.0)
                 for i0, (x2,) in pl.parallel(
                     2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x3,) in pl.parallel(
                             4, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -829,14 +829,14 @@ class TestNonChunkStatementsWrapping:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
                             x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 2.0)
                             x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
                     x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     x6: pl.Tensor[[64], pl.FP32] = pl.tensor.muls(x5, 3.0)
                 return x6
 
@@ -869,7 +869,7 @@ class TestNonChunkStatementsWrapping:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -903,7 +903,7 @@ class TestNonChunkStatementsWrapping:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -913,7 +913,7 @@ class TestNonChunkStatementsWrapping:
                 for j0, (x6,) in pl.parallel(
                     3, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for j1, (x7,) in pl.parallel(
                             4, init_values=(x6,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
@@ -941,7 +941,7 @@ class TestNonChunkStatementsWrapping:
         class Expected:
             @pl.function
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     for i0, (x1,) in pl.range(10, init_values=(x0,)):
                         x2: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x1, 1.0)
                         x3: pl.Tensor[[64], pl.FP32] = pl.yield_(x2)
@@ -971,14 +971,14 @@ class TestNonChunkStatementsWrapping:
                 for i0, (x1,) in pl.parallel(
                     2, init_values=(x0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                 ):
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         for i1, (x2,) in pl.parallel(
                             4, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                         ):
                             x3: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x2, 1.0)
                             x4: pl.Tensor[[64], pl.FP32] = pl.yield_(x3)
                     x5: pl.Tensor[[64], pl.FP32] = pl.yield_(x4)
-                with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                with pl.at(level=pl.Level.CORE_GROUP):
                     for j0, (x6,) in pl.range(
                         3, init_values=(x5,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
@@ -1018,12 +1018,12 @@ class TestScalarAssignmentNotWrapped:
             def main(self, x0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for ob0, (x1,) in pl.range(8, init_values=(x0,)):
                     offset0: pl.Scalar[pl.INDEX] = ob0 * 4
-                    with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                    with pl.at(level=pl.Level.CORE_GROUP):
                         x2: pl.Tensor[[64], pl.FP32] = pl.tensor.adds(x1, 1.0)
                     for i0, (x3,) in pl.parallel(
                         2, init_values=(x2,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
-                        with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
+                        with pl.at(level=pl.Level.CORE_GROUP):
                             for i1, (x4,) in pl.parallel(
                                 4, init_values=(x3,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
                             ):

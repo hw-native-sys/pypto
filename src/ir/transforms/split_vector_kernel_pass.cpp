@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -45,7 +47,16 @@ namespace ir {
 
 namespace {
 
+constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
+
 int SplitDimension(SplitMode mode) { return (mode == SplitMode::UpDown) ? 0 : 1; }
+
+bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
+  return func != nullptr && func->func_type_ == FunctionType::AIV &&
+         pypto::backend::BackendConfig::IsConfigured() &&
+         pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend910B &&
+         func->HasAttr(kDualAivDispatchAttr) && func->GetAttr<bool>(kDualAivDispatchAttr, false);
+}
 
 bool IsCrossCoreSplitOp(const std::string& op_name) {
   return op_name == "tile.tpush_to_aiv" || op_name == "tile.tpush_to_aic" ||
@@ -583,6 +594,197 @@ std::vector<StmtPtr> ProcessStmts(const std::vector<StmtPtr>& stmts, SplitMode m
   return result;
 }
 
+struct SubblockInjectionResult {
+  ExprPtr subblock_idx_expr;
+  std::vector<StmtPtr> body_stmts;
+  std::unordered_set<std::string> used_names;
+};
+
+std::string ReserveFreshName(std::unordered_set<std::string>& used_names, const std::string& base_name) {
+  std::string name = base_name;
+  if (used_names.count(name) != 0) {
+    name = auto_name::GenerateFreshNameLike(base_name, used_names);
+  }
+  used_names.insert(name);
+  return name;
+}
+
+SubblockInjectionResult InjectSubblockIdx(const FunctionPtr& func, bool is_aiv) {
+  std::vector<StmtPtr> body_stmts;
+  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
+    body_stmts = seq->stmts_;
+  } else {
+    body_stmts.push_back(func->body_);
+  }
+
+  std::unordered_set<std::string> used_names;
+  for (const auto& p : func->params_) {
+    used_names.insert(p->name_hint_);
+  }
+  std::vector<VarPtr> def_vars;
+  transform_utils::CollectDefVars(func->body_, def_vars);
+  for (const auto& v : def_vars) {
+    used_names.insert(v->name_hint_);
+  }
+
+  if (!is_aiv) {
+    return {nullptr, std::move(body_stmts), std::move(used_names)};
+  }
+
+  auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
+  std::string subblock_var_name = ReserveFreshName(used_names, "subblock_idx");
+
+  auto& op_reg = OpRegistry::GetInstance();
+  auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
+  auto subblock_call =
+      std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
+                             std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
+  auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
+  auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
+  body_stmts.insert(body_stmts.begin(), assign_stmt);
+  return {subblock_idx_var, std::move(body_stmts), std::move(used_names)};
+}
+
+using ExprReplacementMap = std::unordered_map<const Var*, ExprPtr>;
+
+ExprPtr SubstituteExprIfNeeded(const ExprPtr& expr, const ExprReplacementMap& replacements) {
+  if (replacements.empty() || !expr) return expr;
+  return transform_utils::Substitute(expr, replacements);
+}
+
+StmtPtr SubstituteStmtIfNeeded(const StmtPtr& stmt, const ExprReplacementMap& replacements) {
+  if (replacements.empty() || !stmt) return stmt;
+  return transform_utils::Substitute(stmt, replacements);
+}
+
+bool IsNoSplitSharedPipeSetupCall(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  const std::string& op_name = call->op_->name_;
+  return op_name == "system.reserve_buffer" || op_name == "system.import_peer_buffer" ||
+         op_name == "system.aiv_initialize_pipe" || op_name == "system.aic_initialize_pipe";
+}
+
+bool IsNoSplitSharedPipeSetupStmt(const StmtPtr& stmt) {
+  CallPtr call;
+  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(assign->value_);
+  } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+    call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+  }
+  return IsNoSplitSharedPipeSetupCall(call);
+}
+
+struct NoSplitSharedPrefix {
+  std::vector<StmtPtr> shared_setup_stmts;
+  std::vector<StmtPtr> branch_stmts;
+};
+
+NoSplitSharedPrefix SplitNoSplitSharedPipeSetupPrefix(const std::vector<StmtPtr>& stmts) {
+  NoSplitSharedPrefix result;
+  size_t prefix_len = 0;
+  while (prefix_len < stmts.size() && IsNoSplitSharedPipeSetupStmt(stmts[prefix_len])) {
+    result.shared_setup_stmts.push_back(stmts[prefix_len]);
+    ++prefix_len;
+  }
+  result.branch_stmts.insert(result.branch_stmts.end(),
+                             stmts.begin() + static_cast<std::ptrdiff_t>(prefix_len), stmts.end());
+  return result;
+}
+
+// Lane 1 still needs to replay the producer-side computations that feed cross-core
+// pipe ops. Replacing them with a dummy sync-only payload avoids deadlock but
+// corrupts no-split V2C / bidirectional results on Ascend910B. The only visible
+// side effects we intentionally suppress are tile.store writes and their SSA results.
+std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& stmts,
+                                                  ExprReplacementMap& replacements) {
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (!call || !call->op_) {
+        result.push_back(SubstituteStmtIfNeeded(stmt, replacements));
+        continue;
+      }
+
+      const std::string& op_name = call->op_->name_;
+      if (op_name == "tile.store" && call->args_.size() >= 3) {
+        auto passthrough = SubstituteExprIfNeeded(call->args_[2], replacements);
+        replacements[assign->var_.get()] = passthrough;
+        result.push_back(std::make_shared<AssignStmt>(assign->var_, passthrough, assign->span_));
+        continue;
+      }
+
+      auto new_value = std::dynamic_pointer_cast<const Call>(SubstituteExprIfNeeded(call, replacements));
+      result.push_back(
+          std::make_shared<AssignStmt>(assign->var_, new_value ? new_value : call, assign->span_));
+      continue;
+    }
+
+    if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+      if (!call || !call->op_) {
+        result.push_back(SubstituteStmtIfNeeded(stmt, replacements));
+        continue;
+      }
+
+      const std::string& op_name = call->op_->name_;
+      if (op_name == "tile.store") {
+        continue;
+      }
+
+      auto new_expr = std::dynamic_pointer_cast<const Call>(SubstituteExprIfNeeded(call, replacements));
+      result.push_back(std::make_shared<EvalStmt>(new_expr ? new_expr : call, eval->span_));
+      continue;
+    }
+
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      auto loop_replacements = replacements;
+      auto new_body_stmts =
+          BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(for_stmt->body_), loop_replacements);
+      auto new_for = MutableCopy(for_stmt);
+      new_for->body_ = loop_repair::MakeBody(new_body_stmts, for_stmt->span_);
+      result.push_back(new_for);
+      continue;
+    }
+
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto loop_replacements = replacements;
+      auto new_body_stmts =
+          BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(while_stmt->body_), loop_replacements);
+      auto new_while = MutableCopy(while_stmt);
+      new_while->condition_ = SubstituteExprIfNeeded(while_stmt->condition_, replacements);
+      new_while->body_ = loop_repair::MakeBody(new_body_stmts, while_stmt->span_);
+      result.push_back(new_while);
+      continue;
+    }
+
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      auto then_replacements = replacements;
+      auto new_then_stmts = BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(if_stmt->then_body_),
+                                                         then_replacements);
+      std::optional<StmtPtr> new_else;
+      if (if_stmt->else_body_.has_value()) {
+        auto else_replacements = replacements;
+        auto new_else_stmts = BuildNoSplitLane1ReplayStmts(
+            transform_utils::FlattenToStmts(if_stmt->else_body_.value()), else_replacements);
+        new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
+      }
+      auto new_if = MutableCopy(if_stmt);
+      new_if->condition_ = SubstituteExprIfNeeded(if_stmt->condition_, replacements);
+      new_if->then_body_ = loop_repair::MakeBody(new_then_stmts, if_stmt->span_);
+      new_if->else_body_ = new_else;
+      result.push_back(new_if);
+      continue;
+    }
+
+    result.push_back(SubstituteStmtIfNeeded(stmt, replacements));
+  }
+
+  return result;
+}
+
 FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   if (mode == SplitMode::None) {
     return func;
@@ -601,45 +803,10 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
     var_replacements[param.get()] = new_param;
   }
 
-  // For AIV functions, emit tile.get_subblock_idx() at the top so both vector
-  // lanes share the same kernel body and select their slice dynamically.
-  ExprPtr subblock_idx_expr;
-  std::vector<StmtPtr> body_stmts;
-  if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(func->body_)) {
-    body_stmts = seq->stmts_;
-  } else {
-    body_stmts.push_back(func->body_);
-  }
+  auto injected = InjectSubblockIdx(func, is_aiv);
 
-  if (is_aiv) {
-    auto idx_type = std::make_shared<ScalarType>(DataType::INDEX);
-    std::unordered_set<std::string> used_subblock_names;
-    for (const auto& p : func->params_) {
-      used_subblock_names.insert(p->name_hint_);
-    }
-    std::vector<VarPtr> def_vars;
-    transform_utils::CollectDefVars(func->body_, def_vars);
-    for (const auto& v : def_vars) {
-      used_subblock_names.insert(v->name_hint_);
-    }
-    std::string subblock_var_name = "subblock_idx";
-    if (used_subblock_names.count(subblock_var_name) != 0) {
-      subblock_var_name = auto_name::GenerateFreshNameLike("subblock_idx", used_subblock_names);
-    }
-
-    auto& op_reg = OpRegistry::GetInstance();
-    auto subblock_op = op_reg.GetOp("tile.get_subblock_idx");
-    auto subblock_call =
-        std::make_shared<Call>(subblock_op, std::vector<ExprPtr>{},
-                               std::vector<std::pair<std::string, std::any>>{}, idx_type, func->span_);
-    auto subblock_idx_var = std::make_shared<Var>(subblock_var_name, idx_type, func->span_);
-    auto assign_stmt = std::make_shared<AssignStmt>(subblock_idx_var, subblock_call, func->span_);
-    body_stmts.insert(body_stmts.begin(), assign_stmt);
-    subblock_idx_expr = subblock_idx_var;
-  }
-
-  auto new_stmts = ProcessStmts(body_stmts, mode, split_int, split_dim, tile_vars, is_aiv, subblock_idx_expr,
-                                var_replacements);
+  auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_int, split_dim, tile_vars, is_aiv,
+                                injected.subblock_idx_expr, var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {
@@ -652,6 +819,55 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   new_func->params_ = new_params;
   new_func->body_ = cloned_body;
   new_func->attrs_ = WithSplitAttr(func, mode);
+  return new_func;
+}
+
+FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
+  INTERNAL_CHECK(RequiresNoSplitDualAivSync(func))
+      << "Internal error: ProcessNoSplitDualAivFunction requires dual-dispatch AIV marker";
+
+  std::unordered_map<const Var*, ExprPtr> param_replacements;
+  std::vector<VarPtr> new_params;
+  new_params.reserve(func->params_.size());
+  for (const auto& param : func->params_) {
+    auto new_param = std::make_shared<Var>(param->name_hint_, param->GetType(), param->span_);
+    new_params.push_back(new_param);
+    param_replacements[param.get()] = new_param;
+  }
+
+  auto injected = InjectSubblockIdx(func, /*is_aiv=*/true);
+  INTERNAL_CHECK(!injected.body_stmts.empty())
+      << "Internal error: dual-dispatch no-split AIV body must contain injected subblock_idx";
+  std::vector<StmtPtr> guarded_stmts(injected.body_stmts.begin() + 1, injected.body_stmts.end());
+  auto hoisted_prefix = SplitNoSplitSharedPipeSetupPrefix(guarded_stmts);
+  auto lane0_body = loop_repair::MakeBody(hoisted_prefix.branch_stmts, func->span_);
+
+  ExprReplacementMap lane1_replacements = param_replacements;
+  auto lane1_stmts = BuildNoSplitLane1ReplayStmts(hoisted_prefix.branch_stmts, lane1_replacements);
+  auto lane1_body = loop_repair::MakeBody(lane1_stmts, func->span_);
+  auto [lane1_cloned_body, lane1_clone_map_unused] = DeepClone(lane1_body);
+  (void)lane1_clone_map_unused;
+  lane1_body = lane1_cloned_body;
+
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, func->span_);
+  auto lane0_cond = MakeEq(injected.subblock_idx_expr, zero, func->span_);
+  auto branch_stmt = std::make_shared<IfStmt>(lane0_cond, lane0_body, std::make_optional(lane1_body),
+                                              std::vector<VarPtr>{}, func->span_);
+
+  std::vector<StmtPtr> new_body_stmts{injected.body_stmts.front()};
+  new_body_stmts.insert(new_body_stmts.end(), hoisted_prefix.shared_setup_stmts.begin(),
+                        hoisted_prefix.shared_setup_stmts.end());
+  new_body_stmts.push_back(branch_stmt);
+  StmtPtr new_body = loop_repair::MakeBody(new_body_stmts, func->span_);
+  if (!param_replacements.empty()) {
+    new_body = transform_utils::Substitute(new_body, param_replacements);
+  }
+  auto [cloned_body, clone_map_unused] = DeepClone(new_body);
+  (void)clone_map_unused;
+
+  auto new_func = MutableCopy(func);
+  new_func->params_ = new_params;
+  new_func->body_ = cloned_body;
   return new_func;
 }
 
@@ -668,9 +884,13 @@ Pass SplitVectorKernel() {
       auto resolved_mode = ResolveSplitMode(func);
       bool should_split = resolved_mode.has_value() && resolved_mode.value() != SplitMode::None &&
                           (func->func_type_ == FunctionType::AIV || func->func_type_ == FunctionType::AIC);
+      bool should_dual_dispatch_nosplit = RequiresNoSplitDualAivSync(func);
       // Only process AIC and AIV functions that have a non-None split mode
       if (should_split) {
         new_functions.push_back(ProcessFunction(func, resolved_mode.value()));
+        changed = true;
+      } else if (should_dual_dispatch_nosplit) {
+        new_functions.push_back(ProcessNoSplitDualAivFunction(func));
         changed = true;
       } else {
         new_functions.push_back(func);

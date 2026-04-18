@@ -55,6 +55,8 @@ namespace ir {
 
 namespace {
 
+constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
+
 using core_affinity::ClassifyCallAffinity;
 using core_affinity::ClassifyMoveDirection;
 using core_affinity::CombineAffinity;
@@ -508,6 +510,10 @@ struct ExpandedKernel {
 };
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
+  const bool needs_dual_aiv_dispatch =
+      backend::GetBackendType() == backend::BackendType::Ascend910B &&
+      (!func->GetSplitMode().has_value() || *func->GetSplitMode() == SplitMode::None);
+
   auto stmts = FlattenBody(func->body_);
 
   // Pre-scan for tpop result vars (needed by affinity analysis to avoid
@@ -767,9 +773,16 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   auto [aiv_cloned_body, aiv_clone_map_unused] = DeepClone(MakeBody(aiv_final, func->span_), aiv_map);
   (void)aiv_clone_map_unused;
+  auto aiv_attrs = func->attrs_;
+  if (needs_dual_aiv_dispatch) {
+    aiv_attrs.erase(std::remove_if(aiv_attrs.begin(), aiv_attrs.end(),
+                                   [](const auto& kv) { return kv.first == kDualAivDispatchAttr; }),
+                    aiv_attrs.end());
+    aiv_attrs.emplace_back(kDualAivDispatchAttr, true);
+  }
   auto aiv_func = std::make_shared<Function>(aiv_name, aiv_params, func->param_directions_,
                                              func->return_types_, aiv_cloned_body, func->span_,
-                                             FunctionType::AIV, std::nullopt, std::nullopt, func->attrs_);
+                                             FunctionType::AIV, std::nullopt, std::nullopt, aiv_attrs);
 
   if (!create_group) {
     return {aic_func, aiv_func, std::nullopt};
@@ -1424,13 +1437,6 @@ Pass ExpandMixedKernel() {
         new_functions.push_back(converted);
         continue;
       }
-      // Warn if split unset or is NONE — don't supported by pto-isa now.
-      auto split_mode = func->GetSplitMode();
-      if (!split_mode.has_value() || *split_mode == SplitMode::None) {
-        LOG_ERROR << "Mixed kernel '" << func->name_ << "' use none split mode not supported by isa now; "
-                  << "consider using split=pl.SplitMode.UP_DOWN on its auto_incore scope";
-      }
-
       // Expand mixed kernel.
       // Existing Group callers can be rewritten in place, but any non-Group
       // caller (for example a standalone Spmd wrapper) still needs the

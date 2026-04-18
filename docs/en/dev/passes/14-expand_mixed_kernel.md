@@ -73,6 +73,13 @@ For consumer-side cross-core tiles, the pass also normalizes statement order to 
 `tile.move` (for example Mat -> Left/Right/Bias), that move is treated as the last direct user and the auto-generated
 `system.tfree_to_aiv(...)` is emitted after it.
 
+For Ascend910B (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
+supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
+emits a runtime `subblock_idx` branch: AIV lane 0 executes the original body, while AIV lane 1 replays the cross-core
+handshakes plus any producer-side computations needed to feed them, with visible `tile.store` writes suppressed. This
+keeps the AIC/AIV handshakes balanced for `pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk])` no-split mixed
+kernels and avoids deadlock without corrupting V2C / bidirectional payloads.
+
 **Requirements**:
 
 - Input IR must have tile ops (run `ConvertTensorToTileOps` first)
@@ -83,7 +90,8 @@ For consumer-side cross-core tiles, the pass also normalizes statement order to 
 
 **When to use**: Run after `InferTileMemorySpace` when InCore functions may contain both Cube and Vector tile operations.
 
-> **Note**: This pass is not yet in the default pipeline — downstream passes (`InitMemRef`, `MemoryReuse`, etc.) do not yet fully support cross-core `tpush`/`tpop`. Codegen already supports AIC/AIV/Group function types. Invoke it explicitly via `passes.expand_mixed_kernel()(program)`.
+> **Note**: This pass is part of the default tile optimization pipeline. You can also invoke it explicitly via
+> `passes.expand_mixed_kernel()(program)` when debugging or building a custom pass pipeline.
 
 ## API
 
@@ -137,6 +145,8 @@ Phase 2 — Expand each InCore function F:
  11. If the split bodies use cross-core tile ops and do not already contain setup,
       derive reserve/import/initialize_pipe prologues and prepend them
  12. Create AIC function (no return) and AIV function (original return)
+     - On Ascend910B no-split mixed kernels, tag the generated AIV with dual-dispatch metadata
+       so later lowering launches the same AIV kernel on both vector lanes
  13. If a non-Group caller still needs the original function name
      (for example a standalone Spmd wrapper): also create a Group
      function (calls AIC then AIV)

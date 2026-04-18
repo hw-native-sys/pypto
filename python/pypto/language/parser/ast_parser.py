@@ -2127,7 +2127,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 "pl.at(optimizations=...) must be a list literal",
                 span=self.span_tracker.get_span(value),
-                hint="Use optimizations=[pl.split(pl.SplitMode.UP_DOWN)] or optimizations=[pl.auto_chunk].",
+                hint="Use optimizations=[pl.split(pl.SplitMode.NONE)] or optimizations=[pl.auto_chunk].",
             )
 
         requests_auto_chunk = False
@@ -2207,25 +2207,18 @@ class ASTParser:
             raise ParserSyntaxError(
                 "pl.split() does not accept keyword arguments",
                 span=self.span_tracker.get_span(node),
-                hint="Use pl.split(pl.SplitMode.UP_DOWN).",
+                hint="Use pl.split(pl.SplitMode.NONE).",
             )
         if len(node.args) != 1:
             raise ParserSyntaxError(
                 f"pl.split() takes exactly 1 positional argument, got {len(node.args)}",
                 span=self.span_tracker.get_span(node),
-                hint="Use pl.split(pl.SplitMode.UP_DOWN).",
+                hint="Use pl.split(pl.SplitMode.NONE).",
             )
         mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-        if mode == ir.SplitMode.NONE:
-            raise ParserSyntaxError(
-                "pl.split(pl.SplitMode.NONE) is not supported",
-                span=self.span_tracker.get_span(node.args[0]),
-                hint="Use pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT, or omit the "
-                "pl.split(...) entry entirely.",
-            )
         return mode
 
-    def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode":
+    def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode | None":
         """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
 
         Returns the split mode to use for the AutoInCore scope.
@@ -2237,9 +2230,9 @@ class ASTParser:
             and isinstance(value.value, ast.Name)
             and value.value.id == "pl"
         ):
-            return ir.SplitMode.UP_DOWN
+            return None
 
-        # Called: pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
+        # Called: pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)
         if (
             isinstance(value, ast.Call)
             and isinstance(value.func, ast.Attribute)
@@ -2251,33 +2244,27 @@ class ASTParser:
                 raise ParserSyntaxError(
                     "pl.chunked_loop_optimizer() does not accept positional arguments",
                     span=self.span_tracker.get_span(value),
-                    hint="Use: pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+                    hint="Use: pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)",
                 )
-            split = ir.SplitMode.UP_DOWN
+            split: ir.SplitMode | None = None
             for opt_kw in value.keywords:
                 if opt_kw.arg == "split":
                     split = extract_enum_value(opt_kw.value, SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-                    if split == ir.SplitMode.NONE:
-                        raise ParserSyntaxError(
-                            "pl.chunked_loop_optimizer() does not support split=pl.SplitMode.NONE",
-                            span=self.span_tracker.get_span(opt_kw.value),
-                            hint="Use pl.SplitMode.UP_DOWN or pl.SplitMode.LEFT_RIGHT",
-                        )
                 else:
                     raise ParserSyntaxError(
                         f"pl.chunked_loop_optimizer() got unexpected keyword '{opt_kw.arg}'",
                         span=self.span_tracker.get_span(opt_kw),
                         hint="Only 'split' is supported: "
-                        "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+                        "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)",
                     )
             return split
 
         raise ParserSyntaxError(
             "optimization= only accepts pl.chunked_loop_optimizer or "
-            "pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+            "pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)",
             span=self.span_tracker.get_span(value),
             hint="Use optimization=pl.chunked_loop_optimizer or "
-            "optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)",
+            "optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.<MODE>)",
         )
 
     def _eval_split_mode(self, value: ast.expr) -> "ir.SplitMode":

@@ -364,6 +364,14 @@ def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
     return False
 
 
+def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
+    """Return whether the function must be dispatched on both AIV lanes."""
+    split_mode = getattr(func, "split", None)
+    if split_mode is not None and split_mode != _ir_core.SplitMode.NONE:
+        return True
+    return bool(getattr(func, "attrs", {}).get("dual_aiv_dispatch", False))
+
+
 _SPMD_BLOCK_OPS = frozenset({"tile.get_block_idx", "tile.get_block_num"})
 
 
@@ -397,8 +405,7 @@ def _uses_spmd_block_ops(func: _ir_core.Function) -> bool:
 
 def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
     """Return whether A2A3 split AIV wrappers must source subblock id from runtime context."""
-    split_mode = getattr(func, "split", None)
-    if split_mode is None or split_mode == _ir_core.SplitMode.NONE:
+    if not _requires_dual_aiv_dispatch(func):
         return False
     if _codegen_core.infer_function_core_type(func) != _ir_core.CoreType.VECTOR:
         return False

@@ -859,6 +859,29 @@ class TestGenerateKernelWrapper:
             "#endif"
         ) in wrapper
 
+    def test_no_split_dual_dispatch_wrapper_uses_runtime_subblock_bridge_on_a2a3(self):
+        @pl.program
+        class NoSplitDualDispatchProgram:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def nosplit_vec(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.tile.get_subblock_idx()
+                zero_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(zero_tile, [0, 0], out)
+                return updated
+
+        func = NoSplitDualDispatchProgram.get_function("nosplit_vec")
+        assert func is not None
+        assert func.attrs.get("dual_aiv_dispatch") is True
+
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
+        assert "[[block_local]] static int32_t pypto_runtime_subblock_id;" in wrapper
+        assert "#define get_subblockid() pypto_runtime_subblock_id" in wrapper
+        assert "pypto_runtime_subblock_id = get_sub_block_id(args);" in wrapper
+
     def test_split_aiv_wrapper_uses_runtime_subblock_bridge_in_group_output_on_a2a3(
         self, tmp_path, monkeypatch
     ):

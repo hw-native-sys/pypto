@@ -2051,6 +2051,49 @@ class TestTensorReadWriteOffsetCodegen:
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
         assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
 
+    def test_no_split_mixed_group_dispatches_same_aiv_on_both_lanes(self):
+        """Ascend910B no-split mixed kernels should still launch both AIV lanes."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class NoSplitGroupProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                    a_plus_b = pl.add(a, b)
+                    sub = pl.sub(a, b)
+                    result = pl.matmul(a_plus_b, sub)
+                    out = pl.assemble(out, result, [0, 0])
+                return out
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                NoSplitGroupProgram
+            )
+
+        aic_funcs = [func for func in transformed.functions.values() if func.func_type == pl.FunctionType.AIC]
+        aiv_funcs = [func for func in transformed.functions.values() if func.func_type == pl.FunctionType.AIV]
+        assert len(aic_funcs) == 1
+        assert len(aiv_funcs) == 1
+        assert aiv_funcs[0].attrs.get("dual_aiv_dispatch") is True
+
+        orch_result = _generate_orch_result(transformed)
+        code = orch_result.code
+        expected_ids = (
+            orch_result.func_name_to_id[aic_funcs[0].name],
+            orch_result.func_name_to_id[aiv_funcs[0].name],
+            orch_result.func_name_to_id[aiv_funcs[0].name],
+        )
+
+        assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
+        assert "pto2_rt_submit_task(mixed_0, params_t0);" in code
+
     def test_standalone_spmd_dispatches_group_with_spmd_launch_spec(self):
         """Standalone Spmd should remain a wrapper and carry launch spec into Group dispatch."""
         backend.reset_for_testing()
