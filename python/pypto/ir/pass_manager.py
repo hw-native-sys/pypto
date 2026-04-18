@@ -120,6 +120,10 @@ class PassManager:
             ("UnrollLoops", lambda: passes.unroll_loops()),
             ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
             ("ConvertToSSA", lambda: passes.convert_to_ssa()),
+            # Propagate scalar constants (e.g. `CHUNK_K: Scalar[INDEX] = 512`)
+            # into downstream expression and type-annotation uses before tile
+            # lowering inspects them. Runs post-SSA to exploit single-definition.
+            ("Simplify", lambda: passes.simplify()),
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]

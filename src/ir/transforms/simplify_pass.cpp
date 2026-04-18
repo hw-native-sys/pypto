@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -27,56 +28,102 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
 
-/// Mutator that simplifies all scalar expressions in the IR.
-///
-/// Overrides statement visitors to apply Analyzer::Simplify to each
-/// expression field. The base class IRMutatorWithAnalyzer automatically
-/// binds ForStmt loop variables to their ranges, enabling range-aware
-/// simplifications (e.g., i // 8 == 0 when i in [0, 8)).
-///
-/// Note: We override statement visitors rather than VisitExpr because
-/// IRMutator's child visiting uses qualified calls (ExprFunctor::VisitExpr)
-/// that bypass VisitExpr overrides. Analyzer::Simplify handles deep
-/// recursive simplification of the entire expression tree.
+/// Collects Var pointers that appear as the LHS of more than one AssignStmt.
+/// Used by SimplifyMutator to skip binding a Var to its initial value when
+/// the Var is reassigned (pre-SSA safety).
+class MultiAssignCollector : public IRVisitor {
+ public:
+  std::unordered_set<const Var*> multi_assigned;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!seen_.insert(op->var_.get()).second) {
+      multi_assigned.insert(op->var_.get());
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_set<const Var*> seen_;
+};
+
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
-  explicit SimplifyMutator(arith::Analyzer* analyzer) : IRMutatorWithAnalyzer(analyzer) {}
+  SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned)
+      : IRMutatorWithAnalyzer(analyzer), multi_assigned_(std::move(multi_assigned)) {}
+
+  /// Fold scalar constant bindings at every Var leaf. Reached via the base
+  /// IRMutator's qualified ExprFunctor::VisitExpr dispatch when walking Call
+  /// args — `analyzer_->Simplify` at the SimplifyExpr level does not recurse
+  /// into non-arithmetic Call nodes, so folding must happen at the leaf.
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = var_remap_.find(op.get());
+    ExprPtr remapped = (it != var_remap_.end()) ? it->second : op;
+    return analyzer_->Simplify(remapped);
+  }
+
+  /// Refresh the Call's result type_ so the in-memory IR matches what a
+  /// fresh parse would produce (needed for roundtrip structural equality).
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto base = IRMutator::VisitExpr_(op);
+    auto new_type = SimplifyType(base->GetType());
+    if (new_type.get() == base->GetType().get()) return base;
+    auto call = std::dynamic_pointer_cast<const Call>(base);
+    if (!call) return base;
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
+  }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    auto new_value = analyzer_->Simplify(op->value_);
-    if (new_value.get() == op->value_.get()) return op;
+    auto new_value = SimplifyExpr(op->value_);
+    auto new_var = MaybeRebuildVar(op->var_);
+    auto new_type = new_var->GetType();
+
+    // Bind scalar constant assignments so subsequent uses fold to the literal.
+    // Pre-SSA: skip if the Var is reassigned — binding the initial value
+    // would incorrectly propagate to reads after a reassignment.
+    if (As<ScalarType>(new_type) && IsConstScalar(new_value) &&
+        multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
+      analyzer_->Bind(new_var, new_value);
+    }
+
+    if (new_value.get() == op->value_.get() && new_var.get() == op->var_.get()) return op;
     auto result = MutableCopy(op);
+    result->var_ = new_var;
     result->value_ = new_value;
     return result;
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    // Simplify loop bounds (pre-loop, before binding).
-    auto new_start = analyzer_->Simplify(op->start_);
-    auto new_stop = analyzer_->Simplify(op->stop_);
-    auto new_step = analyzer_->Simplify(op->step_);
+    auto new_start = SimplifyExpr(op->start_);
+    auto new_stop = SimplifyExpr(op->stop_);
+    auto new_step = SimplifyExpr(op->step_);
 
-    // Simplify chunk_size (pre-loop, before binding).
     std::optional<ChunkConfig> new_chunk_config = op->chunk_config_;
     bool chunk_config_changed = false;
     if (op->chunk_config_.has_value()) {
-      auto new_cs = analyzer_->Simplify(op->chunk_config_->size);
+      auto new_cs = SimplifyExpr(op->chunk_config_->size);
       if (new_cs.get() != op->chunk_config_->size.get()) {
         new_chunk_config = ChunkConfig{new_cs, op->chunk_config_->policy};
         chunk_config_changed = true;
       }
     }
 
-    // Bind loop variable to simplified range [start, stop).
+    // Rebuild iter_args before visiting the body so body references pick up
+    // the remapped IterArg identity.
+    bool iter_args_changed = false;
+    auto new_iter_args = RebuildVec(
+        op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
+
     auto start_ci = As<ConstInt>(new_start);
     auto stop_ci = As<ConstInt>(new_stop);
     bool bound = start_ci && stop_ci && stop_ci->value_ > start_ci->value_;
@@ -84,30 +131,36 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       analyzer_->Bind(op->loop_var_, start_ci->value_, stop_ci->value_);
     }
 
-    // Visit body with binding active.
     auto new_body = VisitStmt(op->body_);
 
-    // Unbind loop variable so binding doesn't leak past the loop.
     if (bound) {
       analyzer_->Unbind(op->loop_var_);
     }
 
+    // Rebuild return_vars after the body so folds discovered inside the body
+    // are visible in return types.
+    bool return_vars_changed = false;
+    auto new_return_vars = RebuildVec(
+        op->return_vars_, [this](const auto& v) { return MaybeRebuildVar(v); }, &return_vars_changed);
+
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
                    (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||
-                   chunk_config_changed;
+                   chunk_config_changed || iter_args_changed || return_vars_changed;
     if (!changed) return op;
 
     auto result = MutableCopy(op);
     result->start_ = new_start;
     result->stop_ = new_stop;
     result->step_ = new_step;
+    result->iter_args_ = std::move(new_iter_args);
     result->body_ = new_body;
+    result->return_vars_ = std::move(new_return_vars);
     result->chunk_config_ = new_chunk_config;
     return result;
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    auto new_condition = analyzer_->Simplify(op->condition_);
+    auto new_condition = SimplifyExpr(op->condition_);
 
     // Enter constraint scope for then branch (condition is known true).
     StmtPtr new_then;
@@ -136,7 +189,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    auto new_condition = analyzer_->Simplify(op->condition_);
+    auto new_condition = SimplifyExpr(op->condition_);
     auto new_body = VisitStmt(op->body_);
     bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
     if (!changed) return op;
@@ -151,7 +204,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     bool changed = false;
     new_values.reserve(op->value_.size());
     for (const auto& val : op->value_) {
-      auto new_val = analyzer_->Simplify(val);
+      auto new_val = SimplifyExpr(val);
       new_values.push_back(new_val);
       if (new_val.get() != val.get()) changed = true;
     }
@@ -166,7 +219,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     bool changed = false;
     new_values.reserve(op->value_.size());
     for (const auto& val : op->value_) {
-      auto new_val = analyzer_->Simplify(val);
+      auto new_val = SimplifyExpr(val);
       new_values.push_back(new_val);
       if (new_val.get() != val.get()) changed = true;
     }
@@ -177,17 +230,123 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    auto new_expr = analyzer_->Simplify(op->expr_);
+    auto new_expr = SimplifyExpr(op->expr_);
     if (new_expr.get() == op->expr_.get()) return op;
     auto result = MutableCopy(op);
     result->expr_ = new_expr;
     return result;
   }
+
+ private:
+  /// Compose var-remap (via the base-class `var_remap_`) with analyzer-based
+  /// constant folding — the Analyzer only knows about its own bindings and
+  /// ignores our Var rebuilds, so remap must run first.
+  ExprPtr SimplifyExpr(const ExprPtr& e) {
+    if (!e) return e;
+    return analyzer_->Simplify(VisitExpr(e));
+  }
+
+  std::vector<ExprPtr> SimplifyExprVec(const std::vector<ExprPtr>& vec, bool* changed) {
+    return RebuildVec(vec, [this](const ExprPtr& e) { return SimplifyExpr(e); }, changed);
+  }
+
+  /// Map @p rebuild over @p vec; sets *changed if any element's identity
+  /// differs from the input.
+  template <typename Ptr, typename F>
+  static std::vector<Ptr> RebuildVec(const std::vector<Ptr>& vec, F&& rebuild, bool* changed) {
+    std::vector<Ptr> out;
+    out.reserve(vec.size());
+    for (const auto& x : vec) {
+      auto nx = rebuild(x);
+      if (nx.get() != x.get()) *changed = true;
+      out.push_back(std::move(nx));
+    }
+    return out;
+  }
+
+  /// Rebuild a TensorType or TileType with every embedded ExprPtr (shape,
+  /// stride, valid_shape, start_offset) passed through `SimplifyExpr`.
+  /// Returns the original TypePtr if nothing changed.
+  TypePtr SimplifyType(const TypePtr& type) {
+    if (!type) return type;
+    if (auto t = As<TensorType>(type)) {
+      bool changed = false;
+      auto new_shape = SimplifyExprVec(t->shape_, &changed);
+      std::optional<TensorView> new_tv = t->tensor_view_;
+      if (t->tensor_view_.has_value()) {
+        const auto& tv = *t->tensor_view_;
+        bool view_changed = false;
+        auto new_stride = SimplifyExprVec(tv.stride, &view_changed);
+        auto new_vs = SimplifyExprVec(tv.valid_shape, &view_changed);
+        if (view_changed) {
+          changed = true;
+          new_tv = TensorView(std::move(new_stride), tv.layout, std::move(new_vs));
+        }
+      }
+      if (!changed) return type;
+      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
+    }
+    if (auto t = As<TileType>(type)) {
+      bool changed = false;
+      auto new_shape = SimplifyExprVec(t->shape_, &changed);
+      std::optional<TileView> new_tv = t->tile_view_;
+      if (t->tile_view_.has_value()) {
+        const auto& tv = *t->tile_view_;
+        bool view_changed = false;
+        auto new_vs = SimplifyExprVec(tv.valid_shape, &view_changed);
+        auto new_stride = SimplifyExprVec(tv.stride, &view_changed);
+        auto new_offset = tv.start_offset ? SimplifyExpr(tv.start_offset) : tv.start_offset;
+        if (new_offset.get() != tv.start_offset.get()) view_changed = true;
+        if (view_changed) {
+          changed = true;
+          TileView ntv = tv;
+          ntv.valid_shape = std::move(new_vs);
+          ntv.stride = std::move(new_stride);
+          ntv.start_offset = std::move(new_offset);
+          new_tv = std::move(ntv);
+        }
+      }
+      if (!changed) return type;
+      return std::make_shared<TileType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv),
+                                        t->memory_space_);
+    }
+    return type;
+  }
+
+  static bool IsConstScalar(const ExprPtr& e) {
+    return e && (As<ConstInt>(e) || As<ConstFloat>(e) || As<ConstBool>(e));
+  }
+
+  /// Rebuild a Var with a simplified type, recording the remap so downstream
+  /// VarExpr references pick up the new identity.
+  VarPtr MaybeRebuildVar(const VarPtr& var) {
+    if (!var) return var;
+    auto new_type = SimplifyType(var->GetType());
+    if (new_type.get() == var->GetType().get()) return var;
+    auto new_var = std::make_shared<Var>(var->name_hint_, new_type, var->span_);
+    var_remap_[var.get()] = new_var;
+    return new_var;
+  }
+
+  IterArgPtr MaybeRebuildIterArg(const IterArgPtr& ia) {
+    if (!ia) return ia;
+    auto new_type = SimplifyType(ia->GetType());
+    auto new_init = SimplifyExpr(ia->initValue_);
+    if (new_type.get() == ia->GetType().get() && new_init.get() == ia->initValue_.get()) return ia;
+    auto new_ia = std::make_shared<IterArg>(ia->name_hint_, new_type, new_init, ia->span_);
+    var_remap_[ia.get()] = new_ia;
+    return new_ia;
+  }
+
+  std::unordered_set<const Var*> multi_assigned_;
 };
 
 FunctionPtr TransformSimplify(const FunctionPtr& func) {
+  MultiAssignCollector collector;
+  collector.VisitStmt(func->body_);
+
   auto analyzer = std::make_shared<arith::Analyzer>();
-  SimplifyMutator mutator(analyzer.get());
+  SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned));
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;
   auto result = MutableCopy(func);
