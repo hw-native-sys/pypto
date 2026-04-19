@@ -383,16 +383,18 @@ class _BodyTransformer(ast.NodeTransformer):
                 for tgt, (i, dim) in zip(target_names, enumerate(meta.shape)):
                     if isinstance(tgt, ast.Name):
                         if (param_name, i) in self._dynamic_dims:
-                            # Dynamic dim: emit assignment (M = pl.dynamic("M") ref)
+                            # Dynamic dim: emit assignment (M = <dynvar ref>),
+                            # but skip if it would be a no-op (LHS name == RHS name).
                             val: ast.expr = self._shape_dim_node(param_name, i)
-                            stmts.append(
-                                ast.Assign(
-                                    targets=[ast.Name(id=tgt.id, ctx=ast.Store())],
-                                    value=val,
-                                    lineno=node.lineno,
-                                    col_offset=node.col_offset,
+                            if not (isinstance(val, ast.Name) and val.id == tgt.id):
+                                stmts.append(
+                                    ast.Assign(
+                                        targets=[ast.Name(id=tgt.id, ctx=ast.Store())],
+                                        value=val,
+                                        lineno=node.lineno,
+                                        col_offset=node.col_offset,
+                                    )
                                 )
-                            )
                         else:
                             # Static dim: inline constant, suppress assignment
                             self._shape_inlined[tgt.id] = dim
@@ -853,9 +855,18 @@ class Specializer:
         for name in all_param_names:
             if name in tensor_params:
                 is_out = name in out_params
+                meta = ctx.tensor_meta.get(name)
+                if meta is None:
+                    raise ValueError(
+                        f"@pl.jit: missing inferred tensor metadata for parameter '{name}'. "
+                        "This usually means the tensor's shape/dtype could not be statically "
+                        "determined. Pass the tensor directly as a function argument, or "
+                        "ensure any intermediate pl.create_tensor() used for this parameter "
+                        "has a statically inferable shape and dtype."
+                    )
                 ann = _build_tensor_annotation(
                     name,
-                    ctx.tensor_meta[name],
+                    meta,
                     ctx.dynamic_dims,
                     self._dv_bindings,
                     is_out=is_out,

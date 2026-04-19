@@ -53,6 +53,7 @@ class TestMakeCacheKey:
         tensor_dtypes=None,
         dynamic_dims=None,
         scalar_values=None,
+        platform=None,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -61,6 +62,7 @@ class TestMakeCacheKey:
             tensor_dtypes=tensor_dtypes or {},
             dynamic_dims=dynamic_dims or set(),
             scalar_values=scalar_values or {},
+            platform=platform,
         )
 
     def test_basic_key_structure(self):
@@ -70,9 +72,10 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 3
-        source_hash, tensor_part, scalar_part = key
+        assert len(key) == 4
+        source_hash, platform, tensor_part, scalar_part = key
         assert source_hash == "abc"
+        assert platform is None
         assert isinstance(tensor_part, tuple)
         assert isinstance(scalar_part, tuple)
 
@@ -82,7 +85,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, tensor_part, _ = key
+        _, _, tensor_part, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -96,7 +99,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, tensor_part, _ = key
+        _, _, tensor_part, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -144,7 +147,7 @@ class TestMakeCacheKey:
             param_names=["BLOCK_M"],
             scalar_values={"BLOCK_M": 64},
         )
-        _, _, scalar_part = key
+        _, _, _, scalar_part = key
         assert len(scalar_part) == 1
         assert scalar_part[0].name == "BLOCK_M"
         assert scalar_part[0].value == 64
@@ -164,7 +167,7 @@ class TestMakeCacheKey:
             dynamic_dims=set(),
             scalar_values={},
         )
-        _, tensor_part, _ = key
+        _, _, tensor_part, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
@@ -178,14 +181,66 @@ class TestMakeCacheKey:
         assert d[key] == "value"
 
     def test_source_hash_change_causes_miss(self):
-        shared = dict(
+        k1 = self._make_key(
+            source_hash="hash1",
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        k1 = self._make_key(source_hash="hash1", **shared)
-        k2 = self._make_key(source_hash="hash2", **shared)
+        k2 = self._make_key(
+            source_hash="hash2",
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+        )
         assert k1 != k2
+
+    def test_different_platforms_cause_miss(self):
+        """Same shapes/dtypes compiled for different platforms must not collide."""
+        k1 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform="a2a3sim",
+        )
+        k2 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform="a3",
+        )
+        assert k1 != k2
+
+    def test_same_platform_is_cache_hit(self):
+        k1 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform="a2a3sim",
+        )
+        k2 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform="a2a3sim",
+        )
+        assert k1 == k2
+
+    def test_none_platform_differs_from_named_platform(self):
+        """platform=None and platform='a2a3sim' must not collide."""
+        k_none = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform=None,
+        )
+        k_named = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            platform="a2a3sim",
+        )
+        assert k_none != k_named
 
 
 if __name__ == "__main__":

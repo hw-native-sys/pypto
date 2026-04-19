@@ -229,6 +229,7 @@ class Tensor(metaclass=TensorMeta):
                 K = a.shape[1]         # dim 1 is compile-time constant
                 ...
         """
+        return None
 
     def __getitem__(self, indices: Any) -> Any:
         """Subscript syntax for tensor slicing/reading (only valid inside @pl.function)."""

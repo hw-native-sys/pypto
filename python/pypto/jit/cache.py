@@ -7,12 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Compilation cache for @pl.jit functions.
+"""Compilation cache support for @pl.jit functions.
 
-L1 cache: in-memory dict on each JITFunction instance.
-L2 cache: on-disk under ~/.cache/pypto/jit/<key_hash>/ (survives process restarts).
+The active cache used by JITFunction is an in-memory dict on each instance (L1).
+This module also defines the cache-key construction utilities and an on-disk
+L2 cache implementation (l2_lookup / l2_store) that can be wired in by callers
+to persist compiled artifacts across process restarts.
 
-Cache key encodes source hash, tensor shapes/dtypes, scalar values, and the
+Cache keys encode source hash, tensor shapes/dtypes, scalar values, and the
 PyPTO version so that a version upgrade automatically invalidates stale entries.
 Dynamic dimensions (marked via bind_dynamic) are stored as None in the key
 so different concrete values for that dimension share the same cache entry.
@@ -66,9 +68,9 @@ class ScalarCacheInfo:
     value: int | float | bool
 
 
-# A cache key is a tuple of (source_hash, tensor_infos, scalar_infos).
+# A cache key is a tuple of (source_hash, platform, tensor_infos, scalar_infos).
 # Using a plain tuple keeps it hashable without a custom __hash__.
-CacheKey = tuple[str, tuple[TensorCacheInfo, ...], tuple[ScalarCacheInfo, ...]]
+CacheKey = tuple[str, str | None, tuple[TensorCacheInfo, ...], tuple[ScalarCacheInfo, ...]]
 
 
 def compute_source_hash(sources: list[str]) -> str:
@@ -98,6 +100,7 @@ def make_cache_key(
     tensor_dtypes: dict[str, DataType],
     dynamic_dims: set[tuple[str, int]],
     scalar_values: dict[str, int | float | bool],
+    platform: str | None = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -110,6 +113,9 @@ def make_cache_key(
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
         scalar_values: Concrete value per scalar parameter name.
+        platform: Target platform string (e.g. "a2a3sim"). Included in the key
+            because compiled artifacts are platform-specific; a cache entry
+            compiled for one platform must not be reused for another.
 
     Returns:
         Hashable CacheKey tuple.
@@ -130,7 +136,7 @@ def make_cache_key(
             continue
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
-    return (source_hash, tuple(tensor_infos), tuple(scalar_infos))
+    return (source_hash, platform, tuple(tensor_infos), tuple(scalar_infos))
 
 
 def _key_to_hash(key: CacheKey) -> str:
