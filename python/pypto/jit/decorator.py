@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
+import shutil
 import textwrap
 from typing import Any
 
@@ -104,6 +106,14 @@ def _torch_dtype_to_pypto(torch_dtype: Any) -> DataType:
             "Supported: float16, float32, bfloat16, int8/16/32/64, uint8, bool."
         )
     return _TORCH_DTYPE_MAP[torch_dtype]
+
+
+def _ptoas_available() -> bool:
+    """Return True if the ptoas binary is available on this machine."""
+    ptoas_root = os.environ.get("PTOAS_ROOT")
+    if ptoas_root:
+        return os.path.isfile(os.path.join(ptoas_root, "ptoas"))
+    return shutil.which("ptoas") is not None
 
 
 def _is_tensor(obj: Any) -> bool:
@@ -607,7 +617,8 @@ class JITFunction:
         class_name = f"_jit_{self.__name__}_{self._get_source_hash()}"
         source = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals).specialize()
         parsed = pl.parse(source)
-        return ir_compile(parsed, skip_ptoas=True)
+        skip_ptoas = not _ptoas_available()
+        return ir_compile(parsed, skip_ptoas=skip_ptoas)
 
     def _compile_to_program(
         self,
