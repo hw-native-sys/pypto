@@ -613,6 +613,35 @@ def _ast_to_str(node: ast.expr) -> str:
 
 
 # ---------------------------------------------------------------------------
+# InCore scope detection
+# ---------------------------------------------------------------------------
+
+
+def _has_incore_scope(func_def: ast.FunctionDef) -> bool:
+    """Return True if the function body contains a ``with pl.incore():`` scope.
+
+    Detects ``with pl.incore():`` and ``with pl.auto_incore():`` — the forms
+    that OutlineIncoreScopes processes.  Does not recurse into nested function
+    definitions.
+    """
+    for node in ast.walk(func_def):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            ctx_expr = item.context_expr
+            if not isinstance(ctx_expr, ast.Call):
+                continue
+            func = ctx_expr.func
+            # pl.incore() or pl.auto_incore()
+            if isinstance(func, ast.Attribute) and func.attr in ("incore", "auto_incore"):
+                return True
+            # bare incore() or auto_incore() (less common)
+            if isinstance(func, ast.Name) and func.id in ("incore", "auto_incore"):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main specializer
 # ---------------------------------------------------------------------------
 
@@ -717,7 +746,7 @@ class Specializer:
         all_param_names = [arg.arg for arg in func_def.args.args if arg.arg != "self"]
 
         # Build decorator
-        decorator = self._build_decorator(ctx)
+        decorator = self._build_decorator(ctx, func_def)
 
         # Build parameter list with updated annotations
         params = self._build_params(all_param_names, out_params, tensor_params, scalar_dtype_strs, ctx)
@@ -791,9 +820,18 @@ class Specializer:
 
         return result_lines
 
-    def _build_decorator(self, ctx: SpecializeContext) -> str:
-        """Build the @pl.function(...) decorator line."""
+    def _build_decorator(self, ctx: SpecializeContext, func_def: ast.FunctionDef | None = None) -> str:
+        """Build the @pl.function(...) decorator line.
+
+        Entry functions (func_type is None or 'orchestration') are emitted as
+        Opaque when they contain ``with pl.incore():`` scopes so that
+        OutlineIncoreScopes can outline them and promote the function to
+        Orchestration.  Entry functions without InCore scopes (multi-function
+        style B) are emitted directly as Orchestration.
+        """
         if ctx.func_type is None or ctx.func_type == "orchestration":
+            if func_def is not None and _has_incore_scope(func_def):
+                return "@pl.function(type=pl.FunctionType.Opaque)"
             return "@pl.function(type=pl.FunctionType.Orchestration)"
         # InCore
         if ctx.level is None:

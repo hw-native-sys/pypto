@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 from pypto import backend
 from pypto.backend import BackendType
-from pypto.pypto_core import passes
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -33,17 +32,10 @@ def _setup_backend():
 
 @pytest.fixture(autouse=True)
 def pass_verification_context():
-    """Override the parent conftest's verification context for JIT tests.
+    """Use default pass verification for JIT tests.
 
-    JIT-generated programs go through ``ir.compile()`` which creates its own
-    PassContext internally.  The Default pass pipeline's ``OutlineIncoreScopes``
-    pass declares ``NoNestedInCore`` as a produced property, but does not
-    outline simple InCore scopes that were not set up by ``interchange_chunk_loops``.
-    The BEFORE_AND_AFTER verifier catches this as a violation.
-
-    Until the JIT pipeline properly handles InCore outlining, JIT tests run
-    without pass verification instruments.  The pass pipeline itself still
-    performs its own internal checks.
+    JIT-generated programs use FunctionType.Opaque for entry functions so that
+    OutlineIncoreScopes can outline ``with pl.incore():`` scopes and promote the
+    function to Orchestration.  This means pass verification now works correctly.
     """
-    with passes.PassContext([]):
-        yield
+    yield
