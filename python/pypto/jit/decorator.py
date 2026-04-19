@@ -528,6 +528,10 @@ class JITFunction:
 
         param_names = self._param_names()
 
+        # Extract RunConfig before binding — it is not a JIT function parameter
+        # but is forwarded directly to CompiledProgram.__call__().
+        run_config = kwargs.pop("config", None)
+
         # Bind args/kwargs to param names
         sig = inspect.signature(self._func)
         try:
@@ -572,7 +576,9 @@ class JITFunction:
 
         # Execute the compiled kernel on device with the original arguments
         compiled = self._cache[key]
-        return compiled(*args, **kwargs)
+        if run_config is not None:
+            return compiled(*args, config=run_config)
+        return compiled(*args)
 
     # ------------------------------------------------------------------
     # Compilation
