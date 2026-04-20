@@ -123,10 +123,16 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
       "system.aic_initialize_pipe", "system.tfree_to_aiv", "system.tpush_to_aiv", "tile.tpush_to_aiv",
       "tile.tpop_from_aiv"};
   if (cube_cross_core_ops.count(name)) return CoreAffinity::CUBE;
-  // SPMD block-index ops: needed on both AIC and AIV under SPMD dispatch
+  // Ops with no execution side. SPMD block-index ops are needed on both AIC
+  // and AIV under SPMD dispatch. tile.create is a pure declaration (no
+  // compute, no data motion); letting the catch-all below classify it as
+  // VECTOR caused pure-cube scopes whose only "vector" signal was an
+  // accumulator declaration to be routed through the mixed-kernel split
+  // path, which then produced broken AIC/AIV IR.
   static const std::unordered_set<std::string> shared_tile_ops = {
       "tile.get_block_idx",
       "tile.get_block_num",
+      "tile.create",
   };
   if (shared_tile_ops.count(name)) return CoreAffinity::SHARED;
   if (name.substr(0, 5) == "tile.") return CoreAffinity::VECTOR;

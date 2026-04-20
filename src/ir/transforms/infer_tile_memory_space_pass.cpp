@@ -23,6 +23,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -38,6 +39,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -106,12 +108,33 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
-      if (i < yield_stmt->value_.size()) {
-        if (auto yield_var = As<Var>(yield_stmt->value_[i])) {
-          auto it = var_memory_.find(yield_var);
-          if (it != var_memory_.end()) {
-            var_memory_[op->return_vars_[i]] = it->second;
-          }
+      if (i >= yield_stmt->value_.size()) continue;
+      auto yield_var = As<Var>(yield_stmt->value_[i]);
+      if (!yield_var) continue;
+
+      // Fallback to the TileType annotation handles IfStmt return_vars — they
+      // carry a memory_space_ set by earlier passes but never get re-tracked
+      // in var_memory_ since this analyzer only visits AssignStmts.
+      std::optional<MemorySpace> yield_memory;
+      if (auto it = var_memory_.find(yield_var); it != var_memory_.end()) {
+        yield_memory = it->second;
+      } else if (auto yt = As<TileType>(yield_var->GetType()); yt) {
+        yield_memory = yt->memory_space_;
+      }
+      if (!yield_memory.has_value()) continue;
+
+      var_memory_[op->return_vars_[i]] = *yield_memory;
+
+      // Back-propagation handles the accumulator pattern: a tile.create
+      // conservatively defaults to Mem.Vec but the loop body writes a
+      // different space (e.g. Acc from matmul_acc). Without this override the
+      // final tile.store reads a Vec tile and ExpandMixedKernel misclassifies
+      // the kernel as mixed, producing broken AIC/AIV IR.
+      if (i < op->iter_args_.size()) {
+        var_memory_[op->iter_args_[i]] = *yield_memory;
+        if (auto init_var = As<Var>(op->iter_args_[i]->initValue_);
+            init_var && var_memory_.count(init_var) > 0) {
+          var_memory_[init_var] = *yield_memory;
         }
       }
     }
@@ -241,8 +264,17 @@ class TileMemorySpaceMutator : public IRMutator {
     auto mem_it = var_memory_.find(op);
 
     if (tile_type && mem_it != var_memory_.end()) {
+      // When promoting to a new memory space, refresh the TileView to the
+      // implicit view for the target — the old view (e.g. Vec-style defaults
+      // from a tile.create) becomes a layout mismatch once the memory space
+      // changes (e.g. Acc expects col_major/row_major/fractal=1024 rather
+      // than the Vec-style row_major/none_box/fractal=512).
+      std::optional<TileView> new_view = tile_type->tile_view_;
+      if (tile_type->memory_space_ != mem_it->second) {
+        new_view = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
+      }
       auto new_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                                 tile_type->tile_view_, mem_it->second);
+                                                 std::move(new_view), mem_it->second);
       auto new_var = std::make_shared<Var>(op->name_hint_, std::move(new_type), op->span_);
       var_cache_[op] = new_var;
       return new_var;
@@ -297,6 +329,44 @@ class TileMemorySpaceMutator : public IRMutator {
       return std::make_shared<AssignStmt>(As<Var>(new_var_expr), new_value, op->span_);
     }
 
+    // Rewrite tile.create's target_memory kwarg when the LHS var was promoted
+    // (e.g. the for-loop accumulator back-propagation in Phase 1 moved the
+    // init from Vec to Acc). The new result type uses the implicit TileView
+    // for the promoted memory so later passes see a consistent layout.
+    // OpRegistry deduction would otherwise keep Vec-style layout defaults.
+    if (auto call = As<Call>(new_value); call) {
+      if (auto op_name_node = As<Op>(call->op_); op_name_node && op_name_node->name_ == "tile.create") {
+        auto mem_it = var_memory_.find(op->var_);
+        auto old_call_type = As<TileType>(call->GetType());
+        if (mem_it != var_memory_.end() && old_call_type) {
+          MemorySpace promoted = mem_it->second;
+          std::optional<MemorySpace> kwarg_target;
+          for (const auto& [key, value] : call->kwargs_) {
+            if (key == "target_memory") {
+              kwarg_target = AnyCast<MemorySpace>(value, "target_memory");
+              break;
+            }
+          }
+          if (kwarg_target.has_value() && *kwarg_target != promoted) {
+            std::vector<std::pair<std::string, std::any>> new_kwargs;
+            new_kwargs.reserve(call->kwargs_.size());
+            for (const auto& [key, value] : call->kwargs_) {
+              if (key == "target_memory") {
+                new_kwargs.emplace_back(key, std::any(promoted));
+              } else {
+                new_kwargs.emplace_back(key, value);
+              }
+            }
+            auto promoted_view = tile_view_semantics::GetImplicitTileView(old_call_type->shape_, promoted);
+            auto promoted_type = std::make_shared<TileType>(old_call_type->shape_, old_call_type->dtype_,
+                                                            old_call_type->memref_, promoted_view, promoted);
+            new_value = std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs),
+                                               std::move(promoted_type), call->span_);
+          }
+        }
+      }
+    }
+
     // Sync LHS Var type with the rebuilt Call's result type.  When VisitExpr_(CallPtr)
     // rebuilds the Call via OpRegistry after substituting moved arguments, the deduced
     // result type may differ from the LHS Var's original type (e.g. tile_view changes
@@ -335,6 +405,12 @@ class TileMemorySpaceMutator : public IRMutator {
   std::map<MoveKey, ExprPtr, MoveKeyLess> created_moves_;
 
   std::vector<StmtPtr> VisitAndInsertMoves(const std::vector<StmtPtr>& stmts, bool& changed) {
+    // Scope created_moves_ to this SeqStmts so moves emitted in one branch
+    // of an IfStmt (or other sibling scope) are not treated as available in
+    // later sibling blocks. Otherwise the cache would skip re-emitting a
+    // required tile.move in the else branch while the target var is defined
+    // only in the then branch, leaving a dangling SSA reference.
+    auto saved_moves = created_moves_;
     std::vector<StmtPtr> new_stmts;
     for (const auto& stmt : stmts) {
       InsertMovesForConsumer(new_stmts, stmt, changed);
@@ -342,6 +418,7 @@ class TileMemorySpaceMutator : public IRMutator {
       if (new_stmt.get() != stmt.get()) changed = true;
       new_stmts.push_back(new_stmt);
     }
+    created_moves_ = std::move(saved_moves);
     return new_stmts;
   }
 

@@ -32,6 +32,16 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
         )
 
 
+def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
+    """Run the tensor-to-tile conversion on top of _run_pipeline."""
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        return passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
+            )
+        )
+
+
 def _patch_tensor_create_manual_dep(program: ir.Program, func_name: str) -> ir.Program:
     """Add manual_dep=True kwarg to tensor.create calls in the named function.
 
@@ -857,6 +867,47 @@ def test_gm_pipe_buffer_param_direction_is_out():
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+def test_accumulator_with_tile_create_classifies_as_pure_aic():
+    """Regression for issue #1083.
+
+    A CORE_GROUP scope whose only "vector" signal is a declaration-only
+    ``tile.create`` feeding a matmul/matmul_acc loop used to be misclassified
+    as mixed — routed through the split path and emitting broken AIC/AIV IR.
+    After the fix, ``tile.create`` is SHARED in the core-affinity classifier,
+    and ``InferTileMemorySpace`` back-propagates the body's Acc memory to the
+    iter_arg and init, so the kernel classifies as pure AIC.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def matmul_accumulator(
+            self,
+            a: pl.Tensor[[16, 256], pl.BF16],
+            b: pl.Tensor[[256, 128], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            acc = pl.create_tensor([16, 128], dtype=pl.FP32)
+            for k in pl.range(0, 256, 64):
+                a_slice = pl.slice(a, [16, 64], [0, k])
+                b_slice = pl.slice(b, [64, 128], [k, 0])
+                acc = pl.matmul_acc(acc, a_slice, b_slice)
+            out = pl.assemble(out, acc, [0, 0])
+            return out
+
+    After = _run_pipeline_from_tensor(Before)
+
+    # Exactly one non-orchestration function, typed as AIC (no AIC/AIV split,
+    # no Group wrapper), since the scope is semantically pure cube.
+    compute_funcs = [fn for _, fn in After.functions.items() if fn.func_type != ir.FunctionType.Orchestration]
+    assert len(compute_funcs) == 1, (
+        f"expected a single pure-AIC function, got {[(fn.name, fn.func_type) for fn in compute_funcs]}"
+    )
+    assert compute_funcs[0].func_type == ir.FunctionType.AIC, (
+        f"expected FunctionType.AIC, got {compute_funcs[0].func_type}"
+    )
 
 
 if __name__ == "__main__":
