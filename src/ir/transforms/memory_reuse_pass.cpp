@@ -397,12 +397,7 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
 // are structurally identical but allocated fresh (e.g. two `pl.min(x, y)`
 // calls cloned from the same source). structural_equal walks the IR tree and
 // compares op kinds and children so these cases are treated as equal.
-static bool AreTileExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
-  if (e1.get() == e2.get()) return true;
-  if (!e1 || !e2) return false;
-  return structural_equal(std::static_pointer_cast<const IRNode>(e1),
-                          std::static_pointer_cast<const IRNode>(e2));
-}
+static bool AreTileExprsEqual(const ExprPtr& e1, const ExprPtr& e2) { return structural_equal(e1, e2); }
 
 static bool AreTileExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
   if (v1.size() != v2.size()) return false;
@@ -427,7 +422,7 @@ static bool AreTileViewsEqual(const TileView& a, const TileView& b) {
  * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
  *
  * Checked attributes: shape, dtype, and TileView (all fields compared via the
- * analyzer-backed helpers above).
+ * structural comparison helpers above).
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   auto t1 = As<TileType>(var1->GetType());
