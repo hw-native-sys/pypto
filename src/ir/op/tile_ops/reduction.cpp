@@ -282,6 +282,13 @@ REGISTER_OP("tile.col_sum")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tile.col_sum requires 2 arguments (tile, tmp_tile), but got "
                               << args.size();
+      // Validate tmp_tile: must be TileType with matching dtype
+      auto tile_type = As<TileType>(args[0]->GetType());
+      auto tmp_type = As<TileType>(args[1]->GetType());
+      CHECK(tmp_type) << "The operator tile.col_sum requires tmp_tile to be a TileType, but got "
+                      << args[1]->GetType()->TypeName();
+      CHECK(tmp_type->dtype_ == tile_type->dtype_)
+          << "The operator tile.col_sum requires tmp_tile dtype to match input dtype";
       return DeduceTileColReductionType(args, kwargs, "tile.col_sum");
     });
 
