@@ -33,6 +33,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -390,6 +391,33 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
   return {lifetimes, var_sharing_groups};
 }
 
+// Expression equality via full recursive structural comparison. The shared
+// AreExprsEqual/AreExprVectorsEqual helpers fall back to pointer identity for
+// non-ConstInt expressions, which misses DeepClone-produced expressions that
+// are structurally identical but allocated fresh (e.g. two `pl.min(x, y)`
+// calls cloned from the same source). structural_equal walks the IR tree and
+// compares op kinds and children so these cases are treated as equal.
+static bool AreTileExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
+  if (e1.get() == e2.get()) return true;
+  if (!e1 || !e2) return false;
+  return structural_equal(std::static_pointer_cast<const IRNode>(e1),
+                          std::static_pointer_cast<const IRNode>(e2));
+}
+
+static bool AreTileExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprPtr>& v2) {
+  if (v1.size() != v2.size()) return false;
+  for (size_t i = 0; i < v1.size(); ++i) {
+    if (!AreTileExprsEqual(v1[i], v2[i])) return false;
+  }
+  return true;
+}
+
+static bool AreTileViewsEqual(const TileView& a, const TileView& b) {
+  return AreTileExprVectorsEqual(a.valid_shape, b.valid_shape) &&
+         AreTileExprVectorsEqual(a.stride, b.stride) && AreTileExprsEqual(a.start_offset, b.start_offset) &&
+         a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad;
+}
+
 /**
  * @brief Check if two TileType variables have fully compatible tile attributes
  *
@@ -398,7 +426,8 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
  * Reuse between tiles with different attributes would cause attribute mismatches in
  * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
  *
- * Checked attributes: shape, dtype, and TileView (all fields via TileView::operator==).
+ * Checked attributes: shape, dtype, and TileView (all fields compared via the
+ * analyzer-backed helpers above).
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   auto t1 = As<TileType>(var1->GetType());
@@ -406,12 +435,12 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   if (!t1 || !t2) return true;
 
   if (t1->dtype_ != t2->dtype_) return false;
-  if (!AreExprVectorsEqual(t1->shape_, t2->shape_)) return false;
+  if (!AreTileExprVectorsEqual(t1->shape_, t2->shape_)) return false;
 
   bool has_view1 = t1->tile_view_.has_value();
   bool has_view2 = t2->tile_view_.has_value();
   if (has_view1 != has_view2) return false;
-  if (has_view1 && t1->tile_view_.value() != t2->tile_view_.value()) return false;
+  if (has_view1 && !AreTileViewsEqual(t1->tile_view_.value(), t2->tile_view_.value())) return false;
   return true;
 }
 

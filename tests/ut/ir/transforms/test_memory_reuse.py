@@ -18,7 +18,8 @@ in ``Expected`` must also share (i.e. use the same ``mem_*`` pointer name).
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
+from pypto.ir.op import tile
 
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
@@ -2117,6 +2118,102 @@ class TestMetadata:
         after_vp = After.get_function("vector_producer")
         assert after_vp is not None
         assert after_vp.split == ir.SplitMode.UP_DOWN
+
+
+class TestStructuralShapeEquality:
+    """Structural-equality tile compatibility.
+
+    ``AreTileTypesCompatible`` used to compare shape/TileView expressions via
+    pointer identity (with a ConstInt value-equality fallback). That missed
+    freshly-allocated non-ConstInt expressions that were structurally identical
+    — e.g. tiles produced by DeepClone — and blocked legitimate reuse. The pass
+    now uses ``structural_equal`` so such tiles are recognised as compatible.
+    """
+
+    def test_pointer_distinct_but_structurally_equal_shape_reuses_memref(self):
+        """Two tiles whose shape contains pointer-distinct composite expressions
+        that are structurally identical must share a MemRef after memory_reuse.
+
+        Constructing fresh ``Add(ConstInt(32), ConstInt(32))`` nodes for each
+        tile simulates what DeepClone produces: identical tree shape, but
+        freshly-allocated ``ExprPtr``s. The old pointer-equality check (with a
+        ConstInt value-equality fallback) missed these non-ConstInt composite
+        expressions and blocked reuse; ``structural_equal`` recurses into the
+        tree and correctly recognises them as compatible.
+        """
+        span = ir.Span.unknown()
+        c64 = ir.ConstInt(64, DataType.INT64, span)
+
+        def make_add64() -> ir.Add:
+            # Fresh Add(ConstInt(32), ConstInt(32)) — non-ConstInt expression
+            # that is structurally equal across calls but pointer-distinct.
+            return ir.Add(
+                ir.ConstInt(32, DataType.INT64, span),
+                ir.ConstInt(32, DataType.INT64, span),
+                DataType.INT64,
+                span,
+            )
+
+        add_1 = make_add64()
+        add_2 = make_add64()
+        assert add_1 is not add_2
+
+        memref_a = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
+        memref_b = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(16384, DataType.INT64, span), 16384, 1)
+
+        input_x = ir.Var("input_x", ir.TensorType([64, 64], DataType.FP32), span)
+        output_x = ir.Var("output_x", ir.TensorType([64, 64], DataType.FP32), span)
+
+        tile_a = ir.Var(
+            "tile_a",
+            ir.TileType([add_1, c64], DataType.FP32, memref_a, memory_space=ir.MemorySpace.Vec),
+            span,
+        )
+        tile_b = ir.Var(
+            "tile_b",
+            ir.TileType([add_2, c64], DataType.FP32, memref_b, memory_space=ir.MemorySpace.Vec),
+            span,
+        )
+        store_a = ir.Var("store_a", ir.TensorType([64, 64], DataType.FP32), span)
+        store_b = ir.Var("store_b", ir.TensorType([64, 64], DataType.FP32), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(tile_a, tile.load(input_x, offsets=[0, 0], shapes=[64, 64]), span),
+                ir.AssignStmt(
+                    store_a,
+                    tile.store(tile_a, offsets=[0, 0], output_tensor=output_x),
+                    span,
+                ),
+                ir.AssignStmt(tile_b, tile.load(input_x, offsets=[0, 0], shapes=[64, 64]), span),
+                ir.AssignStmt(
+                    store_b,
+                    tile.store(tile_b, offsets=[0, 0], output_tensor=output_x),
+                    span,
+                ),
+                ir.ReturnStmt(span),
+            ],
+            span,
+        )
+        func = ir.Function("main", [input_x, output_x], [], body, span, ir.FunctionType.InCore)
+        Before = ir.Program([func], "test_struct_shape_reuse", span)
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.memory_reuse()(Before)
+
+        after_func = After.get_function("main")
+        assert after_func is not None
+        after_body = after_func.body
+        assert isinstance(after_body, ir.SeqStmts)
+        assign_a = after_body.stmts[0]
+        assign_b = after_body.stmts[2]
+        assert isinstance(assign_a, ir.AssignStmt)
+        assert isinstance(assign_b, ir.AssignStmt)
+        tile_a_type = assign_a.var.type
+        tile_b_type = assign_b.var.type
+        assert isinstance(tile_a_type, ir.TileType)
+        assert isinstance(tile_b_type, ir.TileType)
+        assert tile_a_type.shares_memref_with(tile_b_type)
 
 
 if __name__ == "__main__":
