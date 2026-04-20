@@ -1,12 +1,12 @@
 # CanonicalizeIOOrder Pass
 
-在全程序的每一个 `SeqStmts` 内部，把标量计算与 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `LowerPipelineLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。
+仅限于 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`，把标量计算与 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `LowerPipelineLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。非流水线循环则保持不变。
 
 ## 概述
 
-`LowerPipelineLoops` 生成的外层 `ForStmt` 体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]`（每个克隆的地址运算先于其 load）。这种布局下，相邻克隆的 tile 生命周期不重叠，`MemoryReuse` 会把它们合并为同一缓冲区，ping-pong 失效。
+`LowerPipelineLoops` 生成的外层 `ForStmt`（kind=Pipeline 标记）体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]`（每个克隆的地址运算先于其 load）。这种布局下，相邻克隆的 tile 生命周期不重叠，`MemoryReuse` 会把它们合并为同一缓冲区，ping-pong 失效。
 
-本 Pass 对全程序的每一个 `SeqStmts`（包括函数体、`ForStmt` body、`IfStmt` 分支 body 等）做重排：
+本 Pass 仅对 **`ForKind::Pipeline` 循环体内部** 的 `SeqStmts`（包括该流水线作用域内嵌套的 `IfStmt` 分支 body 等）做重排：
 
 - 每个标量计算（典型为地址运算）上拉到依赖图允许的最早位置，从而解锁后续 load。
 - 每个 `tile.load` / `tile.read` 上拉到依赖图允许的最早位置。
@@ -19,7 +19,7 @@
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水线位置**: 位于 `LowerPipelineLoops` 之后、`InitMemRef` 之前（slot 20.6）。在 `InitMemRef` 之前运行可保留 SSAForm，依赖分析正常工作。
+**流水线位置**: 位于 `LowerPipelineLoops` 之后、`InitMemRef` 之前（slot 20.6）。在 `InitMemRef` 之前运行可保留 SSAForm，依赖分析正常工作。该 Pass 在退出时会把外层流水线循环的 `kind_` 从 `ForKind::Pipeline` 降级为 `ForKind::Sequential`，并清除残留的 `pipeline_stages` attr —— `ForKind::Pipeline` 是一个过渡标记，不得穿过本 Pass。
 
 ## API
 

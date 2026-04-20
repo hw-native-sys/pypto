@@ -1190,7 +1190,7 @@ class ASTParser:
             return
 
         loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
-        range_args = self._parse_range_call(iter_call)
+        range_args = self._parse_range_call(iter_call, iterator_type)
 
         if is_simple_for and range_args["init_values"]:
             raise ParserSyntaxError(
@@ -1377,8 +1377,15 @@ class ASTParser:
                 hint="Use a positive integer for chunk: chunk=5",
             )
 
-    def _parse_range_keyword(self, keyword: ast.keyword, result: dict[str, Any]) -> None:
-        """Parse a single keyword argument from a pl.range() call."""
+    _ITERATOR_KEYWORDS = {
+        "range": ("init_values", "chunk", "chunk_policy", "attrs"),
+        "parallel": ("init_values", "chunk", "chunk_policy", "attrs"),
+        "unroll": ("init_values", "attrs"),
+        "pipeline": ("init_values", "stage", "attrs"),
+    }
+
+    def _parse_range_keyword(self, keyword: ast.keyword, result: dict[str, Any], iterator_type: str) -> None:
+        """Parse a single keyword argument from a range-like iterator call."""
         if keyword.arg == "init_values":
             if isinstance(keyword.value, (ast.List, ast.Tuple)):
                 result["init_values"] = [self.parse_expression(elt) for elt in keyword.value.elts]
@@ -1417,26 +1424,28 @@ class ASTParser:
                 )
             result["attrs"] = self._parse_attrs_dict(keyword.value)
         else:
+            supported = self._ITERATOR_KEYWORDS.get(iterator_type, self._ITERATOR_KEYWORDS["range"])
             raise ParserSyntaxError(
-                f"Unknown keyword argument '{keyword.arg}' in range()",
+                f"Unknown keyword argument '{keyword.arg}' in pl.{iterator_type}()",
                 span=self.span_tracker.get_span(keyword),
-                hint="Supported keywords: init_values, chunk, chunk_policy, attrs, stage",
+                hint=f"Supported keywords for pl.{iterator_type}(): {', '.join(supported)}",
             )
 
-    def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
-        """Parse pl.range() call arguments.
+    def _parse_range_call(self, call: ast.Call, iterator_type: str = "range") -> dict[str, Any]:
+        """Parse pl.range()/parallel()/unroll()/pipeline() call arguments.
 
         Args:
-            call: AST Call node for pl.range()
+            call: AST Call node for the iterator
+            iterator_type: One of "range", "parallel", "unroll", "pipeline"
 
         Returns:
             Dictionary with start, stop, step, init_values
         """
         if len(call.args) < 1:
             raise ParserSyntaxError(
-                "pl.range() requires at least 1 argument (stop)",
+                f"pl.{iterator_type}() requires at least 1 argument (stop)",
                 span=self.span_tracker.get_span(call),
-                hint="Provide at least the stop value: pl.range(10) or pl.range(0, 10)",
+                hint=f"Provide at least the stop value: pl.{iterator_type}(10) or pl.{iterator_type}(0, 10)",
             )
 
         start = 0
@@ -1460,7 +1469,7 @@ class ASTParser:
             "attrs": {},
         }
         for keyword in call.keywords:
-            self._parse_range_keyword(keyword, result)
+            self._parse_range_keyword(keyword, result, iterator_type)
 
         result["start"] = start
         result["stop"] = stop

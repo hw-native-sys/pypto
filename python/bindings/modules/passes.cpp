@@ -334,12 +334,16 @@ void BindPass(nb::module_& m) {
              "keeps ``ForKind::Pipeline`` as a marker for CanonicalizeIOOrder; the\n"
              "``pipeline_stages`` attr is stripped so the pass is idempotent.");
   passes.def("canonicalize_io_order", &pass::CanonicalizeIOOrder,
-             "Canonicalize statement order inside every SeqStmts in the program using a\n"
-             "4-tier schedule: lift scalar-producing assigns (e.g. address arithmetic) as\n"
-             "high as possible, then cluster tile.load near the top, then remaining tile\n"
-             "compute, and finally sink tile.store to the bottom — all subject to the SSA\n"
-             "dependency graph. Enables symmetric ping-pong buffering by making replicated\n"
-             "clones' input and output tiles co-live.");
+             "Canonicalize statement order inside SeqStmts that live within a\n"
+             "``ForKind::Pipeline`` body using a 4-tier schedule: lift scalar-producing\n"
+             "assigns (e.g. address arithmetic) as high as possible, then cluster\n"
+             "tile.load near the top, then remaining tile compute, and finally sink\n"
+             "tile.store to the bottom — all subject to the SSA dependency graph.\n"
+             "Enables symmetric ping-pong buffering by making replicated clones' input\n"
+             "and output tiles co-live. On exit the pass demotes the outer pipeline\n"
+             "loop's kind from ``ForKind::Pipeline`` to ``ForKind::Sequential`` (and\n"
+             "strips any stale ``pipeline_stages`` attr). Non-pipeline loops are left\n"
+             "untouched.");
   passes.def("ctrl_flow_transform", &pass::CtrlFlowTransform,
              "Create a control flow structuring pass (eliminate break/continue)");
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
