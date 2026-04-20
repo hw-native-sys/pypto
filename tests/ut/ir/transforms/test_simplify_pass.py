@@ -44,9 +44,9 @@ def wrap_stmts(stmts):
 def make_program(body_stmts, return_types=None):
     """Build a single-function Program.
 
-    Pass `return_types` to declare the function's return signature; use
-    this when `body_stmts` ends in a ReturnStmt so Simplify's scalar DCE
-    does not prune the returned value.
+    Pass `return_types` when `body_stmts` ends in a ReturnStmt so the
+    function signature matches the returned values (otherwise the
+    structural check complains about an empty signature).
     """
     body = wrap_stmts(body_stmts)
     func = ir.Function("main", [], return_types or [], body, S)
@@ -858,6 +858,61 @@ class TestScalarDCE:
         after = passes.simplify()(Before)
         # y is referenced by the write — scalar DCE leaves it alone.
         ir.assert_structural_equal(after, Before)
+
+    def test_keeps_scalar_assign_with_direct_call_rhs(self):
+        """A scalar LHS whose RHS is a direct Call must be preserved even
+        when the LHS has no further uses — the Call may have side effects.
+
+        Uses a synthetic Op name that won't roundtrip through the DSL parser,
+        so we run under a roundtrip-free PassContext to exercise the DCE
+        predicate directly.
+        """
+        y = make_var("y", DataType.INT64)
+        call = ir.Call(ir.Op("test.pure_scalar"), [], ir.ScalarType(DataType.INT64), S)
+        before = make_program([ir.AssignStmt(y, call, S)])
+
+        with passes.PassContext([]):
+            after = passes.simplify()(before)
+        # LHS is scalar-typed and unused, but the direct-Call RHS keeps it.
+        ir.assert_structural_equal(after, before)
+
+    def test_keeps_scalar_assign_with_nested_call_rhs(self):
+        """A scalar LHS whose RHS contains a Call nested inside an arithmetic
+        expression must be preserved — any expression containing a Call may
+        have side effects, not just a top-level Call."""
+        y = make_var("y", DataType.INT64)
+        call = ir.Call(ir.Op("test.pure_scalar"), [], ir.ScalarType(DataType.INT64), S)
+        nested = ir.Add(call, ci(1, DataType.INT64), DataType.INT64, S)
+        before = make_program([ir.AssignStmt(y, nested, S)])
+
+        with passes.PassContext([]):
+            after = passes.simplify()(before)
+        # Nested Call must still block removal.
+        ir.assert_structural_equal(after, before)
+
+    def test_drops_dead_scalar_inside_scope(self):
+        """An unused scalar inside a ScopeStmt body is removed — DCE recurses
+        into scope bodies, not just For/If/While.
+
+        An evaluation statement anchors the scope so its body stays non-empty
+        after DCE (an empty scope body is not representable in the DSL).
+        """
+        dead = make_var("dead")
+        dead_assign = ir.AssignStmt(dead, ci(7), S)
+        anchor = ir.EvalStmt(
+            ir.Call(ir.Op("system.sync"), [], ir.ScalarType(IDX), S),
+            S,
+        )
+        scope_before = ir.InCoreScopeStmt(body=ir.SeqStmts([dead_assign, anchor], S), span=S)
+        before = make_program([scope_before])
+
+        scope_expected = ir.InCoreScopeStmt(body=anchor, span=S)
+        expected = make_program([scope_expected])
+
+        # Synthetic Op names don't roundtrip; run without the roundtrip check.
+        with passes.PassContext([]):
+            after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
 
 
 if __name__ == "__main__":
