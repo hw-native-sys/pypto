@@ -132,8 +132,12 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
       // the kernel as mixed, producing broken AIC/AIV IR.
       if (i < op->iter_args_.size()) {
         var_memory_[op->iter_args_[i]] = *yield_memory;
+        // Any TileType init carrier needs to agree with the promoted iter_arg,
+        // whether or not the analyzer has already recorded it — e.g. an IfStmt
+        // return_var used as the loop init is never visited by the AssignStmt
+        // path, so it would otherwise keep its old memory space.
         if (auto init_var = As<Var>(op->iter_args_[i]->initValue_);
-            init_var && var_memory_.count(init_var) > 0) {
+            init_var && As<TileType>(init_var->GetType())) {
           var_memory_[init_var] = *yield_memory;
         }
       }
@@ -347,15 +351,24 @@ class TileMemorySpaceMutator : public IRMutator {
               break;
             }
           }
-          if (kwarg_target.has_value() && *kwarg_target != promoted) {
+          // tile.create defaults target_memory to Vec, so an explicit Vec call
+          // may omit the kwarg entirely. Rewrite when the kwarg is missing or
+          // differs from the promoted space: preserve other kwargs, overwrite
+          // target_memory if present, and inject it otherwise.
+          if (!kwarg_target.has_value() || *kwarg_target != promoted) {
             std::vector<std::pair<std::string, std::any>> new_kwargs;
-            new_kwargs.reserve(call->kwargs_.size());
+            new_kwargs.reserve(call->kwargs_.size() + 1);
+            bool saw_target_memory = false;
             for (const auto& [key, value] : call->kwargs_) {
               if (key == "target_memory") {
+                saw_target_memory = true;
                 new_kwargs.emplace_back(key, std::any(promoted));
               } else {
                 new_kwargs.emplace_back(key, value);
               }
+            }
+            if (!saw_target_memory) {
+              new_kwargs.emplace_back("target_memory", std::any(promoted));
             }
             auto promoted_view = tile_view_semantics::GetImplicitTileView(old_call_type->shape_, promoted);
             auto promoted_type = std::make_shared<TileType>(old_call_type->shape_, old_call_type->dtype_,
@@ -403,6 +416,10 @@ class TileMemorySpaceMutator : public IRMutator {
   const std::set<MoveKey, MoveKeyLess>& needed_moves_;
   std::map<VarPtr, ExprPtr> var_cache_;
   std::map<MoveKey, ExprPtr, MoveKeyLess> created_moves_;
+  // One entry per active SeqStmts scope holding the keys inserted into
+  // created_moves_ within that scope. Popping a scope erases only those keys,
+  // avoiding a full-map copy on every SeqStmts visit (O(N^2) on nested IR).
+  std::vector<std::vector<MoveKey>> scope_inserted_stack_;
 
   std::vector<StmtPtr> VisitAndInsertMoves(const std::vector<StmtPtr>& stmts, bool& changed) {
     // Scope created_moves_ to this SeqStmts so moves emitted in one branch
@@ -410,7 +427,7 @@ class TileMemorySpaceMutator : public IRMutator {
     // later sibling blocks. Otherwise the cache would skip re-emitting a
     // required tile.move in the else branch while the target var is defined
     // only in the then branch, leaving a dangling SSA reference.
-    auto saved_moves = created_moves_;
+    scope_inserted_stack_.emplace_back();
     std::vector<StmtPtr> new_stmts;
     for (const auto& stmt : stmts) {
       InsertMovesForConsumer(new_stmts, stmt, changed);
@@ -418,7 +435,10 @@ class TileMemorySpaceMutator : public IRMutator {
       if (new_stmt.get() != stmt.get()) changed = true;
       new_stmts.push_back(new_stmt);
     }
-    created_moves_ = std::move(saved_moves);
+    for (const auto& key : scope_inserted_stack_.back()) {
+      created_moves_.erase(key);
+    }
+    scope_inserted_stack_.pop_back();
     return new_stmts;
   }
 
@@ -497,9 +517,13 @@ class TileMemorySpaceMutator : public IRMutator {
     auto moved_var = std::make_shared<Var>(
         mutated_producer_var->name_hint_ + "_" + MemorySpaceToString(target), std::move(moved_type), span);
 
-    // Register for substitution and in var_cache_ so VisitExpr_(VarPtr) returns it as-is
+    // Register for substitution and in var_cache_ so VisitExpr_(VarPtr) returns it as-is.
+    // Record the key in the current scope so it is erased when the SeqStmts exits.
     MoveKey key = {original_var, target};
     created_moves_[key] = moved_var;
+    if (!scope_inserted_stack_.empty()) {
+      scope_inserted_stack_.back().push_back(key);
+    }
     var_cache_[moved_var] = moved_var;
 
     stmts.push_back(std::make_shared<AssignStmt>(moved_var, move_call, span));

@@ -33,7 +33,11 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
 
 
 def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
-    """Run the tensor-to-tile conversion on top of _run_pipeline."""
+    """Run SSA -> tensor-to-tile -> infer-memory -> expand-mixed-kernel.
+
+    Mirrors _run_pipeline but inserts convert_tensor_to_tile_ops between SSA
+    and InferTileMemorySpace, for cases that start from tensor-level IR.
+    """
     with passes.PassContext([], ir.VerificationLevel.NONE):
         return passes.expand_mixed_kernel()(
             passes.infer_tile_memory_space()(
