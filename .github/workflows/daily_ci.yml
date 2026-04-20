@@ -76,15 +76,25 @@ jobs:
       - name: Run qwen3 decode examples
         working-directory: ${{ github.workspace }}/pypto-lib
         run: |
+          failed=()
           for f in \
             examples/models/qwen3/qwen3_32b_decode_scope1.py \
             examples/models/qwen3/qwen3_32b_decode_scope2.py \
             examples/models/qwen3/qwen3_32b_decode_scope3.py \
             examples/models/qwen3/qwen3_32b_decode.py; do
             echo "::group::$f"
-            python "$f" -p a2a3 -d $DEVICE_ID
+            if ! python "$f" -p a2a3 -d $DEVICE_ID; then
+              failed+=("$f")
+              echo "::error file=$f::qwen3 decode case failed: $f"
+            fi
             echo "::endgroup::"
           done
+          if [ ${#failed[@]} -ne 0 ]; then
+            echo "Failed qwen3 decode cases (${#failed[@]}):"
+            printf '  - %s\n' "${failed[@]}"
+            exit 1
+          fi
+          echo "All qwen3 decode cases passed."
 
   a5-system-tests:
     runs-on: [self-hosted, a5]
@@ -132,3 +142,72 @@ jobs:
           task-submit --timeout 1800 --max-time 1800 --device 1 \
             --run "pytest tests/st/ -v --forked --platform=a5 --device=1 --pto-isa-commit=d96c8784 -m a5 \
               -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min)'"
+
+  notify-on-failure:
+    name: Open issue on failure
+    needs: [qwen3-decode, a5-system-tests]
+    if: |
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.qwen3-decode.result == 'failure' || needs.a5-system-tests.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update Daily CI failure issue
+        uses: actions/github-script@v7
+        env:
+          QWEN3_RESULT: ${{ needs.qwen3-decode.result }}
+          A5_RESULT: ${{ needs.a5-system-tests.result }}
+        with:
+          script: |
+            const ISSUE_LABEL = 'daily-ci-failure';
+            const ISSUE_TITLE = '[Daily CI] Failure';
+
+            const today = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const commitUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`;
+
+            const failedJobs = [];
+            if (process.env.QWEN3_RESULT === 'failure') failedJobs.push('qwen3-decode');
+            if (process.env.A5_RESULT === 'failure') failedJobs.push('a5-system-tests');
+
+            const body = [
+              `Daily CI run failed on **${today}**.`,
+              ``,
+              `- Workflow run: ${runUrl}`,
+              `- Commit: [\`${context.sha.slice(0, 7)}\`](${commitUrl})`,
+              `- Branch: \`${context.ref}\``,
+              `- Failed jobs: ${failedJobs.map(j => `\`${j}\``).join(', ') || 'unknown'}`,
+              ``,
+              `Please investigate the failure and either fix the underlying issue or update this issue with progress. Close this issue once Daily CI is green again.`,
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ISSUE_LABEL,
+              per_page: 100,
+            });
+
+            const match = existing.data.find(issue => issue.title === ISSUE_TITLE);
+
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+              core.notice(`Appended failure comment to existing issue #${match.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: ISSUE_TITLE,
+                body,
+                labels: [ISSUE_LABEL, 'bug'],
+              });
+              core.notice(`Created new Daily CI failure issue #${created.data.number}`);
+            }
