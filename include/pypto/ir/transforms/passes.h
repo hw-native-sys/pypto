@@ -211,20 +211,27 @@ Pass InterchangeChunkLoops();
 Pass UnrollLoops();
 
 /**
- * @brief Partially unroll tile-level loops carrying ``unroll_factor`` attr
+ * @brief Lower ``pl.pipeline(N, stage=F)`` loops at the tile level
  *
- * Lowers ``for i in pl.range(N, unroll=F)`` into an outer loop of ``N/F``
+ * Triggers on ``ForStmt`` nodes with ``kind_ == ForKind::Pipeline`` and
+ * ``attrs_["pipeline_stages"] == F``. Produces an outer loop of ``N/F``
  * iterations whose body is a ``SeqStmts`` of ``F`` deep-cloned copies of the
  * original body, each with the loop variable substituted as
  * ``new_var + k * step``. A trailing remainder covers ``N % F`` if non-zero —
  * a bare ``SeqStmts`` flattened into the outer scope for static bounds, or a
  * cascaded ``IfStmt`` dispatch on ``rem`` for dynamic bounds.
  *
+ * The produced outer loop **keeps ``ForKind::Pipeline``** as a marker for the
+ * downstream ``CanonicalizeIOOrder`` pass (which scopes its IO reorder to
+ * pipeline bodies and demotes the kind to ``Sequential`` on exit). The
+ * ``pipeline_stages`` attr is stripped from the output so re-running this
+ * pass is a natural no-op (trigger requires BOTH kind and attr).
+ *
  * Runs at the tile level (after NormalizeReturnOrder, before InitMemRef) so
  * each clone's tile variables become candidates for distinct MemRef allocations
  * — enabling ping-pong buffering for the cloned bodies.
  */
-Pass PartialUnrollTileLoops();
+Pass LowerPipelineLoops();
 
 /**
  * @brief Canonicalize IO order inside every ``SeqStmts`` in the program
@@ -240,7 +247,7 @@ Pass PartialUnrollTileLoops();
  *
  * The result is `[scalar…, loads…, tile compute…, stores…]` whenever the
  * dataflow allows. Within replicated regions produced by
- * ``PartialUnrollTileLoops``, sibling clones' input tiles become co-live near
+ * ``LowerPipelineLoops``, sibling clones' input tiles become co-live near
  * the top and output tiles co-live near the bottom — preventing ``MemoryReuse``
  * from coalescing them and enabling symmetric ping-pong execution.
  *

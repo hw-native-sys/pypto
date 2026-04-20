@@ -773,10 +773,11 @@ class ParamDirection(enum.Enum):
 class ForKind(enum.Enum):
     """For loop kind classification.
 
-    Distinguishes sequential, parallel, and unroll for loops:
+    Distinguishes sequential, parallel, unroll, and pipeline for loops:
     - Sequential: Standard sequential for loop (default)
     - Parallel: Parallel for loop
     - Unroll: Compile-time unrolled for loop
+    - Pipeline: Software-pipelined loop (transient marker; stripped by CanonicalizeIOOrder)
     """
 
     Sequential = ...
@@ -787,6 +788,11 @@ class ForKind(enum.Enum):
 
     Unroll = ...
     """Compile-time unrolled for loop."""
+
+    Pipeline = ...
+    """Software-pipelined loop — lowered by ``LowerPipelineLoops``. The kind
+    persists as a marker through ``CanonicalizeIOOrder`` (which demotes it to
+    ``Sequential`` on exit) and must not survive past that pass."""
 
 class ChunkPolicy(enum.Enum):
     """Chunk policy for loop chunking.

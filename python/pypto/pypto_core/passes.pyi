@@ -325,25 +325,29 @@ def interchange_chunk_loops() -> Pass:
 def unroll_loops() -> Pass:
     """Create a loop unrolling pass that expands ForKind.Unroll loops at compile time."""
 
-def partial_unroll_tile_loops() -> Pass:
-    """Create a tile-level partial-unroll pass for ``pl.range(N, unroll=F)`` loops.
+def lower_pipeline_loops() -> Pass:
+    """Create a tile-level lowering pass for ``pl.pipeline(N, stage=F)`` loops.
 
     Replicates each loop body F times per outer iteration. Static bounds emit a
     bare ``SeqStmts`` tail flattened into the outer scope; dynamic bounds emit a
     cascaded ``IfStmt`` dispatch on ``rem`` whose branch bodies are bare
-    ``SeqStmts``.
+    ``SeqStmts``. The produced outer loop keeps ``ForKind.Pipeline`` as a marker
+    for ``CanonicalizeIOOrder``; the ``pipeline_stages`` attr is stripped so the
+    pass is idempotent.
     """
 
 def canonicalize_io_order() -> Pass:
-    """Create an IO-order canonicalization pass.
+    """Create an IO-order canonicalization pass, scoped to pipeline bodies.
 
-    Performs a priority-aware stable topological sort over every ``SeqStmts`` in
-    the program with four tiers: scalar-producing assigns (e.g. address
-    arithmetic) lift first, then ``tile.load``, then remaining tile compute, and
-    finally ``tile.store`` — all subject to the SSA dependency graph. Within
-    replicated regions from ``partial_unroll_tile_loops``, sibling clones' input
-    and output tiles become co-live, enabling ping-pong buffering once
-    ``MemoryReuse`` runs.
+    Performs a priority-aware stable topological sort over every ``SeqStmts``
+    **inside a ``ForKind.Pipeline`` body** with four tiers: scalar-producing
+    assigns (e.g. address arithmetic) lift first, then ``tile.load``, then
+    remaining tile compute, and finally ``tile.store`` — all subject to the SSA
+    dependency graph. Within replicated regions from ``lower_pipeline_loops``,
+    sibling clones' input and output tiles become co-live, enabling ping-pong
+    buffering once ``MemoryReuse`` runs. On exit, demotes the outer pipeline
+    loop's kind to ``Sequential`` — ``ForKind.Pipeline`` must not survive past
+    this pass.
     """
 
 def ctrl_flow_transform() -> Pass:
@@ -526,7 +530,7 @@ __all__ = [
     "create_function_pass",
     "create_program_pass",
     "stmt_dependency_analysis",
-    "partial_unroll_tile_loops",
+    "lower_pipeline_loops",
     "canonicalize_io_order",
 ]
 

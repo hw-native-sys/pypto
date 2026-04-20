@@ -217,6 +217,9 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
   if (op->kind_ == ir::ForKind::Unroll) {
     LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
                 "generating sequential loop as fallback";
+  } else if (op->kind_ == ir::ForKind::Pipeline) {
+    LOG_WARN << "ForKind::Pipeline loop reached codegen; CanonicalizeIOOrder "
+                "should have demoted it to Sequential. Generating sequential loop as fallback.";
   }
 
   // Evaluate loop bounds

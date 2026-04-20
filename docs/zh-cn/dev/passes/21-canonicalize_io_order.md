@@ -1,10 +1,10 @@
 # CanonicalizeIOOrder Pass
 
-在全程序的每一个 `SeqStmts` 内部，把标量计算与 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `PartialUnrollTileLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。
+在全程序的每一个 `SeqStmts` 内部，把标量计算与 `tile.load` / `tile.read` 上拉到顶部、`tile.store` / `tile.write` 下沉到底部 —— 受 SSA 依赖图约束 —— 从而规范化 IO 顺序。对于 `LowerPipelineLoops` 产生的复制区域，该规范化直接启用对称的 ping-pong 缓冲。
 
 ## 概述
 
-`PartialUnrollTileLoops` 生成的外层 `ForStmt` 体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]`（每个克隆的地址运算先于其 load）。这种布局下，相邻克隆的 tile 生命周期不重叠，`MemoryReuse` 会把它们合并为同一缓冲区，ping-pong 失效。
+`LowerPipelineLoops` 生成的外层 `ForStmt` 体是 `F` 份克隆体的 `SeqStmts`，自然顺序为 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]`（每个克隆的地址运算先于其 load）。这种布局下，相邻克隆的 tile 生命周期不重叠，`MemoryReuse` 会把它们合并为同一缓冲区，ping-pong 失效。
 
 本 Pass 对全程序的每一个 `SeqStmts`（包括函数体、`ForStmt` body、`IfStmt` 分支 body 等）做重排：
 
@@ -19,7 +19,7 @@
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水线位置**: 位于 `PartialUnrollTileLoops` 之后、`InitMemRef` 之前（slot 20.6）。在 `InitMemRef` 之前运行可保留 SSAForm，依赖分析正常工作。
+**流水线位置**: 位于 `LowerPipelineLoops` 之后、`InitMemRef` 之前（slot 20.6）。在 `InitMemRef` 之前运行可保留 SSAForm，依赖分析正常工作。
 
 ## API
 
@@ -78,7 +78,7 @@ ready={store_1}                         发射 store_1
 
 ## 示例
 
-**变换前**（来自 `PartialUnrollTileLoops` 的输入 —— 注意每个克隆都有标量地址运算 assign）:
+**变换前**（来自 `LowerPipelineLoops` 的输入 —— 注意每个克隆都有标量地址运算 assign）:
 
 ```python
 for i in pl.range(0, 8, 4):
@@ -119,8 +119,6 @@ for i in pl.range(0, 8, 4):
 
 ## 相关
 
-- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) —— 上游复制区域生成者，本 Pass 在此区域上效果最显著
+- [`LowerPipelineLoops`](20-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
 - [`MemoryReuse`](16-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
-- RFC #1025 —— 复制区域设计
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具
-- RFC #1048 —— 移除 `unroll_replicated` 标记；将本 Pass 作用域扩展到每一个 `SeqStmts`

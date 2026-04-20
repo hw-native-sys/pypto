@@ -71,7 +71,11 @@ void BindPass(nb::module_& m) {
              "AIV functions with split mode have tpop shapes and store offsets adjusted")
       .value("OutParamNotShadowed", IRProperty::OutParamNotShadowed, "Out/InOut params are not reassigned")
       .value("NoNestedInCore", IRProperty::NoNestedInCore,
-             "No nested InCore scopes (ScopeStmt inside ScopeStmt)");
+             "No nested InCore scopes (ScopeStmt inside ScopeStmt)")
+      .value("InOutUseValid", IRProperty::InOutUseValid,
+             "No reads of InOut/Out-passed variables after the call (RFC #1026)")
+      .value("PipelineResolved", IRProperty::PipelineResolved,
+             "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -323,10 +327,12 @@ void BindPass(nb::module_& m) {
   passes.def("interchange_chunk_loops", &pass::InterchangeChunkLoops,
              "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
-  passes.def("partial_unroll_tile_loops", &pass::PartialUnrollTileLoops,
-             "Lower ``pl.range(N, unroll=F)`` loops at the tile level: replicate the body F\n"
+  passes.def("lower_pipeline_loops", &pass::LowerPipelineLoops,
+             "Lower ``pl.pipeline(N, stage=F)`` loops at the tile level: replicate the body F\n"
              "times per outer iteration with a bare-SeqStmts remainder (or a cascaded IfStmt\n"
-             "dispatch for dynamic bounds) covering N % F when needed.");
+             "dispatch for dynamic bounds) covering N % F when needed. The produced outer loop\n"
+             "keeps ``ForKind::Pipeline`` as a marker for CanonicalizeIOOrder; the\n"
+             "``pipeline_stages`` attr is stripped so the pass is idempotent.");
   passes.def("canonicalize_io_order", &pass::CanonicalizeIOOrder,
              "Canonicalize statement order inside every SeqStmts in the program using a\n"
              "4-tier schedule: lift scalar-producing assigns (e.g. address arithmetic) as\n"

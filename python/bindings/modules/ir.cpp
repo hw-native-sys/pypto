@@ -843,6 +843,8 @@ void BindIR(nb::module_& m) {
       .value("Sequential", ForKind::Sequential, "Standard sequential for loop (default)")
       .value("Parallel", ForKind::Parallel, "Parallel for loop")
       .value("Unroll", ForKind::Unroll, "Compile-time unrolled for loop")
+      .value("Pipeline", ForKind::Pipeline,
+             "Software-pipelined loop (pre-lowering user marker + transient post-lowering marker)")
       .export_values();
 
   // ChunkPolicy enum (must be before ForStmt which uses it)

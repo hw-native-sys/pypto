@@ -7,12 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""DSL-style Before/Expected tests for the PartialUnrollTileLoops pass.
+"""DSL-style Before/Expected tests for the LowerPipelineLoops pass.
 
-The pass triggers on any ``ForStmt`` carrying ``attrs_["unroll_factor"]``.
-Inputs set the attr directly via ``pl.range(..., attrs={"unroll_factor": F})``
-so the tests don't need to run the front-pass chain (``pl.range(N, unroll=F)``
-is already covered by ``test_range_unroll_kwarg.py``).
+The pass triggers on any ``ForStmt`` with ``kind_ == ForKind::Pipeline`` and
+``attrs_["pipeline_stages"] == F``. Inputs use ``pl.pipeline(N, stage=F)`` —
+the user-facing DSL surface — so these tests exercise the full parse →
+lower → canonicalize chain against Expected programs written as plain
+``pl.range`` (which is what the IR reduces to once the Pipeline marker is
+demoted by CanonicalizeIOOrder).
 """
 
 import pypto.language as pl
@@ -21,13 +23,19 @@ from pypto import ir, passes
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
-    """Run PartialUnrollTileLoops with structural verification disabled — our
-    Before programs are intentionally minimal and skip the tile-lowering chain."""
+    """Run ``LowerPipelineLoops`` + ``CanonicalizeIOOrder`` with structural
+    verification disabled — our Before programs are intentionally minimal and
+    skip the tile-lowering chain. Canonicalize runs to demote the transient
+    ``ForKind::Pipeline`` marker back to ``Sequential`` so the Expected
+    programs (written in plain ``pl.range``) can be compared structurally.
+    Canonicalize is a no-op on the scalar-only bodies used in these tests
+    (single tier, stable order)."""
     with passes.PassContext([], passes.VerificationLevel.NONE):
-        return passes.partial_unroll_tile_loops()(program)
+        lowered = passes.lower_pipeline_loops()(program)
+        return passes.canonicalize_io_order()(lowered)
 
 
-class TestPartialUnrollMechanics:
+class TestLowerPipelineMechanics:
     """Before/Expected pairs verifying the cloning + outer-stride rewriting logic."""
 
     def test_clean_divide_produces_replicated_outer_loop(self):
@@ -37,7 +45,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 8, 1, attrs={"unroll_factor": 4}):
+                for i in pl.pipeline(0, 8, 1, stage=4):
                     _y: pl.Scalar[pl.INDEX] = i
                 return x
 
@@ -65,7 +73,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 10, 1, attrs={"unroll_factor": 4}):
+                for i in pl.pipeline(0, 10, 1, stage=4):
                     _y: pl.Scalar[pl.INDEX] = i
                 return x
 
@@ -86,13 +94,13 @@ class TestPartialUnrollMechanics:
         ir.assert_structural_equal(After, Expected)
 
     def test_factor_one_is_noop(self):
-        """unroll_factor=1 leaves the loop intact (modulo attr cleanup)."""
+        """stage=1 leaves the loop intact (modulo attr cleanup + kind demotion)."""
 
         @pl.program
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 8, 1, attrs={"unroll_factor": 1}):
+                for i in pl.pipeline(0, 8, 1, stage=1):
                     _y: pl.Scalar[pl.INDEX] = i
                 return x
 
@@ -115,7 +123,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.range(0, 4, 1, attrs={"unroll_factor": 4}):
+                for i in pl.pipeline(0, 4, 1, stage=4):
                     _y: pl.Scalar[pl.INDEX] = i
                 return x
 
@@ -140,7 +148,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]):
-                for i in pl.range(0, n, 1, attrs={"unroll_factor": 4}):
+                for i in pl.pipeline(0, n, 1, stage=4):
                     _y: pl.Scalar[pl.INDEX] = i
 
         @pl.program
@@ -181,7 +189,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INDEX]):
-                for i in pl.range(0, n, 2, attrs={"unroll_factor": 4}):
+                for i in pl.pipeline(0, n, 2, stage=4):
                     _y: pl.Scalar[pl.INDEX] = i
 
         @pl.program
@@ -222,7 +230,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
-                for i, (a,) in pl.range(0, 8, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                for i, (a,) in pl.pipeline(0, 8, 1, stage=4, init_values=(s0,)):
                     b: pl.Scalar[pl.INDEX] = a + i
                     r = pl.yield_(b)
                 return r
@@ -251,7 +259,7 @@ class TestPartialUnrollMechanics:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, x: pl.Tensor[[64], pl.FP32], s0: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
-                for i, (a,) in pl.range(0, 10, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                for i, (a,) in pl.pipeline(0, 10, 1, stage=4, init_values=(s0,)):
                     b: pl.Scalar[pl.INDEX] = a + i
                     r = pl.yield_(b)
                 return r
@@ -290,7 +298,7 @@ class TestPartialUnrollMechanics:
                 s0: pl.Scalar[pl.INDEX],
                 n: pl.Scalar[pl.INDEX],
             ) -> pl.Scalar[pl.INDEX]:
-                for i, (a,) in pl.range(0, n, 1, init_values=(s0,), attrs={"unroll_factor": 4}):
+                for i, (a,) in pl.pipeline(0, n, 1, stage=4, init_values=(s0,)):
                     b: pl.Scalar[pl.INDEX] = a + i
                     r = pl.yield_(b)
                 return r

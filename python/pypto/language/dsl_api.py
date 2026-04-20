@@ -109,7 +109,7 @@ class RangeIterator(Generic[T]):
         init_values: tuple[Any, ...] | None = None,
         chunk: int | None = None,
         chunk_policy: str = "guarded",
-        unroll_factor: int | None = None,
+        pipeline_stages: int | None = None,
     ):
         """Initialize range iterator.
 
@@ -120,7 +120,9 @@ class RangeIterator(Generic[T]):
             init_values: Initial values for iter_args
             chunk: Chunk size for loop chunking (None = no chunking)
             chunk_policy: Chunk distribution policy (default: "guarded")
-            unroll_factor: Partial unroll factor for tile-level ping-pong (None = no unroll)
+            pipeline_stages: Software-pipelining depth — replicates the body this
+                many times per outer iteration (None = no pipelining). Only set by
+                pl.pipeline(); validated by the parser.
         """
         self.start = start
         self.stop = stop
@@ -128,7 +130,7 @@ class RangeIterator(Generic[T]):
         self.init_values = init_values or ()
         self.chunk = chunk
         self.chunk_policy = chunk_policy
-        self.unroll_factor = unroll_factor
+        self.pipeline_stages = pipeline_stages
         self.current = start
 
     def __iter__(self) -> RangeIterator[T]:
@@ -187,22 +189,22 @@ def _make_range_iterator(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll_factor: int | None = None,
+    pipeline_stages: int | None = None,
     func_name: str = "range",
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
-    """Shared implementation for range(), parallel(), and unroll()."""
+    """Shared implementation for range(), parallel(), unroll(), and pipeline()."""
     if chunk is not None and (not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0):
         raise ValueError(f"{func_name}() chunk must be a positive integer, got {chunk!r}")
-    if unroll_factor is not None:
-        if not isinstance(unroll_factor, int) or isinstance(unroll_factor, bool) or unroll_factor < 1:
-            raise ValueError(f"{func_name}() unroll factor must be a positive integer, got {unroll_factor!r}")
+    if pipeline_stages is not None:
+        if not isinstance(pipeline_stages, int) or isinstance(pipeline_stages, bool) or pipeline_stages < 1:
+            raise ValueError(f"{func_name}() stage must be a positive integer, got {pipeline_stages!r}")
         if chunk is not None:
-            raise ValueError(f"{func_name}() unroll= and chunk= are mutually exclusive")
+            raise ValueError(f"{func_name}() stage= and chunk= are mutually exclusive")
     kwargs = {
         "init_values": init_values,
         "chunk": chunk,
         "chunk_policy": chunk_policy,
-        "unroll_factor": unroll_factor,
+        "pipeline_stages": pipeline_stages,
     }
     if len(args) == 1:
         return RangeIterator(args[0], **kwargs)
@@ -220,7 +222,6 @@ def range(
     init_values: None = None,
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[Scalar]: ...
 
 
@@ -230,7 +231,6 @@ def range(
     init_values: tuple[T1],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
 
 
@@ -240,7 +240,6 @@ def range(
     init_values: tuple[T1, T2],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
 
 
@@ -250,7 +249,6 @@ def range(
     init_values: tuple[T1, T2, T3],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
 
 
@@ -260,7 +258,6 @@ def range(
     init_values: tuple[T1, T2, T3, T4],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
 
 
@@ -270,7 +267,6 @@ def range(
     init_values: tuple[T1, T2, T3, T4, T5],
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
 
 
@@ -279,7 +275,6 @@ def range(
     init_values: tuple[Any, ...] | None = None,
     chunk: int | None = None,
     chunk_policy: str = "guarded",
-    unroll: int | None = None,
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create a range iterator for for loops.
 
@@ -287,7 +282,9 @@ def range(
         Simple:        for i in pl.range(10):
         Iter args:     for i, (var1, var2) in pl.range(16, init_values=(init1, init2)):
         Chunked:       for i in pl.range(0, 10, chunk=5):
-        Partial unroll: for i in pl.range(64, unroll=4):  # 16 outer iters, 4 body copies each
+
+    For software pipelining (body replication for ping-pong buffering), use
+    ``pl.pipeline(N, stage=F)`` instead — it is a sibling loop iterator.
 
     Args can be int literals or Scalar variables:
         for i in pl.range(n):  # n is pl.Scalar[pl.INT64]
@@ -300,10 +297,6 @@ def range(
         init_values: Initial values for iteration arguments
         chunk: Chunk size for loop chunking (splits loop into nested loops)
         chunk_policy: Chunk distribution policy (default: "guarded")
-        unroll: Partial unroll factor for tile-level ping-pong buffering. Replicates
-            the loop body ``unroll`` times per outer iteration; the outer loop steps
-            by ``step * unroll``. Mutually exclusive with ``chunk``. Lowered by the
-            ``PartialUnrollTileLoops`` pass at the tile level.
 
     Returns:
         If no init_values: RangeIterator yielding loop variable (Scalar)
@@ -314,7 +307,6 @@ def range(
         init_values=init_values,
         chunk=chunk,
         chunk_policy=chunk_policy,
-        unroll_factor=unroll,
         func_name="range",
     )
 
@@ -421,6 +413,73 @@ def unroll(
     return cast(
         RangeIterator["Scalar"],
         _make_range_iterator(*args, chunk=chunk, chunk_policy=chunk_policy, func_name="unroll"),
+    )
+
+
+@overload
+def pipeline(*args: RangeArg, stage: int, init_values: None = None) -> RangeIterator[Scalar]: ...
+
+
+@overload
+def pipeline(
+    *args: RangeArg, stage: int, init_values: tuple[T1]
+) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
+
+
+@overload
+def pipeline(
+    *args: RangeArg, stage: int, init_values: tuple[T1, T2]
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
+
+
+@overload
+def pipeline(
+    *args: RangeArg, stage: int, init_values: tuple[T1, T2, T3]
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
+
+
+@overload
+def pipeline(
+    *args: RangeArg, stage: int, init_values: tuple[T1, T2, T3, T4]
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
+
+
+@overload
+def pipeline(
+    *args: RangeArg, stage: int, init_values: tuple[T1, T2, T3, T4, T5]
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
+
+
+def pipeline(
+    *args: RangeArg,
+    stage: int,
+    init_values: tuple[Any, ...] | None = None,
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
+    """Create a software-pipelined loop iterator.
+
+    Replicates the loop body ``stage`` times per outer iteration to enable
+    ping-pong buffering. The outer loop advances in strides of ``stage * step``;
+    a tail dispatch covers the remainder when the trip count is not divisible
+    by ``stage``. Lowered by the ``LowerPipelineLoops`` pass at the tile level.
+
+    Positional args match ``pl.range``: (stop) / (start, stop) / (start, stop, step).
+    The ``stage`` kwarg is required and must be a positive integer.
+
+    Args:
+        *args: 1-3 positional args — same shape as ``pl.range()``.
+        stage: Pipeline depth (positive integer, typically 2-4).
+        init_values: Loop-carried state, same semantics as ``pl.range()``.
+
+    Examples:
+        >>> for i in pl.pipeline(64, stage=4):
+        ...     tile = pl.tile.load(...)
+        ...     pl.tile.store(...)
+    """
+    return _make_range_iterator(
+        *args,
+        init_values=init_values,
+        pipeline_stages=stage,
+        func_name="pipeline",
     )
 
 

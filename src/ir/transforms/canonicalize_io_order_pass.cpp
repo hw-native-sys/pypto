@@ -28,6 +28,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/type.h"
@@ -127,9 +128,41 @@ class CanonicalizeIOOrderMutator : public IRMutator {
  public:
   CanonicalizeIOOrderMutator() : io_ops_(IOCategoryOps::Build()) {}
 
+  /// Scope the IO reorder to bodies of `ForKind::Pipeline` loops. Non-pipelined
+  /// code is visited recursively but its SeqStmts are left as-is.
+  ///
+  /// On exit from a pipeline scope, demote `kind_` to `Sequential` — the marker
+  /// has served its purpose (gated this reorder) and must not survive past this
+  /// pass. The verifier checks the post-condition: no ForKind::Pipeline loops
+  /// downstream of CanonicalizeIOOrder.
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    const bool is_pipeline = (op->kind_ == ForKind::Pipeline);
+    if (is_pipeline) inside_pipeline_depth_++;
+    auto visited = IRMutator::VisitStmt_(op);
+    if (is_pipeline) inside_pipeline_depth_--;
+
+    if (!is_pipeline) return visited;
+    auto visited_for = std::dynamic_pointer_cast<const ForStmt>(visited);
+    if (!visited_for) return visited;
+    auto demoted = MutableCopy(visited_for);
+    demoted->kind_ = ForKind::Sequential;
+    // Strip any stale `pipeline_stages` attr when demoting — normally the attr
+    // is already gone after LowerPipelineLoops, but stripping here keeps the
+    // invariant (`pipeline_stages` attr ⇒ kind == Pipeline) whole even when
+    // CanonicalizeIOOrder runs standalone on pre-lowered IR (e.g. in tests).
+    // Skip the rebuild entirely when the attr is already absent (common case).
+    if (demoted->HasAttr(kPipelineStagesAttr)) {
+      demoted->attrs_ = StripAttr(demoted->attrs_, kPipelineStagesAttr);
+    }
+    return demoted;
+  }
+
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
     // Recurse first so any nested SeqStmts are reordered bottom-up.
     auto visited = IRMutator::VisitStmt_(op);
+    if (inside_pipeline_depth_ == 0) {
+      return visited;  // outside any pipeline scope — do not reorder
+    }
     auto seq = std::dynamic_pointer_cast<const SeqStmts>(visited);
     if (!seq || seq->stmts_.size() < 2) {
       return visited;  // single stmt — nothing to reorder
@@ -138,6 +171,11 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   }
 
  private:
+  /// Depth counter: increments on entry to a `ForKind::Pipeline`, decrements
+  /// on exit. Non-zero when a pipeline loop is an ancestor of the currently
+  /// visited SeqStmts. Supports nested pipelines (each level increments).
+  int inside_pipeline_depth_ = 0;
+
   /// Stable, priority-aware topological sort.
   ///
   /// Complexity: O(N log N + E) per region — the dependency graph is built

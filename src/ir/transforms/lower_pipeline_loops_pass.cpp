@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
@@ -41,13 +42,6 @@ using Attrs = std::vector<std::pair<std::string, std::any>>;
 
 namespace {
 
-constexpr const char* kUnrollFactorAttr = "unroll_factor";
-
-/// Legacy attribute name once emitted by this pass (RFC #1048 removed it).
-/// Stripped defensively when seen on input so legacy IR (e.g. deserialized
-/// from an older compiler) doesn't carry the now-meaningless marker forward.
-constexpr const char* kLegacyUnrollReplicatedAttr = "unroll_replicated";
-
 /// Extract a compile-time integer from a ConstInt or Neg(ConstInt) expression.
 int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(expr)) {
@@ -58,8 +52,8 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
       return -inner->value_;
     }
   }
-  throw pypto::ValueError("PartialUnrollTileLoops: " + what +
-                          " must be a compile-time integer constant, got " + expr->TypeName());
+  throw pypto::ValueError("LowerPipelineLoops: " + what + " must be a compile-time integer constant, got " +
+                          expr->TypeName());
 }
 
 /// Non-throwing variant — returns nullopt if `expr` is not a compile-time integer.
@@ -95,18 +89,6 @@ ExprPtr OffsetIndex(const ExprPtr& base, int64_t offset_val, const Span& span) {
     return MakeConstIndex(ci->value_ + offset_val, span);
   }
   return MakeAdd(base, MakeConstIndex(offset_val, span), span);
-}
-
-/// Copy `original` while stripping `kUnrollFactorAttr` and the legacy
-/// `kLegacyUnrollReplicatedAttr` (in case it survived from older serialized IR).
-Attrs StripUnrollFactorAttr(const Attrs& original) {
-  Attrs out;
-  out.reserve(original.size());
-  for (const auto& [k, v] : original) {
-    if (k == kUnrollFactorAttr || k == kLegacyUnrollReplicatedAttr) continue;
-    out.emplace_back(k, v);
-  }
-  return out;
 }
 
 /// Build a fresh outer loop variable mirroring `original` (same name, same type, same span).
@@ -146,8 +128,15 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 }
 
 /**
- * @brief Mutator that lowers ForStmt nodes carrying `attrs_["unroll_factor"]`
- *        into a replicated main loop plus a modulo-dispatch remainder.
+ * @brief Mutator that lowers user-written `pl.pipeline(N, stage=F)` loops
+ *        (`ForKind::Pipeline` + `attrs_["pipeline_stages"]`) into a replicated
+ *        main loop plus a modulo-dispatch remainder.
+ *
+ * The produced outer loop **keeps `ForKind::Pipeline`** as a marker for the
+ * downstream `CanonicalizeIOOrder` pass (which scopes its IO reorder to
+ * pipeline bodies and demotes the kind to `Sequential` on exit). The
+ * `pipeline_stages` attr is stripped from the output, so re-running this pass
+ * is a natural no-op (trigger requires BOTH kind and attr).
  *
  * Static bounds → bare `SeqStmts` tail with exactly rem_iters clones flattened
  *   into the outer scope (plus trailing `AssignStmt`s to bind the outer loop's
@@ -164,26 +153,28 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
  * `return_vars` matching the iter_args types; the innermost else yields the
  * main-loop return_vars so the `rem == 0` fall-through is a no-op.
  */
-class PartialUnrollMutator : public IRMutator {
+class LowerPipelineMutator : public IRMutator {
  public:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    if (!op->HasAttr(kUnrollFactorAttr)) {
+    if (op->kind_ != ForKind::Pipeline || !op->HasAttr(kPipelineStagesAttr)) {
       return IRMutator::VisitStmt_(op);
     }
-    int64_t factor = static_cast<int64_t>(op->GetAttr<int>(kUnrollFactorAttr, 0));
-    CHECK(factor >= 1) << "PartialUnrollTileLoops: unroll_factor must be >= 1, got " << factor;
+    int64_t factor = static_cast<int64_t>(op->GetAttr<int>(kPipelineStagesAttr, 0));
+    CHECK(factor >= 1) << "LowerPipelineLoops: pipeline_stages must be >= 1, got " << factor;
 
-    // Recurse into the body first so nested unroll-marked loops are lowered too.
+    // Recurse into the body first so nested pipeline-marked loops are lowered too.
     auto inner_body = VisitStmt(op->body_);
 
     // Step must always be static — the main loop's stride and per-clone offsets
     // both depend on `factor * step` being a compile-time integer.
     int64_t step = GetConstIntValue(op->step_, "step");
-    CHECK(step != 0) << "PartialUnrollTileLoops: step cannot be zero";
+    CHECK(step != 0) << "LowerPipelineLoops: step cannot be zero";
 
-    // factor == 1: drop the attr and keep the loop otherwise unchanged.
+    // factor == 1: nothing to replicate. Demote kind to Sequential (no scope
+    // marker needed — CanonicalizeIOOrder has nothing to cluster when there is
+    // only one body copy) and strip the attr.
     if (factor == 1) {
-      return CleanupUnrollAttr(op, inner_body);
+      return DemoteToSequential(op, inner_body);
     }
 
     auto start_const = TryGetConstInt(op->start_);
@@ -195,11 +186,15 @@ class PartialUnrollMutator : public IRMutator {
   }
 
  private:
-  /// No replication needed — drop the attr and return the loop unchanged.
-  StmtPtr CleanupUnrollAttr(const ForStmtPtr& op, const StmtPtr& inner_body) {
+  /// stage == 1 / empty trip count path — no replication needed.
+  /// Demote kind to Sequential (no scope marker for CanonicalizeIOOrder to
+  /// react to) and strip `pipeline_stages`. The (kind, attr) pair moves
+  /// together so downstream invariants stay clean.
+  StmtPtr DemoteToSequential(const ForStmtPtr& op, const StmtPtr& inner_body) {
     auto cleaned = MutableCopy(op);
     cleaned->body_ = inner_body;
-    cleaned->attrs_ = StripUnrollFactorAttr(op->attrs_);
+    cleaned->kind_ = ForKind::Sequential;
+    cleaned->attrs_ = StripAttr(op->attrs_, kPipelineStagesAttr);
     return cleaned;
   }
 
@@ -249,8 +244,6 @@ class PartialUnrollMutator : public IRMutator {
     return {SeqStmts::Flatten(std::move(clones), sp), std::move(prev_yields)};
   }
 
-  /// Convert a vector of return_vars into a vector of ExprPtrs (for YieldStmt values
-  /// or iter_arg init-value forwarding).
   std::vector<ExprPtr> ReturnVarsAsExprs(const std::vector<VarPtr>& vars) {
     std::vector<ExprPtr> result;
     result.reserve(vars.size());
@@ -314,7 +307,7 @@ class PartialUnrollMutator : public IRMutator {
     auto new_body = SeqStmts::Flatten(std::move(body_parts), sp);
 
     ExprPtr new_step = MakeConstIndex(factor * step, sp);
-    Attrs new_attrs = StripUnrollFactorAttr(op->attrs_);
+    Attrs new_attrs = StripAttr(op->attrs_, kPipelineStagesAttr);
     return std::make_shared<ForStmt>(new_loop_var, main_start, main_stop, new_step, new_iter_args, new_body,
                                      main_return_vars, sp, op->kind_,
                                      /*chunk_config=*/std::nullopt, new_attrs, op->leading_comments_);
@@ -350,7 +343,7 @@ class PartialUnrollMutator : public IRMutator {
                       int64_t step) {
     int64_t trip = ComputeStaticTripCount(start, stop, step);
     if (trip == 0) {
-      return CleanupUnrollAttr(op, body);
+      return DemoteToSequential(op, body);
     }
     int64_t main_iters = trip / factor;
     int64_t rem_iters = trip % factor;
@@ -412,7 +405,7 @@ class PartialUnrollMutator : public IRMutator {
    */
   StmtPtr LowerDynamic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t step) {
     Span sp = op->span_;
-    CHECK(step > 0) << "PartialUnrollTileLoops: dynamic bounds require a positive step, got " << step
+    CHECK(step > 0) << "LowerPipelineLoops: dynamic bounds require a positive step, got " << step
                     << ". Use static bounds for negative-step loops.";
 
     // trip_iters = ceil_div(stop - start, step). For step == 1 the ceil_div
@@ -523,9 +516,9 @@ class PartialUnrollMutator : public IRMutator {
   }
 };
 
-FunctionPtr TransformPartialUnrollTileLoops(const FunctionPtr& func) {
-  INTERNAL_CHECK(func) << "PartialUnrollTileLoops cannot run on null function";
-  PartialUnrollMutator mutator;
+FunctionPtr TransformLowerPipelineLoops(const FunctionPtr& func) {
+  INTERNAL_CHECK(func) << "LowerPipelineLoops cannot run on null function";
+  LowerPipelineMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;
   auto new_func = MutableCopy(func);
@@ -537,9 +530,8 @@ FunctionPtr TransformPartialUnrollTileLoops(const FunctionPtr& func) {
 
 namespace pass {
 
-Pass PartialUnrollTileLoops() {
-  return CreateFunctionPass(TransformPartialUnrollTileLoops, "PartialUnrollTileLoops",
-                            kPartialUnrollTileLoopsProperties);
+Pass LowerPipelineLoops() {
+  return CreateFunctionPass(TransformLowerPipelineLoops, "LowerPipelineLoops", kLowerPipelineLoopsProperties);
 }
 
 }  // namespace pass

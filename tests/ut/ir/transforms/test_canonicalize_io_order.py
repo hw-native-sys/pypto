@@ -9,10 +9,15 @@
 
 """DSL-style Before/Expected tests for the CanonicalizeIOOrder pass.
 
-The pass walks every ``SeqStmts`` in the program and reorders its top-level
-statements into four priority tiers — scalar compute first, then tile.load,
-then tile compute, and finally tile.store — all subject to the SSA dependency
-graph.
+The pass walks every ``SeqStmts`` **inside a ``ForKind.Pipeline`` body** and
+reorders its top-level statements into four priority tiers — scalar compute
+first, then tile.load, then tile compute, and finally tile.store — all subject
+to the SSA dependency graph. Loops that are not pipelined are left untouched.
+
+Tests that want reorder wrap the outer in ``pl.pipeline(..., stage=1)`` to opt
+in. The pass demotes ``ForKind.Pipeline`` → ``ForKind.Sequential`` and strips
+any stale ``pipeline_stages`` attr on exit, so the Expected programs use plain
+``pl.range`` — matching the post-pass state.
 """
 
 import pypto.language as pl
@@ -39,7 +44,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     tc0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
                     pl.tile.store(tc0, [0, 0], out)
@@ -71,7 +76,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     off: pl.Scalar[pl.INDEX] = 64
                     ta2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [off, 0], [64, 64])
@@ -106,7 +111,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[256, 64], pl.FP32], out: pl.Tensor[[256, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     off0: pl.Scalar[pl.INDEX] = i * 64
                     t0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [off0, 0], [64, 64])
                     c0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(t0, t0)
@@ -150,33 +155,26 @@ class TestCanonicalizeIOOrder:
         # IR identity preserved — the reorder detects no change is needed.
         assert After is Before
 
-    def test_reorder_on_function_body_seqstmts(self):
-        """The reorder applies to any ``SeqStmts`` — including the function body
-        itself, which is not inside any ForStmt."""
+    def test_function_body_outside_pipeline_is_not_reordered(self):
+        """Scope check: a function body with interleaved load/store — but no
+        enclosing ``ForKind.Pipeline`` — must be left untouched. This is the
+        key difference from the pre-refactor behavior, where the reorder ran
+        at every SeqStmts including the function body itself."""
 
         @pl.program
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                # Interleaved load/store — the second load (`tb`) appears after
-                # the first store (`ta`), so the pass should pull `tb` up ahead
-                # of that store.
+                # Interleaved load/store at function scope — without an
+                # enclosing pipeline loop, the pass does not reorder this.
                 ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                 pl.tile.store(ta, [0, 0], out)
                 tb: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
-                pl.tile.store(tb, [0, 0], out)
-
-        @pl.program
-        class Expected:
-            @pl.function(strict_ssa=True)
-            def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                ta: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
-                tb: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
-                pl.tile.store(ta, [0, 0], out)
                 pl.tile.store(tb, [0, 0], out)
 
         After = _run_pass(Before)
-        ir.assert_structural_equal(After, Expected)
+        # No pipeline scope → identity preserved.
+        assert After is Before
 
     def test_no_io_ops_is_noop(self):
         """A region with neither loads nor stores is unchanged."""
@@ -208,7 +206,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     t1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     pl.tile.store(t1, [0, 0], out)
                     t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
@@ -239,7 +237,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     # Store placed before read in source — reorder should swap them.
                     pl.tile.store(t, [0, 0], out)
@@ -266,7 +264,7 @@ class TestCanonicalizeIOOrder:
         class Before:
             @pl.function(strict_ssa=True)
             def main(self, in_a: pl.Tensor[[192, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
-                for i in pl.range(0, 2, 1):
+                for i in pl.pipeline(0, 2, 1, stage=1):
                     ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
                     tc: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
                     _ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])

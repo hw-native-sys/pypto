@@ -1,12 +1,12 @@
-# PartialUnrollTileLoops Pass
+# LowerPipelineLoops Pass
 
-在 tile 层级展开 `pl.range(N, unroll=F)` 循环：将循环体复制 `F` 份以启用 ping-pong 缓冲，同时保留外层顺序循环。
+在 tile 层级展开 `pl.pipeline(N, stage=F)` 循环：将循环体复制 `F` 份以启用 ping-pong 缓冲，同时保留外层顺序循环。
 
 ## 概述
 
 `pl.unroll(N)` 在 SSA 之前的 slot #1 完整展开循环为 `N` 份副本。用户使用它通常并非需要 `N` 份副本，而是希望获得不同的 tile MemRef —— 否则 `MemoryReuse` 会把生命周期相邻的 tile 合并为同一缓冲区，导致 ping-pong 失效。
 
-`PartialUnrollTileLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile，下游 `MemoryReuse` 无法将其合并。
+`LowerPipelineLoops` 提供更精细的开关：在 tile 层级把循环体复制 `F` 份（典型值 2–4），保留外层 `N/F` 次顺序迭代。每个副本获得独立的定义变量（保持 SSA），各自操作独立的 tile，下游 `MemoryReuse` 无法将其合并。
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
@@ -16,25 +16,25 @@
 
 | C++ | Python | 级别 |
 | --- | ------ | ---- |
-| `pass::PartialUnrollTileLoops()` | `passes.partial_unroll_tile_loops()` | 函数级 |
+| `pass::LowerPipelineLoops()` | `passes.lower_pipeline_loops()` | 函数级 |
 
 ```python
 from pypto import passes
-result = passes.partial_unroll_tile_loops()(program)
+result = passes.lower_pipeline_loops()(program)
 ```
 
 ## DSL 语法
 
 ```python
 # 每次外层迭代复制循环体 4 次；外层循环 16 次，步长为 4。
-for i in pl.range(64, unroll=4):
+for i in pl.pipeline(64, stage=4):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
 ```
 
 ## 行为
 
-对于 `attrs_["unroll_factor"] = F` 的循环：
+对于 `attrs_["pipeline_stages"] = F` 的循环：
 
 - **主循环**：步长为 `F*step`，循环体为 `F` 份副本组成的 `SeqStmts`。
 - **克隆细节**：每份副本通过 `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)` 生成。每个副本拥有新鲜的定义变量，既保持 SSA，又给 `MemoryReuse` 提供独立的 tile 身份。
@@ -73,8 +73,8 @@ for i in pl.range(64, unroll=4):
 | ---- | ---- |
 | `step` 必须为编译期整数常量 | 主循环步长及各副本偏移均依赖 `factor * step` 为整数 |
 | 动态边界要求 `step > 0` | 动态 trip 计算公式假设正步长；负步长需使用静态边界 |
-| `unroll` 与 `chunk` 在 `pl.range` 中互斥 | 二者优化方向不同，组合使用语义模糊且无明显场景 |
-| `unroll=` 仅支持 `pl.range()` | 该特性作用域限定于 `pl.range()`；`pl.parallel()` / `pl.unroll()` 语义不同 |
+| `stage=` 与 `chunk=` 在 `pl.pipeline` 中互斥 | 二者优化方向不同，组合使用语义模糊且无明显场景 |
+| `stage=` 仅支持 `pl.pipeline()` | 该特性作用域限定于 `pl.pipeline()`；`pl.range()` / `pl.parallel()` / `pl.unroll()` 语义不同 |
 
 ## 示例
 
@@ -82,7 +82,7 @@ for i in pl.range(64, unroll=4):
 
 ```python
 # 变换前
-for i in pl.range(0, 10, 1, attrs={"unroll_factor": 4}):
+for i in pl.pipeline(0, 10, 1, stage=4):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
 
@@ -101,7 +101,7 @@ tile_x_5 = pl.tile.load(input_a, [9 * 128], [128]); pl.tile.store(tile_x_5, [9 *
 
 ```python
 # 变换前
-for i in pl.range(0, n, 1, attrs={"unroll_factor": 4}):
+for i in pl.pipeline(0, n, 1, stage=4):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
 
@@ -128,5 +128,3 @@ else:
 
 - [`CanonicalizeIOOrder`](21-canonicalize_io_order.md) —— 下一个 Pass，对全程序每一个 `SeqStmts` 做 IO 顺序规范化
 - [`UnrollLoops`](01-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径
-- RFC #1025 —— 设计文档
-- RFC #1048 —— 移除 `unroll_replicated` 标记

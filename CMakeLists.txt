@@ -162,7 +162,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/split_chunked_loops_pass.cpp
     src/ir/transforms/interchange_chunk_loops_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp
-    src/ir/transforms/partial_unroll_tile_loops_pass.cpp
+    src/ir/transforms/lower_pipeline_loops_pass.cpp
     src/ir/transforms/canonicalize_io_order_pass.cpp
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
@@ -195,6 +195,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
     src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/verify_inout_use.cpp
+    src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/warning_verifier_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
 

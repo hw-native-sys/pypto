@@ -312,7 +312,7 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 
-The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default), parallel (`ForKind.Parallel`), and unroll (`ForKind.Unroll`) loops. In the DSL, `pl.range()` produces sequential, `pl.parallel()` produces parallel, and `pl.unroll()` produces compile-time unrolled loops. The printer emits `pl.parallel(...)` or `pl.unroll(...)` accordingly.
+The `kind_` field (`ForKind` enum) distinguishes sequential (`ForKind.Sequential`, default), parallel (`ForKind.Parallel`), unroll (`ForKind.Unroll`), and pipeline (`ForKind.Pipeline`) loops. In the DSL, `pl.range()` produces sequential, `pl.parallel()` produces parallel, `pl.unroll()` produces compile-time unrolled loops, and `pl.pipeline(N, stage=F)` produces software-pipelined loops. The printer emits `pl.parallel(...)`, `pl.unroll(...)`, or `pl.pipeline(..., stage=F)` accordingly. `ForKind.Pipeline` is a transient marker — `LowerPipelineLoops` replicates the body F times and keeps the kind as a scope marker, then `CanonicalizeIOOrder` reorders the body's IO and demotes the kind back to `Sequential`.
 
 **Requirements:**
 

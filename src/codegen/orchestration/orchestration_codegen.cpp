@@ -242,6 +242,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (for_stmt->kind_ == ForKind::Unroll) {
       LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
                   "generating sequential loop as fallback";
+    } else if (for_stmt->kind_ == ForKind::Pipeline) {
+      LOG_WARN << "ForKind::Pipeline loop reached codegen; CanonicalizeIOOrder "
+                  "should have demoted it to Sequential. Generating sequential loop as fallback.";
     }
 
     std::string loop_var = GetVarName(for_stmt->loop_var_);

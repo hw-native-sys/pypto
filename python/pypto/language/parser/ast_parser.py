@@ -1084,16 +1084,20 @@ class ASTParser:
                     # Will be resolved from loop outputs
                     self.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
-    _VALID_ITERATORS = {"range", "parallel", "unroll", "while_"}
-    _ITERATOR_ERROR = "For loop must use pl.range(), pl.parallel(), pl.unroll(), or pl.while_()"
-    _ITERATOR_HINT = "Use pl.range(), pl.parallel(), pl.unroll(), or pl.while_() as the iterator"
+    _VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_"}
+    _ITERATOR_ERROR = (
+        "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_()"
+    )
+    _ITERATOR_HINT = (
+        "Use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_() as the iterator"
+    )
 
     def _validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, str]:
-        """Validate that for loop uses pl.range(), pl.parallel(), pl.unroll(), or pl.while_().
+        """Validate that for loop uses pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_().
 
         Returns:
             Tuple of (call_node, iterator_type) where iterator_type is
-            "range", "parallel", "unroll", or "while_"
+            "range", "parallel", "unroll", "pipeline", or "while_"
         """
         if not isinstance(stmt.iter, ast.Call):
             raise ParserSyntaxError(
@@ -1228,36 +1232,43 @@ class ASTParser:
         if chunk_expr is not None:
             self._validate_chunk_args(chunk_expr, range_args["init_values"], iter_call)
 
-        # Validate unroll= and merge into attrs as "unroll_factor".
-        unroll_expr = range_args.get("unroll")
-        unroll_factor: int | None = None
-        if unroll_expr is not None:
-            if iterator_type != "range":
+        # Validate stage= on pl.pipeline() and merge into attrs as "pipeline_stages".
+        # stage= is required on pl.pipeline() and forbidden everywhere else.
+        pipeline_stages: int | None = None
+        stage_expr = range_args.get("stage")
+        if iterator_type == "pipeline":
+            if stage_expr is None:
                 raise ParserSyntaxError(
-                    f"unroll= is only supported on pl.range(), not pl.{iterator_type}()",
+                    "pl.pipeline() requires stage= (positive integer)",
                     span=self.span_tracker.get_span(iter_call),
-                    hint="Move unroll= to pl.range(), or use pl.unroll() for full unrolling.",
+                    hint="Use pl.pipeline(stop, stage=F).",
                 )
             if chunk_expr is not None:
                 raise ParserSyntaxError(
-                    "unroll= and chunk= are mutually exclusive on pl.range()",
+                    "stage= and chunk= are mutually exclusive on pl.pipeline()",
                     span=self.span_tracker.get_span(iter_call),
-                    hint="Use unroll= for ping-pong replication or chunk= for chunked iteration, not both.",
+                    hint="Drop chunk= when pipelining — pl.pipeline replicates the body at tile level.",
                 )
-            if not _is_const_int(unroll_expr):
+            if not _is_const_int(stage_expr):
                 raise ParserSyntaxError(
-                    "unroll must be a compile-time constant positive integer",
+                    "pl.pipeline() stage must be a compile-time constant integer",
                     span=self.span_tracker.get_span(iter_call),
-                    hint="Use an integer literal: unroll=4",
+                    hint="Use an integer literal: stage=4",
                 )
-            unroll_val = _const_int_value(unroll_expr)
-            if unroll_val is None or unroll_val < 1:
+            stage_val = _const_int_value(stage_expr)
+            if stage_val is None or stage_val < 1:
                 raise ParserSyntaxError(
-                    f"unroll factor must be >= 1, got {unroll_val}",
+                    f"pl.pipeline() stage must be >= 1, got {stage_val}",
                     span=self.span_tracker.get_span(iter_call),
-                    hint="Use a positive integer for unroll: unroll=4",
+                    hint="Use a positive integer for stage: stage=4",
                 )
-            unroll_factor = unroll_val
+            pipeline_stages = stage_val
+        elif stage_expr is not None:
+            raise ParserSyntaxError(
+                f"stage= is only supported on pl.pipeline(), not pl.{iterator_type}()",
+                span=self.span_tracker.get_span(iter_call),
+                hint="Use pl.pipeline() for software pipelining.",
+            )
 
         kind = self._ITERATOR_TO_KIND[iterator_type]
         # Infer loop var dtype from range bounds to preserve roundtrip fidelity.
@@ -1285,9 +1296,9 @@ class ASTParser:
         prev_in_while_loop = self.in_while_loop
 
         attrs_dict: dict[str, object] | None = range_args.get("attrs") or None
-        if unroll_factor is not None:
+        if pipeline_stages is not None:
             attrs_dict = dict(attrs_dict) if attrs_dict else {}
-            attrs_dict["unroll_factor"] = unroll_factor
+            attrs_dict["pipeline_stages"] = pipeline_stages
         with self.builder.for_loop(
             loop_var,
             range_args["start"],
@@ -1379,8 +1390,8 @@ class ASTParser:
                 )
         elif keyword.arg == "chunk":
             result["chunk"] = self.parse_expression(keyword.value)
-        elif keyword.arg == "unroll":
-            result["unroll"] = self.parse_expression(keyword.value)
+        elif keyword.arg == "stage":
+            result["stage"] = self.parse_expression(keyword.value)
         elif keyword.arg == "chunk_policy":
             if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                 _VALID_CHUNK_POLICIES = {"leading_full", "guarded"}
@@ -1409,7 +1420,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{keyword.arg}' in range()",
                 span=self.span_tracker.get_span(keyword),
-                hint="Supported keywords: init_values, chunk, chunk_policy, attrs",
+                hint="Supported keywords: init_values, chunk, chunk_policy, attrs, stage",
             )
 
     def _parse_range_call(self, call: ast.Call) -> dict[str, Any]:
@@ -3557,6 +3568,7 @@ class ASTParser:
         "range": ir.ForKind.Sequential,
         "parallel": ir.ForKind.Parallel,
         "unroll": ir.ForKind.Unroll,
+        "pipeline": ir.ForKind.Pipeline,
     }
 
     # Maps unified op names to the scalar variant for tile ops.

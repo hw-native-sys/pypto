@@ -47,12 +47,14 @@ class IRVisitor;
 class IRMutator;
 
 /**
- * @brief Distinguishes sequential, parallel, and unroll for loops
+ * @brief Distinguishes sequential, parallel, unroll, and pipeline for loops
  */
 enum class ForKind : uint8_t {
   Sequential = 0,  ///< Standard sequential for loop (default)
   Parallel = 1,    ///< Parallel for loop
-  Unroll = 2       ///< Compile-time unrolled for loop
+  Unroll = 2,      ///< Compile-time unrolled for loop
+  Pipeline = 3     ///< Software-pipelined loop (lowered by LowerPipelineLoops; transient marker kept through
+                   ///< CanonicalizeIOOrder)
 };
 
 /**
@@ -215,7 +217,7 @@ inline SplitMode StringToSplitMode(const std::string& str) {
 /**
  * @brief Convert ForKind to string
  * @param kind The for loop kind
- * @return String representation ("Sequential", "Parallel", or "Unroll")
+ * @return String representation ("Sequential", "Parallel", "Unroll", or "Pipeline")
  */
 inline std::string ForKindToString(ForKind kind) {
   switch (kind) {
@@ -225,6 +227,8 @@ inline std::string ForKindToString(ForKind kind) {
       return "Parallel";
     case ForKind::Unroll:
       return "Unroll";
+    case ForKind::Pipeline:
+      return "Pipeline";
   }
   throw pypto::TypeError("Unknown ForKind");
 }
@@ -242,6 +246,8 @@ inline ForKind StringToForKind(const std::string& str) {
     return ForKind::Parallel;
   } else if (str == "Unroll") {
     return ForKind::Unroll;
+  } else if (str == "Pipeline") {
+    return ForKind::Pipeline;
   } else {
     throw pypto::TypeError("Unknown ForKind: " + str);
   }

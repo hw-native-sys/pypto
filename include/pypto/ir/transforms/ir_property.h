@@ -51,6 +51,7 @@ enum class IRProperty : uint64_t {
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
   NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
   InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
+  PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
   kCount                    ///< Sentinel (must be last)
 };
 

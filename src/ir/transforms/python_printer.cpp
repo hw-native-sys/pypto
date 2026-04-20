@@ -46,6 +46,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -862,7 +863,12 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << ")";
   }
 
-  // Select range function based on loop kind
+  // `Pipeline` is user-facing only when the `pipeline_stages` attr is still
+  // present (pre-lowering form); after LowerPipelineLoops strips the attr the
+  // loop is a transient marker that prints as `.range(` — callers who need
+  // fidelity for the intermediate state must rely on tree-level assertions,
+  // not text round-trip.
+  const bool pipeline_user_form = (op->kind_ == ForKind::Pipeline && op->HasAttr(kPipelineStagesAttr));
   const char* range_func = ".range(";
   switch (op->kind_) {
     case ForKind::Unroll:
@@ -870,6 +876,9 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
       break;
     case ForKind::Parallel:
       range_func = ".parallel(";
+      break;
+    case ForKind::Pipeline:
+      range_func = pipeline_user_form ? ".pipeline(" : ".range(";
       break;
     case ForKind::Sequential:
       break;
@@ -919,6 +928,13 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
     INTERNAL_CHECK_SPAN(false, op->span_) << "ForKind::Unroll does not support iter_args/init_values";
   }
+
+  // When rendering as `.pipeline(...)`, surface `pipeline_stages` as the required
+  // `stage=` kwarg. The attr itself is stripped from the printed attrs={...} dict
+  // below so it never leaks as storage detail.
+  if (pipeline_user_form) {
+    stream_ << ", stage=" << op->GetAttr<int>(kPipelineStagesAttr, 0);
+  }
   if (!op->iter_args_.empty()) {
     stream_ << ", init_values=(";
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
@@ -949,33 +965,35 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     }
   }
 
-  // Add attrs kwargs
-  if (!op->attrs_.empty()) {
-    stream_ << ", attrs={";
-    bool first_attr = true;
-    for (const auto& [key, value] : op->attrs_) {
-      if (!first_attr) stream_ << ", ";
-      first_attr = false;
-      stream_ << std::quoted(key) << ": ";
-      if (value.type() == typeid(LoopOrigin)) {
-        stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
-      } else if (value.type() == typeid(int)) {
-        stream_ << AnyCast<int>(value, key);
-      } else if (value.type() == typeid(double)) {
-        stream_ << FormatFloatLiteral(AnyCast<double>(value, key));
-      } else if (value.type() == typeid(float)) {
-        stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, key)));
-      } else if (value.type() == typeid(bool)) {
-        stream_ << (AnyCast<bool>(value, key) ? "True" : "False");
-      } else if (value.type() == typeid(std::string)) {
-        stream_ << std::quoted(AnyCast<std::string>(value, key));
-      } else {
-        INTERNAL_CHECK(false) << "Unsupported attrs value type for key '" << key
-                              << "': " << DemangleTypeName(value.type().name());
-      }
+  // Add attrs kwargs. When the loop prints as `.pipeline(...)`, `pipeline_stages`
+  // is already surfaced as `stage=` above and must be stripped from the visible
+  // attrs dict — the kind drives the textual form, not the storage mechanism.
+  // Emit the `, attrs={` header lazily so we can skip it entirely when every
+  // attr is filtered out.
+  bool header_emitted = false;
+  for (const auto& [key, value] : op->attrs_) {
+    if (pipeline_user_form && key == kPipelineStagesAttr) continue;
+    stream_ << (header_emitted ? ", " : ", attrs={");
+    header_emitted = true;
+    stream_ << std::quoted(key) << ": ";
+    if (value.type() == typeid(LoopOrigin)) {
+      stream_ << prefix_ << ".LoopOrigin." << LoopOriginToString(AnyCast<LoopOrigin>(value, key));
+    } else if (value.type() == typeid(int)) {
+      stream_ << AnyCast<int>(value, key);
+    } else if (value.type() == typeid(double)) {
+      stream_ << FormatFloatLiteral(AnyCast<double>(value, key));
+    } else if (value.type() == typeid(float)) {
+      stream_ << FormatFloatLiteral(static_cast<double>(AnyCast<float>(value, key)));
+    } else if (value.type() == typeid(bool)) {
+      stream_ << (AnyCast<bool>(value, key) ? "True" : "False");
+    } else if (value.type() == typeid(std::string)) {
+      stream_ << std::quoted(AnyCast<std::string>(value, key));
+    } else {
+      INTERNAL_CHECK(false) << "Unsupported attrs value type for key '" << key
+                            << "': " << DemangleTypeName(value.type().name());
     }
-    stream_ << "}";
   }
+  if (header_emitted) stream_ << "}";
 
   stream_ << "):\n";
 

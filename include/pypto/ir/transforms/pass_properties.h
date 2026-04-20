@@ -159,9 +159,9 @@ inline const PassProperties kAllocateMemoryAddrProperties{
 inline const PassProperties kNormalizeReturnOrderProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps}};
 
-// -- Partial unroll + IO-order canonicalization passes (tile-level, before InitMemRef) ---------
+// -- Pipeline lowering + IO-order canonicalization passes (tile-level, before InitMemRef) ------
 
-inline const PassProperties kPartialUnrollTileLoopsProperties{
+inline const PassProperties kLowerPipelineLoopsProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
@@ -171,7 +171,8 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure}};
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
+                 IRProperty::PipelineResolved}};
 
 }  // namespace pass
 }  // namespace ir

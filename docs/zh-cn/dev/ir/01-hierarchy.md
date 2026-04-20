@@ -279,7 +279,7 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
 for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Parallel)
 ```
 
-`kind_` 字段（`ForKind` 枚举）区分顺序执行（`ForKind.Sequential`，默认）、并行执行（`ForKind.Parallel`）和编译时展开（`ForKind.Unroll`）的循环。在 DSL 中，`pl.range()` 生成顺序循环，`pl.parallel()` 生成并行循环，`pl.unroll()` 生成编译时展开循环。打印器相应输出 `pl.parallel(...)` 或 `pl.unroll(...)`。
+`kind_` 字段（`ForKind` 枚举）区分顺序执行（`ForKind.Sequential`，默认）、并行执行（`ForKind.Parallel`）、编译时展开（`ForKind.Unroll`）和软件流水线（`ForKind.Pipeline`）的循环。在 DSL 中，`pl.range()` 生成顺序循环，`pl.parallel()` 生成并行循环，`pl.unroll()` 生成编译时展开循环，`pl.pipeline(N, stage=F)` 生成软件流水线循环。打印器相应输出 `pl.parallel(...)`、`pl.unroll(...)` 或 `pl.pipeline(..., stage=F)`。`ForKind.Pipeline` 是临时标记：`LowerPipelineLoops` 将循环体复制 F 份并保留该 kind 作为作用域标记，随后 `CanonicalizeIOOrder` 重排循环体 IO 并把 kind 降回 `Sequential`。
 
 **要求：**
 

@@ -1,12 +1,12 @@
 # CanonicalizeIOOrder Pass
 
-Inside every `SeqStmts` in the program, lifts scalar compute and `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph — to canonicalize IO order. Within replicated regions produced by `PartialUnrollTileLoops`, this enables symmetric ping-pong buffering.
+Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, lifts scalar compute and `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph. Within replicated regions produced by `LowerPipelineLoops`, this enables symmetric ping-pong buffering. Loops that are not pipelined are left untouched.
 
 ## Overview
 
-After `PartialUnrollTileLoops` produces an outer `ForStmt` whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). With this layout, sibling clones' tile live ranges are sequential — `MemoryReuse` happily coalesces them into a single buffer, defeating ping-pong.
+After `LowerPipelineLoops` produces an outer `ForStmt` (kind=Pipeline marker) whose body is a `SeqStmts` of `F` cloned bodies, the natural emission order is `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1, …]` (each clone's address arithmetic precedes its own load). With this layout, sibling clones' tile live ranges are sequential — `MemoryReuse` happily coalesces them into a single buffer, defeating ping-pong.
 
-This pass reorders every `SeqStmts` in the program (including function bodies, `ForStmt` bodies, and `IfStmt` branch bodies) so:
+This pass reorders `SeqStmts` **inside a `ForKind::Pipeline` body** (including nested `IfStmt` branch bodies inside the pipeline scope) so:
 
 - Each scalar-producing compute (typically address arithmetic) floats to the earliest position the dependency graph permits, so it unblocks downstream loads.
 - Each `tile.load` / `tile.read` floats to the earliest position the dependency graph permits.
@@ -19,7 +19,7 @@ Lifting scalar compute is what unlocks the load cluster: without it, each clone'
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After `PartialUnrollTileLoops`, before `InitMemRef` (slot 20.6). Running before `InitMemRef` keeps SSAForm intact for the dependency analysis.
+**Pipeline position**: After `LowerPipelineLoops`, before `InitMemRef` (slot 20.6). Running before `InitMemRef` keeps SSAForm intact for the dependency analysis. On exit the pass demotes the outer pipeline loop's `kind_` from `ForKind::Pipeline` → `ForKind::Sequential` and strips any stale `pipeline_stages` attr — `ForKind::Pipeline` is a transient marker that must not survive past this pass.
 
 ## API
 
@@ -34,7 +34,7 @@ result = passes.canonicalize_io_order()(program)
 
 ## Algorithm
 
-A priority-aware stable topological sort applied to every `SeqStmts` of two or more statements. Each top-level statement is categorized:
+A priority-aware stable topological sort applied to every `SeqStmts` of two or more statements **inside a `ForKind::Pipeline` body**. The mutator maintains a pipeline-depth counter: it increments on entry to a `ForKind::Pipeline` loop, decrements on exit, and reorders `SeqStmts` only when the counter is non-zero. Each top-level statement is categorized:
 
 | Category | Priority | Examples |
 | -------- | -------- | -------- |
@@ -78,10 +78,10 @@ The reorder is a topological sort over the SSA def-use dependency graph, so it p
 
 ## Example
 
-**Before** (input from `PartialUnrollTileLoops` — note the per-clone scalar address-arithmetic assigns):
+**Before** (input from `LowerPipelineLoops` — note the outer loop still carries the `kind=Pipeline` marker, and the per-clone scalar address-arithmetic assigns):
 
 ```python
-for i in pl.range(0, 8, 4):
+for i in pl.range(0, 8, 4):  # kind=Pipeline (marker); pipeline_stages attr stripped by LowerPipelineLoops
     off_0: pl.Scalar[pl.INDEX] = i * 128
     tile_x_0 = pl.tile.load(input_a, [off_0], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)
@@ -93,10 +93,10 @@ for i in pl.range(0, 8, 4):
     # ... k=2, k=3 ...
 ```
 
-**After**:
+**After** (kind demoted to Sequential; body reordered):
 
 ```python
-for i in pl.range(0, 8, 4):
+for i in pl.range(0, 8, 4):  # kind=Sequential
     off_0: pl.Scalar[pl.INDEX] = i * 128
     off_1: pl.Scalar[pl.INDEX] = (i + 1) * 128
     off_2: pl.Scalar[pl.INDEX] = (i + 2) * 128
@@ -119,8 +119,6 @@ All four `off_k` lift first to unblock the loads. All four `tile_x_k` are now co
 
 ## Related
 
-- [`PartialUnrollTileLoops`](20-partial_unroll_tile_loops.md) — upstream producer of replicated regions that benefit most from this pass
+- [`LowerPipelineLoops`](20-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
 - [`MemoryReuse`](16-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
-- RFC #1025 — replicated-region design
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility
-- RFC #1048 — removal of the `unroll_replicated` marker; broadening of this pass's scope to every `SeqStmts`

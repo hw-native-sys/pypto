@@ -233,6 +233,21 @@ PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
  */
 PropertyVerifierPtr CreateInOutUseValidPropertyVerifier();
 
+/**
+ * @brief Factory function for creating PipelineResolved property verifier
+ *
+ * Verifies two invariants around ``ForKind::Pipeline``:
+ *   1. No ``ForStmt`` may carry ``kind_ == ForKind::Pipeline`` (post-canonicalize
+ *      state — Pipeline is a transient marker lowered by ``LowerPipelineLoops``
+ *      and demoted by ``CanonicalizeIOOrder``).
+ *   2. No ``ForStmt`` may carry the ``pipeline_stages`` attr when its kind is
+ *      anything other than Pipeline (the attr ⇒ kind invariant — always checked,
+ *      regardless of this property's specific "post-canonicalize" scope).
+ *
+ * @return Shared pointer to PipelineResolved PropertyVerifier
+ */
+PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 
