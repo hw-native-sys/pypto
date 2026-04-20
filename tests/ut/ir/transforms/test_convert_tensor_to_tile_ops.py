@@ -2715,5 +2715,86 @@ class TestConvertSortOps:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestConvertGatherOp:
+    """Test conversion of tensor.gather (MVP: 2D + dim=-1)."""
+
+    def test_gather_conversion(self):
+        """tensor.gather -> per-row loop of tile.load + tile.gather + tile.store."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                inp: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                out: pl.Tensor[[4, 3], pl.FP32] = pl.tensor.gather(inp, dim=-1, index=idx)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(inp, idx)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        # Sanity: tensor.gather is fully lowered; tile.gather appears inside a per-row loop.
+        assert "tensor.gather" not in after_src
+        assert "tile.gather" in after_src
+        assert "pl.range(4" in after_src or "range(4" in after_src
+        # The index-form tile.gather needs a [1, 3] INT32 scratch tile.
+        assert "dtype=pl.INT32" in after_src
+        # Per-row slices: [1, 16] from inp, [1, 3] from idx.
+        assert "[1, 16]" in after_src
+        assert "[1, 3]" in after_src
+        # Phase 3 adds an Out tensor param for the result.
+        assert "pl.Out[pl.Tensor[[4, 3]" in after_src
+
+    def test_gather_mask_conversion(self):
+        """tensor.gather(mask_pattern=...) -> tile.load + tile.gather_mask + tile.store."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, src: pl.Tensor[[8, 64], pl.FP32]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                out: pl.Tensor[[8, 32], pl.FP32] = pl.tensor.gather(src, mask_pattern=1)
+                return out
+
+            @pl.function
+            def main(self, src: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                out: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(src)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[8, 64], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                src_tile: pl.Tile[[8, 64], pl.FP32] = pl.load(src, [0, 0], [8, 64])
+                out_tile: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(src_tile, mask_pattern=1)
+                out_store: pl.Tensor[[8, 32], pl.FP32] = pl.store(out_tile, [0, 0], out_0)
+                return out_store
+
+            @pl.function
+            def main(self, src: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
+                out_0: pl.Tensor[[8, 32], pl.FP32] = pl.create_tensor([8, 32], dtype=pl.FP32)
+                out: pl.Tensor[[8, 32], pl.FP32] = self.main_incore_0(src, out_0)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

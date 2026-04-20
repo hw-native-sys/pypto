@@ -1967,5 +1967,150 @@ def test_tensor_mrgsort_mixed_args_rejected():
         ir.op.tensor.mrgsort(s0, s1, block_len=64)
 
 
+# Tensor gather tests
+
+
+def _make_gather_inputs(src_dtype=DataType.FP32, idx_dtype=DataType.INT32, b=4, n=16, k=3):
+    span = ir.Span.unknown()
+    B = ir.ConstInt(b, DataType.INT32, span)
+    N = ir.ConstInt(n, DataType.INT32, span)
+    K = ir.ConstInt(k, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([B, N], src_dtype), span)
+    idx = ir.Var("idx", ir.TensorType([B, K], idx_dtype), span)
+    return inp, idx
+
+
+def test_tensor_gather_basic():
+    """tensor.gather output has index shape and input dtype."""
+    inp, idx = _make_gather_inputs()
+    call = ir.op.tensor.gather(inp, dim=-1, index=idx)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[0], ir.ConstInt) and result_type.shape[0].value == 4
+    assert isinstance(result_type.shape[1], ir.ConstInt) and result_type.shape[1].value == 3
+
+
+def test_tensor_gather_dim_last_axis_positive():
+    """dim=rank-1 is accepted as an alias for dim=-1."""
+    inp, idx = _make_gather_inputs()
+    call = ir.op.tensor.gather(inp, dim=1, index=idx)
+    assert call.op.name == "tensor.gather"
+
+
+def test_tensor_gather_rejects_bad_dim():
+    inp, idx = _make_gather_inputs()
+    with pytest.raises(Exception, match=r"dim=-1 or dim=rank-1"):
+        ir.op.tensor.gather(inp, dim=0, index=idx)
+
+
+def test_tensor_gather_rejects_non_int32_index():
+    inp, idx = _make_gather_inputs(idx_dtype=DataType.INT16)
+    with pytest.raises(Exception, match=r"index dtype to be INT32"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx)
+
+
+def test_tensor_gather_rejects_unsupported_input_dtype():
+    inp, idx = _make_gather_inputs(src_dtype=DataType.UINT32)
+    with pytest.raises(Exception, match=r"FP16, FP32, INT16, or INT32"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx)
+
+
+def test_tensor_gather_rejects_rank_mismatch():
+    span = ir.Span.unknown()
+    B = ir.ConstInt(4, DataType.INT32, span)
+    N = ir.ConstInt(16, DataType.INT32, span)
+    K = ir.ConstInt(3, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([B, N], DataType.FP32), span)
+    idx = ir.Var("idx", ir.TensorType([K], DataType.INT32), span)
+    with pytest.raises(Exception, match=r"rank"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx)
+
+
+def test_tensor_gather_rejects_non_matching_outer_dim():
+    span = ir.Span.unknown()
+    B = ir.ConstInt(4, DataType.INT32, span)
+    B2 = ir.ConstInt(5, DataType.INT32, span)
+    N = ir.ConstInt(16, DataType.INT32, span)
+    K = ir.ConstInt(3, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([B, N], DataType.FP32), span)
+    idx = ir.Var("idx", ir.TensorType([B2, K], DataType.INT32), span)
+    with pytest.raises(Exception, match=r"non-gather axis"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx)
+
+
+# ---- tensor.gather_mask (mask-pattern form) -----------------------------------
+
+
+def _make_gather_mask_input(rows: int = 8, cols: int = 64, dtype: DataType = DataType.FP32):
+    span = ir.Span.unknown()
+    R = ir.ConstInt(rows, DataType.INT32, span)
+    C = ir.ConstInt(cols, DataType.INT32, span)
+    return ir.Var("inp", ir.TensorType([R, C], dtype), span)
+
+
+def test_tensor_gather_mask_p0101_halves_last_dim():
+    """tensor.gather(input, mask_pattern=1) emits tensor.gather_mask, last dim /= 2."""
+    inp = _make_gather_mask_input(rows=8, cols=64)
+    call = ir.op.tensor.gather(inp, mask_pattern=1)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.gather_mask"
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert rt.dtype == DataType.FP32
+    assert isinstance(rt.shape[0], ir.ConstInt) and rt.shape[0].value == 8
+    assert isinstance(rt.shape[1], ir.ConstInt) and rt.shape[1].value == 32
+
+
+def test_tensor_gather_mask_p0001_quarters_last_dim():
+    """Patterns 3..6 produce a /4 shrink."""
+    inp = _make_gather_mask_input(rows=4, cols=64)
+    call = ir.op.tensor.gather(inp, mask_pattern=3)
+    assert isinstance(call.type.shape[1], ir.ConstInt)
+    assert call.type.shape[1].value == 16
+
+
+def test_tensor_gather_mask_p1111_keeps_last_dim():
+    inp = _make_gather_mask_input(rows=4, cols=64)
+    call = ir.op.tensor.gather(inp, mask_pattern=7)
+    assert isinstance(call.type.shape[1], ir.ConstInt)
+    assert call.type.shape[1].value == 64
+
+
+def test_tensor_gather_mask_output_dtype_reinterpret():
+    """output_dtype reinterprets bits to a same-bit-width dtype."""
+    inp = _make_gather_mask_input(rows=2, cols=32, dtype=DataType.FP32)
+    call = ir.op.tensor.gather(inp, mask_pattern=2, output_dtype=DataType.UINT32)
+    assert call.op.name == "tensor.gather_mask"
+    assert call.type.dtype == DataType.UINT32
+
+
+def test_tensor_gather_mask_rejects_bad_pattern():
+    inp = _make_gather_mask_input()
+    with pytest.raises(Exception, match=r"mask_pattern in range"):
+        ir.op.tensor.gather(inp, mask_pattern=0)
+
+
+def test_tensor_gather_mask_rejects_indivisible_cols():
+    inp = _make_gather_mask_input(rows=2, cols=33)
+    with pytest.raises(Exception, match=r"divisible by 2"):
+        ir.op.tensor.gather(inp, mask_pattern=1)
+
+
+def test_tensor_gather_mask_rejects_dtype_width_mismatch():
+    inp = _make_gather_mask_input(rows=2, cols=32, dtype=DataType.FP16)
+    with pytest.raises(Exception, match=r"same bit width"):
+        ir.op.tensor.gather(inp, mask_pattern=1, output_dtype=DataType.FP32)
+
+
+def test_tensor_gather_rejects_mixed_index_and_mask():
+    inp, idx = _make_gather_inputs()
+    with pytest.raises(ValueError, match=r"mutually exclusive"):
+        ir.op.tensor.gather(inp, dim=-1, index=idx, mask_pattern=1)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

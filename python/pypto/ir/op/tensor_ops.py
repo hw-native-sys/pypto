@@ -1101,3 +1101,76 @@ def mrgsort_format2(
     Prefer ``mrgsort(src0, src1, src2, src3, tmp, executed)`` in user code.
     """
     return mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=exhausted, span=span)
+
+
+# ============================================================================
+# Gather Operation
+# ============================================================================
+
+
+def gather(
+    input: Expr,
+    dim: int | None = None,
+    index: Expr | None = None,
+    *,
+    mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements of ``input`` (tensor-level) — index form or mask-pattern form.
+
+    Index form (``dim`` + ``index``): output[b, k] = input[b, index[b, k]].
+        MVP limitation: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
+        ``index`` must be an INT32 tensor whose shape matches ``input`` on every
+        axis except ``dim``; output shape == ``index.shape``, dtype == ``input.dtype``.
+
+    Mask form (``mask_pattern=<int>``): selects columns of each row by a fixed
+        hardware mask. Last-dim shrinks by 2 (P0101/P1010) or 4 (P0001..P1000),
+        or stays the same for P1111. Optional ``output_dtype`` keyword reinterprets
+        result bits to a same-bit-width dtype (e.g. FP32 → UINT32).
+
+    Args:
+        input: Source tensor (TensorType, FP16/FP32/INT16/INT32).
+        dim: (index form) Axis along which to gather. Only ``-1`` / ``rank - 1`` accepted in MVP.
+        index: (index form) Index tensor (TensorType, INT32) with the same rank as ``input``.
+        mask_pattern: (mask form, keyword-only) Mask pattern selector in [1, 7].
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: (mask form, keyword-only) Optional output dtype with the same
+            bit width as ``input.dtype``.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression with the appropriate result type for the chosen form.
+    """
+    actual_span = _get_span_or_capture(span)
+    if mask_pattern is not None:
+        if dim is not None or index is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (dim, index) "
+                "are mutually exclusive; do not pass dim or index with mask_pattern"
+            )
+        kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
+        if output_dtype is not None:
+            kwargs["output_dtype"] = output_dtype
+        return _ir_core.create_op_call("tensor.gather_mask", [input], kwargs, actual_span)
+    if dim is None or index is None:
+        raise ValueError(
+            "gather() requires either (dim, index) for index form, "
+            "or mask_pattern=<int> for mask form"
+        )
+    kwargs = {"dim": dim}
+    return _ir_core.create_op_call("tensor.gather", [input, index], kwargs, actual_span)
+
+
+def gather_mask(
+    input: Expr,
+    mask_pattern: int,
+    output_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements of ``input`` (tensor-level) by mask pattern. Used by the parser
+    for roundtrip fidelity.
+
+    Prefer ``gather(input, mask_pattern=...)`` in user code.
+    """
+    return gather(input, mask_pattern=mask_pattern, output_dtype=output_dtype, span=span)

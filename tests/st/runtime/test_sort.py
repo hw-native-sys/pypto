@@ -213,6 +213,80 @@ class MrgSort1FP32Program:
 
 
 @pl.program
+class MrgSort1DynFP32TensorProgram:
+    """Tensor-level counterpart of ``MrgSort1DynFP32Program``.
+
+    Same pipeline (sort32 → 3× mrgsort format1 → gather for sorted values) but
+    expressed with the ``pl.tensor.*`` API inside a single ``Opaque`` main
+    wrapped in ``pl.at(CORE_GROUP)`` — following the tensor-level style used in
+    ``test_cross_core.py``. Sorted values are extracted from the interleaved
+    ``[1, 4096]`` mrgsort output via ``pl.tensor.gather(mask_pattern=P0101)``,
+    which lowers directly to ``tile.gather_mask`` (1:1).
+
+    Block_len schedule matches the tile version: 1<<(6+2*i) = 64, 256, 1024.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        idx: pl.Tensor[[1, 2048], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+    ) -> pl.Tensor[[1, 2048], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            sorted_t = pl.tensor.sort32(src, idx)
+            for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
+                block_len = 1 << (6 + i * 2)
+                merged = pl.tensor.mrgsort(acc, block_len=block_len)
+                result = pl.yield_(merged)
+            # P0101 selects even positions: [val0, idx0, val1, idx1, ...] → values only.
+            vals = pl.tensor.gather(result, mask_pattern=pl.tile.MaskPattern.P0101)
+            val_output = pl.assemble(val_output, vals, [0, 0])
+        return val_output
+
+
+@pl.program
+class MrgSort1DynFP32TensorValIdxProgram:
+    """Tensor-level sort32 + mrgsort + mask-gather pipeline that returns BOTH
+    sorted values and their original indices.
+
+    Mirrors ``MrgSort1DynFP32Program`` at the tensor level: P0101 extracts
+    value lanes, P1010 with ``output_dtype=UINT32`` bit-reinterprets the
+    odd-position UINT32 index bits stored by sort32 into a UINT32 tensor.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        idx: pl.Tensor[[1, 2048], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 2048], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            sorted_t = pl.tensor.sort32(src, idx)
+            for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
+                block_len = 1 << (6 + i * 2)
+                merged = pl.tensor.mrgsort(acc, block_len=block_len)
+                result = pl.yield_(merged)
+            # P0101 → sorted values (FP32 at even positions).
+            vals = pl.tensor.gather(result, mask_pattern=pl.tile.MaskPattern.P0101)
+            # P1010 + output_dtype=UINT32 → bit-reinterpret odd-position bits into UINT32.
+            sorted_idx = pl.tensor.gather(
+                result, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
+            )
+            val_output = pl.assemble(val_output, vals, [0, 0])
+            idx_output = pl.assemble(idx_output, sorted_idx, [0, 0])
+        return val_output, idx_output
+
+
+@pl.program
 class MrgSort1DynFP32Program:
     """Sort 64×32-element blocks (2048 values) with sort32, then merge with
     3 iterations of mrgsort format1 using dynamic block_len computed from loop index.
@@ -382,6 +456,77 @@ class MrgSort1DynFP32TestCase(PTOTestCase):
         tensors["val_output"][:] = src[global_order].unsqueeze(0)
 
         # Expected idx: the original index mapping permuted by sort order
+        tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
+
+
+class MrgSort1DynFP32TensorTestCase(PTOTestCase):
+    """Tensor-level counterpart of ``MrgSort1DynFP32TestCase``.
+
+    Uses the ``pl.tensor.*`` API (sort32 / mrgsort / gather mask form) inside
+    an Opaque main wrapped in ``pl.at(CORE_GROUP)``. Only sorted values are
+    checked — the gather P0101 form extracts even-position values and discards
+    the odd-position index bits.
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort1_dyn_fp32_tensor"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
+            TensorSpec("idx", [1, 2048], DataType.UINT32, init_value=_make_idx_1x2048),
+            TensorSpec("val_output", [1, 2048], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort1DynFP32TensorProgram
+
+    def compute_expected(self, tensors, params=None):
+        """Sorted descending values for the 2048-element input."""
+        src = tensors["src"].flatten()
+        sorted_vals, _ = torch.sort(src, descending=True)
+        tensors["val_output"][:] = sorted_vals.unsqueeze(0)
+
+
+class MrgSort1DynFP32TensorValIdxTestCase(PTOTestCase):
+    """Tensor-level sort32 + mrgsort + mask-gather returning both val and idx.
+
+    Tests P0101 (values) and P1010 (+ output_dtype=UINT32 for bit-reinterpret)
+    tensor-level gather masks in a single program.
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort1_dyn_fp32_tensor_val_idx"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
+            TensorSpec("idx", [1, 2048], DataType.UINT32, init_value=_make_idx_1x2048),
+            TensorSpec("val_output", [1, 2048], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 2048], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort1DynFP32TensorValIdxProgram
+
+    def compute_expected(self, tensors, params=None):
+        """Sorted values and permuted original indices for the 2048-element input."""
+        src = tensors["src"].flatten()
+        idx = tensors["idx"].flatten()
+        _, global_order = torch.sort(src, descending=True)
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
         tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
 
 
@@ -556,6 +701,18 @@ class TestSort:
     def test_mrgsort1_dyn_fp32(self, test_runner):
         """Test tmrgsort format1 with dynamic block_len: sort 2048 elements via iterative merge."""
         test_case = MrgSort1DynFP32TestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_mrgsort1_dyn_fp32_tensor(self, test_runner):
+        """Tensor-level sort32 + mrgsort + gather pipeline for 2048-element sort."""
+        test_case = MrgSort1DynFP32TensorTestCase()
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_mrgsort1_dyn_fp32_tensor_val_idx(self, test_runner):
+        """Tensor-level sort32 + mrgsort + P0101/P1010 mask-gather: returns values and indices."""
+        test_case = MrgSort1DynFP32TensorValIdxTestCase()
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 

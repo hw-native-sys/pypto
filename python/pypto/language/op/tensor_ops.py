@@ -64,6 +64,7 @@ __all__ = [
     "set_validshape",
     "sort32",
     "mrgsort",
+    "gather",
     "alloc",
 ]
 
@@ -926,6 +927,74 @@ def mrgsort(
         executed.unwrap(),
         exhausted,
     )
+    return Tensor(expr=call_expr)
+
+
+@overload
+def gather(input: Tensor, dim: int, index: Tensor) -> Tensor: ...
+
+
+@overload
+def gather(input: Tensor, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tensor: ...
+
+
+def gather(
+    input: Tensor,
+    dim: int | None = None,
+    index: Tensor | None = None,
+    *,
+    mask_pattern: int | None = None,
+    output_dtype: int | DataType | None = None,
+) -> Tensor:
+    """Gather elements of ``input`` (tensor-level) — index form or mask-pattern form.
+
+    Index form (``dim`` + ``index``):
+        ``output[b, k] = input[b, index[b, k]]``
+        MVP: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
+        ``index`` must be an INT32 tensor whose shape matches ``input`` on every
+        axis except ``dim``.
+
+    Mask form (``mask_pattern=<int>``):
+        Selects columns of each row by a fixed hardware mask pattern (lowered
+        directly to ``tile.gather_mask``). Last-dim shrinks by 2 (P0101/P1010)
+        or 4 (P0001..P1000), or stays the same for P1111.
+
+    Args:
+        input: Source tensor (FP16/FP32/INT16/INT32).
+        dim: (index form) Axis to gather along; only ``-1`` / ``rank - 1`` accepted in MVP.
+        index: (index form) Index tensor (INT32) with same rank as input.
+        mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
+        output_dtype: (mask form, keyword-only) Optional output dtype with the same
+            bit width as ``input.dtype`` (e.g. FP32 → UINT32 for sort32 index bits).
+
+    Returns:
+        Tensor of shape ``index.shape`` (index form) or shape with shrunk last dim
+        (mask form), and dtype ``input.dtype`` (or ``output_dtype`` if provided).
+
+    Examples:
+        out = gather(input, dim=-1, index=idx)
+        out = gather(input, mask_pattern=1)
+        out = gather(input, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+    """
+    if mask_pattern is not None:
+        if dim is not None or index is not None:
+            raise ValueError(
+                "gather() mask form (mask_pattern=...) and index form (dim, index) "
+                "are mutually exclusive; do not pass dim or index with mask_pattern"
+            )
+        call_expr = _ir_ops.gather(input.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
+        return Tensor(expr=call_expr)
+    if output_dtype is not None:
+        raise ValueError(
+            "output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>"
+        )
+    if dim is None or index is None:
+        raise ValueError(
+            "gather() requires either (dim, index) for index form, "
+            "or mask_pattern=<int> for mask form"
+        )
+    call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)
 
 

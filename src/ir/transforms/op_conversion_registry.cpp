@@ -88,6 +88,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterMatmulOps();
   RegisterReductionOps();
   RegisterSortOps();
+  RegisterGatherOps();
 }
 
 // ============================================================================
@@ -733,6 +734,123 @@ void OpConversionRegistry::RegisterSortOps() {
   RegisterSimple("tensor.sort32", "tile.sort32");
   RegisterSimple("tensor.mrgsort_format1", "tile.mrgsort_format1");
   RegisterSimple("tensor.mrgsort_format2", "tile.mrgsort_format2");
+  RegisterSimple("tensor.gather_mask", "tile.gather_mask");
+}
+
+// ============================================================================
+// Gather op: tensor.gather -> per-row tile.load + tile.gather + tile.assemble
+// loop over the outer (non-gather) dimension.
+//
+// MVP supports 2D input with dim == -1 (last axis). Semantics:
+//     out[b, k] = input[b, index[b, k]]
+//
+// The loop yields a TileType accumulator built via tile.assemble; Phase 3 of
+// ConvertTensorToTileOps then rewrites the loop to write directly into an
+// added Out tensor parameter via tile.store (see RewriteReturnedAssembleLoop-
+// ToStore). Using per-row slicing avoids materialising a `b * N` base offset
+// tile, which would otherwise require an arange/iota op PyPTO currently lacks.
+// ============================================================================
+
+void OpConversionRegistry::RegisterGatherOps() {
+  RegisterCustom(
+      "tensor.gather",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.gather conversion expects 2 args (input, index), got "
+                                << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        const auto& input = args[0];
+        const auto& index = args[1];
+
+        auto input_tensor_type = As<TensorType>(input->GetType());
+        CHECK(input_tensor_type) << "tensor.gather conversion: input must be TensorType, got "
+                                 << input->GetType()->TypeName();
+        auto index_tensor_type = As<TensorType>(index->GetType());
+        CHECK(index_tensor_type) << "tensor.gather conversion: index must be TensorType, got "
+                                 << index->GetType()->TypeName();
+        CHECK(input_tensor_type->shape_.size() == 2 && index_tensor_type->shape_.size() == 2)
+            << "tensor.gather conversion (MVP): only rank-2 inputs supported";
+
+        int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
+        const int64_t rank = static_cast<int64_t>(input_tensor_type->shape_.size());
+        CHECK(dim_val == -1 || dim_val == rank - 1)
+            << "tensor.gather conversion (MVP): only dim=-1 supported, got " << dim_val;
+
+        const auto& input_shape = input_tensor_type->shape_;   // [B, N]
+        const auto& index_shape = index_tensor_type->shape_;   // [B, K]
+        DataType input_dtype = input_tensor_type->dtype_;
+
+        auto make_index_const = [&](int64_t value) -> ExprPtr {
+          return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+        };
+        ExprPtr zero = make_index_const(0);
+        ExprPtr one = make_index_const(1);
+
+        std::vector<StmtPtr> prologue;
+
+        // Accumulator tile, shape equal to the output tensor; Phase 3 later
+        // rewrites this init to the added Out tensor parameter.
+        auto acc_shape_tuple = MakeShapeTuple(index_shape, span);
+        std::vector<std::pair<std::string, std::any>> acc_create_kwargs = {
+            {"dtype", input_dtype}, {"target_memory", MemorySpace::Vec}};
+        auto acc_create_call = op_reg.Create("tile.create", {acc_shape_tuple}, acc_create_kwargs, span);
+        auto acc_init_var = std::make_shared<Var>("gather_out_init", acc_create_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(acc_init_var, acc_create_call, span));
+
+        auto acc_tile_type = acc_create_call->GetType();
+        auto loop_var = std::make_shared<Var>("b", std::make_shared<ScalarType>(DataType::INDEX), span);
+        auto iter_arg = std::make_shared<IterArg>("gather_acc", acc_tile_type, acc_init_var, span);
+        auto return_var = std::make_shared<Var>("gather_result", acc_tile_type, span);
+
+        auto row_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{loop_var, zero}, span);
+        std::vector<ExprPtr> src_row_shape = {one, input_shape[1]};
+        std::vector<ExprPtr> idx_row_shape = {one, index_shape[1]};
+        auto src_shape_tuple = MakeShapeTuple(src_row_shape, span);
+        auto idx_shape_tuple = MakeShapeTuple(idx_row_shape, span);
+
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {
+            {"target_memory", MemorySpace::Vec}, {"transpose", false}};
+
+        std::vector<StmtPtr> body_stmts;
+        auto src_load = op_reg.Create("tile.load", {input, row_offsets, src_shape_tuple, src_shape_tuple},
+                                      load_kwargs, span);
+        auto src_tile_var = std::make_shared<Var>("gather_src_row", src_load->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(src_tile_var, src_load, span));
+
+        auto idx_load = op_reg.Create("tile.load", {index, row_offsets, idx_shape_tuple, idx_shape_tuple},
+                                      load_kwargs, span);
+        auto idx_tile_var = std::make_shared<Var>("gather_idx_row", idx_load->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(idx_tile_var, idx_load, span));
+
+        // Scratch workspace tile required by tile.gather (same shape as idx row, INT32).
+        std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
+            {"dtype", DataType(DataType::INT32)}, {"target_memory", MemorySpace::Vec}};
+        auto tmp_create_call =
+            op_reg.Create("tile.create", {idx_shape_tuple}, tmp_create_kwargs, span);
+        auto tmp_tile_var = std::make_shared<Var>("gather_tmp", tmp_create_call->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(tmp_tile_var, tmp_create_call, span));
+
+        auto gather_call =
+            op_reg.Create("tile.gather", {src_tile_var, idx_tile_var, tmp_tile_var}, span);
+        auto gather_row_var = std::make_shared<Var>("gather_row", gather_call->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(gather_row_var, gather_call, span));
+
+        // Assemble the per-row result into the accumulator; Phase 3 rewrites
+        // this tile.assemble into tile.store once the Out param is added.
+        auto assemble_call =
+            op_reg.Create("tile.assemble", {iter_arg, gather_row_var, row_offsets}, span);
+        auto assemble_var = std::make_shared<Var>("gather_assemble", assemble_call->GetType(), span);
+        body_stmts.push_back(std::make_shared<AssignStmt>(assemble_var, assemble_call, span));
+        body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{assemble_var}, span));
+
+        auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+        auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, input_shape[0], one,
+                                                  std::vector<IterArgPtr>{iter_arg}, body,
+                                                  std::vector<VarPtr>{return_var}, span);
+        prologue.push_back(for_stmt);
+        return ConversionResult{std::move(prologue), return_var};
+      });
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
