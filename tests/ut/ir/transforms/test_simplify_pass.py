@@ -41,9 +41,15 @@ def wrap_stmts(stmts):
     return ir.SeqStmts(stmts, S)
 
 
-def make_program(body_stmts):
+def make_program(body_stmts, return_types=None):
+    """Build a single-function Program.
+
+    Pass `return_types` to declare the function's return signature; use
+    this when `body_stmts` ends in a ReturnStmt so Simplify's scalar DCE
+    does not prune the returned value.
+    """
     body = wrap_stmts(body_stmts)
-    func = ir.Function("main", [], [], body, S)
+    func = ir.Function("main", [], return_types or [], body, S)
     return ir.Program([func], "test", S)
 
 
@@ -72,22 +78,27 @@ class TestPassMetadata:
 
 
 class TestIdentitySimplification:
+    """Scalars are written into a tensor sink so DCE does not prune them
+    and the fold result stays observable in the IR."""
+
     def test_add_zero(self):
         """x + 0 should simplify to x."""
 
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i + 0
+                    y: pl.Scalar[pl.INT64] = i + 0
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -98,16 +109,18 @@ class TestIdentitySimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = 0 + i
+                    y: pl.Scalar[pl.INT64] = 0 + i
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -118,16 +131,18 @@ class TestIdentitySimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i * 1
+                    y: pl.Scalar[pl.INT64] = i * 1
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -138,16 +153,18 @@ class TestIdentitySimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i - 0
+                    y: pl.Scalar[pl.INT64] = i - 0
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -159,40 +176,35 @@ class TestIdentitySimplification:
 
 
 class TestConstantFolding:
+    """Verify arithmetic constant folding — tests put the expression
+    directly in a ReturnStmt so the fold result stays observable after
+    Simplify's scalar DCE step."""
+
     def test_add_constants(self):
         """3 + 4 should fold to 7."""
-        y = make_var("y")
-        assign = ir.AssignStmt(y, ir.Add(ci(3), ci(4), IDX, S), S)
-        before = make_program([assign])
-
-        assign_exp = ir.AssignStmt(y, ci(7), S)
-        expected = make_program([assign_exp])
+        ret_type = ir.ScalarType(IDX)
+        before = make_program([ir.ReturnStmt([ir.Add(ci(3), ci(4), IDX, S)], S)], [ret_type])
+        expected = make_program([ir.ReturnStmt([ci(7)], S)], [ret_type])
 
         after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
 
     def test_mul_constants(self):
         """3 * 4 should fold to 12."""
-        y = make_var("y")
-        assign = ir.AssignStmt(y, ir.Mul(ci(3), ci(4), IDX, S), S)
-        before = make_program([assign])
-
-        assign_exp = ir.AssignStmt(y, ci(12), S)
-        expected = make_program([assign_exp])
+        ret_type = ir.ScalarType(IDX)
+        before = make_program([ir.ReturnStmt([ir.Mul(ci(3), ci(4), IDX, S)], S)], [ret_type])
+        expected = make_program([ir.ReturnStmt([ci(12)], S)], [ret_type])
 
         after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
 
     def test_nested_constant_expr(self):
         """(2 + 3) * 4 should fold to 20."""
-        y = make_var("y")
+        ret_type = ir.ScalarType(IDX)
         inner = ir.Add(ci(2), ci(3), IDX, S)
         outer = ir.Mul(inner, ci(4), IDX, S)
-        assign = ir.AssignStmt(y, outer, S)
-        before = make_program([assign])
-
-        assign_exp = ir.AssignStmt(y, ci(20), S)
-        expected = make_program([assign_exp])
+        before = make_program([ir.ReturnStmt([outer], S)], [ret_type])
+        expected = make_program([ir.ReturnStmt([ci(20)], S)], [ret_type])
 
         after = passes.simplify()(before)
         ir.assert_structural_equal(after, expected)
@@ -210,16 +222,18 @@ class TestRangeAwareSimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i // 8
+                    y: pl.Scalar[pl.INT64] = i // 8
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = 0
+                    y: pl.Scalar[pl.INT64] = 0
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -230,16 +244,18 @@ class TestRangeAwareSimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i % 8
+                    y: pl.Scalar[pl.INT64] = i % 8
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -250,9 +266,10 @@ class TestRangeAwareSimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i // 4
+                    y: pl.Scalar[pl.INT64] = i // 4
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
@@ -263,18 +280,20 @@ class TestRangeAwareSimplification:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8, 4], pl.INT64]):
                 for i in pl.range(8):
                     for j in pl.range(4):
-                        _y: pl.Scalar[pl.INDEX] = j // 4
+                        y: pl.Scalar[pl.INT64] = j // 4
+                        pl.tensor.write(out, [i, j], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8, 4], pl.INT64]):
                 for i in pl.range(8):
                     for j in pl.range(4):
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i, j], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -292,18 +311,20 @@ class TestIfBranchConstraint:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = i // 4
+                        y: pl.Scalar[pl.INT64] = i // 4
+                        pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -315,22 +336,26 @@ class TestIfBranchConstraint:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = i // 4
+                        y: pl.Scalar[pl.INT64] = i // 4
+                        pl.tensor.write(out, [i], y)
                     else:
-                        _y: pl.Scalar[pl.INDEX] = i // 8
+                        y2: pl.Scalar[pl.INT64] = i // 8
+                        pl.tensor.write(out, [i], y2)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], y)
                     else:
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y2: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], y2)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -341,22 +366,26 @@ class TestIfBranchConstraint:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[16], pl.INT64]):
                 for i in pl.range(16):
                     if i < 8:
-                        _y: pl.Scalar[pl.INDEX] = i // 8
+                        y: pl.Scalar[pl.INT64] = i // 8
+                        pl.tensor.write(out, [i], y)
                     else:
-                        _z: pl.Scalar[pl.INDEX] = i // 16
+                        z: pl.Scalar[pl.INT64] = i // 16
+                        pl.tensor.write(out, [i], z)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[16], pl.INT64]):
                 for i in pl.range(16):
                     if i < 8:
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], y)
                     else:
-                        _z: pl.Scalar[pl.INDEX] = 0
+                        z: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], z)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -374,17 +403,19 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i + 0
+                    y: pl.Scalar[pl.INT64] = i + 0
+                    pl.tensor.write(out, [i], y)
                     break
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
                     break
 
         after = passes.simplify()(Before)
@@ -396,17 +427,19 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[4], pl.INT64]):
                 for i in pl.range(4):
-                    _y: pl.Scalar[pl.INDEX] = i * 1
+                    y: pl.Scalar[pl.INT64] = i * 1
+                    pl.tensor.write(out, [i], y)
                     continue
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[4], pl.INT64]):
                 for i in pl.range(4):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
                     continue
 
         after = passes.simplify()(Before)
@@ -418,18 +451,20 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
-                        _y: pl.Scalar[pl.INDEX] = i + 0
+                        y: pl.Scalar[pl.INT64] = i + 0
+                        pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
-                        _y: pl.Scalar[pl.INDEX] = i
+                        y: pl.Scalar[pl.INT64] = i
+                        pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -462,18 +497,22 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out_y: pl.Tensor[[8], pl.INT64], out_z: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i + 0
-                    _z: pl.Scalar[pl.INDEX] = i * 1
+                    y: pl.Scalar[pl.INT64] = i + 0
+                    z: pl.Scalar[pl.INT64] = i * 1
+                    pl.tensor.write(out_y, [i], y)
+                    pl.tensor.write(out_z, [i], z)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out_y: pl.Tensor[[8], pl.INT64], out_z: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
-                    _z: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    z: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out_y, [i], y)
+                    pl.tensor.write(out_z, [i], z)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -484,25 +523,29 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = i // 4
+                        y: pl.Scalar[pl.INT64] = i // 4
+                        pl.tensor.write(out, [i], y)
                         break
                     else:
-                        _y: pl.Scalar[pl.INDEX] = i + 0
+                        y2: pl.Scalar[pl.INT64] = i + 0
+                        pl.tensor.write(out, [i], y2)
                         continue
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        _y: pl.Scalar[pl.INDEX] = 0
+                        y: pl.Scalar[pl.INT64] = 0
+                        pl.tensor.write(out, [i], y)
                         break
                     else:
-                        _y: pl.Scalar[pl.INDEX] = i
+                        y2: pl.Scalar[pl.INT64] = i
+                        pl.tensor.write(out, [i], y2)
                         continue
 
         after = passes.simplify()(Before)
@@ -514,20 +557,22 @@ class TestControlFlow:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
-                            _y: pl.Scalar[pl.INDEX] = i // 4
+                            y: pl.Scalar[pl.INT64] = i // 4
+                            pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
-                            _y: pl.Scalar[pl.INDEX] = 0
+                            y: pl.Scalar[pl.INT64] = 0
+                            pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -545,9 +590,10 @@ class TestNoChange:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
@@ -558,16 +604,18 @@ class TestNoChange:
         @pl.program
         class Before:
             @pl.function
-            def main(self, n: pl.Scalar[pl.INDEX]):
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(n):
-                    _y: pl.Scalar[pl.INDEX] = i + 0
+                    y: pl.Scalar[pl.INT64] = i + 0
+                    pl.tensor.write(out, [i], y)
 
         @pl.program
         class Expected:
             @pl.function
-            def main(self, n: pl.Scalar[pl.INDEX]):
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(n):
-                    _y: pl.Scalar[pl.INDEX] = i
+                    y: pl.Scalar[pl.INT64] = i
+                    pl.tensor.write(out, [i], y)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -600,16 +648,18 @@ class TestScalarConstantPropagation:
         @pl.program
         class Before:
             @pl.function
-            def main(self):
+            def main(self, out: pl.Tensor[[1], pl.INDEX]):
                 CHUNK_K: pl.Scalar[pl.INDEX] = 512
-                _y: pl.Scalar[pl.INDEX] = CHUNK_K + 1
+                y: pl.Scalar[pl.INDEX] = CHUNK_K + 1
+                pl.tensor.write(out, [0], y)
 
+        # After simplify + scalar DCE: 513 propagates into the write call,
+        # and both CHUNK_K and y are dropped as dead scalar bindings.
         @pl.program
         class Expected:
             @pl.function
-            def main(self):
-                CHUNK_K: pl.Scalar[pl.INDEX] = 512  # noqa: F841
-                _y: pl.Scalar[pl.INDEX] = 513
+            def main(self, out: pl.Tensor[[1], pl.INDEX]):
+                pl.tensor.write(out, [0], 513)  # pyright: ignore[reportArgumentType]
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -625,11 +675,12 @@ class TestScalarConstantPropagation:
                 for _i in pl.range(0, 1024, CHUNK_K):
                     pass
 
+        # After simplify + scalar DCE: 512 propagates into the for-step and
+        # CHUNK_K becomes dead, so the binding is removed.
         @pl.program
         class Expected:
             @pl.function
             def main(self):
-                CHUNK_K: pl.Scalar[pl.INDEX] = 512  # noqa: F841
                 for _i in pl.range(0, 1024, 512):
                     pass
 
@@ -647,11 +698,13 @@ class TestScalarConstantPropagation:
                 N: pl.Scalar[pl.INDEX] = 4
                 _t: pl.Tensor[[N, 8], pl.FP32] = pl.tensor.create([N, 8], dtype=pl.FP32)
 
+        # After simplify + scalar DCE: N folds into the tensor shape and
+        # Call args, then its binding is dropped as dead scalar. `_t` is
+        # Call-backed so its assignment is preserved despite being unused.
         @pl.program
         class Expected:
             @pl.function
             def main(self):
-                N: pl.Scalar[pl.INDEX] = 4  # noqa: F841
                 _t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
 
         after = passes.simplify()(Before)
@@ -685,11 +738,12 @@ class TestScalarConstantPropagation:
         @pl.program
         class Before:
             @pl.function
-            def main(self, cond: pl.Scalar[pl.BOOL]):
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
                 k: pl.Scalar[pl.INDEX] = 7
                 if cond:
                     k = 5
-                _y: pl.Scalar[pl.INDEX] = k + 1
+                y: pl.Scalar[pl.INDEX] = k + 1
+                pl.tensor.write(out, [0], y)
 
         # Expected: no folding of `k` — the binding inside the branch isn't
         # safe to propagate past the merge point. `k + 1` stays symbolic.
@@ -726,17 +780,84 @@ class TestScalarConstantPropagation:
                 for _i, (acc_iter,) in pl.range(4, init_values=(acc,)):
                     acc_iter = pl.tensor.add(acc_iter, acc_iter)
 
+        # After simplify + scalar DCE: N folds into every shape annotation
+        # and Call arg, then its scalar binding is dropped. `acc` is
+        # Call-backed so it survives despite being unused after the fold.
         @pl.program
         class Expected:
             @pl.function
             def main(self):
-                N: pl.Scalar[pl.INDEX] = 4  # noqa: F841
                 acc: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
                 for _i, (acc_iter,) in pl.range(4, init_values=(acc,)):
                     acc_iter = pl.tensor.add(acc_iter, acc_iter)
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
+
+
+# ============================================================================
+# Scalar dead-code elimination (conservative — preserves Call-RHS assigns)
+# ============================================================================
+
+
+class TestScalarDCE:
+    """The final step of Simplify is a conservative scalar DCE. It removes
+    AssignStmts whose LHS is scalar and whose RHS is not a Call, provided
+    the LHS has no remaining uses. Call-backed and tensor-typed assigns
+    are always preserved — the IR has no purity annotation yet."""
+
+    def test_removes_unused_scalar_const(self):
+        """A scalar constant with no uses is removed."""
+        y = make_var("y")
+        before = make_program([ir.AssignStmt(y, ci(5), S)])
+        expected = make_program([])
+
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_cascade_scalar_chain(self):
+        """`a = 5; b = a + 1` with b unused removes both."""
+        a = make_var("a")
+        b = make_var("b")
+        stmts = [
+            ir.AssignStmt(a, ci(5), S),
+            ir.AssignStmt(b, ir.Add(a, ci(1), IDX, S), S),
+        ]
+        before = make_program(stmts)
+        expected = make_program([])
+
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+
+    def test_keeps_call_rhs_even_if_lhs_unused(self):
+        """A Call-backed assignment is preserved even when LHS is unused —
+        the call might have side effects we cannot yet reason about."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                _t: pl.Tensor[[4], pl.FP32] = pl.tensor.create([4], dtype=pl.FP32)
+
+        # _t is unused, but pl.tensor.create is a Call → preserved.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_keeps_used_scalar(self):
+        """A scalar referenced downstream is preserved even after the
+        upstream binding's LHS gets constant-folded away."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    y: pl.Scalar[pl.INDEX] = i + 1
+                    pl.tensor.write(out, [i], y)
+
+        after = passes.simplify()(Before)
+        # y is referenced by the write — scalar DCE leaves it alone.
+        ir.assert_structural_equal(after, Before)
 
 
 if __name__ == "__main__":

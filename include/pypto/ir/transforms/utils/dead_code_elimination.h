@@ -40,6 +40,21 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
 /// used by any return, yield, or side-effect statement.
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts);
 
+/// Conservative scalar-only DCE.
+///
+/// Removes every `AssignStmt` that satisfies ALL of:
+///   - LHS Var has `ScalarType`
+///   - RHS expression is NOT a `Call` (Call may have side effects)
+///   - LHS Var is not transitively used by any preserved statement
+///
+/// Preserves every other statement unchanged: AssignStmts with non-scalar
+/// LHS, Call-backed AssignStmts, EvalStmt, ReturnStmt, YieldStmt, and all
+/// control flow (ForStmt/IfStmt/WhileStmt).
+///
+/// Like `EliminateDeadCode`, iterates to a fixed point so chains of scalar
+/// bindings (`a = 5; b = a + 1; c = b + 1` with `c` unused) collapse fully.
+std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts);
+
 }  // namespace dce
 }  // namespace ir
 }  // namespace pypto

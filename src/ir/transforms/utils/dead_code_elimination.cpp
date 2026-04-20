@@ -11,18 +11,23 @@
 
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -83,70 +88,87 @@ void CollectAllAssignStmts(const std::vector<StmtPtr>& stmts,
 namespace {
 
 using loop_repair::MakeBody;
+using RemovablePredicate = std::function<bool(const StmtPtr&)>;
 
-void FindLiveRootsRecursive(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& live) {
+/// Collect live-root variables.
+///
+/// A statement is a "live root" when it is NOT classified as a removal
+/// candidate by `is_removable`. Its own Var references (expressions and
+/// direct fields, not nested-body refs) are added to the live set; the
+/// nested body, if any, is recursed into separately so its own candidate
+/// assignments remain eligible for removal.
+void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const RemovablePredicate& is_removable,
+                                std::unordered_set<const Var*>& live) {
+  auto collect_expr_refs = [&](const ExprPtr& expr) {
+    if (!expr) return;
+    outline_utils::VarDefUseCollector collector;
+    collector.VisitExpr(expr);
+    live.insert(collector.var_uses.begin(), collector.var_uses.end());
+  };
+  auto collect_iter_arg_refs = [&](const auto& loop_stmt) {
+    for (const auto& iter_arg : loop_stmt->iter_args_) {
+      collect_expr_refs(iter_arg->initValue_);
+    }
+  };
+
   for (const auto& stmt : stmts) {
-    if (std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
-        std::dynamic_pointer_cast<const YieldStmt>(stmt) || IsSideEffectOp(stmt)) {
+    // Live-root: non-candidate leaf statements contribute their refs. For
+    // AssignStmt/EvalStmt/ReturnStmt/YieldStmt we use the full subtree
+    // collector because they have no nested bodies — it is equivalent to
+    // walking their direct Expr fields.
+    bool is_leaf = std::dynamic_pointer_cast<const AssignStmt>(stmt) ||
+                   std::dynamic_pointer_cast<const EvalStmt>(stmt) ||
+                   std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
+                   std::dynamic_pointer_cast<const YieldStmt>(stmt);
+    if (is_leaf && !is_removable(stmt)) {
       outline_utils::VarDefUseCollector collector;
       collector.VisitStmt(stmt);
       auto all_refs = collector.GetAllVarRefs();
       live.insert(all_refs.begin(), all_refs.end());
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        live.insert(assign->var_.get());
-      }
     }
-    auto collect_iter_arg_refs = [&](const auto& loop_stmt) {
-      for (const auto& iter_arg : loop_stmt->iter_args_) {
-        outline_utils::VarDefUseCollector collector;
-        collector.VisitExpr(iter_arg->initValue_);
-        live.insert(collector.var_uses.begin(), collector.var_uses.end());
-      }
-    };
-    auto collect_expr_refs = [&](const ExprPtr& expr) {
-      outline_utils::VarDefUseCollector collector;
-      collector.VisitExpr(expr);
-      live.insert(collector.var_uses.begin(), collector.var_uses.end());
-    };
 
+    // Control-flow headers: add direct-field refs (bounds, conditions,
+    // iter-arg initializers) but defer body traversal to the recursive
+    // call so nested candidate assignments remain eligible for removal.
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       collect_expr_refs(for_stmt->start_);
       collect_expr_refs(for_stmt->stop_);
       collect_expr_refs(for_stmt->step_);
+      if (for_stmt->chunk_config_.has_value()) collect_expr_refs(for_stmt->chunk_config_->size);
       collect_iter_arg_refs(for_stmt);
-      FindLiveRootsRecursive(FlattenBody(for_stmt->body_), live);
+      FindLiveRootsRecursiveImpl(FlattenBody(for_stmt->body_), is_removable, live);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       collect_expr_refs(if_stmt->condition_);
-      FindLiveRootsRecursive(FlattenBody(if_stmt->then_body_), live);
+      FindLiveRootsRecursiveImpl(FlattenBody(if_stmt->then_body_), is_removable, live);
       if (if_stmt->else_body_.has_value()) {
-        FindLiveRootsRecursive(FlattenBody(if_stmt->else_body_.value()), live);
+        FindLiveRootsRecursiveImpl(FlattenBody(if_stmt->else_body_.value()), is_removable, live);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       collect_expr_refs(while_stmt->condition_);
       collect_iter_arg_refs(while_stmt);
-      FindLiveRootsRecursive(FlattenBody(while_stmt->body_), live);
+      FindLiveRootsRecursiveImpl(FlattenBody(while_stmt->body_), is_removable, live);
     }
   }
 }
 
-std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
-                                    const std::unordered_set<const Var*>& live) {
+std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
+                                        const RemovablePredicate& is_removable,
+                                        const std::unordered_set<const Var*>& live) {
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (live.count(assign->var_.get()) || IsSideEffectOp(stmt)) {
-        result.push_back(stmt);
-      }
+      if (is_removable(stmt) && !live.count(assign->var_.get())) continue;
+      result.push_back(stmt);
     } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto filtered = FilterDeadCode(FlattenBody(for_stmt->body_), live);
+      auto filtered = FilterDeadCodeImpl(FlattenBody(for_stmt->body_), is_removable, live);
       auto new_for = MutableCopy(for_stmt);
       new_for->body_ = MakeBody(filtered, for_stmt->span_);
       result.push_back(new_for);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto filtered_then = FilterDeadCode(FlattenBody(if_stmt->then_body_), live);
+      auto filtered_then = FilterDeadCodeImpl(FlattenBody(if_stmt->then_body_), is_removable, live);
       std::optional<StmtPtr> filtered_else;
       if (if_stmt->else_body_.has_value()) {
-        auto fe = FilterDeadCode(FlattenBody(if_stmt->else_body_.value()), live);
+        auto fe = FilterDeadCodeImpl(FlattenBody(if_stmt->else_body_.value()), is_removable, live);
         filtered_else = MakeBody(fe, if_stmt->span_);
       }
       auto new_if = MutableCopy(if_stmt);
@@ -154,7 +176,7 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
       new_if->else_body_ = filtered_else;
       result.push_back(new_if);
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto filtered = FilterDeadCode(FlattenBody(while_stmt->body_), live);
+      auto filtered = FilterDeadCodeImpl(FlattenBody(while_stmt->body_), is_removable, live);
       auto new_while = MutableCopy(while_stmt);
       new_while->body_ = MakeBody(filtered, while_stmt->span_);
       result.push_back(new_while);
@@ -165,33 +187,64 @@ std::vector<StmtPtr> FilterDeadCode(const std::vector<StmtPtr>& stmts,
   return result;
 }
 
-}  // namespace
-
-std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
+std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
+                                           const RemovablePredicate& is_removable) {
   std::unordered_set<const Var*> live;
-  FindLiveRootsRecursive(stmts, live);
+  FindLiveRootsRecursiveImpl(stmts, is_removable, live);
 
   std::vector<std::shared_ptr<const AssignStmt>> all_assigns;
   CollectAllAssignStmts(stmts, all_assigns);
 
+  // Cache each assignment's RHS uses once so the fixed-point loop does not
+  // re-walk the expression every iteration — the outer loop can iterate
+  // O(chain length) times on long dependency chains.
+  std::vector<std::unordered_set<const Var*>> assign_uses;
+  assign_uses.reserve(all_assigns.size());
+  for (const auto& assign : all_assigns) {
+    outline_utils::VarDefUseCollector collector;
+    collector.VisitExpr(assign->value_);
+    assign_uses.emplace_back(std::move(collector.var_uses));
+  }
+
   bool changed = true;
   while (changed) {
     changed = false;
-    for (auto it = all_assigns.rbegin(); it != all_assigns.rend(); ++it) {
-      if (!live.count((*it)->var_.get())) continue;
-
-      outline_utils::VarDefUseCollector collector;
-      collector.VisitExpr((*it)->value_);
-      for (const Var* ref : collector.var_uses) {
-        if (!live.count(ref)) {
-          live.insert(ref);
-          changed = true;
-        }
+    for (size_t i = all_assigns.size(); i-- > 0;) {
+      if (!live.count(all_assigns[i]->var_.get())) continue;
+      for (const Var* ref : assign_uses[i]) {
+        if (live.insert(ref).second) changed = true;
       }
     }
   }
 
-  return FilterDeadCode(stmts, live);
+  return FilterDeadCodeImpl(stmts, is_removable, live);
+}
+
+/// Predicate for the default `EliminateDeadCode`: any AssignStmt that is not
+/// a known side-effect op is a removal candidate.
+bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
+  return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
+}
+
+/// Predicate for `EliminateDeadScalarAssignments`: an AssignStmt with a
+/// scalar-typed LHS whose RHS is not a Call. Call-backed assigns are
+/// conservatively preserved because the IR has no purity annotations yet.
+bool IsRemovableScalarAssign(const StmtPtr& stmt) {
+  auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+  if (!assign) return false;
+  if (!As<ScalarType>(assign->var_->GetType())) return false;
+  if (std::dynamic_pointer_cast<const Call>(assign->value_)) return false;
+  return true;
+}
+
+}  // namespace
+
+std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
+  return EliminateDeadCodeCore(stmts, IsRemovableForDefaultDce);
+}
+
+std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts) {
+  return EliminateDeadCodeCore(stmts, IsRemovableScalarAssign);
 }
 
 }  // namespace dce

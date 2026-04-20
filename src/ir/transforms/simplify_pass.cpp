@@ -15,6 +15,7 @@
  * - MLC-Python (https://github.com/mlc-ai/mlc-python), Apache License 2.0
  */
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -31,7 +32,10 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/dead_code_elimination.h"
+#include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -404,9 +408,21 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   auto analyzer = std::make_shared<arith::Analyzer>();
   SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned));
   auto new_body = mutator.VisitStmt(func->body_);
-  if (new_body.get() == func->body_.get()) return func;
+
+  // Final step: conservative scalar DCE prunes scalar bindings whose only
+  // uses were folded out by the mutator above. Call-backed assignments are
+  // preserved because the IR has no purity annotations yet — a Call may
+  // have observable side effects we cannot reason about.
+  auto flat = transform_utils::FlattenToStmts(new_body);
+  auto pruned = dce::EliminateDeadScalarAssignments(flat);
+  bool dce_changed = pruned.size() != flat.size() ||
+                     !std::equal(pruned.begin(), pruned.end(), flat.begin(),
+                                 [](const StmtPtr& a, const StmtPtr& b) { return a.get() == b.get(); });
+  StmtPtr final_body = dce_changed ? loop_repair::MakeBody(pruned, new_body->span_) : new_body;
+
+  if (final_body.get() == func->body_.get()) return func;
   auto result = MutableCopy(func);
-  result->body_ = new_body;
+  result->body_ = final_body;
   return result;
 }
 

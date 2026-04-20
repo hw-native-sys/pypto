@@ -396,6 +396,15 @@ direct `out_indices[i]` lookup, without tracing through `tile.store`/yield
 chains. The pass is placed before `InitMemRef` so it runs after all kernel
 splitting but before memory allocation.
 
+`Simplify` folds arithmetic identities (`x + 0 → x`, `x * 1 → x`), evaluates
+constant-only expressions, runs range-aware rewrites using loop-variable
+bounds and if-branch constraints, and propagates scalar constants through
+single-assignment bindings. As a final step it runs a **conservative scalar
+DCE**: any `AssignStmt` whose LHS is a scalar `Var` and whose RHS is not a
+`Call` is removed once its LHS has no remaining uses. Call-backed
+assignments are always preserved because the IR has no purity annotation
+yet — the call might have observable side effects.
+
 ### Using PassPipeline Directly
 
 ```python
