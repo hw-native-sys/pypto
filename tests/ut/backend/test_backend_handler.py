@@ -98,5 +98,5 @@ class TestGlobalHandlerAccessor:
         assert handler.requires_vto_c_fractal_adapt() is True
 
     def test_global_handler_raises_when_not_configured(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="Backend type not configured"):
             _backend_core.get_handler()

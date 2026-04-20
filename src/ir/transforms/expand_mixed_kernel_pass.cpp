@@ -23,7 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
@@ -37,6 +36,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
@@ -295,7 +295,7 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 /// per-backend implementations in src/backend/910B/backend_910b_handler.cpp
 /// and src/backend/950/backend_950_handler.cpp for the layout rules.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  return backend::GetBackend()->GetHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
+  return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
@@ -310,7 +310,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars) {
-  const auto* handler = backend::GetBackend()->GetHandler();
+  const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
@@ -476,7 +476,7 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
   const bool needs_dual_aiv_dispatch =
-      backend::GetBackend()->GetHandler()->RequiresNoSplitDualAivDispatch() &&
+      PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&
       (!func->GetSplitMode().has_value() || *func->GetSplitMode() == SplitMode::None);
 
   auto stmts = FlattenBody(func->body_);
@@ -1224,7 +1224,7 @@ int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions
 /// Orchestration functions get a tensor.create call instead of a parameter.
 void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   if (!backend::BackendConfig::IsConfigured() ||
-      !backend::GetBackend()->GetHandler()->RequiresGMPipeBuffer()) {
+      !PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
     return;
   }
 
