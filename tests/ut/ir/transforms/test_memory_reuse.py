@@ -1269,7 +1269,7 @@ class TestYieldFixup:
                     next_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(extra_0, acc_0)
                     extra_1: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_1, acc_1)
                     next_1: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(extra_1, acc_1)
-                    out_0, out_1 = pl.yield_(next_0, next_1)
+                    out_0, _out_1 = pl.yield_(next_0, next_1)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(out_0, [0, 0], output)
                 return result
 
@@ -1306,7 +1306,7 @@ class TestYieldFixup:
                     next_1: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(extra_1, acc_1)
                     )
-                    out_0, out_1 = pl.yield_(next_0, next_1)
+                    out_0, _out_1 = pl.yield_(next_0, next_1)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     out_0, [0, 0], output
                 )
@@ -2234,14 +2234,20 @@ class TestTopDownRetargeter:
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_retargeter_declines_when_read_after_nested_if(self):
-        """Regression test for ancestor-walking liveness check.
+        """Regression test for the ancestor-walking liveness check.
 
         The yield producer (``tile_c``) sits inside an IfStmt branch, but
-        a subsequent op (``side``) reads ``acc_0`` *after* the IfStmt in
-        the enclosing loop body.  An innermost-branch-only liveness check
+        a subsequent op reads ``acc_0`` *after* the IfStmt in the
+        enclosing loop body.  An innermost-branch-only liveness check
         would miss this read and incorrectly retype ``tile_c`` onto
-        ``acc_0``'s buffer, clobbering the iter_arg before ``side`` runs.
-        The ancestor-walking check sees the post-IfStmt read and declines.
+        ``acc_0``'s buffer, clobbering the iter_arg before the post-
+        IfStmt read runs.  The ancestor-walking check sees the read and
+        declines.
+
+        The post-IfStmt read is expressed as ``pl.store(acc_0, ...)``
+        directly rather than via an intermediate ``side = op(acc_0)`` so
+        the assertion is not muddied by any lifetime-coalescing that
+        could place ``side`` and ``if_result`` in the same buffer.
         """
 
         @pl.program
@@ -2261,17 +2267,16 @@ class TestTopDownRetargeter:
                         if_result = pl.yield_(tile_c)
                     else:
                         if_result = pl.yield_(acc_0)
-                    # side reads acc_0 (target base) AFTER the IfStmt.
-                    side: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.mul(acc_0, acc_0)
-                    _use: pl.Tensor[[64, 64], pl.FP32] = pl.store(side, [0, 0], output)
+                    # Reads acc_0 (target base) AFTER the IfStmt.
+                    _use: pl.Tensor[[64, 64], pl.FP32] = pl.store(acc_0, [0, 0], output)
                     loop_out = pl.yield_(if_result)
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
         # acc_0/init_0 share mem_vec_2.  tile_c stays on mem_vec_3 (NOT
         # retargeted onto mem_vec_2) because the liveness check detects
-        # ``side``'s read of acc_0 after the IfStmt.  YieldFixup then
-        # inserts a tile.move to unify if_result to the iter_arg buffer.
+        # the post-IfStmt read of acc_0.  YieldFixup then inserts a
+        # tile.move to unify if_result to the iter_arg buffer at the yield.
         @pl.program
         class Expected:
             @pl.function
@@ -2297,11 +2302,8 @@ class TestTopDownRetargeter:
                         if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                             pl.yield_(acc_0)
                         )
-                    side: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.mul(acc_0, acc_0)
-                    )
                     _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                        side, [0, 0], output
+                        acc_0, [0, 0], output
                     )
                     if_result_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.move(if_result, target_memory=pl.Mem.Vec)

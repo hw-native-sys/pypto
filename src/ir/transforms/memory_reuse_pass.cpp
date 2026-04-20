@@ -201,7 +201,25 @@ class DefMapVisitor : public IRVisitor {
     ancestor_stack_.pop_back();
   }
 
+  // Scope statements (InCore/AutoInCore/Cluster/Hierarchy/Spmd) must also
+  // participate in the ancestor chain.  Without them, the liveness walk
+  // would jump straight from a scope body's SeqStmts to the enclosing
+  // loop body SeqStmts without finding its path-child, and reads after
+  // the scope in the enclosing body would be missed.
+  void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitScope(op, op->body_); }
+  void VisitStmt_(const AutoInCoreScopeStmtPtr& op) override { VisitScope(op, op->body_); }
+  void VisitStmt_(const ClusterScopeStmtPtr& op) override { VisitScope(op, op->body_); }
+  void VisitStmt_(const HierarchyScopeStmtPtr& op) override { VisitScope(op, op->body_); }
+  void VisitStmt_(const SpmdScopeStmtPtr& op) override { VisitScope(op, op->body_); }
+
  private:
+  template <typename ScopeStmtPtrT>
+  void VisitScope(const ScopeStmtPtrT& op, const StmtPtr& body) {
+    ancestor_stack_.push_back(op);
+    VisitStmt(body);
+    ancestor_stack_.pop_back();
+  }
+
   // Outermost-first stack of enclosing stmts during the walk.
   std::vector<StmtPtr> ancestor_stack_;
 };
@@ -329,8 +347,9 @@ class TopDownRetargeter {
     if (!call) return false;
     const auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return false;
+    const auto& entry = reg.GetEntry(call->op_->name_);
 
-    auto reuse_idx = reg.GetEntry(call->op_->name_).GetOutputReusesInputArg();
+    auto reuse_idx = entry.GetOutputReusesInputArg();
     if (reuse_idx.has_value()) {
       // Pinned output: can't change this stmt's LHS MemRef; recurse onto pinned input.
       if (*reuse_idx >= call->args_.size()) return false;
@@ -342,10 +361,40 @@ class TopDownRetargeter {
       return true;
     }
 
+    // Decline retargeting for ops whose output memory is not fully captured
+    // by the LHS type alone:
+    //   1. View ops (set_output_memory_inherit_input) — output MemRef
+    //      inherits the input's view byte_offset_ / size_, which rewriting
+    //      with target's full MemRef would silently drop.
+    //   2. Ops that encode output memory in a `target_memory` kwarg (e.g.
+    //      tile.move / tile.load) — retyping the LHS without also rewriting
+    //      the kwarg leaves the call self-inconsistent.
+    if (IsOutputMemoryInheritInput(entry)) return false;
+    if (HasKwarg(*call, "target_memory")) return false;
+
     // Unconstrained: check liveness, then plan retype.
     if (!IsTargetDeadAtAssign(def, target->base_.get())) return false;
     PlanRewrite(var, target, target_memory);
     return true;
+  }
+
+  /// True when the op is registered with set_output_memory_inherit_input:
+  /// the memory spec exists, has no output_reuses_input_arg, and its
+  /// deduce_output_memory lambda returns nullopt for empty kwargs (the
+  /// signature the inherit-input registration leaves behind).
+  static bool IsOutputMemoryInheritInput(const OpRegistryEntry& entry) {
+    const auto& spec = entry.GetMemorySpec();
+    if (!spec.has_value()) return false;
+    if (spec->output_reuses_input_arg.has_value()) return false;
+    if (!spec->deduce_output_memory) return false;
+    return !spec->deduce_output_memory({}).has_value();
+  }
+
+  static bool HasKwarg(const Call& call, const std::string& key) {
+    for (const auto& [k, _] : call.kwargs_) {
+      if (k == key) return true;
+    }
+    return false;
   }
 
   /// Retype an IfStmt return_var: recurse into both branches' yield values.
