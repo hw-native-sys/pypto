@@ -764,22 +764,26 @@ void OpConversionRegistry::RegisterGatherOps() {
         const auto& index = args[1];
 
         auto input_tensor_type = As<TensorType>(input->GetType());
-        CHECK(input_tensor_type) << "tensor.gather conversion: input must be TensorType, got "
-                                 << input->GetType()->TypeName();
+        auto input_tile_type = As<TileType>(input->GetType());
+        CHECK(input_tensor_type || input_tile_type)
+            << "tensor.gather conversion: input must be TensorType or TileType, got "
+            << input->GetType()->TypeName();
         auto index_tensor_type = As<TensorType>(index->GetType());
-        CHECK(index_tensor_type) << "tensor.gather conversion: index must be TensorType, got "
-                                 << index->GetType()->TypeName();
-        CHECK(input_tensor_type->shape_.size() == 2 && index_tensor_type->shape_.size() == 2)
+        auto index_tile_type = As<TileType>(index->GetType());
+        CHECK(index_tensor_type || index_tile_type)
+            << "tensor.gather conversion: index must be TensorType or TileType, got "
+            << index->GetType()->TypeName();
+        const auto& input_shape = input_tensor_type ? input_tensor_type->shape_ : input_tile_type->shape_;
+        const auto& index_shape = index_tensor_type ? index_tensor_type->shape_ : index_tile_type->shape_;
+        CHECK(input_shape.size() == 2 && index_shape.size() == 2)
             << "tensor.gather conversion (MVP): only rank-2 inputs supported";
 
         int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
-        const int64_t rank = static_cast<int64_t>(input_tensor_type->shape_.size());
+        const int64_t rank = static_cast<int64_t>(input_shape.size());
         CHECK(dim_val == -1 || dim_val == rank - 1)
             << "tensor.gather conversion (MVP): only dim=-1 supported, got " << dim_val;
 
-        const auto& input_shape = input_tensor_type->shape_;   // [B, N]
-        const auto& index_shape = index_tensor_type->shape_;   // [B, K]
-        DataType input_dtype = input_tensor_type->dtype_;
+        DataType input_dtype = input_tensor_type ? input_tensor_type->dtype_ : input_tile_type->dtype_;
 
         auto make_index_const = [&](int64_t value) -> ExprPtr {
           return std::make_shared<ConstInt>(value, DataType::INDEX, span);
@@ -809,45 +813,50 @@ void OpConversionRegistry::RegisterGatherOps() {
         auto src_shape_tuple = MakeShapeTuple(src_row_shape, span);
         auto idx_shape_tuple = MakeShapeTuple(idx_row_shape, span);
 
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {
-            {"target_memory", MemorySpace::Vec}, {"transpose", false}};
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
+                                                                     {"transpose", false}};
+
+        auto make_row = [&](const ExprPtr& tensor_or_tile, bool is_tensor,
+                            const ExprPtr& row_shape_tuple) -> CallPtr {
+          if (is_tensor) {
+            return op_reg.Create("tile.load", {tensor_or_tile, row_offsets, row_shape_tuple, row_shape_tuple},
+                                 load_kwargs, span);
+          }
+          return op_reg.Create("tile.slice", {tensor_or_tile, row_shape_tuple, row_offsets, row_shape_tuple},
+                               span);
+        };
 
         std::vector<StmtPtr> body_stmts;
-        auto src_load = op_reg.Create("tile.load", {input, row_offsets, src_shape_tuple, src_shape_tuple},
-                                      load_kwargs, span);
+        auto src_load = make_row(input, input_tensor_type != nullptr, src_shape_tuple);
         auto src_tile_var = std::make_shared<Var>("gather_src_row", src_load->GetType(), span);
         body_stmts.push_back(std::make_shared<AssignStmt>(src_tile_var, src_load, span));
 
-        auto idx_load = op_reg.Create("tile.load", {index, row_offsets, idx_shape_tuple, idx_shape_tuple},
-                                      load_kwargs, span);
+        auto idx_load = make_row(index, index_tensor_type != nullptr, idx_shape_tuple);
         auto idx_tile_var = std::make_shared<Var>("gather_idx_row", idx_load->GetType(), span);
         body_stmts.push_back(std::make_shared<AssignStmt>(idx_tile_var, idx_load, span));
 
         // Scratch workspace tile required by tile.gather (same shape as idx row, INT32).
         std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
             {"dtype", DataType(DataType::INT32)}, {"target_memory", MemorySpace::Vec}};
-        auto tmp_create_call =
-            op_reg.Create("tile.create", {idx_shape_tuple}, tmp_create_kwargs, span);
+        auto tmp_create_call = op_reg.Create("tile.create", {idx_shape_tuple}, tmp_create_kwargs, span);
         auto tmp_tile_var = std::make_shared<Var>("gather_tmp", tmp_create_call->GetType(), span);
         body_stmts.push_back(std::make_shared<AssignStmt>(tmp_tile_var, tmp_create_call, span));
 
-        auto gather_call =
-            op_reg.Create("tile.gather", {src_tile_var, idx_tile_var, tmp_tile_var}, span);
+        auto gather_call = op_reg.Create("tile.gather", {src_tile_var, idx_tile_var, tmp_tile_var}, span);
         auto gather_row_var = std::make_shared<Var>("gather_row", gather_call->GetType(), span);
         body_stmts.push_back(std::make_shared<AssignStmt>(gather_row_var, gather_call, span));
 
         // Assemble the per-row result into the accumulator; Phase 3 rewrites
         // this tile.assemble into tile.store once the Out param is added.
-        auto assemble_call =
-            op_reg.Create("tile.assemble", {iter_arg, gather_row_var, row_offsets}, span);
+        auto assemble_call = op_reg.Create("tile.assemble", {iter_arg, gather_row_var, row_offsets}, span);
         auto assemble_var = std::make_shared<Var>("gather_assemble", assemble_call->GetType(), span);
         body_stmts.push_back(std::make_shared<AssignStmt>(assemble_var, assemble_call, span));
         body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{assemble_var}, span));
 
         auto body = SeqStmts::Flatten(std::move(body_stmts), span);
-        auto for_stmt = std::make_shared<ForStmt>(loop_var, zero, input_shape[0], one,
-                                                  std::vector<IterArgPtr>{iter_arg}, body,
-                                                  std::vector<VarPtr>{return_var}, span);
+        auto for_stmt =
+            std::make_shared<ForStmt>(loop_var, zero, input_shape[0], one, std::vector<IterArgPtr>{iter_arg},
+                                      body, std::vector<VarPtr>{return_var}, span);
         prologue.push_back(for_stmt);
         return ConversionResult{std::move(prologue), return_var};
       });

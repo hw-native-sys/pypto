@@ -1055,10 +1055,10 @@ def mrgsort(
     """
     actual_span = _get_span_or_capture(span)
     if block_len is not None:
-        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if exhausted or any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
             raise ValueError(
                 "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
-                "are mutually exclusive; do not pass format2 arguments with block_len"
+                "are mutually exclusive; do not pass format2 arguments or exhausted=True with block_len"
             )
         if isinstance(block_len, _ir_core.ConstInt):
             block_len_expr = _ir_core.ConstInt(block_len.value, DataType.INT32, actual_span)
@@ -1155,9 +1155,10 @@ def gather(
         return _ir_core.create_op_call("tensor.gather_mask", [input], kwargs, actual_span)
     if dim is None or index is None:
         raise ValueError(
-            "gather() requires either (dim, index) for index form, "
-            "or mask_pattern=<int> for mask form"
+            "gather() requires either (dim, index) for index form, or mask_pattern=<int> for mask form"
         )
+    if output_dtype is not None:
+        raise ValueError("gather() output_dtype is only valid for the mask form; use mask_pattern=<int>")
     kwargs = {"dim": dim}
     return _ir_core.create_op_call("tensor.gather", [input, index], kwargs, actual_span)
 

@@ -2069,15 +2069,19 @@ def test_tensor_gather_mask_p0001_quarters_last_dim():
     """Patterns 3..6 produce a /4 shrink."""
     inp = _make_gather_mask_input(rows=4, cols=64)
     call = ir.op.tensor.gather(inp, mask_pattern=3)
-    assert isinstance(call.type.shape[1], ir.ConstInt)
-    assert call.type.shape[1].value == 16
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert isinstance(rt.shape[1], ir.ConstInt)
+    assert rt.shape[1].value == 16
 
 
 def test_tensor_gather_mask_p1111_keeps_last_dim():
     inp = _make_gather_mask_input(rows=4, cols=64)
     call = ir.op.tensor.gather(inp, mask_pattern=7)
-    assert isinstance(call.type.shape[1], ir.ConstInt)
-    assert call.type.shape[1].value == 64
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert isinstance(rt.shape[1], ir.ConstInt)
+    assert rt.shape[1].value == 64
 
 
 def test_tensor_gather_mask_output_dtype_reinterpret():
@@ -2085,7 +2089,9 @@ def test_tensor_gather_mask_output_dtype_reinterpret():
     inp = _make_gather_mask_input(rows=2, cols=32, dtype=DataType.FP32)
     call = ir.op.tensor.gather(inp, mask_pattern=2, output_dtype=DataType.UINT32)
     assert call.op.name == "tensor.gather_mask"
-    assert call.type.dtype == DataType.UINT32
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert rt.dtype == DataType.UINT32
 
 
 def test_tensor_gather_mask_rejects_bad_pattern():

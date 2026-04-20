@@ -2608,9 +2608,7 @@ class TestConvertSortOps:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self, src: pl.Tensor[[1, 128], pl.FP32]
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
+            def main_incore_0(self, src: pl.Tensor[[1, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
                 out: pl.Tensor[[1, 128], pl.FP32] = pl.tensor.mrgsort(src, block_len=64)
                 return out
 
@@ -2762,9 +2760,7 @@ class TestConvertGatherOp:
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self, src: pl.Tensor[[8, 64], pl.FP32]
-            ) -> pl.Tensor[[8, 32], pl.FP32]:
+            def main_incore_0(self, src: pl.Tensor[[8, 64], pl.FP32]) -> pl.Tensor[[8, 32], pl.FP32]:
                 out: pl.Tensor[[8, 32], pl.FP32] = pl.tensor.gather(src, mask_pattern=1)
                 return out
 

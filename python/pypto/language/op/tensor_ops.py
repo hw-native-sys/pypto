@@ -905,10 +905,10 @@ def mrgsort(
         Tensor with merged sorted elements
     """
     if block_len is not None:
-        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if exhausted or any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
             raise ValueError(
                 "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
-                "are mutually exclusive; do not pass format2 arguments with block_len"
+                "are mutually exclusive; do not pass format2 arguments or exhausted=True with block_len"
             )
         block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
         call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
@@ -986,13 +986,10 @@ def gather(
         call_expr = _ir_ops.gather(input.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
         return Tensor(expr=call_expr)
     if output_dtype is not None:
-        raise ValueError(
-            "output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>"
-        )
+        raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
     if dim is None or index is None:
         raise ValueError(
-            "gather() requires either (dim, index) for index form, "
-            "or mask_pattern=<int> for mask form"
+            "gather() requires either (dim, index) for index form, or mask_pattern=<int> for mask form"
         )
     call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)

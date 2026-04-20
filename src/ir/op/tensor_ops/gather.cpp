@@ -40,28 +40,27 @@ namespace ir {
 TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires 2 arguments (input, index), but got " << args.size();
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (input, index), but got "
+                          << args.size();
 
   auto input_type = As<TensorType>(args[0]->GetType());
-  CHECK(input_type) << "The operator " << op_name
-                    << " requires input to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(input_type) << "The operator " << op_name << " requires input to be a TensorType, but got "
+                    << args[0]->GetType()->TypeName();
   CHECK(input_type->dtype_ == DataType::FP16 || input_type->dtype_ == DataType::FP32 ||
         input_type->dtype_ == DataType::INT16 || input_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name
-      << " requires input dtype to be FP16, FP32, INT16, or INT32, but got "
+      << "The operator " << op_name << " requires input dtype to be FP16, FP32, INT16, or INT32, but got "
       << input_type->dtype_.ToString();
 
   auto index_type = As<TensorType>(args[1]->GetType());
-  CHECK(index_type) << "The operator " << op_name
-                    << " requires index to be a TensorType, but got " << args[1]->GetType()->TypeName();
+  CHECK(index_type) << "The operator " << op_name << " requires index to be a TensorType, but got "
+                    << args[1]->GetType()->TypeName();
   CHECK(index_type->dtype_ == DataType::INT32)
       << "The operator " << op_name << " requires index dtype to be INT32, but got "
       << index_type->dtype_.ToString();
 
   const int64_t rank = static_cast<int64_t>(input_type->shape_.size());
-  CHECK(rank == 2) << "The operator " << op_name
-                   << " currently supports only 2D input (MVP), but got rank " << rank;
+  CHECK(rank == 2) << "The operator " << op_name << " currently supports only 2D input (MVP), but got rank "
+                   << rank;
   CHECK(static_cast<int64_t>(index_type->shape_.size()) == rank)
       << "The operator " << op_name << " requires index rank (" << index_type->shape_.size()
       << ") to match input rank (" << rank << ")";
@@ -113,17 +112,15 @@ TypePtr DeduceTensorGatherMaskType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   auto input_type = As<TensorType>(args[0]->GetType());
-  CHECK(input_type) << "The operator " << op_name
-                    << " requires input to be a TensorType, but got " << args[0]->GetType()->TypeName();
+  CHECK(input_type) << "The operator " << op_name << " requires input to be a TensorType, but got "
+                    << args[0]->GetType()->TypeName();
   CHECK(input_type->dtype_ == DataType::FP16 || input_type->dtype_ == DataType::FP32 ||
         input_type->dtype_ == DataType::INT16 || input_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name
-      << " requires input dtype to be FP16, FP32, INT16, or INT32, but got "
+      << "The operator " << op_name << " requires input dtype to be FP16, FP32, INT16, or INT32, but got "
       << input_type->dtype_.ToString();
 
   CHECK(input_type->shape_.size() == 2)
-      << "The operator " << op_name << " requires 2D input, but got rank "
-      << input_type->shape_.size();
+      << "The operator " << op_name << " requires 2D input, but got rank " << input_type->shape_.size();
 
   int pattern = -1;
   for (const auto& [key, value] : kwargs) {

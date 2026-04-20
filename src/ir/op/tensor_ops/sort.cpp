@@ -27,13 +27,13 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -45,24 +45,37 @@ namespace ir {
 TypePtr DeduceTensorSort32Type(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires 2 arguments (src, idx), but got " << args.size();
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, idx), but got "
+                          << args.size();
 
   auto src_type = As<TensorType>(args[0]->GetType());
-  CHECK(src_type) << "The operator " << op_name
-                  << " requires first argument to be a TensorType, but got "
+  CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                   << args[0]->GetType()->TypeName();
   CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32)
       << "The operator " << op_name << " requires src dtype to be FP16 or FP32, but got "
       << src_type->dtype_.ToString();
 
-  auto idx_type = As<TensorType>(args[1]->GetType());
-  CHECK(idx_type) << "The operator " << op_name
-                  << " requires second argument to be a TensorType, but got "
-                  << args[1]->GetType()->TypeName();
-
   const auto& input_shape = src_type->shape_;
   CHECK(!input_shape.empty()) << "The operator " << op_name << " requires non-empty input shape";
+  if (auto const_last_dim = As<ConstInt>(input_shape.back())) {
+    CHECK(const_last_dim->value_ > 0 && const_last_dim->value_ % 32 == 0)
+        << "The operator " << op_name
+        << " requires the last dimension to be a positive multiple of 32, but got " << const_last_dim->value_;
+  }
+
+  auto idx_type = As<TensorType>(args[1]->GetType());
+  CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TensorType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(idx_type->dtype_ == DataType::UINT32)
+      << "The operator " << op_name << " requires idx dtype to be UINT32, but got "
+      << idx_type->dtype_.ToString();
+  CHECK(idx_type->shape_.size() == input_shape.size())
+      << "The operator " << op_name << " requires idx rank (" << idx_type->shape_.size()
+      << ") to match src rank (" << input_shape.size() << ")";
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    CHECK(DimensionsEqual(input_shape[i], idx_type->shape_[i]))
+        << "The operator " << op_name << " requires idx shape to match src shape at axis " << i;
+  }
 
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
   auto last_dim = input_shape.back();
@@ -99,8 +112,7 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
                           << args.size();
 
   auto src0_type = As<TensorType>(args[0]->GetType());
-  CHECK(src0_type) << "The operator " << op_name
-                   << " requires argument 0 to be a TensorType, but got "
+  CHECK(src0_type) << "The operator " << op_name << " requires argument 0 to be a TensorType, but got "
                    << args[0]->GetType()->TypeName();
   CHECK(src0_type->dtype_ == DataType::FP16 || src0_type->dtype_ == DataType::FP32)
       << "The operator " << op_name << " requires src dtype to be FP16 or FP32, but got "
@@ -111,14 +123,13 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
     CHECK(src_type) << "The operator " << op_name << " requires argument " << i
                     << " to be a TensorType, but got " << args[i]->GetType()->TypeName();
     CHECK(src_type->dtype_ == src0_type->dtype_)
-        << "The operator " << op_name
-        << " requires all src tensors to have matching dtype, but argument " << i << " has "
-        << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString() << ")";
+        << "The operator " << op_name << " requires all src tensors to have matching dtype, but argument "
+        << i << " has " << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString()
+        << ")";
   }
 
   auto tmp_type = As<TensorType>(args[4]->GetType());
-  CHECK(tmp_type) << "The operator " << op_name
-                  << " requires argument 4 (tmp) to be a TensorType, but got "
+  CHECK(tmp_type) << "The operator " << op_name << " requires argument 4 (tmp) to be a TensorType, but got "
                   << args[4]->GetType()->TypeName();
 
   auto exc_type = As<TensorType>(args[5]->GetType());
@@ -151,12 +162,11 @@ REGISTER_OP("tensor.mrgsort_format2")
 TypePtr DeduceTensorMrgSort1Type(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
                                  const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name
-                          << " requires 2 arguments (src, block_len), but got " << args.size();
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, block_len), but got "
+                          << args.size();
 
   auto src_type = As<TensorType>(args[0]->GetType());
-  CHECK(src_type) << "The operator " << op_name
-                  << " requires argument 0 to be a TensorType, but got "
+  CHECK(src_type) << "The operator " << op_name << " requires argument 0 to be a TensorType, but got "
                   << args[0]->GetType()->TypeName();
   CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32)
       << "The operator " << op_name << " requires src dtype to be FP16 or FP32, but got "
@@ -172,8 +182,8 @@ TypePtr DeduceTensorMrgSort1Type(const std::vector<ExprPtr>& args,
 
   if (auto const_val = As<ConstInt>(args[1])) {
     CHECK(const_val->value_ > 0 && const_val->value_ % 64 == 0)
-        << "The operator " << op_name
-        << " requires block_len to be a positive multiple of 64, but got " << const_val->value_;
+        << "The operator " << op_name << " requires block_len to be a positive multiple of 64, but got "
+        << const_val->value_;
   }
 
   return std::make_shared<TensorType>(src_type->shape_, src_type->dtype_);
