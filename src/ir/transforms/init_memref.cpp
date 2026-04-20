@@ -395,17 +395,20 @@ class InitMemRefMutator : public IRMutator {
     new_for->return_vars_ = new_return_vars;
     new_for->chunk_config_ = new_chunk_config;
 
-    // Patch return_vars so each shares its yield value's MemRef.
-    auto yield_stmt = FindYieldStmt(new_body);
-    if (!yield_stmt || new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
+    // Patch return_vars so each shares its iter_arg's MemRef (inherited from initValue).
+    // This establishes the invariant that initValue/iter_arg/return_var all share the
+    // same MemRef buffer — the loop accumulator lives in one place for the whole loop.
+    // Any yield-vs-buffer mismatch is the concern of downstream passes.
+    if (new_for->iter_args_.empty() || new_for->return_vars_.empty()) {
       return new_for;
     }
 
-    auto get_yield_var = [&](size_t i) -> VarPtr {
-      return (i < yield_stmt->value_.size()) ? As<Var>(yield_stmt->value_[i]) : nullptr;
+    auto get_iter_arg_var = [&](size_t i) -> VarPtr {
+      if (i >= new_for->iter_args_.size()) return nullptr;
+      return std::static_pointer_cast<const Var>(new_for->iter_args_[i]);
     };
     auto [patched, changed] =
-        PatchReturnVarsFromYield(new_for->return_vars_, op->return_vars_, get_yield_var);
+        PatchReturnVarsFromYield(new_for->return_vars_, op->return_vars_, get_iter_arg_var);
 
     if (!changed) return new_for;
 

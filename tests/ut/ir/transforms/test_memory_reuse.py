@@ -1137,9 +1137,9 @@ class TestInplaceOps:
 class TestYieldFixup:
     """Yield fixup for ForStmt and IfStmt -- ensuring loop-carry and return variables share correct MemRef."""
 
-    def test_tile_move_inserted_when_memrefs_diverge(self):
-        """When initValue and yield value start with different MemRefs,
-        a tile.move is inserted to unify all loop-carry vars to one MemRef.
+    def test_producer_retyped_to_iter_arg_buffer(self):
+        """The yield producer is retyped directly to the iter_arg's MemRef
+        (no tile.move inserted). Intermediate 'extra_0' keeps its own buffer.
         """
 
         @pl.program
@@ -1160,9 +1160,9 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(out_0, [0, 0], output)
                 return result
 
-        # init_0 uses mem_vec_2; loop body uses mem_vec_3 for extra_0/next_0;
-        # tile.move converts next_0 -> next_0_mv with mem_vec_2 so the yield
-        # value matches the iter_arg's MemRef.
+        # init_0/acc_0/next_0/out_0 all share mem_vec_2 (the iter_arg buffer).
+        # The retargeter places next_0 directly on mem_vec_2; extra_0 (not the
+        # yield value) keeps its own buffer mem_vec_3. No tile.move is needed.
         @pl.program
         class Expected:
             @pl.function
@@ -1180,14 +1180,11 @@ class TestYieldFixup:
                     extra_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc_0, acc_0)
                     )
-                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(extra_0, acc_0)
                     )
-                    next_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(next_0, target_memory=pl.Mem.Vec)
-                    )
                     out_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.yield_(
-                        next_0_mv
+                        next_0
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     out_0, [0, 0], output
@@ -1198,11 +1195,9 @@ class TestYieldFixup:
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_simple_loop_memrefs_unified(self):
-        """Simple loop: after reuse, iter_arg/initValue/return_var share MemRef.
-
-        Even with no extra ops, tile.move is still inserted because the
-        MemoryReuse pass first allocates a separate buffer for next_0 and
-        then unifies via move.
+        """Simple loop: iter_arg/initValue/return_var/next_0 all land in a
+        single MemRef. The retargeter retypes next_0 directly, so no
+        intermediate buffer or tile.move is needed.
         """
 
         @pl.program
@@ -1231,19 +1226,15 @@ class TestYieldFixup:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
                 for _i, (acc_0,) in pl.range(4, init_values=(init_0,)):
-                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc_0, acc_0)
                     )
-                    next_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(next_0, target_memory=pl.Mem.Vec)
-                    )
                     out_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.yield_(
-                        next_0_mv
+                        next_0
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     out_0, [0, 0], output
@@ -1253,8 +1244,11 @@ class TestYieldFixup:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
-    def test_multiple_iter_args_partial_mismatch(self):
-        """With 2 iter_args, tile.move is inserted for each mismatched pair."""
+    def test_multiple_iter_args_producers_retyped_independently(self):
+        """With 2 iter_args, the retargeter retypes each yield producer
+        directly to its own iter_arg buffer. Intermediate chains share a
+        single scratch buffer.
+        """
 
         @pl.program
         class Before:
@@ -1279,9 +1273,9 @@ class TestYieldFixup:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(out_0, [0, 0], output)
                 return result
 
-        # init_0/init_1 each get their own buffer (mem_vec_2, mem_vec_3).
-        # Loop body uses mem_vec_4/mem_vec_6 for the two intermediate chains.
-        # Two tile.move ops unify next_0/next_1 to init buffers.
+        # init_0 -> mem_vec_2 and init_1 -> mem_vec_3 (loop-carry buffers).
+        # next_0/next_1 retyped directly to mem_vec_2/mem_vec_3; extra_0 and
+        # extra_1 share a single scratch buffer mem_vec_4. No tile.move ops.
         @pl.program
         class Expected:
             @pl.function
@@ -1293,7 +1287,6 @@ class TestYieldFixup:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
@@ -1304,22 +1297,16 @@ class TestYieldFixup:
                     extra_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc_0, acc_0)
                     )
-                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
+                    next_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(extra_0, acc_0)
                     )
-                    extra_1: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    extra_1: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc_1, acc_1)
                     )
-                    next_1: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                    next_1: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(extra_1, acc_1)
                     )
-                    next_0_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(next_0, target_memory=pl.Mem.Vec)
-                    )
-                    next_1_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(next_1, target_memory=pl.Mem.Vec)
-                    )
-                    out_0, out_1 = pl.yield_(next_0_mv, next_1_mv)
+                    out_0, out_1 = pl.yield_(next_0, next_1)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     out_0, [0, 0], output
                 )
@@ -1489,9 +1476,12 @@ class TestYieldFixup:
 class TestControlFlow:
     """Tests for correct lifetime analysis across control flow boundaries."""
 
-    def test_var_used_in_nested_if_not_reused_in_loop(self):
-        """tile_a is used inside loop body so it stays live across the loop;
-        tile_c gets a separate buffer; tile.move unifies the loop-carry."""
+    def test_var_used_in_nested_if_shares_iter_arg_buffer(self):
+        """The iter_arg `acc` and its initValue `tile_a` share MemRef via
+        InitMemRef. The retargeter further propagates that MemRef through
+        the IfStmt's return_var and both branches' yield values, so every
+        tile in the yield chain lands on the iter_arg buffer.
+        """
 
         @pl.program
         class Before:
@@ -1514,6 +1504,10 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
+        # tile_a/acc/tile_c/if_result/loop_out all share mem_vec_2. The else
+        # branch already yields `acc` (already on mem_vec_2), and the then
+        # branch's tile_c is retargeted onto mem_vec_2 since mem_vec_2 is
+        # not read after tile_c's write inside the branch body.
         @pl.program
         class Expected:
             @pl.function
@@ -1523,27 +1517,23 @@ class TestControlFlow:
                 output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
                 for i, (acc,) in pl.range(4, init_values=(tile_a,)):
                     if i < 2:
-                        tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                        tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(acc, tile_a)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                             pl.yield_(tile_c)
                         )
                     else:
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                             pl.yield_(acc)
                         )
-                    if_result_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(if_result, target_memory=pl.Mem.Vec)
-                    )
                     loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(if_result_mv)
+                        pl.yield_(if_result)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     loop_out, [0, 0], output
@@ -1626,8 +1616,10 @@ class TestControlFlow:
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_loop_local_var_can_be_reused(self):
-        """Variables defined AND used entirely within a single loop iteration
-        can still be reused with other loop-local variables."""
+        """Loop-local vars share a scratch buffer; the yield producer is
+        retyped directly to the iter_arg buffer. tile_x/tile_y share a
+        scratch, tile_z (the yield value) lands on init_tile's buffer.
+        """
 
         @pl.program
         class Before:
@@ -1650,8 +1642,9 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
-        # init_tile uses mem_vec_2; loop body uses mem_vec_3 for the chain;
-        # tile.move inserts a copy at the yield to reset to init's MemRef.
+        # init_tile/acc/tile_z/loop_out on mem_vec_2; tile_x/tile_y share
+        # scratch mem_vec_3. The retargeter retypes tile_z directly to
+        # mem_vec_2, so no tile.move is needed at yield.
         @pl.program
         class Expected:
             @pl.function
@@ -1679,14 +1672,11 @@ class TestControlFlow:
                     tile_y: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(tile_x, tile_x)
                     )
-                    tile_z: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
+                    tile_z: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(tile_y, tile_y)
                     )
-                    tile_z_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(tile_z, target_memory=pl.Mem.Vec)
-                    )
                     loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_z_mv)
+                        pl.yield_(tile_z)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     loop_out, [0, 0], output
@@ -1698,7 +1688,10 @@ class TestControlFlow:
 
     def test_nested_for_loops_outer_var_extends_to_outer_end(self):
         """Variable defined before nested loops, used in inner loop body --
-        lifetime extends to the END of the OUTER loop (not just inner)."""
+        lifetime extends to the END of the OUTER loop. With the retargeter,
+        each level's yield producer is retyped directly onto that level's
+        iter_arg buffer; no tile.move ops are inserted.
+        """
 
         @pl.program
         class Before:
@@ -1726,10 +1719,10 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(outer_out, [0, 0], output)
                 return result
 
-        # tile_a (mem_vec_2), init_outer (mem_vec_3), init_inner (mem_vec_4),
-        # tile_b (mem_vec_5) — tile_a stays live across both loops, so it
-        # never gets reused. tile.move pairs unify yields back to outer/inner
-        # iter_arg buffers.
+        # tile_a is live across both loops on mem_vec_2. init_outer/acc_outer
+        # share mem_vec_3; init_inner/acc_inner share mem_vec_4. tile_b
+        # (inner yield) is retyped to mem_vec_4, tile_d (outer yield) to
+        # mem_vec_3. No scratch buffer for tile_b is allocated.
         @pl.program
         class Expected:
             @pl.function
@@ -1741,7 +1734,6 @@ class TestControlFlow:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
@@ -1753,23 +1745,17 @@ class TestControlFlow:
                         pl.tile.create([64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
                     )
                     for _j, (acc_inner,) in pl.range(4, init_values=(init_inner,)):
-                        tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(acc_inner, tile_a)
                         )
-                        tile_b_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                            pl.tile.move(tile_b, target_memory=pl.Mem.Vec)
-                        )
                         inner_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                            pl.yield_(tile_b_mv)
+                            pl.yield_(tile_b)
                         )
-                    tile_d: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
+                    tile_d: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc_outer, inner_out)
                     )
-                    tile_d_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(tile_d, target_memory=pl.Mem.Vec)
-                    )
                     outer_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(tile_d_mv)
+                        pl.yield_(tile_d)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     outer_out, [0, 0], output
@@ -1839,8 +1825,11 @@ class TestControlFlow:
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
     def test_for_with_if_multiple_vars_competing(self):
-        """ForStmt with IfStmt inside, multiple variables from before the loop
-        used inside the if -- all outer variables stay live across the loop."""
+        """ForStmt with IfStmt inside: `tile_a` and `tile_b` are live across
+        the loop on distinct buffers. The retargeter propagates the
+        iter_arg buffer through the IfStmt's return_var and both branches'
+        yield producers (both unconstrained adds with liveness OK).
+        """
 
         @pl.program
         class Before:
@@ -1870,9 +1859,9 @@ class TestControlFlow:
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
                 return result
 
-        # tile_a → mem_vec_2, tile_b → mem_vec_3 (both live across loop).
-        # init_tile → mem_vec_4 (loop-carry buffer).
-        # tile_c/tile_d → mem_vec_5 (different branches share).
+        # tile_a -> mem_vec_2, tile_b -> mem_vec_3 (both live across loop).
+        # init_tile/acc/tile_c/tile_d/if_result/loop_out all share mem_vec_4
+        # via the retargeter.
         @pl.program
         class Expected:
             @pl.function
@@ -1884,7 +1873,6 @@ class TestControlFlow:
                 mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
@@ -1896,24 +1884,21 @@ class TestControlFlow:
                 )
                 for i, (acc,) in pl.range(4, init_values=(init_tile,)):
                     if i < 2:
-                        tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(tile_a, tile_b)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.yield_(tile_c)
                         )
                     else:
-                        tile_d: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        tile_d: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.tile.add(tile_b, tile_a)
                         )
-                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        if_result: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                             pl.yield_(tile_d)
                         )
-                    if_result_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(if_result, target_memory=pl.Mem.Vec)
-                    )
                     loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(if_result_mv)
+                        pl.yield_(if_result)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     loop_out, [0, 0], output
@@ -1993,9 +1978,13 @@ class TestControlFlow:
         """Return_var used after loop must block reuse of initValue's MemRef.
 
         Regression test for issue #768: MemoryReuse allowed a post-loop
-        variable to reuse the initValue's MemRef, but YieldFixup later
-        placed the loop output in the same buffer, causing the accumulated
-        result to be overwritten before the final add consumed it.
+        variable to reuse the initValue's MemRef, causing the accumulated
+        result to be overwritten before the final add consumed it. The
+        critical invariant — `resid` must NOT take the loop-carry buffer
+        `mem_vec_3` — is still enforced. The retargeter additionally
+        retypes `acc_next` directly to `mem_vec_3`, eliminating the
+        tile.move the old pipeline emitted, but the #768 guard is
+        unchanged.
         """
 
         @pl.program
@@ -2021,9 +2010,10 @@ class TestControlFlow:
                 return result
 
         # o_acc/o_acc_z/loop_out/final all share mem_vec_3 (loop-carry buffer).
-        # chunk/acc_next reuse mem_vec_5 inside the loop, and resid reuses
-        # mem_vec_5 because chunk/acc_next are dead by then. Crucially, resid
-        # does NOT take mem_vec_3 — that would clobber the loop result.
+        # acc_next is retyped directly to mem_vec_3 by the retargeter.
+        # chunk lives on mem_vec_5 inside the loop; resid reuses mem_vec_5
+        # because chunk is dead by then. Crucially, resid does NOT take
+        # mem_vec_3 -- that would clobber the loop result (#768 regression).
         @pl.program
         class Expected:
             @pl.function
@@ -2047,14 +2037,11 @@ class TestControlFlow:
                             input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                         )
                     )
-                    acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                    acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc, chunk)
                     )
-                    acc_next_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.tile.move(acc_next, target_memory=pl.Mem.Vec)
-                    )
                     loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                        pl.yield_(acc_next_mv)
+                        pl.yield_(acc_next)
                     )
                 resid: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = pl.tile.load(
                     input_b, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
@@ -2064,6 +2051,182 @@ class TestControlFlow:
                 )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)] = pl.tile.store(
                     final, [0, 0], output
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+
+class TestTopDownRetargeter:
+    """Tests for the Step-0 top-down retargeter inside MemoryReuse.
+
+    The retargeter walks each ForStmt's iter_arg -> yield chain and
+    rewrites the producer's MemRef to the iter_arg's MemRef when the
+    source tile is dead at the producer's write. These tests exercise
+    its happy path (pinned accumulator chain) and its safety check
+    (must decline when target is still live).
+    """
+
+    def test_acc_chain_pinned_producer_shares_iter_arg_buffer(self):
+        """A matmul_acc chain over Acc memory: the retargeter follows the
+        pinned `acc` input up to the iter_arg (already on target) and
+        retypes `acc_next` onto the same single Acc allocation. No
+        tile.move ops are inserted.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP16],
+                input_b: pl.Tensor[[32, 32], pl.FP16],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                tile_a_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    input_a, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
+                )
+                tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+                    input_b, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat
+                )
+                tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Left] = pl.move(
+                    tile_a_l1, target_memory=pl.MemorySpace.Left
+                )
+                tile_b_l0b: pl.Tile[[32, 32], pl.FP16, pl.MemorySpace.Right] = pl.move(
+                    tile_b_l1, target_memory=pl.MemorySpace.Right
+                )
+                # Use matmul (not tile.create) so init_acc's TileView
+                # matches matmul_acc's — keeps the pre-verified IR well-formed.
+                init_acc: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(tile_a_l0a, tile_b_l0b)
+                for _k, (acc,) in pl.range(0, 4, init_values=(init_acc,)):
+                    acc_next: pl.Tile[[32, 32], pl.FP32, pl.MemorySpace.Acc] = pl.matmul_acc(
+                        acc, tile_a_l0a, tile_b_l0b
+                    )
+                    loop_out = pl.yield_(acc_next)
+                result: pl.Tensor[[32, 32], pl.FP32] = pl.store(loop_out, [0, 0], output)
+                return result
+
+        # init_acc, acc, acc_next, loop_out all share the single Acc
+        # allocation mem_acc_7. No tile.move op appears anywhere in the
+        # loop body — the retargeter collapses the chain. (matmul_acc is
+        # already pinned to its acc input by set_output_reuses_input(0), so
+        # the retargeter recurses through the pin to the iter_arg, which
+        # is already on the target MemRef, then retypes acc_next.)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[32, 32], pl.FP16, pl.MemRef("mem_ddr_0", 0, 2048)],
+                input_b: pl.Tensor[[32, 32], pl.FP16, pl.MemRef("mem_ddr_1", 0, 2048)],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                mem_mat_3: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_mat_4: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 2048)
+                mem_left_5: pl.Ptr = pl.tile.alloc(pl.Mem.Left, 2048)
+                mem_right_6: pl.Ptr = pl.tile.alloc(pl.Mem.Right, 2048)
+                mem_acc_7: pl.Ptr = pl.tile.alloc(pl.Mem.Acc, 4096)
+                tile_a_l1: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_mat_3, 0, 2048), pl.Mem.Mat] = (
+                    pl.tile.load(
+                        input_a, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat, transpose=False
+                    )
+                )
+                tile_b_l1: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_mat_4, 0, 2048), pl.Mem.Mat] = (
+                    pl.tile.load(
+                        input_b, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Mat, transpose=False
+                    )
+                )
+                tile_a_l0a: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_left_5, 0, 2048), pl.Mem.Left] = (
+                    pl.tile.move(tile_a_l1, target_memory=pl.Mem.Left)
+                )
+                tile_b_l0b: pl.Tile[[32, 32], pl.FP16, pl.MemRef(mem_right_6, 0, 2048), pl.Mem.Right] = (
+                    pl.tile.move(tile_b_l1, target_memory=pl.Mem.Right)
+                )
+                init_acc: pl.Tile[[32, 32], pl.FP32, pl.MemRef(mem_acc_7, 0, 4096), pl.Mem.Acc] = (
+                    pl.tile.matmul(tile_a_l0a, tile_b_l0b)
+                )
+                for _k, (acc,) in pl.range(4, init_values=(init_acc,)):
+                    acc_next: pl.Tile[[32, 32], pl.FP32, pl.MemRef(mem_acc_7, 0, 4096), pl.Mem.Acc] = (
+                        pl.tile.matmul_acc(acc, tile_a_l0a, tile_b_l0b)
+                    )
+                    loop_out: pl.Tile[[32, 32], pl.FP32, pl.MemRef(mem_acc_7, 0, 4096), pl.Mem.Acc] = (
+                        pl.yield_(acc_next)
+                    )
+                result: pl.Tensor[[32, 32], pl.FP32, pl.MemRef("mem_ddr_2", 0, 4096)] = pl.tile.store(
+                    loop_out, [0, 0], output
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_retargeter_declines_when_target_still_live(self):
+        """Safety check: if target's base is read after the candidate
+        producer (here, via another op that reads the iter_arg), the
+        retargeter must leave the producer alone so that the iter_arg's
+        value is preserved until its last read. YieldFixup then inserts
+        a tile.move to unify the yield to the iter_arg buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                init_0: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                for _i, (acc_0,) in pl.range(0, 4, init_values=(init_0,)):
+                    tmp: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_0, acc_0)
+                    # `other` reads acc_0 AFTER tmp is written. If the
+                    # retargeter retyped tmp onto acc_0's buffer here, the
+                    # subsequent read of acc_0 would see the already-
+                    # clobbered value. So the retargeter must decline.
+                    other: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.mul(tmp, acc_0)
+                    _use: pl.Tensor[[64, 64], pl.FP32] = pl.store(other, [0, 0], output)
+                    loop_out = pl.yield_(tmp)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(loop_out, [0, 0], output)
+                return result
+
+        # tmp stays on its own buffer mem_vec_3 (retargeter declined).
+        # YieldFixup inserts tmp_mv = tile.move(tmp, ...) onto the iter_arg
+        # buffer mem_vec_2, and loop_out yields tmp_mv.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                init_0: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                for _i, (acc_0,) in pl.range(4, init_values=(init_0,)):
+                    tmp: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.add(
+                        acc_0, acc_0
+                    )
+                    other: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.mul(tmp, acc_0)
+                    )
+                    _use: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                        other, [0, 0], output
+                    )
+                    tmp_mv: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(tmp, target_memory=pl.Mem.Vec)
+                    )
+                    loop_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
+                        pl.yield_(tmp_mv)
+                    )
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    loop_out, [0, 0], output
                 )
                 return result
 
