@@ -93,56 +93,42 @@ class VarUseCollector : public IRVisitor {
 //     same target, and retype the return_var itself.
 //
 // Liveness check: a retype at AssignStmt S is only safe if target's base Ptr
-// is not read between S and the consuming yield, within the same branch body.
+// is not read between S and the enclosing ForStmt's yield.  The check walks
+// S's full ancestor chain (innermost out), and at each enclosing SeqStmts
+// scans the siblings that execute after the current walk node.  That covers
+// reads inside the same branch, reads after a nested IfStmt in the parent
+// body, and so on up to the enclosing ForStmt — where the retyped value is
+// consumed.
 //
 // Complexity: the retargeter runs a single IR walk to build the def map
 // (O(N)), then one TryRetargetVar per ForStmt iter_arg plus recursion into
-// IfStmt branches.  The liveness check (IsTargetDeadAtAssign / BodyReadsBase)
-// scans the tail of the AssignStmt's containing body; in the worst case of
-// a deep linear chain this is O(N^2).  In practice body tails are short
-// (matmul/accumulator loops have a handful of producers each), so the
-// realised cost is well below that bound; we accept the super-linear worst
-// case rather than threading a precomputed "bases read at-or-after" index
-// that would complicate the pass for no measurable win on typical IR.
+// IfStmt branches.  The liveness check scans the tail of each enclosing
+// SeqStmts up to the owning ForStmt; in the worst case of a deep linear
+// chain this is O(N^2).  In practice body tails are short (matmul/
+// accumulator loops have a handful of producers each), so the realised
+// cost is well below that bound; we accept the super-linear worst case
+// rather than threading a precomputed "bases read at-or-after" index that
+// would complicate the pass for no measurable win on typical IR.
 // ============================================================================
-
-/// Collects all base Ptrs referenced by MemRefs in an expression.
-class BasePtrCollector : public IRVisitor {
- public:
-  std::set<const Var*> bases;
-
-  void VisitExpr_(const VarPtr& var) override {
-    if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
-      bases.insert(GetDefinedMemRef(tile)->base_.get());
-    }
-    IRVisitor::VisitExpr_(var);
-  }
-};
-
-inline std::set<const Var*> CollectBasesUsed(const ExprPtr& expr) {
-  BasePtrCollector c;
-  c.VisitExpr(expr);
-  return c.bases;
-}
-
-inline std::set<const Var*> CollectBasesUsed(const std::vector<ExprPtr>& exprs) {
-  BasePtrCollector c;
-  for (const auto& e : exprs) c.VisitExpr(e);
-  return c.bases;
-}
 
 /// Describes where a TileType Var is defined.
 struct VarDef {
   enum Kind { kAssign, kIfReturn, kForReturn, kIterArg, kUnknown };
   Kind kind = kUnknown;
-  StmtPtr assign_stmt;      // AssignStmt (for kAssign)
-  StmtPtr control_stmt;     // IfStmt/ForStmt (for kIfReturn/kForReturn)
-  size_t return_idx = 0;    // index into return_vars_ (for kIfReturn/kForReturn)
-  IterArgPtr iter_arg;      // for kIterArg
-  StmtPtr containing_body;  // the SeqStmts or body stmt that holds assign_stmt
+  StmtPtr assign_stmt;    // AssignStmt (for kAssign)
+  StmtPtr control_stmt;   // IfStmt/ForStmt (for kIfReturn/kForReturn)
+  size_t return_idx = 0;  // index into return_vars_ (for kIfReturn/kForReturn)
+  IterArgPtr iter_arg;    // for kIterArg
+  // Full chain of enclosing stmts from outermost to innermost (does *not*
+  // include the assign_stmt itself).  Populated for kAssign defs and used
+  // by the liveness check to walk up through nested IfStmt branches to the
+  // enclosing ForStmt's body.
+  std::vector<StmtPtr> ancestors;
 };
 
-/// Walks the IR once to build def map + seq-containment map.
+/// Walks the IR once to build the def map, recording every AssignStmt's full
+/// enclosing-stmt chain so the liveness check can walk up past IfStmt /
+/// ScopeStmt branches into the enclosing loop body.
 class DefMapVisitor : public IRVisitor {
  public:
   std::map<VarPtr, VarDef> defs;
@@ -150,10 +136,17 @@ class DefMapVisitor : public IRVisitor {
   void Run(const StmtPtr& body) { VisitStmt(body); }
 
  protected:
+  // Generic: every stmt becomes an ancestor of its children.  We push on
+  // enter and pop on exit so per-def ancestor snapshots are correct.
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!stmt) return;
+    IRVisitor::VisitStmt(stmt);
+  }
+
   void VisitStmt_(const SeqStmtsPtr& op) override {
-    current_body_stack_.push_back(op);
+    ancestor_stack_.push_back(op);
     for (const auto& s : op->stmts_) VisitStmt(s);
-    current_body_stack_.pop_back();
+    ancestor_stack_.pop_back();
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -161,7 +154,7 @@ class DefMapVisitor : public IRVisitor {
       VarDef d;
       d.kind = VarDef::kAssign;
       d.assign_stmt = op;
-      d.containing_body = current_body_stack_.empty() ? nullptr : current_body_stack_.back();
+      d.ancestors = ancestor_stack_;
       defs[op->var_] = d;
     }
     if (op->value_) VisitExpr(op->value_);
@@ -177,8 +170,10 @@ class DefMapVisitor : public IRVisitor {
       d.return_idx = i;
       defs[rv] = d;
     }
+    ancestor_stack_.push_back(op);
     VisitStmt(op->then_body_);
     if (op->else_body_.has_value()) VisitStmt(op->else_body_.value());
+    ancestor_stack_.pop_back();
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
@@ -201,12 +196,43 @@ class DefMapVisitor : public IRVisitor {
       d.return_idx = i;
       defs[rv] = d;
     }
+    ancestor_stack_.push_back(op);
     VisitStmt(op->body_);
+    ancestor_stack_.pop_back();
   }
 
  private:
-  std::vector<StmtPtr> current_body_stack_;
+  // Outermost-first stack of enclosing stmts during the walk.
+  std::vector<StmtPtr> ancestor_stack_;
 };
+
+/// Visits a stmt subtree and collects the MemRef base Ptrs of every *read*
+/// of a TileType Var.  Writes (the LHS of an AssignStmt) are intentionally
+/// excluded; every other stmt/expression kind dispatches through the default
+/// IRVisitor traversal, so new stmt types are covered automatically.
+class SubtreeReadBaseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> bases;
+
+  void VisitExpr_(const VarPtr& var) override {
+    if (auto tile = GetTileTypeWithMemRef(var->GetType())) {
+      bases.insert(GetDefinedMemRef(tile)->base_.get());
+    }
+    IRVisitor::VisitExpr_(var);
+  }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    // Skip op->var_ — the LHS is a definition, not a read.
+    if (op->value_) VisitExpr(op->value_);
+  }
+};
+
+inline bool SubtreeReadsBase(const StmtPtr& stmt, const Var* target_base) {
+  if (!stmt) return false;
+  SubtreeReadBaseCollector c;
+  c.VisitStmt(stmt);
+  return c.bases.count(target_base) > 0;
+}
 
 /// Plans top-down retypes. Produces (old Var -> new Type) map.
 class TopDownRetargeter {
@@ -352,64 +378,41 @@ class TopDownRetargeter {
 
   /// Is target's base Ptr unread between the AssignStmt and the end of its containing body?
   /// Also walks into nested control flow to check for reads there.
+  /// Liveness check: walks the AssignStmt's full ancestor chain from innermost
+  /// outward and, at every enclosing SeqStmts, scans the siblings that execute
+  /// after the AssignStmt for reads of `target_base`.  Walking continues past
+  /// IfStmt branches into the parent body so reads that appear after a nested
+  /// IfStmt (but still within the enclosing ForStmt's body) are detected.  The
+  /// walk stops at the first enclosing ForStmt — reads outside the loop body
+  /// cannot observe the retyped value, which is consumed at the loop yield.
   bool IsTargetDeadAtAssign(const VarDef& def, const Var* target_base) {
-    auto seq = As<SeqStmts>(def.containing_body);
-    // Non-SeqStmts containing body means the AssignStmt is the *entire* body
-    // of its enclosing scope (IfStmt/ForStmt/ScopeStmt branch with a single
-    // child after NormalizeStmtStructure).  Nothing follows it in that scope,
-    // so target is trivially dead by the end of the body.  Retargetable yield
-    // producers always have a sibling YieldStmt, so this branch only fires
-    // for AssignStmts the retargeter would never plan to rewrite in the
-    // first place; treating it as "dead" is both safe and unreachable-in-
-    // practice for the rewrite path.
-    if (!seq) return true;
-    auto it = std::find(seq->stmts_.begin(), seq->stmts_.end(), def.assign_stmt);
-    if (it == seq->stmts_.end()) return true;
-    for (++it; it != seq->stmts_.end(); ++it) {
-      if (BodyReadsBase(*it, target_base)) return false;
+    if (def.ancestors.empty()) return true;
+
+    // `child_on_path` is the direct descendant of the current ancestor that
+    // lies on the walk path toward the AssignStmt.  We update it as we step
+    // outward so that, at each SeqStmts level, we can locate it in stmts_.
+    StmtPtr child_on_path = def.assign_stmt;
+
+    for (auto it = def.ancestors.rbegin(); it != def.ancestors.rend(); ++it) {
+      const auto& anc = *it;
+
+      if (auto seq = As<SeqStmts>(anc)) {
+        auto pos = std::find(seq->stmts_.begin(), seq->stmts_.end(), child_on_path);
+        if (pos != seq->stmts_.end()) {
+          for (++pos; pos != seq->stmts_.end(); ++pos) {
+            if (SubtreeReadsBase(*pos, target_base)) return false;
+          }
+        }
+      }
+
+      // Stop once we've scanned the body of the enclosing ForStmt: the
+      // retyped value is consumed by that loop's yield, so anything outside
+      // the loop cannot observe it.
+      if (As<ForStmt>(anc)) return true;
+
+      child_on_path = anc;
     }
     return true;
-  }
-
-  /// Whether any stmt in the given subtree reads a tile with `target_base`.
-  /// Reads = any Var reference in expressions. Writes (LHS of AssignStmt) don't count.
-  bool BodyReadsBase(const StmtPtr& stmt, const Var* target_base) {
-    if (!stmt) return false;
-    if (auto seq = As<SeqStmts>(stmt)) {
-      for (const auto& s : seq->stmts_) {
-        if (BodyReadsBase(s, target_base)) return true;
-      }
-      return false;
-    }
-    if (auto a = As<AssignStmt>(stmt)) {
-      if (!a->value_) return false;
-      auto bases = CollectBasesUsed(a->value_);
-      return bases.count(target_base) > 0;
-    }
-    if (auto y = As<YieldStmt>(stmt)) {
-      auto bases = CollectBasesUsed(y->value_);
-      return bases.count(target_base) > 0;
-    }
-    if (auto r = As<ReturnStmt>(stmt)) {
-      auto bases = CollectBasesUsed(r->value_);
-      return bases.count(target_base) > 0;
-    }
-    if (auto i = As<IfStmt>(stmt)) {
-      if (CollectBasesUsed(i->condition_).count(target_base) > 0) return true;
-      if (BodyReadsBase(i->then_body_, target_base)) return true;
-      if (i->else_body_.has_value() && BodyReadsBase(i->else_body_.value(), target_base)) return true;
-      return false;
-    }
-    if (auto f = As<ForStmt>(stmt)) {
-      // Reading iter_arg init = reading some outer var; count as read only if base matches.
-      for (const auto& ia : f->iter_args_) {
-        if (ia->initValue_ && CollectBasesUsed(ia->initValue_).count(target_base) > 0) return true;
-      }
-      if (BodyReadsBase(f->body_, target_base)) return true;
-      return false;
-    }
-    if (auto s = As<ScopeStmt>(stmt)) return BodyReadsBase(s->body_, target_base);
-    return false;
   }
 };
 
