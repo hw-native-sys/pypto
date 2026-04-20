@@ -22,6 +22,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -54,7 +55,7 @@ int SplitDimension(SplitMode mode) { return (mode == SplitMode::UpDown) ? 0 : 1;
 bool RequiresNoSplitDualAivSync(const FunctionPtr& func) {
   return func != nullptr && func->func_type_ == FunctionType::AIV &&
          pypto::backend::BackendConfig::IsConfigured() &&
-         pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend910B &&
+         pypto::backend::GetBackend()->GetHandler()->RequiresNoSplitDualAivDispatch() &&
          func->HasAttr(kDualAivDispatchAttr) && func->GetAttr<bool>(kDualAivDispatchAttr, false);
 }
 

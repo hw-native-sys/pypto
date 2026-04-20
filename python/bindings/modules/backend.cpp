@@ -141,7 +141,9 @@ void BindBackend(nb::module_& m) {
       .def("requires_vto_c_fractal_adapt", &BackendHandler::RequiresVtoCFractalAdapt,
            "Whether AIV-side V-to-C tpush must materialise a fractal-layout adapter move")
       .def("requires_runtime_subblock_bridge", &BackendHandler::RequiresRuntimeSubblockBridge,
-           "Whether split AIV wrappers must source the subblock id from the runtime context");
+           "Whether split AIV wrappers must source the subblock id from the runtime context")
+      .def("requires_no_split_dual_aiv_dispatch", &BackendHandler::RequiresNoSplitDualAivDispatch,
+           "Whether mixed kernels with no split mode must still be dispatched on both AIV lanes");
 
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")

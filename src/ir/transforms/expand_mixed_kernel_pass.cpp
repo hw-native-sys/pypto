@@ -476,7 +476,7 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
   const bool needs_dual_aiv_dispatch =
-      backend::GetBackendType() == backend::BackendType::Ascend910B &&
+      backend::GetBackend()->GetHandler()->RequiresNoSplitDualAivDispatch() &&
       (!func->GetSplitMode().has_value() || *func->GetSplitMode() == SplitMode::None);
 
   auto stmts = FlattenBody(func->body_);

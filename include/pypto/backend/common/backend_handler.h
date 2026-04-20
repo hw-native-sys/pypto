@@ -113,6 +113,21 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresRuntimeSubblockBridge() const = 0;
 
   /**
+   * @brief Whether mixed kernels with no split mode (or `SplitMode::None`)
+   *        must still be dispatched on both AIV lanes for cross-core sync.
+   *
+   * On Ascend910B the AIC side performs cross-core pipe handshakes against
+   * both AIVs, so a `no_split` mixed kernel cannot dispatch a single AIV
+   * lane without deadlocking. ExpandMixedKernel marks such functions with the
+   * `dual_aiv_dispatch` attribute so that downstream passes (notably
+   * SplitVectorKernel) and the orchestration codegen know to keep both lanes
+   * active and replay sync-only payload on the secondary lane.
+   *
+   * Ascend950 hardware cross-core pipe does not require this workaround.
+   */
+  [[nodiscard]] virtual bool RequiresNoSplitDualAivDispatch() const = 0;
+
+  /**
    * @brief Compute the destination tile view for a cross-core transfer.
    *
    * Encapsulates the per-backend rule for how to lay out the bridge tile

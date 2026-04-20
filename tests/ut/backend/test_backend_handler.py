@@ -34,6 +34,7 @@ class TestBackendHandlerValues:
         assert handler.requires_split_load_tpop_workaround() is True
         assert handler.requires_vto_c_fractal_adapt() is False
         assert handler.requires_runtime_subblock_bridge() is True
+        assert handler.requires_no_split_dual_aiv_dispatch() is True
 
     def test_ascend950_handler_values(self):
         handler = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend950).get_handler()
@@ -47,6 +48,7 @@ class TestBackendHandlerValues:
         assert handler.requires_split_load_tpop_workaround() is False
         assert handler.requires_vto_c_fractal_adapt() is True
         assert handler.requires_runtime_subblock_bridge() is False
+        assert handler.requires_no_split_dual_aiv_dispatch() is False
 
     def test_handlers_are_disjoint_between_backends(self):
         h910 = _backend_core.get_backend_instance(_backend_core.BackendType.Ascend910B).get_handler()

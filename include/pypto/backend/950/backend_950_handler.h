@@ -43,6 +43,7 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
   [[nodiscard]] bool RequiresVtoCFractalAdapt() const override { return true; }
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return false; }
+  [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return false; }
 
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
