@@ -12,9 +12,11 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -39,12 +41,20 @@ namespace {
 class DeepCloneMutator : public IRMutator {
  public:
   explicit DeepCloneMutator(const std::unordered_map<const Var*, ExprPtr>& var_map, bool clone_def_vars)
-      : expr_map_(var_map), clone_def_vars_(clone_def_vars) {}
+      : expr_map_(var_map), clone_def_vars_(clone_def_vars) {
+    seed_keys_.reserve(var_map.size());
+    for (const auto& [key, _val] : var_map) {
+      seed_keys_.insert(key);
+    }
+  }
 
-  /// Get the accumulated definition-site Var mapping (excludes non-Var substitutions).
+  /// Get the definition-site Var mapping created by the clone traversal —
+  /// excludes caller-seeded entries (whether they pointed at Vars or not) so
+  /// the result matches the "definition-site clones only" contract.
   [[nodiscard]] std::unordered_map<const Var*, VarPtr> GetVarMap() const {
     std::unordered_map<const Var*, VarPtr> result;
     for (const auto& [key, val] : expr_map_) {
+      if (seed_keys_.count(key)) continue;
       auto var = std::dynamic_pointer_cast<const Var>(val);
       if (var) {
         result[key] = var;
@@ -110,10 +120,20 @@ class DeepCloneMutator : public IRMutator {
     if (it != expr_map_.end()) {
       return it->second;
     }
-    // Create fresh MemRef with cloned byte_offset_ and same base_
+    // Remap base_ through the mutator so a substituted Ptr var carries through
+    // into the cloned MemRef (preserves allocation identity across a scope
+    // substitution). If the remapped expr is not a Var, fall back to the
+    // original base_ — the alternative is silently corrupting MemRef invariants.
+    VarPtr new_base = op->base_;
+    if (op->base_) {
+      auto remapped_base = IRMutator::VisitExpr(op->base_);
+      if (auto as_var = std::dynamic_pointer_cast<const Var>(remapped_base)) {
+        new_base = as_var;
+      }
+    }
     auto new_offset = op->byte_offset_ ? IRMutator::VisitExpr(op->byte_offset_) : op->byte_offset_;
-    auto fresh =
-        std::make_shared<MemRef>(op->name_hint_, op->base_, std::move(new_offset), op->size_, op->span_);
+    auto fresh = std::make_shared<MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset),
+                                          op->size_, op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }
@@ -136,9 +156,26 @@ class DeepCloneMutator : public IRMutator {
   }
 
   /// Remap expressions inside a TypePtr (shape, TileView/TensorView fields, MemRef).
-  /// Returns the original pointer unchanged if nothing inside references a remapped var.
+  /// Recurses into TupleType element types so nested shaped types pick up
+  /// substitutions too. Returns the original pointer unchanged if nothing
+  /// inside references a remapped var.
   TypePtr RemapType(const TypePtr& type) {
     if (!type) return type;
+    // TupleType element types may themselves embed remappable expressions.
+    if (auto tuple_type = std::dynamic_pointer_cast<const TupleType>(type)) {
+      std::vector<TypePtr> new_types;
+      new_types.reserve(tuple_type->types_.size());
+      bool changed = false;
+      for (const auto& elem : tuple_type->types_) {
+        auto new_elem = RemapType(elem);
+        if (new_elem.get() != elem.get()) {
+          changed = true;
+        }
+        new_types.push_back(std::move(new_elem));
+      }
+      if (!changed) return type;
+      return std::make_shared<TupleType>(std::move(new_types));
+    }
     // Remap the embedded MemRef (if any) so its byte_offset_ expression picks up
     // substitutions. Dispatches through VisitExpr_(const MemRefPtr&), which creates
     // a fresh MemRef with the mutated offset and caches it in expr_map_.
@@ -181,6 +218,9 @@ class DeepCloneMutator : public IRMutator {
   }
 
   std::unordered_map<const Var*, ExprPtr> expr_map_;
+  /// Keys present in the caller-supplied seed map; filtered out of GetVarMap()
+  /// so only entries created by the clone traversal are returned.
+  std::unordered_set<const Var*> seed_keys_;
   bool clone_def_vars_;
 };
 

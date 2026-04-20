@@ -1485,8 +1485,9 @@ void BindIR(nb::module_& m) {
       "var_map seeds the substitution: each (original_var, replacement_expr) pair\n"
       "replaces references to original_var with replacement_expr inside the clone.\n\n"
       "Returns a tuple of (cloned_body, def_var_map) where def_var_map is a list of\n"
-      "(original_var, cloned_var) pairs for definition-site clones (excludes seeded\n"
-      "substitutions that map to non-Var expressions).");
+      "(original_var, cloned_var) pairs for the definition sites freshly cloned by\n"
+      "the traversal. Seeded entries from var_map are NOT included — use the\n"
+      "caller's own substitution map for those.");
 
   // Cross-function call return type deduction
   ir.def("deduce_call_return_type", &DeduceCallReturnType, nb::arg("callee_params"), nb::arg("args"),

@@ -3115,8 +3115,8 @@ def deep_clone(
 
     Returns:
         Tuple of (cloned_body, def_var_map) where def_var_map is a list of
-        (original_var, cloned_var) pairs for definition-site clones. Seeded
-        substitutions that map to non-Var expressions are excluded.
+        (original_var, cloned_var) pairs for the definition sites freshly
+        cloned by the traversal. Seeded entries from var_map are NOT included.
     """
 
 def deduce_call_return_type(
