@@ -25,6 +25,8 @@
 #include "pypto/ir/reflection/field_traits.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -91,10 +93,14 @@ class DeepCloneMutator : public IRMutator {
     if (it != expr_map_.end()) {
       return it->second;
     }
-    // Create fresh IterArg with cloned initValue_
+    // Create fresh IterArg with cloned initValue_ and a remapped type — the
+    // type may embed expressions (shape dims, TileView/TensorView fields,
+    // MemRef byte_offset) that reference Vars in expr_map_.
     INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto fresh = std::make_shared<IterArg>(op->name_hint_, op->GetType(), std::move(new_init), op->span_);
+    auto new_type = RemapType(op->GetType());
+    auto fresh =
+        std::make_shared<IterArg>(op->name_hint_, std::move(new_type), std::move(new_init), op->span_);
     expr_map_[op.get()] = fresh;
     return fresh;
   }
@@ -113,7 +119,10 @@ class DeepCloneMutator : public IRMutator {
   }
 
  private:
-  /// Create a fresh Var with same name and type, register in expr_map_.
+  /// Create a fresh Var with a remapped type, register in expr_map_.
+  /// The type is rewritten so shape dims, TileView/TensorView fields, and any
+  /// embedded MemRef's byte_offset are substituted via expr_map_ — otherwise
+  /// the fresh Var's type would still reference the caller's old Var pointers.
   void CloneVar(const VarPtr& op) {
     if (expr_map_.count(op.get())) return;  // Already mapped (e.g. pre-seeded)
     // Check if the actual runtime type is MemRef — don't create a plain Var for MemRef
@@ -121,8 +130,28 @@ class DeepCloneMutator : public IRMutator {
       // MemRef will be handled by VisitExpr_(MemRefPtr) during traversal
       return;
     }
-    auto fresh = std::make_shared<Var>(op->name_hint_, op->GetType(), op->span_);
+    auto new_type = RemapType(op->GetType());
+    auto fresh = std::make_shared<Var>(op->name_hint_, std::move(new_type), op->span_);
     expr_map_[op.get()] = fresh;
+  }
+
+  /// Remap expressions inside a TypePtr (shape, TileView/TensorView fields, MemRef).
+  /// Returns the original pointer unchanged if nothing inside references a remapped var.
+  TypePtr RemapType(const TypePtr& type) {
+    if (!type) return type;
+    // Remap the embedded MemRef (if any) so its byte_offset_ expression picks up
+    // substitutions. Dispatches through VisitExpr_(const MemRefPtr&), which creates
+    // a fresh MemRef with the mutated offset and caches it in expr_map_.
+    auto original_memref_opt = GetTypeMemRef(type);
+    std::optional<MemRefPtr> new_memref_opt = original_memref_opt;
+    if (original_memref_opt.has_value()) {
+      auto remapped = IRMutator::VisitExpr(*original_memref_opt);
+      if (auto as_memref = std::dynamic_pointer_cast<const MemRef>(remapped)) {
+        new_memref_opt = as_memref;
+      }
+    }
+    return CloneTypeWithMemRefAndRemapExprs(type, new_memref_opt,
+                                            [this](const ExprPtr& e) { return IRMutator::VisitExpr(e); });
   }
 
   /// Use GetFieldDescriptors to find DefField VarPtr/vector<VarPtr> entries

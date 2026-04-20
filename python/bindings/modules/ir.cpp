@@ -1464,23 +1464,29 @@ void BindIR(nb::module_& m) {
 
   ir.def(
       "deep_clone",
-      [](const StmtPtr& body) -> nb::tuple {
-        auto result = DeepClone(body);
+      [](const StmtPtr& body, const std::vector<std::pair<VarPtr, ExprPtr>>& var_map_pairs) -> nb::tuple {
+        std::unordered_map<const Var*, ExprPtr> seed_map;
+        for (const auto& [orig, replacement] : var_map_pairs) {
+          seed_map[orig.get()] = replacement;
+        }
+        auto result = DeepClone(body, seed_map);
         // Convert raw-pointer-keyed map to shared_ptr-keyed map for Python
-        std::vector<std::pair<VarPtr, VarPtr>> var_map_pairs;
-        var_map_pairs.reserve(result.var_map.size());
+        std::vector<std::pair<VarPtr, VarPtr>> out_pairs;
+        out_pairs.reserve(result.var_map.size());
         for (const auto& [raw_ptr, new_var] : result.var_map) {
           // Find the original VarPtr from the raw pointer — wrap as non-owning shared_ptr
           // Since Python holds the original IR tree alive, the raw pointer is valid
-          var_map_pairs.emplace_back(std::shared_ptr<const Var>(std::shared_ptr<const Var>{}, raw_ptr),
-                                     new_var);
+          out_pairs.emplace_back(std::shared_ptr<const Var>(std::shared_ptr<const Var>{}, raw_ptr), new_var);
         }
-        return nb::make_tuple(result.cloned_body, var_map_pairs);
+        return nb::make_tuple(result.cloned_body, out_pairs);
       },
-      nb::arg("body"),
+      nb::arg("body"), nb::arg("var_map") = std::vector<std::pair<VarPtr, ExprPtr>>{},
       "Deep-clone a statement subtree, creating fresh Var objects at definition sites.\n\n"
-      "Returns a tuple of (cloned_body, var_map) where var_map is a list of\n"
-      "(original_var, cloned_var) pairs for definition-site clones.");
+      "var_map seeds the substitution: each (original_var, replacement_expr) pair\n"
+      "replaces references to original_var with replacement_expr inside the clone.\n\n"
+      "Returns a tuple of (cloned_body, def_var_map) where def_var_map is a list of\n"
+      "(original_var, cloned_var) pairs for definition-site clones (excludes seeded\n"
+      "substitutions that map to non-Var expressions).");
 
   // Cross-function call return type deduction
   ir.def("deduce_call_return_type", &DeduceCallReturnType, nb::arg("callee_params"), nb::arg("args"),

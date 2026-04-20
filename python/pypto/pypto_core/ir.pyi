@@ -3098,7 +3098,10 @@ def substitute_expr(expr: Expr, var_map: list[tuple[Var, Var]]) -> Expr:
 def substitute_stmt(body: Stmt, var_map: list[tuple[Var, Var]]) -> Stmt:
     """Substitute variable references in a statement subtree using (original_var, replacement_var) pairs."""
 
-def deep_clone(body: Stmt) -> tuple[Stmt, list[tuple[Var, Var]]]:
+def deep_clone(
+    body: Stmt,
+    var_map: list[tuple[Var, Expr]] = ...,
+) -> tuple[Stmt, list[tuple[Var, Var]]]:
     """Deep-clone a statement subtree, creating fresh Var objects at definition sites.
 
     All Var, IterArg, and MemRef objects at definition sites inside the statement
@@ -3106,10 +3109,14 @@ def deep_clone(body: Stmt) -> tuple[Stmt, list[tuple[Var, Var]]]:
 
     Args:
         body: The statement subtree to clone
+        var_map: Optional seeded substitutions. Each (original_var, replacement_expr)
+            pair replaces references to original_var with replacement_expr inside
+            the clone (including expressions embedded in type annotations).
 
     Returns:
-        Tuple of (cloned_body, var_map) where var_map is a list of
-        (original_var, cloned_var) pairs for definition-site clones.
+        Tuple of (cloned_body, def_var_map) where def_var_map is a list of
+        (original_var, cloned_var) pairs for definition-site clones. Seeded
+        substitutions that map to non-Var expressions are excluded.
     """
 
 def deduce_call_return_type(
