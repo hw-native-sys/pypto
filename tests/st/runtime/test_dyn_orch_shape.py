@@ -69,6 +69,8 @@ B = pl.dynamic("B")  # batch
 
 _DYN_SHAPES = [(16, 16)]
 _MIXED_SHAPES = [(128, 16)]
+# Asymmetric shapes — used to actually exercise transpose semantics (rows != cols).
+_ASYM_SHAPES = [(16, 32)]
 
 # (batch, num_heads, head_dim, block_size, context_len, max_model_len)
 _PA_CONFIGS = [(2, 16, 128, 128, 256, 1024)]
@@ -763,12 +765,14 @@ class TestDynOrchShapeOperations:
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
     @pytest.mark.parametrize("backend", PLATFORMS)
-    @pytest.mark.parametrize("shape", _DYN_SHAPES)
+    @pytest.mark.parametrize("shape", _ASYM_SHAPES)
     def test_dyn_orch_transpose_add(self, test_runner, shape, backend):
         """Test add where the orchestration transposes dynamic 2D inputs before dispatch.
 
         Validates ``pl.transpose`` (issue #1071) inside an Orchestration function lowers
-        to the runtime ``Tensor::transpose`` zero-copy metadata swap.
+        to the runtime ``Tensor::transpose`` zero-copy metadata swap.  Uses an asymmetric
+        shape (rows != cols) so the ``[rows, cols] -> [cols, rows]`` view transformation
+        is actually exercised end-to-end (a buggy no-op transpose would not pass this).
         """
         result = test_runner.run(DynOrchTransposeAddTestCase(shape, backend_type=backend))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
