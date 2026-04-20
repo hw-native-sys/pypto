@@ -26,6 +26,7 @@
 #include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
@@ -38,6 +39,7 @@ namespace python {
 using pypto::backend::Backend;
 using pypto::backend::Backend910B;
 using pypto::backend::Backend950;
+using pypto::backend::BackendHandler;
 using pypto::backend::BackendType;
 using pypto::backend::Cluster;
 using pypto::backend::Core;
@@ -119,9 +121,33 @@ void BindBackend(nb::module_& m) {
                ", cores=" + std::to_string(soc.TotalCoreCount()) + ")";
       });
 
+  // ========== BackendHandler ==========
+  // Per-backend behaviour dispatch. Passes / codegen / Python all consume this
+  // interface rather than branching on BackendType.
+  nb::class_<BackendHandler>(backend_mod, "BackendHandler", "Per-backend behaviour dispatch interface")
+      .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
+           "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
+      .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
+           "Method name on launch_spec for setting core count "
+           "('set_block_num' on Ascend910B, 'set_core_num' on Ascend950)")
+      .def("get_default_sim_platform", &BackendHandler::GetDefaultSimPlatform,
+           "Default simulator platform name (e.g. 'a2a3sim', 'a5sim')")
+      .def("get_extra_ptoas_flags", &BackendHandler::GetExtraPtoasFlags,
+           "Extra flags appended to ptoas invocation for this backend")
+      .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
+           "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
+      .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
+           "Whether LegalizePtoBufferReuse must apply the split-load tpop hazard workaround")
+      .def("requires_vto_c_fractal_adapt", &BackendHandler::RequiresVtoCFractalAdapt,
+           "Whether AIV-side V-to-C tpush must materialise a fractal-layout adapter move")
+      .def("requires_runtime_subblock_bridge", &BackendHandler::RequiresRuntimeSubblockBridge,
+           "Whether split AIV wrappers must source the subblock id from the runtime context");
+
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
+      .def("get_handler", &Backend::GetHandler, nb::rv_policy::reference,
+           "Get the per-backend BackendHandler singleton")
       .def("export_to_file", &Backend::ExportToFile, nb::arg("path"), "Export backend to msgpack file")
       .def_static(
           "import_from_file",
@@ -154,6 +180,18 @@ void BindBackend(nb::module_& m) {
 
   backend_mod.def("get_backend_type", &backend::BackendConfig::GetBackendType,
                   "Get the configured backend type. Throws error if not configured.");
+
+  backend_mod.def(
+      "get_backend_instance", [](BackendType type) { return backend::GetBackendInstance(type); },
+      nb::arg("backend_type"), nb::rv_policy::reference,
+      "Get the singleton Backend instance for a specific BackendType. "
+      "Useful when the caller knows the desired backend independently of global config.");
+
+  backend_mod.def(
+      "get_handler", []() { return backend::BackendConfig::GetBackend()->GetHandler(); },
+      nb::rv_policy::reference,
+      "Get the BackendHandler for the currently configured backend. "
+      "Throws if backend type has not been configured.");
 
   backend_mod.def("is_backend_configured", &backend::BackendConfig::IsConfigured,
                   "Check if backend type has been configured.");

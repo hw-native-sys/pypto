@@ -25,6 +25,11 @@
 #include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace pypto {
+
+namespace backend {
+class BackendHandler;
+}  // namespace backend
+
 namespace ir {
 
 // Forward declare Pass to avoid circular include (pass_context.h <-> passes.h)
@@ -241,6 +246,19 @@ class PassContext {
    * @return Pointer to current context, or nullptr if none
    */
   static PassContext* Current();
+
+  /**
+   * @brief Convenience accessor for the currently configured BackendHandler.
+   *
+   * Equivalent to `BackendConfig::GetBackend()->GetHandler()`. Provided so
+   * that passes can dispatch backend-specific behaviour through the
+   * PassContext (per the `pass-context-config` rule) without taking a
+   * direct dependency on the global BackendConfig from every call site.
+   *
+   * @return Pointer to the active backend handler (never null).
+   * @throws pypto::ValueError if backend type has not been configured.
+   */
+  [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
  private:
   std::vector<PassInstrumentPtr> instruments_;

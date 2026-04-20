@@ -29,6 +29,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/codegen/pto/tpop_chain_reorder.h"
 #include "pypto/core/dtype.h"
@@ -148,13 +149,13 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 // ========================================================================
 
 PTOCodegen::PTOCodegen() : backend_(backend::GetBackend()) {
-  auto type = backend::GetBackendType();
-  CHECK(type == backend::BackendType::Ascend910B || type == backend::BackendType::Ascend950)
-      << "PTOCodegen requires Ascend910B or Ascend950 backend, but unknown type is configured";
+  CHECK(backend_ != nullptr && backend_->GetHandler() != nullptr)
+      << "PTOCodegen requires a configured backend that exposes a BackendHandler";
 }
 
 PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
   CHECK(backend != nullptr) << "Backend cannot be null";
+  CHECK(backend->GetHandler() != nullptr) << "PTOCodegen requires a backend that exposes a BackendHandler";
 }
 
 // ========================================================================
@@ -169,18 +170,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   fs_.body_section.str("");
   fs_.body_section.clear();
 
-  auto type = backend::GetBackendType();
-  std::string target_arch;
-  switch (type) {
-    case backend::BackendType::Ascend950:
-      target_arch = "a5";
-      break;
-    case backend::BackendType::Ascend910B:
-      target_arch = "a2a3";
-      break;
-    default:
-      CHECK(false) << "Unsupported backend type for PTO target_arch: " << static_cast<int>(type);
-  }
+  const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
 
   for (const auto& [gvar, func] : program->functions_) {

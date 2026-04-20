@@ -28,6 +28,7 @@ import torch
 
 from pypto.backend import BackendType
 from pypto.pypto_core import DataType
+from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.ir import (
     ConstInt,
     FunctionType,
@@ -159,8 +160,13 @@ def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int],
 
 
 def _default_platform(backend_type: BackendType) -> str:
-    """Return the default simulator platform for a backend type."""
-    return "a5sim" if backend_type == BackendType.Ascend950 else "a2a3sim"
+    """Return the default simulator platform for a backend type.
+
+    The mapping from backend to platform name lives on the per-backend
+    BackendHandler so adding a new backend only requires implementing the
+    handler.
+    """
+    return _backend_core.get_backend_instance(backend_type).get_handler().get_default_sim_platform()
 
 
 class CompiledProgram:

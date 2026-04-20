@@ -15,6 +15,7 @@
 #include <string>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/ir/program.h"
 
 namespace pypto {
@@ -46,6 +47,11 @@ class Backend910B : public Backend {
    * @return "910B"
    */
   [[nodiscard]] std::string GetTypeName() const override { return "910B"; }
+
+  /**
+   * @brief Get the BackendHandler singleton for this backend.
+   */
+  [[nodiscard]] const BackendHandler* GetHandler() const override;
 
   /**
    * @brief Generate PTO MLIR code for program

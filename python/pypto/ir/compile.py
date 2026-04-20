@@ -154,16 +154,15 @@ def compile(  # noqa: PLR0913
             with _stage("passes"):
                 transformed_program = pm.run_passes(program, dump_ir=dump_passes, output_dir=passes_dump_dir)
 
-        if backend_type in (BackendType.Ascend910B, BackendType.Ascend950):
-            try:
-                with _stage("codegen"):
-                    files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
-            except PartialCodegenError as exc:
-                _write_files(exc.files, output_dir)
-                raise
-            _write_files(files, output_dir)
-        else:
-            raise ValueError(f"Unsupported backend type: {backend_type}")
+        # Codegen target selection is owned by the per-backend BackendHandler;
+        # any value of the ``BackendType`` enum is a valid PTO codegen target.
+        try:
+            with _stage("codegen"):
+                files = generate(transformed_program, output_dir, skip_ptoas=skip_ptoas)
+        except PartialCodegenError as exc:
+            _write_files(exc.files, output_dir)
+            raise
+        _write_files(files, output_dir)
     finally:
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)

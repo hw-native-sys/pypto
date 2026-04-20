@@ -409,7 +409,7 @@ def _needs_runtime_subblock_bridge(func: _ir_core.Function) -> bool:
         return False
     if _codegen_core.infer_function_core_type(func) != _ir_core.CoreType.VECTOR:
         return False
-    if _backend_core.get_backend_type() != _backend_core.BackendType.Ascend910B:
+    if not _backend_core.get_handler().requires_runtime_subblock_bridge():
         return False
     return _uses_dynamic_subblock_id(func)
 
@@ -652,8 +652,7 @@ def _get_ptoas_flags() -> list[str]:
         "--enable-insert-sync",
         "--pto-level=level3",
     ]
-    if _backend_core.get_backend_type() == _backend_core.BackendType.Ascend950:
-        flags.extend(["--pto-arch", "a5"])
+    flags.extend(_backend_core.get_handler().get_extra_ptoas_flags())
     return flags
 
 

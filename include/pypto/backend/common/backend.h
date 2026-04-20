@@ -43,8 +43,9 @@ using CallPtr = std::shared_ptr<const Call>;
 
 namespace backend {
 
-// Forward declaration (required for GetBackendInstance return type)
+// Forward declarations
 class Backend;
+class BackendHandler;
 
 /**
  * @brief Backend type identifier for selecting backend instance
@@ -61,6 +62,17 @@ enum class BackendType {
  * @return Pointer to the backend instance (never null)
  */
 const Backend* GetBackendInstance(BackendType type);
+
+/**
+ * @brief Convert BackendType enum to a human-readable string.
+ *
+ * Used in error messages and logging. Adding a new BackendType requires
+ * updating this function so diagnostics stay readable.
+ *
+ * @param type Backend type
+ * @return Display name (e.g. "Ascend910B", "Ascend950")
+ */
+std::string BackendTypeToString(BackendType type);
 
 // Backend op code generation function type
 using BackendCodegenFunc = std::function<std::string(const ir::CallPtr& op, codegen::CodegenBase& codegen)>;
@@ -300,6 +312,21 @@ class Backend {
    * @return Backend type name (e.g., "910B", "950")
    */
   [[nodiscard]] virtual std::string GetTypeName() const = 0;
+
+  /**
+   * @brief Get the per-backend behaviour dispatch handler.
+   *
+   * Returns the backend-owned BackendHandler singleton that encapsulates every
+   * behavioural difference between backends (codegen target arch, runtime API
+   * names, pass-level workaround toggles, cross-core layout rules...).
+   *
+   * Passes should prefer the convenience accessor
+   * `ir::PassContext::Current()->GetBackendHandler()`.
+   * Codegen objects that already hold a Backend* may call this directly.
+   *
+   * @return Pointer to the handler singleton (never null).
+   */
+  [[nodiscard]] virtual const BackendHandler* GetHandler() const = 0;
 
   /**
    * @brief Get the SoC structure

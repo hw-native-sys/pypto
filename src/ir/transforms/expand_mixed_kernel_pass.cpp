@@ -25,6 +25,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -289,48 +290,12 @@ std::string BuildBoundaryTpopName(CoreSide side, const std::string& dest_name) {
 /// Determine the fractal TileView for cross-core data transfer based on the
 /// boundary move destination memory space.
 ///
-/// Ascend950 (a5): hardware cross-core pipe carries data in fractal layout.
-///   Left -> NZ (col_major blayout, row_major slayout)
-///   Right -> ZN (row_major blayout, col_major slayout)
-///   Mat/Vec -> preserve original (already-final layout)
-///
-/// Ascend910B (a2a3): cross-core transfer goes through GM. Left/Right/Mat use
-/// NZ bridge tiles because GM -> Mat transfer requires fractal layout.
-/// Vec destinations must preserve the original Vec view: the GM-backed C2V pop
-/// materializes through an ND GlobalTensor on the consumer side, and PTO-ISA
-/// only supports Vec loads for matching ND/DN/NZ layouts. Emitting an NZ Vec
-/// bridge tile would make the generated kernel invalid.
-///   Left -> NZ (col_major blayout, row_major slayout)
-///   Right -> NZ (col_major blayout, row_major slayout)
-///   Mat -> NZ (col_major blayout, row_major slayout)
-///   Vec -> preserve original view
+/// Computes the cross-core transfer view by delegating to the active
+/// BackendHandler. See BackendHandler::BuildCrossCoreTransferView and the
+/// per-backend implementations in src/backend/910B/backend_910b_handler.cpp
+/// and src/backend/950/backend_950_handler.cpp for the layout rules.
 TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& original_view) {
-  auto backend_type = backend::GetBackendType();
-  INTERNAL_CHECK(backend_type == backend::BackendType::Ascend950 ||
-                 backend_type == backend::BackendType::Ascend910B)
-      << "BuildCrossCoreTransferView only supports Ascend950 and Ascend910B backends";
-
-  TileView result = original_view;
-
-  // Ascend910B: all GM -> Mat transfers must be in NZ layout (hardware
-  // constraint), so Left/Right/Mat destinations all use NZ at the transfer
-  // boundary. The final Left/Right layout is resolved by a subsequent
-  // Mat -> Left/Right move (MTE1).
-  // Ascend950: vec to Mat don't support ZN fractal, so use NZ for Right dest as 910B,
-  // this can also work.
-  switch (dest_ms) {
-    case MemorySpace::Left:
-    case MemorySpace::Right:
-    case MemorySpace::Mat:
-      result.blayout = TileLayout::col_major;
-      result.slayout = TileLayout::row_major;
-      return result;
-    case MemorySpace::Vec:
-      return original_view;
-    default:
-      INTERNAL_UNREACHABLE << "cross-core move destination must be Vec, Mat, Left, or Right, got "
-                           << static_cast<int>(dest_ms);
-  }
+  return backend::GetBackend()->GetHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
@@ -345,7 +310,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars) {
-  auto backend_type = backend::GetBackendType();
+  const auto* handler = backend::GetBackend()->GetHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
@@ -377,7 +342,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // On Ascend950: Left -> NZ, Right -> ZN.
           // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
           // directly use nd
-          if (side == CoreSide::AIV && backend_type == backend::BackendType::Ascend950) {
+          if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt()) {
             auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
             INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value() &&
                                     push_dest_type->tile_view_.has_value(),
@@ -1259,7 +1224,7 @@ int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions
 /// Orchestration functions get a tensor.create call instead of a parameter.
 void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   if (!backend::BackendConfig::IsConfigured() ||
-      backend::GetBackendType() != backend::BackendType::Ascend910B) {
+      !backend::GetBackend()->GetHandler()->RequiresGMPipeBuffer()) {
     return;
   }
 

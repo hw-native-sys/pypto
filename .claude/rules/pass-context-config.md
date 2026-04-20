@@ -17,7 +17,27 @@
 | ------ | ----------------- | --- |
 | Verification level | `PassContext([], VerificationLevel.BASIC)` | Global set/get functions |
 | Pass instruments | `PassContext([VerificationInstrument(...)])` | Global registries |
+| Backend behaviour dispatch | `PassContext::GetBackendHandler()` (delegates to the configured `Backend`) | `if (GetBackendType() == ...)` branches in passes |
 | Future: logging level | `PassContext(..., log_level=...)` | Global log config |
+
+### Backend dispatch
+
+Per-backend behaviour (codegen target arch, runtime API names, hazard
+workarounds, cross-core layout rules, ...) lives on a `BackendHandler` virtual
+interface. Passes never branch on `BackendType` directly; instead they call:
+
+```cpp
+const auto* handler = ir::PassContext::Current()->GetBackendHandler();
+if (handler->RequiresGMPipeBuffer()) { ... }
+```
+
+Adding a new backend requires:
+
+1. Implement a `Backend` subclass in `src/backend/<arch>/`.
+2. Implement a `BackendHandler` subclass returning the per-arch values.
+3. Override `Backend::GetHandler()` to return the new handler singleton.
+
+No existing pass / codegen needs to change.
 
 ## How to Add New Pass Config
 

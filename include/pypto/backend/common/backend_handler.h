@@ -1,0 +1,144 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#ifndef PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
+#define PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_
+
+#include <string>
+#include <vector>
+
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/type.h"
+
+namespace pypto {
+namespace backend {
+
+/**
+ * @brief Backend-specific behavior dispatch interface
+ *
+ * BackendHandler centralises every behavioural difference between backends
+ * (e.g. Ascend910B vs Ascend950). Passes and codegen never branch on
+ * BackendType directly; instead they invoke virtual methods on a handler
+ * obtained from PassContext or from a Backend instance.
+ *
+ * Adding a new backend requires only:
+ *   1. Implement a Backend subclass (see Backend910B / Backend950).
+ *   2. Implement a BackendHandler subclass.
+ *   3. Override Backend::GetHandler() to return the new handler singleton.
+ *
+ * No existing pass / codegen needs to change.
+ */
+class BackendHandler {
+ public:
+  virtual ~BackendHandler() = default;
+
+  // ---------------------------------------------------------------------------
+  // Codegen hooks
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief PTO MLIR target arch attribute string (e.g. "a2a3", "a5").
+   *
+   * Used by PTOCodegen when emitting `module attributes {pto.target_arch = ...}`.
+   */
+  [[nodiscard]] virtual std::string GetPtoTargetArch() const = 0;
+
+  /**
+   * @brief Method name used on `launch_spec` to set the per-task core count.
+   *
+   * Different runtimes expose different APIs for the same concept
+   * (Ascend910B: "set_block_num"; Ascend950: "set_core_num").
+   */
+  [[nodiscard]] virtual std::string GetLaunchSpecCoreCountMethod() const = 0;
+
+  /**
+   * @brief Default simulator platform name (e.g. "a2a3sim", "a5sim").
+   *
+   * Used by Python-side runner / compiled program defaults.
+   */
+  [[nodiscard]] virtual std::string GetDefaultSimPlatform() const = 0;
+
+  /**
+   * @brief Extra flags appended to the ptoas compiler invocation.
+   *
+   * Most backends only need the common flags; some require additional
+   * arch selectors (e.g. Ascend950 needs ["--pto-arch", "a5"]).
+   */
+  [[nodiscard]] virtual std::vector<std::string> GetExtraPtoasFlags() const = 0;
+
+  // ---------------------------------------------------------------------------
+  // Pass behavioural hooks
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief Whether this backend needs the `__gm_pipe_buffer` injection in
+   *        ExpandMixedKernelPass.
+   *
+   * Ascend910B routes cross-core pipe data through a GM-backed slot buffer;
+   * Ascend950 uses on-chip cross-core hardware and does not need it.
+   */
+  [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
+
+  /**
+   * @brief Whether this backend needs the LegalizePtoBufferReuse split-load /
+   *        tpop hazard workaround for AIV functions.
+   */
+  [[nodiscard]] virtual bool RequiresSplitLoadTpopWorkaround() const = 0;
+
+  /**
+   * @brief Whether AIV-side V-to-C tpush must materialise a fractal-layout
+   *        adapter `tile.move` before the actual tpush.
+   *
+   * Ascend950 hardware cross-core pipe expects fractal layout at the boundary
+   * (Left -> NZ, Right -> ZN), so the AIV producer must convert.
+   * Ascend910B routes via UB -> GM -> Mat which accepts ND directly, so no
+   * adapter is needed.
+   */
+  [[nodiscard]] virtual bool RequiresVtoCFractalAdapt() const = 0;
+
+  /**
+   * @brief Whether A2A3 split AIV wrappers must source the subblock id from
+   *        the runtime context.
+   *
+   * Only relevant on Ascend910B. Other backends always return false.
+   */
+  [[nodiscard]] virtual bool RequiresRuntimeSubblockBridge() const = 0;
+
+  /**
+   * @brief Compute the destination tile view for a cross-core transfer.
+   *
+   * Encapsulates the per-backend rule for how to lay out the bridge tile
+   * crossing the AIC/AIV boundary.
+   *
+   * Ascend910B (a2a3): cross-core transfer goes through GM. Left/Right/Mat
+   *   destinations all use NZ (col_major blayout, row_major slayout) because
+   *   GM -> Mat transfer requires fractal layout. Vec destinations preserve
+   *   the original view: the GM-backed C2V pop materialises through an ND
+   *   GlobalTensor on the consumer side, and PTO-ISA only supports Vec loads
+   *   for matching ND/DN/NZ layouts.
+   *
+   * Ascend950 (a5): hardware cross-core pipe carries data in fractal layout
+   *   directly. Left/Right/Mat all use NZ at the transfer boundary
+   *   (Left -> NZ, Right -> NZ as well because vec -> Mat does not support
+   *   ZN fractal); Vec preserves the original view.
+   *
+   * @param dest_ms Destination memory space (must be Vec / Mat / Left / Right).
+   * @param original_view Caller-supplied view of the source tile.
+   * @return TileView to use at the cross-core transfer boundary.
+   */
+  [[nodiscard]] virtual ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
+                                                                const ir::TileView& original_view) const = 0;
+};
+
+}  // namespace backend
+}  // namespace pypto
+
+#endif  // PYPTO_BACKEND_COMMON_BACKEND_HANDLER_H_

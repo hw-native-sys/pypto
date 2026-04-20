@@ -13,7 +13,9 @@
 
 #include <string>
 
+#include "pypto/backend/950/backend_950_handler.h"
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/ir/program.h"
@@ -30,6 +32,8 @@ Backend950& Backend950::Instance() {
   static Backend950 instance;
   return instance;
 }
+
+const BackendHandler* Backend950::GetHandler() const { return &Ascend950Handler::Instance(); }
 
 std::string Backend950::GenerateCode(const ir::ProgramPtr& program) {
   codegen::PTOCodegen codegen(this);

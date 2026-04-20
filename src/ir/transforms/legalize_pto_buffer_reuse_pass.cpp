@@ -35,6 +35,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -170,7 +171,7 @@ class MemRefUsageCollector : public IRVisitor {
 // -------------------------------------------------------------------------
 
 bool NeedsAscend910BSplitLoadTpopHazardWorkaround(const FunctionPtr& func) {
-  if (backend::GetBackendType() != backend::BackendType::Ascend910B ||
+  if (!backend::GetBackend()->GetHandler()->RequiresSplitLoadTpopWorkaround() ||
       func->func_type_ != FunctionType::AIV) {
     return false;
   }

@@ -61,10 +61,28 @@ class SoC:
     def total_cluster_count(self) -> int: ...
     def total_core_count(self) -> int: ...
 
+class BackendHandler:
+    """Per-backend behaviour dispatch interface.
+
+    Encapsulates every behavioural difference between backends. Passes,
+    codegen, and the Python runtime consume this interface rather than
+    branching on :class:`BackendType` directly.
+    """
+
+    def get_pto_target_arch(self) -> str: ...
+    def get_launch_spec_core_count_method(self) -> str: ...
+    def get_default_sim_platform(self) -> str: ...
+    def get_extra_ptoas_flags(self) -> list[str]: ...
+    def requires_gm_pipe_buffer(self) -> bool: ...
+    def requires_split_load_tpop_workaround(self) -> bool: ...
+    def requires_vto_c_fractal_adapt(self) -> bool: ...
+    def requires_runtime_subblock_bridge(self) -> bool: ...
+
 class Backend:
     """Abstract backend base class."""
 
     def get_type_name(self) -> str: ...
+    def get_handler(self) -> BackendHandler: ...
     def export_to_file(self, path: str) -> None: ...
     @staticmethod
     def import_from_file(path: str) -> Backend: ...
@@ -111,6 +129,26 @@ def get_backend_type() -> BackendType:
 
     Returns:
         The configured backend type
+
+    Raises:
+        ValueError: If backend type has not been configured
+    """
+    ...
+
+def get_backend_instance(backend_type: BackendType) -> Backend:
+    """
+    Get the singleton :class:`Backend` instance for a specific
+    :class:`BackendType` regardless of the global configuration.
+
+    This is useful for callers that already know which backend they want
+    (for example, :class:`RunOptions.backend_type` may differ from the
+    globally-configured type when running multiple backends in sequence).
+    """
+    ...
+
+def get_handler() -> BackendHandler:
+    """
+    Get the :class:`BackendHandler` for the currently configured backend.
 
     Raises:
         ValueError: If backend type has not been configured

@@ -58,6 +58,16 @@ const Backend* GetBackendInstance(BackendType type) {
   }
 }
 
+std::string BackendTypeToString(BackendType type) {
+  switch (type) {
+    case BackendType::Ascend910B:
+      return "Ascend910B";
+    case BackendType::Ascend950:
+      return "Ascend950";
+  }
+  return "Unknown";
+}
+
 // Forward declaration of registry
 class BackendRegistry;
 

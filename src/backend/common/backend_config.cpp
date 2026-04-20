@@ -28,10 +28,8 @@ void BackendConfig::SetBackendType(BackendType type) {
 
   if (backend_type_.has_value()) {
     // Idempotent: allow setting the same type multiple times
-    CHECK(*backend_type_ == type) << "Backend type already set to "
-                                  << (*backend_type_ == BackendType::Ascend910B ? "Ascend910B" : "Ascend950")
-                                  << ", cannot change to "
-                                  << (type == BackendType::Ascend910B ? "Ascend910B" : "Ascend950");
+    CHECK(*backend_type_ == type) << "Backend type already set to " << BackendTypeToString(*backend_type_)
+                                  << ", cannot change to " << BackendTypeToString(type);
     return;
   }
 

@@ -13,7 +13,9 @@
 
 #include <string>
 
+#include "pypto/backend/910B/backend_910b_handler.h"
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/soc.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/ir/program.h"
@@ -30,6 +32,8 @@ Backend910B& Backend910B::Instance() {
   static Backend910B instance;
   return instance;
 }
+
+const BackendHandler* Backend910B::GetHandler() const { return &Ascend910BHandler::Instance(); }
 
 std::string Backend910B::GenerateCode(const ir::ProgramPtr& program) {
   codegen::PTOCodegen codegen(this);

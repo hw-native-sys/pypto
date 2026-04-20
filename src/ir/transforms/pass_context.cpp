@@ -17,6 +17,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/program.h"
@@ -205,6 +208,12 @@ void PassContext::RunAfterPass(const Pass& pass, const ProgramPtr& program) {
 }
 
 PassContext* PassContext::Current() { return current_; }
+
+const backend::BackendHandler* PassContext::GetBackendHandler() const {
+  // Handler ownership lives with the Backend itself; PassContext is just a
+  // convenient access path that satisfies the "pass-context-config" rule.
+  return backend::BackendConfig::GetBackend()->GetHandler();
+}
 
 }  // namespace ir
 }  // namespace pypto

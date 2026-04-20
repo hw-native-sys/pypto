@@ -26,6 +26,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/codegen/orchestration_op_registry.h"
@@ -129,8 +130,6 @@ std::string GenerateConfigFunction(int expected_arg_count) {
   oss << "}\n\n";
   return oss.str();
 }
-
-bool IsA5Backend() { return pypto::backend::GetBackendType() == pypto::backend::BackendType::Ascend950; }
 
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
   return aiv_func != nullptr &&
@@ -716,7 +715,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int core_num = launch_func->GetAttr<int>("core_num", 0);
     bool sync_start = launch_func->GetAttr<bool>("sync_start", false);
     if (core_num > 0) {
-      std::string method = IsA5Backend() ? "set_core_num" : "set_block_num";
+      const std::string method = pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
       code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
     }
     if (sync_start) {

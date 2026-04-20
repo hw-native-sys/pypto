@@ -39,6 +39,7 @@ import torch
 
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
 from .env_manager import get_simpler_root as _get_simpler_root
@@ -129,8 +130,11 @@ class RunConfig:
                 f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
             )
         # Auto-correct platform to match backend_type so compilation and execution
-        # always target the same architecture.
-        expected_arch = "a5" if self.backend_type == BackendType.Ascend950 else "a2a3"
+        # always target the same architecture. The arch label ("a2a3", "a5"...)
+        # is owned by the per-backend BackendHandler so adding a new backend
+        # only requires implementing the handler.
+        backend = _backend_core.get_backend_instance(self.backend_type)
+        expected_arch = backend.get_handler().get_pto_target_arch()
         if not self.platform.startswith(expected_arch):
             sim_suffix = "sim" if self.platform.endswith("sim") else ""
             self.platform = f"{expected_arch}{sim_suffix}"
