@@ -325,6 +325,15 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
                                     << " for " << ndim << "D tensor";
   CHECK(axis1 != axis2) << "tensor.transpose axis1 and axis2 must be different, got " << axis1;
 
+  // If the optional valid_shape operand is present, validate its structure even though it is
+  // intentionally not emitted at the orchestration layer (mirrors tensor.reshape / tensor.slice).
+  if (op->args_.size() == 4) {
+    auto valid_shape_tuple = As<MakeTuple>(op->args_[3]);
+    CHECK(valid_shape_tuple) << "tensor.transpose valid_shape must be MakeTuple";
+    CHECK(static_cast<int64_t>(valid_shape_tuple->elements_.size()) == ndim)
+        << "tensor.transpose valid_shape must have same rank as input shape";
+  }
+
   std::string ext_input_name = codegen.GetExternalTensorName(input_name);
   std::string result_var = codegen.GetCurrentResultTarget();
 
