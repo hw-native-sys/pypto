@@ -114,6 +114,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/memory.cpp
     src/ir/op/tensor_ops/scatter_update.cpp
     src/ir/op/tensor_ops/reduction.cpp
+    src/ir/op/tensor_ops/sort.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
     src/ir/op/testing.cpp

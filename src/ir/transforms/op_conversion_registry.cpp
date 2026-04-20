@@ -87,6 +87,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterMemoryOps();
   RegisterMatmulOps();
   RegisterReductionOps();
+  RegisterSortOps();
 }
 
 // ============================================================================
@@ -721,6 +722,17 @@ void OpConversionRegistry::RegisterReductionOps() {
   RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
   RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
+}
+
+// ============================================================================
+// Sort ops: sort32, mrgsort_format1, mrgsort_format2 — simple 1:1 name mapping.
+// Auto-bridge in the convert pass loads TensorType args to Vec tiles.
+// ============================================================================
+
+void OpConversionRegistry::RegisterSortOps() {
+  RegisterSimple("tensor.sort32", "tile.sort32");
+  RegisterSimple("tensor.mrgsort_format1", "tile.mrgsort_format1");
+  RegisterSimple("tensor.mrgsort_format2", "tile.mrgsort_format2");
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,

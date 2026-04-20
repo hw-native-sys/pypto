@@ -1848,5 +1848,124 @@ class TestTensorFormatShapeError:
             ir.op.tensor.add(tensor_a, tensor_b)
 
 
+def test_tensor_sort32():
+    """tensor.sort32 doubles the last dim and preserves dtype."""
+    span = ir.Span.unknown()
+    d8 = ir.ConstInt(8, DataType.INT32, span)
+    d32 = ir.ConstInt(32, DataType.INT32, span)
+    src = ir.Var("src", ir.TensorType([d8, d32], DataType.FP32), span)
+    idx = ir.Var("idx", ir.TensorType([d8, d32], DataType.UINT32), span)
+
+    call = ir.op.tensor.sort32(src, idx)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.sort32"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 64
+
+
+def test_tensor_sort32_wrong_dtype():
+    """tensor.sort32 rejects non-FP src dtype."""
+    span = ir.Span.unknown()
+    d8 = ir.ConstInt(8, DataType.INT32, span)
+    d32 = ir.ConstInt(32, DataType.INT32, span)
+    src = ir.Var("src", ir.TensorType([d8, d32], DataType.INT32), span)
+    idx = ir.Var("idx", ir.TensorType([d8, d32], DataType.INT32), span)
+
+    with pytest.raises(Exception, match=r"FP16 or FP32"):
+        ir.op.tensor.sort32(src, idx)
+
+
+def test_tensor_mrgsort_format1():
+    """tensor.mrgsort(block_len=...) emits tensor.mrgsort_format1 with src shape."""
+    span = ir.Span.unknown()
+    d1 = ir.ConstInt(1, DataType.INT32, span)
+    d128 = ir.ConstInt(128, DataType.INT32, span)
+    src = ir.Var("src", ir.TensorType([d1, d128], DataType.FP32), span)
+
+    call = ir.op.tensor.mrgsort(src, block_len=64)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.mrgsort_format1"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 128
+
+
+def test_tensor_mrgsort_format1_invalid_block_len():
+    """tensor.mrgsort_format1 rejects block_len that is not a multiple of 64."""
+    span = ir.Span.unknown()
+    d1 = ir.ConstInt(1, DataType.INT32, span)
+    d128 = ir.ConstInt(128, DataType.INT32, span)
+    src = ir.Var("src", ir.TensorType([d1, d128], DataType.FP32), span)
+
+    with pytest.raises(Exception, match=r"multiple of 64"):
+        ir.op.tensor.mrgsort(src, block_len=63)
+
+
+def test_tensor_mrgsort_format2():
+    """tensor.mrgsort(src0..src3, tmp, executed) emits tensor.mrgsort_format2."""
+    span = ir.Span.unknown()
+    d1 = ir.ConstInt(1, DataType.INT32, span)
+    d128 = ir.ConstInt(128, DataType.INT32, span)
+    d4 = ir.ConstInt(4, DataType.INT32, span)
+    d512 = ir.ConstInt(512, DataType.INT32, span)
+    src_t = ir.TensorType([d1, d128], DataType.FP32)
+    tmp_t = ir.TensorType([d1, d512], DataType.FP32)
+    exe_t = ir.TensorType([d4], DataType.INT32)
+
+    srcs = [ir.Var(f"s{i}", src_t, span) for i in range(4)]
+    tmp = ir.Var("tmp", tmp_t, span)
+    exe = ir.Var("exe", exe_t, span)
+
+    call = ir.op.tensor.mrgsort(*srcs, tmp, exe)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.mrgsort_format2"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    # Output shape matches tmp tensor's shape
+    assert isinstance(result_type.shape[1], ir.ConstInt)
+    assert result_type.shape[1].value == 512
+
+
+def test_tensor_mrgsort_format2_dtype_mismatch():
+    """tensor.mrgsort_format2 rejects mismatched src dtypes."""
+    span = ir.Span.unknown()
+    d1 = ir.ConstInt(1, DataType.INT32, span)
+    d128 = ir.ConstInt(128, DataType.INT32, span)
+    src_fp32 = ir.TensorType([d1, d128], DataType.FP32)
+    src_fp16 = ir.TensorType([d1, d128], DataType.FP16)
+
+    s0 = ir.Var("s0", src_fp32, span)
+    s1 = ir.Var("s1", src_fp16, span)
+    s2 = ir.Var("s2", src_fp32, span)
+    s3 = ir.Var("s3", src_fp32, span)
+    tmp = ir.Var("tmp", src_fp32, span)
+    exe = ir.Var("exe", src_fp32, span)
+
+    with pytest.raises(Exception, match=r"matching dtype"):
+        ir.op.tensor.mrgsort(s0, s1, s2, s3, tmp, exe)
+
+
+def test_tensor_mrgsort_mixed_args_rejected():
+    """mrgsort cannot mix block_len with format2 positional args."""
+    span = ir.Span.unknown()
+    d1 = ir.ConstInt(1, DataType.INT32, span)
+    d128 = ir.ConstInt(128, DataType.INT32, span)
+    s0 = ir.Var("s0", ir.TensorType([d1, d128], DataType.FP32), span)
+    s1 = ir.Var("s1", ir.TensorType([d1, d128], DataType.FP32), span)
+
+    with pytest.raises(ValueError, match=r"mutually exclusive"):
+        ir.op.tensor.mrgsort(s0, s1, block_len=64)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

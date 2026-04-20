@@ -14,6 +14,7 @@ that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
 from collections.abc import Sequence
+from typing import overload
 
 __all__ = [
     "create_tensor",
@@ -61,6 +62,8 @@ __all__ = [
     "transpose",
     "scatter_update",
     "set_validshape",
+    "sort32",
+    "mrgsort",
     "alloc",
 ]
 
@@ -824,6 +827,105 @@ def scatter_update(
         Tensor wrapping the scatter_update operation
     """
     call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
+    return Tensor(expr=call_expr)
+
+
+def sort32(src: Tensor, idx: Tensor) -> Tensor:
+    """Sort fixed 32-element blocks with explicit index tensor (tensor-level).
+
+    Tensor-level counterpart of ``pl.tile.sort32``. Sorts 32-element blocks in
+    src, permuting idx alongside. Returns sorted value-index pairs tensor with
+    doubled last dimension.
+
+    For FP16 src: initialize idx with [0, 1, 2, ..., 31] per block.
+    For FP32 src: initialize idx with [0, 2, 4, ..., 62] per block.
+
+    Args:
+        src: Input value tensor (FP16 or FP32)
+        idx: Input index tensor with sequential offsets
+
+    Returns:
+        Tensor wrapping the sort32 operation (last dim doubled)
+    """
+    call_expr = _ir_ops.sort32(src.unwrap(), idx.unwrap())
+    return Tensor(expr=call_expr)
+
+
+@overload
+def mrgsort(src0: Tensor, *, block_len: int | Scalar) -> Tensor: ...
+
+
+@overload
+def mrgsort(
+    src0: Tensor,
+    src1: Tensor,
+    src2: Tensor,
+    src3: Tensor,
+    tmp: Tensor,
+    executed: Tensor,
+    exhausted: bool = ...,
+) -> Tensor: ...
+
+
+def mrgsort(
+    src0: Tensor,
+    src1: Tensor | None = None,
+    src2: Tensor | None = None,
+    src3: Tensor | None = None,
+    tmp: Tensor | None = None,
+    executed: Tensor | None = None,
+    exhausted: bool = False,
+    *,
+    block_len: int | Scalar | None = None,
+) -> Tensor:
+    """Merge sort — format1 (single-list) or format2 (4-way merge), tensor-level.
+
+    Tensor-level counterpart of ``pl.tile.mrgsort``.
+
+    Format1 usage (keyword block_len):
+        out = mrgsort(src, block_len=64)
+
+    Format2 usage (6 positional args):
+        out = mrgsort(src0, src1, src2, src3, tmp, executed)
+        out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
+
+    Args:
+        src0: For format1: input tensor with pre-sorted runs (FP16 or FP32).
+              For format2: first sorted input tensor.
+        src1: (format2) Second sorted input tensor.
+        src2: (format2) Third sorted input tensor.
+        src3: (format2) Fourth sorted input tensor.
+        tmp: (format2) Temporary workspace tensor.
+        executed: (format2) Exhaustion status tensor (written by hardware).
+        exhausted: (format2) If True, marks inputs as exhausted (default: False).
+        block_len: (format1, keyword-only) Run length, must be multiple of 64.
+
+    Returns:
+        Tensor with merged sorted elements
+    """
+    if block_len is not None:
+        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+            raise ValueError(
+                "mrgsort() format1 (block_len=...) and format2 (src1, src2, src3, tmp, executed) "
+                "are mutually exclusive; do not pass format2 arguments with block_len"
+            )
+        block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
+        call_expr = _ir_ops.mrgsort(src0.unwrap(), block_len=block_len_expr)
+        return Tensor(expr=call_expr)
+    if src1 is None or src2 is None or src3 is None or tmp is None or executed is None:
+        raise ValueError(
+            "mrgsort() requires either block_len=<int> for format1, "
+            "or (src0, src1, src2, src3, tmp, executed) for format2"
+        )
+    call_expr = _ir_ops.mrgsort(
+        src0.unwrap(),
+        src1.unwrap(),
+        src2.unwrap(),
+        src3.unwrap(),
+        tmp.unwrap(),
+        executed.unwrap(),
+        exhausted,
+    )
     return Tensor(expr=call_expr)
 
 
