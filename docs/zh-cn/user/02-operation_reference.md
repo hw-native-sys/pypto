@@ -126,6 +126,9 @@
 | `row_max` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行最大值（需要临时缓冲区） |
 | `row_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行求和（需要临时缓冲区） |
 | `row_min` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行最小值（需要临时缓冲区） |
+| `col_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 列求和（需要临时缓冲区） |
+| `col_max` | `(tile: Tile) -> Tile` | 列最大值 |
+| `col_min` | `(tile: Tile) -> Tile` | 列最小值 |
 | `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | 沿轴求和 |
 | `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最大值 |
 | `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | 沿轴取最小值 |

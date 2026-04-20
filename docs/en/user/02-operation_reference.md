@@ -131,6 +131,9 @@ Transfer data between memory hierarchy levels.
 | `row_max` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise max (requires tmp buffer) |
 | `row_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise sum (requires tmp buffer) |
 | `row_min` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise min (requires tmp buffer) |
+| `col_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Column-wise sum (requires tmp buffer) |
+| `col_max` | `(tile: Tile) -> Tile` | Column-wise max |
+| `col_min` | `(tile: Tile) -> Tile` | Column-wise min |
 | `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | Sum along axis |
 | `max` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Max along axis |
 | `min` | `(tile: Tile \| Scalar, axis: int \| Scalar = 0, keepdim: bool = False) -> Tile \| Scalar` | Min along axis |

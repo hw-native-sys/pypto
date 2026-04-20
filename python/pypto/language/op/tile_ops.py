@@ -64,6 +64,9 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_min",
+    "col_sum",
+    "col_max",
+    "col_min",
     "maximum",
     "row_expand",
     "row_expand_sub",
@@ -871,6 +874,46 @@ def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
         Tile wrapping the row_min operation
     """
     call_expr = _ir_ops.row_min(tile.unwrap(), tmp_tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_sum(tile: Tile, tmp_tile: Tile) -> Tile:
+    """Column-wise sum reduction.
+
+    Args:
+        tile: Input tile
+        tmp_tile: Temporary tile (same shape as input)
+
+    Returns:
+        Tile wrapping the col_sum operation
+    """
+    call_expr = _ir_ops.col_sum(tile.unwrap(), tmp_tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_max(tile: Tile) -> Tile:
+    """Column-wise max reduction.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the col_max operation
+    """
+    call_expr = _ir_ops.col_max(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_min(tile: Tile) -> Tile:
+    """Column-wise min reduction.
+
+    Args:
+        tile: Input tile
+
+    Returns:
+        Tile wrapping the col_min operation
+    """
+    call_expr = _ir_ops.col_min(tile.unwrap())
     return Tile(expr=call_expr)
 
 

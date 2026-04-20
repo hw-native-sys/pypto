@@ -50,6 +50,9 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_min",
+    "col_sum",
+    "col_max",
+    "col_min",
     "cast",
     "create_tile",
     "read",
@@ -478,6 +481,32 @@ def row_min(input: T, tmp_tile: Tile | None = None) -> T:
             raise ValueError("row_min on Tile requires tmp_tile argument")
         return _tile.row_min(input, tmp_tile)
     raise TypeError(f"row_min: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
+    """Column-wise sum reduction, dispatched by input type.
+
+    For Tile inputs, tmp_tile is required as a temporary buffer.
+    """
+    if isinstance(input, Tile):
+        if tmp_tile is None:
+            raise ValueError("col_sum on Tile requires tmp_tile argument")
+        return _tile.col_sum(input, tmp_tile)
+    _raise_type_dispatch_error("col_sum", input)
+
+
+def col_max(input: T) -> T:
+    """Column-wise max reduction, dispatched by input type."""
+    if isinstance(input, Tile):
+        return _tile.col_max(input)
+    _raise_type_dispatch_error("col_max", input)
+
+
+def col_min(input: T) -> T:
+    """Column-wise min reduction, dispatched by input type."""
+    if isinstance(input, Tile):
+        return _tile.col_min(input)
+    _raise_type_dispatch_error("col_min", input)
 
 
 @overload

@@ -1051,5 +1051,78 @@ class TestConstDtypeCodegen:
         assert "0.00000000000000000e+00 : f32" not in mlir, f"f32 constant leaked into MLIR:\n{mlir}"
 
 
+class TestColReductionCodegen:
+    """Tests for column-wise reduction operations codegen (Issue #881)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_col_sum_codegen(self):
+        """tile.col_sum emits pto.tcolsum with isBinary attribute."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+                tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
+                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in, tmp_tile)
+                return pl.store(result, [0, 0], output)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolsum" in mlir, f"Expected pto.tcolsum in codegen output:\n{mlir}"
+        assert "isBinary = true" in mlir, f"Expected isBinary attribute in codegen output:\n{mlir}"
+
+    def test_col_max_codegen(self):
+        """tile.col_max emits pto.tcolmax."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_max(tile_in)
+                return pl.store(result, [0, 0], output)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolmax" in mlir, f"Expected pto.tcolmax in codegen output:\n{mlir}"
+
+    def test_col_min_codegen(self):
+        """tile.col_min emits pto.tcolmin."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_min(tile_in)
+                return pl.store(result, [0, 0], output)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolmin" in mlir, f"Expected pto.tcolmin in codegen output:\n{mlir}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

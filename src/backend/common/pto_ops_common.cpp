@@ -1397,7 +1397,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_sum",         "pto.trowsum",          2},
     {"tile.row_max",         "pto.trowmax",          2},
     {"tile.row_min",         "pto.trowmin",          2},
-    {"tile.col_sum",         "pto.tcolsum",          1},
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
     {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
@@ -1542,6 +1541,20 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);
+  }
+  // tile.col_sum (TCOLSUM): registered separately because PTOAS requires an isBinary attribute.
+  // isBinary is hardcoded to true (binary-tree reduction) — the sequential path (false) offers
+  // no advantage in precision or performance.
+  if (exclude_ops.count("tile.col_sum") == 0) {
+    backend.RegisterOp("tile.col_sum")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+          auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+          CHECK(op->args_.size() == 2)
+              << "tile.col_sum requires 2 arguments (tile, tmp_tile), but got " << op->args_.size();
+          std::string config_attr = " {isBinary = true}";
+          codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen, config_attr));
+          return std::string("");
+        });
   }
   // tile.full (TEXPANDS): output is row_major per ISA
   if (exclude_ops.count("tile.full") == 0) {
