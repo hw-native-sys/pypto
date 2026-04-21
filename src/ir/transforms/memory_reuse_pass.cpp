@@ -369,13 +369,28 @@ class TopDownRetargeter {
     //   2. Ops that encode output memory in a `target_memory` kwarg (e.g.
     //      tile.move / tile.load) — retyping the LHS without also rewriting
     //      the kwarg leaves the call self-inconsistent.
+    //   3. Ops registered `not_inplace_safe()` (e.g. tile.mrgsort_format1)
+    //      whose implementation requires src buffer != dst buffer.  If any
+    //      input of the call already lives on `target_base`, retyping the
+    //      output onto the same buffer creates an in-place execution that
+    //      the op cannot handle and fails at runtime.
     if (IsOutputMemoryInheritInput(entry)) return false;
     if (HasKwarg(*call, "target_memory")) return false;
+    if (!entry.IsInplaceSafe() && CallReadsBase(*call, target->base_.get())) return false;
 
     // Unconstrained: check liveness, then plan retype.
     if (!IsTargetDeadAtAssign(def, target->base_.get())) return false;
     PlanRewrite(var, target, target_memory);
     return true;
+  }
+
+  /// True if any argument of the call is a TileType Var whose MemRef base
+  /// is `target_base`.  Used to detect would-be in-place execution before
+  /// we retype the output onto the same buffer.
+  static bool CallReadsBase(const Call& call, const Var* target_base) {
+    SubtreeReadBaseCollector c;
+    for (const auto& arg : call.args_) c.VisitExpr(arg);
+    return c.bases.count(target_base) > 0;
   }
 
   /// True when the op is registered with set_output_memory_inherit_input:

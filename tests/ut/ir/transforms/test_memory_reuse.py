@@ -2319,6 +2319,94 @@ class TestTopDownRetargeter:
         After = _run_pipeline(Before)
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
+    def test_retargeter_declines_for_not_inplace_safe_op(self):
+        """Regression test for the not_inplace_safe check.
+
+        ``tile.mrgsort_format1`` is registered ``.not_inplace_safe()`` —
+        its implementation requires distinct src/dst buffers.  In a
+        merge-sort accumulator loop the yield producer both reads and
+        (would) write ``tile_iter``'s buffer, so retargeting ``merged``
+        onto that buffer creates an in-place execution the op cannot
+        handle and fails at runtime with NPU error 507017
+        (``rtStreamSynchronize AICPU failed``).  The retargeter must
+        decline, and YieldFixup then inserts a ``tile.move`` to unify
+        the yield with the iter_arg buffer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                src_tile: pl.Tile[[1, 2048], pl.FP32] = pl.load(src_tensor, [0, 0], [1, 2048])
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32] = pl.load(idx_tensor, [0, 0], [1, 2048])
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32] = pl.tile.sort32(src_tile, idx_tile)
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    block_len = 1 << (6 + i * 2)
+                    merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=block_len)
+                    result = pl.yield_(merged)
+                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather(
+                    result, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
+                return out_val
+
+        # tile_iter/sorted_tile/result live on mem_vec_5 (loop-carry buffer).
+        # `merged` is allocated on its own buffer mem_vec_6 so src (tile_iter
+        # on mem_vec_5) and dst (merged on mem_vec_6) differ.  YieldFixup
+        # inserts merged_mv on mem_vec_5 so the yield matches the iter_arg.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                src_tensor: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_0", 0, 8192)],
+                idx_tensor: pl.Tensor[[1, 2048], pl.UINT32, pl.MemRef("mem_ddr_1", 0, 8192)],
+                val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)]],
+            ) -> pl.Tensor[[1, 2048], pl.FP32]:
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.load(
+                        src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec, transpose=False
+                    )
+                )
+                idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.load(
+                        idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec, transpose=False
+                    )
+                )
+                sorted_tile: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                    pl.tile.sort32(src_tile, idx_tile)
+                )
+                for i, (tile_iter,) in pl.range(3, init_values=(sorted_tile,)):
+                    block_len = 1 << (6 + i * 2)
+                    merged: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.mrgsort(tile_iter, block_len=block_len)
+                    )
+                    merged_mv: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.move(merged, target_memory=pl.Mem.Vec)
+                    )
+                    result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.yield_(merged_mv)
+                    )
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = pl.tile.gather(
+                    result, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
+                    vals, [0, 0], val_output
+                )
+                return out_val
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
 
 class TestMetadata:
     """Function metadata should survive MemoryReuse rewrites."""
