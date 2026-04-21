@@ -10,9 +10,14 @@
 """Error rendering and formatting for pretty error messages."""
 
 import os
+import re
 import sys
 
 from .exceptions import ParserError, SSAViolationError
+
+# Sentence boundary: a period followed by whitespace or end of string. Avoids
+# splitting inside dotted identifiers like `pl.range()` or `module.attr`.
+_SENTENCE_BOUNDARY = re.compile(r"\.(?=\s|$)")
 
 
 class ErrorRenderer:
@@ -273,13 +278,31 @@ class ErrorRenderer:
         if column >= len(line_content):
             return 1
 
+        def is_ident_char(c: str) -> bool:
+            return c.isalnum() or c == "_"
+
         token_chars = 0
-        for i in range(column, len(line_content)):
+        i = column
+        while i < len(line_content):
             char = line_content[i]
-            if char.isalnum() or char == "_":
+            if is_ident_char(char):
                 token_chars += 1
-            else:
-                break
+                i += 1
+                continue
+            # Extend across `.` only when it's part of a dotted identifier
+            # (identifier char on both sides), so dotted callees like
+            # `pl.range` render as a single token.
+            if (
+                char == "."
+                and i > column
+                and is_ident_char(line_content[i - 1])
+                and i + 1 < len(line_content)
+                and is_ident_char(line_content[i + 1])
+            ):
+                token_chars += 1
+                i += 1
+                continue
+            break
 
         return token_chars if token_chars > 0 else 1
 
@@ -357,7 +380,8 @@ class ErrorRenderer:
         # Add short inline message if available
         inline_msg = ""
         if message:
-            short_msg = message.split(".")[0].split("\n")[0]
+            first_line = message.split("\n", 1)[0]
+            short_msg = _SENTENCE_BOUNDARY.split(first_line, maxsplit=1)[0]
             if len(short_msg) < 50:
                 inline_msg = self._red(f" {short_msg}")
 
