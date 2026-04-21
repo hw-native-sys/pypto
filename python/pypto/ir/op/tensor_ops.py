@@ -1072,6 +1072,8 @@ def mrgsort(
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, or at least (src0, src1) for format2"
         )
+    if src2 is None and src3 is not None:
+        raise ValueError("mrgsort() format2 requires src2 when src3 is provided")
     kwargs: dict[str, Any] = {"exhausted": exhausted}
     if src2 is None:
         args = [src0, src1]

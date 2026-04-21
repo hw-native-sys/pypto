@@ -2276,6 +2276,8 @@ def mrgsort(
             "mrgsort() requires either block_len=<int> for format1, "
             "or at least (src0, src1, tmp=<tile>, executed=<tile>) for format2"
         )
+    if src2 is None and src3 is not None:
+        raise ValueError("mrgsort() format2 requires src2 when src3 is provided")
     if tmp is None or executed is None:
         raise ValueError(
             "mrgsort() format2 requires tmp and executed to be provided as keyword arguments; "

@@ -139,6 +139,11 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
         << ")";
     CHECK(src_type->shape_.size() == src0_type->shape_.size())
         << "The operator " << op_name << " requires all src tensors to have matching rank";
+    for (size_t axis = 0; axis + 1 < src0_type->shape_.size(); ++axis) {
+      CHECK(DimensionsEqual(src_type->shape_[axis], src0_type->shape_[axis]))
+          << "The operator " << op_name << " requires all src tensors to match shape on non-concat axis "
+          << axis << ", but argument " << i << " differs";
+    }
     src_types.push_back(src_type);
   }
 

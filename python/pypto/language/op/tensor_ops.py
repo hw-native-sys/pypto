@@ -865,9 +865,7 @@ def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, *, exhausted: bool = ...) 
 
 
 @overload
-def mrgsort(
-    src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, *, exhausted: bool = ...
-) -> Tensor: ...
+def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, *, exhausted: bool = ...) -> Tensor: ...
 
 
 def mrgsort(

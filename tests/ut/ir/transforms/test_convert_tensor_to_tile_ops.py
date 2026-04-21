@@ -2640,7 +2640,7 @@ class TestConvertSortOps:
         ir.assert_structural_equal(After, Expected)
 
     def test_mrgsort_format2_conversion(self):
-        """tensor.mrgsort(s0..s3) -> tile.loads + tile.create(tmp/executed) + tile.mrgsort_format2 + tile.store."""
+        """tensor.mrgsort(s0..s3) -> tile.loads + tile.create(tmp/executed) + tile.mrgsort_format2 + store."""
 
         @pl.program
         class Before:
