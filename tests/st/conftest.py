@@ -74,12 +74,13 @@ def pytest_addoption(parser):
     parser.addoption(
         "--platform",
         action="store",
-        default="a2a3sim,a5sim",
+        default="a2a3",
         help=(
             "Comma-separated allowlist of target platforms; each test under "
             "tests/st/runtime/ is parametrized over a2a3, a5, a2a3sim, a5sim "
             "and only variants whose id appears here are run "
-            "(default: a2a3sim,a5sim)."
+            "(default: a2a3, matching legacy CI behaviour). Legacy "
+            "non-parametrized tests inherit this value as their platform."
         ),
     )
     parser.addoption(
@@ -194,7 +195,7 @@ def test_config(request) -> RunConfig:
         save_kernels_dir = kernels_dir
 
     platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
-    fallback_platform = next(iter(platform_filter), "a2a3sim")
+    fallback_platform = next(iter(platform_filter), "a2a3")
 
     return RunConfig(
         platform=fallback_platform,
@@ -441,7 +442,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         # ``tc.get_platform()`` overrides this fallback inside ``TestRunner``,
         # so any one entry from the filter is sufficient here.
         platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
-        platform: str = next(iter(platform_filter), "a2a3sim")
+        platform: str = next(iter(platform_filter), "a2a3")
         pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
         print(
             f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"

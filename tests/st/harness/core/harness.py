@@ -242,17 +242,19 @@ class PTOTestCase(ABC):
             return self._override_strategy
         return OptimizationStrategy.Default
 
-    def get_platform(self) -> str:
+    def get_platform(self) -> str | None:
         """Return the target platform string ("a2a3"/"a5"/"a2a3sim"/"a5sim").
 
-        If *platform* was passed to the constructor, that value takes
-        precedence.  Otherwise falls back to the default ``"a2a3sim"``.
-        Subclasses may still override this method; the constructor override
-        only applies when the subclass does **not** redefine the method.
+        Resolution order:
+            1. The ``platform`` constructor arg, if set, wins.
+            2. ``None`` otherwise, signalling that the runner should fall
+               back to the session-wide ``--platform`` CLI value.
+
+        Subclasses may still override this method to hard-pin a platform; the
+        constructor override only applies when the subclass does **not**
+        redefine the method.
         """
-        if self._override_platform is not None:
-            return self._override_platform
-        return "a2a3sim"
+        return self._override_platform
 
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.

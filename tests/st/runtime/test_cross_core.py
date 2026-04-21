@@ -27,7 +27,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.core.harness import DataType, PTOTestCase, TensorSpec
 
 M = 32
 K = 64
@@ -499,60 +499,57 @@ class BiDirectNoSplitTest(PTOTestCase):
 
 
 class TestCrossCore:
-    """Cross-core communication system tests."""
+    """Cross-core communication system tests.
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpush_tpop_v2c_updown(self, test_runner, platform):
+    The 9 cases below intentionally do not parametrize over ``platform``.
+    They exercise the cross-core compile/runtime pipeline using the default
+    backend (Ascend910B) and rely on the session-wide ``--platform`` value
+    chosen by CI to pick the execution target (a2a3, a2a3sim or a5sim).
+    """
+
+    def test_tpush_tpop_v2c_updown(self, test_runner):
         """V2C updown pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CUDTest(platform=platform))
+        result = test_runner.run(V2CUDTest())
         assert result.passed, f"Cross-core V2C updown compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpush_tpop_v2c_leftright(self, test_runner, platform):
+    def test_tpush_tpop_v2c_leftright(self, test_runner):
         """V2C left-right pipe: compile through full pipeline and verify kernel artifacts."""
-        result = test_runner.run(V2CLRTest(platform=platform))
+        result = test_runner.run(V2CLRTest())
         assert result.passed, f"Cross-core V2C left-right compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpush_tpop_v2c_nosplit(self, test_runner, platform):
+    def test_tpush_tpop_v2c_nosplit(self, test_runner):
         """V2C no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(V2CNoSplitTest(platform=platform))
+        result = test_runner.run(V2CNoSplitTest())
         assert result.passed, f"Cross-core V2C no-split compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_c2v_leftright(self, test_runner, platform):
+    def test_tpop_c2v_leftright(self, test_runner):
         """C2V left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VLRTest(platform=platform))
+        result = test_runner.run(C2VLRTest())
         assert result.passed, f"Cross-core C2V left-right compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_c2v_updown(self, test_runner, platform):
+    def test_tpop_c2v_updown(self, test_runner):
         """C2V updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VUDTest(platform=platform))
+        result = test_runner.run(C2VUDTest())
         assert result.passed, f"Cross-core C2V updown compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_c2v_nosplit(self, test_runner, platform):
+    def test_tpop_c2v_nosplit(self, test_runner):
         """C2V no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(C2VNoSplitTest(platform=platform))
+        result = test_runner.run(C2VNoSplitTest())
         assert result.passed, f"Cross-core C2V no-split compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_bidirect_updown(self, test_runner, platform):
+    def test_tpop_bidirect_updown(self, test_runner):
         """Bidirect updown pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectUDTest(platform=platform))
+        result = test_runner.run(BiDirectUDTest())
         assert result.passed, f"Cross-core bidirect updown compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_bidirect_leftright(self, test_runner, platform):
+    def test_tpop_bidirect_leftright(self, test_runner):
         """Bidirect left-right pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectLRTest(platform=platform))
+        result = test_runner.run(BiDirectLRTest())
         assert result.passed, f"Cross-core bidirect left-right compilation failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tpop_bidirect_nosplit(self, test_runner, platform):
+    def test_tpop_bidirect_nosplit(self, test_runner):
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
-        result = test_runner.run(BiDirectNoSplitTest(platform=platform))
+        result = test_runner.run(BiDirectNoSplitTest())
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
 

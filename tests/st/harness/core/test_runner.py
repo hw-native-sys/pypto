@@ -93,6 +93,8 @@ def _cache_key(tc: PTOTestCase) -> str:
     try:
         platform = tc.get_platform()
     except AttributeError:
+        platform = None
+    if not platform:
         platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
     return f"{tc.get_name()}@{platform}"
 
@@ -108,9 +110,11 @@ def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None
     """
     if test_case is not None:
         try:
-            return test_case.get_platform()
+            tc_platform = test_case.get_platform()
         except AttributeError:
-            pass
+            tc_platform = None
+        if tc_platform:
+            return tc_platform
     return config_platform
 
 
