@@ -161,9 +161,11 @@ TypePtr DeduceTensorGatherMaskType(const std::vector<ExprPtr>& args,
   DataType out_dtype;
   for (const auto& [key, value] : kwargs) {
     if (key == "output_dtype") {
+      CHECK(value.type() == typeid(DataType) || value.type() == typeid(int))
+          << "The operator " << op_name << " requires output_dtype to be DataType or int";
       if (value.type() == typeid(DataType)) {
         out_dtype = AnyCast<DataType>(value, "kwarg key: output_dtype");
-      } else if (value.type() == typeid(int)) {
+      } else {
         out_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: output_dtype"));
       }
       has_output_dtype = true;
