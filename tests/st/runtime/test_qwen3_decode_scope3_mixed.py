@@ -39,8 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pypto.language as pl  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
-from harness.core.harness import DataType, PTOTestCase, TensorSpec  # noqa: E402
-from pypto.backend import BackendType  # noqa: E402
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
 
 BATCH = 16
@@ -273,10 +272,10 @@ class Qwen3DecodeScope3MixedTestCase(PTOTestCase):
         hidden_size: int = HIDDEN,
         intermediate_size: int = INTERMEDIATE,
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config or RunConfig(rtol=1e-3, atol=1e-3), backend_type=backend_type)
+        super().__init__(config or RunConfig(rtol=1e-3, atol=1e-3), platform=platform)
         self._batch = batch
         self._hidden_size = hidden_size
         self._intermediate_size = intermediate_size
@@ -302,19 +301,13 @@ class Qwen3DecodeScope3MixedTestCase(PTOTestCase):
 class TestQwen3DecodeScope3Mixed:
     """Pytest entry points for the Qwen3 decode scope-3 ST coverage."""
 
-    @pytest.mark.hardware
-    def test_qwen3_decode_scope3_mixed(self, test_runner):
-        """Run the original a2a3 hardware case under the shared ST harness."""
-        result = test_runner.run(Qwen3DecodeScope3MixedTestCase(backend_type=BackendType.Ascend910B))
-        assert result.passed, f"Qwen3 decode scope-3 mixed test failed: {result.error}"
-
-    @pytest.mark.a5
-    def test_qwen3_decode_scope3_mixed_a5(self, test_runner):
-        """Run the same scope-3 test on the Ascend 950 backend."""
-        if test_runner.config.platform.endswith("sim"):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_qwen3_decode_scope3_mixed(self, test_runner, platform):
+        """Run the scope-3 mixed kernel across all four target platforms."""
+        if platform == "a5sim":
             pytest.skip("a5sim CPU stub does not support BF16 TMATMUL for this mixed-kernel case yet")
-        result = test_runner.run(Qwen3DecodeScope3MixedTestCase(backend_type=BackendType.Ascend950))
-        assert result.passed, f"Qwen3 decode scope-3 mixed A5 test failed: {result.error}"
+        result = test_runner.run(Qwen3DecodeScope3MixedTestCase(platform=platform))
+        assert result.passed, f"Qwen3 decode scope-3 mixed test failed: {result.error}"
 
 
 def _build_pytest_args(argv: list[str]) -> list[str]:

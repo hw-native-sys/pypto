@@ -15,6 +15,7 @@ skipped when hardware is not available.
 
 import pytest
 from harness.core.environment import is_hardware_available
+from harness.core.harness import ONBOARD_PLATFORMS
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -22,15 +23,17 @@ def check_hardware_availability(request):
     """Skip all runtime tests if hardware is not available.
 
     This fixture checks for Ascend NPU device nodes (/dev/davinci*, /dev/npu*,
-    /dev/ascend*). If none are found and platform is 'a2a3', all tests in the
-    runtime directory are skipped.
+    /dev/ascend*). If none are found and the requested platform set only
+    contains onboard (real-hardware) platforms (e.g. ``a2a3``/``a5``), all
+    tests in the runtime directory are skipped with a hint to switch to a
+    simulator platform.
     """
-    platform = request.config.getoption("--platform")
-
-    # If platform is real hardware but no hardware is available
-    if platform in ("a2a3", "a5") and not is_hardware_available():
+    raw = request.config.getoption("--platform")
+    requested = {p.strip() for p in str(raw).split(",") if p.strip()}
+    onboard_set = set(ONBOARD_PLATFORMS)
+    if requested and requested.issubset(onboard_set) and not is_hardware_available():
         pytest.skip(
             "Hardware not available: Ascend NPU device nodes not found "
             "(checked /dev/davinci*, /dev/npu*, /dev/ascend*). "
-            "Use --platform=a2a3sim to run on simulator."
+            "Use --platform=a2a3sim or --platform=a5sim to run on simulator."
         )

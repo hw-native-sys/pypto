@@ -34,7 +34,7 @@ Scenarios:
 Shapes: (16, 16) for scenarios 1 and 4; (32, 32) full / (16, 16) valid for
 scenario 2; (128, 16) for scenario 3 (rows divisible by 2).
 
-All tests use OptimizationStrategy.Default and BackendType.Ascend910B.
+All tests use OptimizationStrategy.Default and run across all PLATFORMS.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
@@ -54,7 +54,6 @@ from examples.models.paged_attention import (
     kernel_softmax_prepare,
 )
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.runtime.runner import RunConfig
 
 M = pl.dynamic("M")
@@ -92,10 +91,10 @@ class DynOrchAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -160,10 +159,10 @@ class DynOrchReshapeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -236,10 +235,10 @@ class DynOrchTransposeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -307,10 +306,10 @@ class DynOrchValidShapeAddTestCase(PTOTestCase):
         shape: tuple[int, int],
         valid_shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
         self._valid_rows, self._valid_cols = valid_shape
 
@@ -392,10 +391,10 @@ class DynOrchLoopMixedDimsAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -463,10 +462,10 @@ class DynOrchDimOnDynParamAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -539,10 +538,10 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
         max_model_len: int = 1024,
         scale: float = 1.0,
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self.config.atol = 2e-2
         self.config.rtol = 2e-2
         self._batch = batch
@@ -747,26 +746,26 @@ class DynOrchPagedAttentionTestCase(PTOTestCase):
 class TestDynOrchShapeOperations:
     """Test suite for dynamic orchestration shape operations."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _DYN_SHAPES)
-    def test_dyn_orch_add(self, test_runner, shape, backend):
+    def test_dyn_orch_add(self, test_runner, shape, platform):
         """Test add where both InCore and orchestration use dynamic M×N dims."""
-        result = test_runner.run(DynOrchAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynOrchAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _DYN_SHAPES)
-    def test_dyn_orch_reshape_add(self, test_runner, shape, backend):
+    def test_dyn_orch_reshape_add(self, test_runner, shape, platform):
         """Test add where the orchestration reshapes dynamic 1D inputs to 2D before dispatch.
 
         Validates ``pl.reshape`` (issue #1068) inside an Orchestration function.
         """
-        result = test_runner.run(DynOrchReshapeAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynOrchReshapeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _ASYM_SHAPES)
-    def test_dyn_orch_transpose_add(self, test_runner, shape, backend):
+    def test_dyn_orch_transpose_add(self, test_runner, shape, platform):
         """Test add where the orchestration transposes dynamic 2D inputs before dispatch.
 
         Validates ``pl.transpose`` (issue #1071) inside an Orchestration function lowers
@@ -774,38 +773,54 @@ class TestDynOrchShapeOperations:
         shape (rows != cols) so the ``[rows, cols] -> [cols, rows]`` view transformation
         is actually exercised end-to-end (a buggy no-op transpose would not pass this).
         """
-        result = test_runner.run(DynOrchTransposeAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynOrchTransposeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((32, 32), (16, 16))])
-    def test_dyn_orch_valid_shape_add(self, test_runner, shape, valid_shape, backend):
+    def test_dyn_orch_valid_shape_add(self, test_runner, shape, valid_shape, platform):
         """Test add with dynamic M×N orchestration and valid_shapes from INT64 tensor."""
-        result = test_runner.run(DynOrchValidShapeAddTestCase(shape, valid_shape, backend_type=backend))
+        result = test_runner.run(DynOrchValidShapeAddTestCase(shape, valid_shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _MIXED_SHAPES)
-    def test_dyn_orch_loop_mixed_dims_add(self, test_runner, shape, backend):
+    def test_dyn_orch_loop_mixed_dims_add(self, test_runner, shape, platform):
         """Test add with dynamic M / static cols=16 in orchestration, loop in InCore."""
-        result = test_runner.run(DynOrchLoopMixedDimsAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynOrchLoopMixedDimsAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _DYN_SHAPES)
-    def test_dyn_orch_dim_on_dyn_param_add(self, test_runner, shape, backend):
+    def test_dyn_orch_dim_on_dyn_param_add(self, test_runner, shape, platform):
         """Test add where orchestration reads tensor dims via pl.tensor.dim."""
-        result = test_runner.run(DynOrchDimOnDynParamAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynOrchDimOnDynParamAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize(
         "batch,num_heads,head_dim,block_size,context_len,max_model_len",
         _PA_CONFIGS,
     )
     def test_dyn_orch_paged_attention(
-        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
+        self,
+        test_runner,
+        platform,
+        batch,
+        num_heads,
+        head_dim,
+        block_size,
+        context_len,
+        max_model_len,
     ):
-        """Test paged attention with fully dynamic dims in the orchestration signature."""
+        """Test paged attention with fully dynamic dims in the orchestration signature.
+
+        The A5 variants of this test currently exercise a CPU sim path bug
+        (TMATMUL bf16 unsupported); they are skipped via the platforms marker
+        until that is resolved.
+        """
+        if platform.startswith("a5"):
+            pytest.skip("CPU sim path bug: TMATMUL does not support bf16 data type")
         result = test_runner.run(
             DynOrchPagedAttentionTestCase(
                 batch=batch,
@@ -814,32 +829,10 @@ class TestDynOrchShapeOperations:
                 block_size=block_size,
                 context_len=context_len,
                 max_model_len=max_model_len,
+                platform=platform,
             )
         )
         assert result.passed, f"Dyn orch paged attention test failed: {result.error}"
-
-    @pytest.mark.a5
-    @pytest.mark.skip(reason="CPU sim path bug: TMATMUL does not support bf16 data type")
-    @pytest.mark.parametrize(
-        "batch,num_heads,head_dim,block_size,context_len,max_model_len",
-        _PA_CONFIGS,
-    )
-    def test_dyn_orch_paged_attention_a5(
-        self, test_runner, batch, num_heads, head_dim, block_size, context_len, max_model_len
-    ):
-        """Test paged attention with fully dynamic dims on A5 (Ascend 950)."""
-        result = test_runner.run(
-            DynOrchPagedAttentionTestCase(
-                batch=batch,
-                num_heads=num_heads,
-                head_dim=head_dim,
-                block_size=block_size,
-                context_len=context_len,
-                max_model_len=max_model_len,
-                backend_type=BackendType.Ascend950,
-            )
-        )
-        assert result.passed, f"Dyn orch paged attention A5 test failed: {result.error}"
 
 
 if __name__ == "__main__":

@@ -17,7 +17,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 MN_CASES: list[tuple[int, int]] = [(8, 16), (16, 16), (16, 8)]
 
@@ -27,8 +26,8 @@ class TestTileRowExpand(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 16, n: int = 16, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 16, n: int = 16, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.N = n
 
@@ -78,8 +77,8 @@ class TestTileColExpand(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 16, n: int = 16, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 16, n: int = 16, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.N = n
 
@@ -136,10 +135,10 @@ class TestTensorExpandClone(PTOTestCase):
         k: int = 8,
         broadcast_dim: int = 0,
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config=None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self.B = b
         self.N = n
         self.K = k
@@ -209,26 +208,26 @@ class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
     @pytest.mark.parametrize("m, n", MN_CASES)
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_row_expand(self, test_runner, backend, m, n):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_row_expand(self, test_runner, platform, m, n):
         """Test tile.row_expand across platforms."""
-        result = test_runner.run(TestTileRowExpand(m=m, n=n, backend_type=backend))
+        result = test_runner.run(TestTileRowExpand(m=m, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("m, n", MN_CASES)
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_col_expand(self, test_runner, backend, m, n):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_col_expand(self, test_runner, platform, m, n):
         """Test tile.col_expand across platforms."""
-        result = test_runner.run(TestTileColExpand(m=m, n=n, backend_type=backend))
+        result = test_runner.run(TestTileColExpand(m=m, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("broadcast_dim", [-1, 0, 1, 2])
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tensor_expand_clone(self, test_runner, backend, broadcast_dim):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tensor_expand_clone(self, test_runner, platform, broadcast_dim):
         """Test tensor.expand_clone across platforms."""
-        if backend == BackendType.Ascend950 and broadcast_dim == 2:
-            pytest.skip("Skip broadcast_dim=2 for a5 backend due to pto-isa bug.")
-        result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, backend_type=backend))
+        if platform in ("a5", "a5sim") and broadcast_dim == 2:
+            pytest.skip("Skip broadcast_dim=2 for Ascend 950 due to pto-isa bug.")
+        result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

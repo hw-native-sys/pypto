@@ -28,8 +28,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
 
@@ -392,9 +391,6 @@ class MrgSort1FP32TestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [1, 128], DataType.FP32, init_value=_make_src_1x128),
@@ -431,9 +427,6 @@ class MrgSort1DynFP32TestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -474,9 +467,6 @@ class MrgSort1DynFP32TensorTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
@@ -506,9 +496,6 @@ class MrgSort1DynFP32TensorValIdxTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -542,9 +529,6 @@ class Sort32FP32TestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -585,9 +569,6 @@ class Sort32GatherFP32TestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -631,9 +612,6 @@ class Sort32GatherMaskFP32TestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
@@ -657,63 +635,51 @@ class Sort32GatherMaskFP32TestCase(PTOTestCase):
 # --- Tests ---
 
 
+# sort32/mrgsort intrinsics are A2A3-only (Ascend 910B); restrict to those platforms.
+@pytest.mark.platforms("a2a3", "a2a3sim")
 class TestSort:
     """Test suite for sort32 and mrgsort operations."""
 
-    def test_sort32_fp32(self, test_runner):
-        """Test sort32 with FP32 data: verify descending sort with index tracking.
-
-        To manually inspect sorted indices from the interleaved output:
-            values, indices = extract_sort32_results(output_f32)
-            # values:  [8, 32] f32  — sorted descending
-            # indices: [8, 32] int32 — original positions
-        """
-        test_case = Sort32FP32TestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sort32_fp32(self, test_runner, platform):
+        """Test sort32 with FP32 data: verify descending sort with index tracking."""
+        result = test_runner.run(Sort32FP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_sort32_gather_fp32(self, test_runner):
-        """Test sort32 + gather: separate values and indices into distinct tensors.
-
-        Pipeline: sort32 → gather(even) → val_output [8,32] FP32
-                  sort32 → gather(odd) → idx_output [8,32] FP32 (host reinterprets)
-        """
-        test_case = Sort32GatherFP32TestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sort32_gather_fp32(self, test_runner, platform):
+        """Test sort32 + gather: separate values and indices into distinct tensors."""
+        result = test_runner.run(Sort32GatherFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_sort32_gather_mask_fp32(self, test_runner):
-        """Test sort32 + gather_mask: extract sorted values with P0101 mask.
-
-        Pipeline: sort32 → gather(mask_pattern=P0101) → output [8,32] FP32
-        P0101 selects columns 0,2,4,... (stride=2) from [8,64] interleaved output.
-        """
-        test_case = Sort32GatherMaskFP32TestCase()
-        result = test_runner.run(test_case)
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sort32_gather_mask_fp32(self, test_runner, platform):
+        """Test sort32 + gather_mask: extract sorted values with P0101 mask."""
+        result = test_runner.run(Sort32GatherMaskFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_mrgsort1_fp32(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort1_fp32(self, test_runner, platform):
         """Test tmrgsort format1: merge 4 pre-sorted 64-element runs into single sorted list."""
-        test_case = MrgSort1FP32TestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(MrgSort1FP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_mrgsort1_dyn_fp32(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort1_dyn_fp32(self, test_runner, platform):
         """Test tmrgsort format1 with dynamic block_len: sort 2048 elements via iterative merge."""
-        test_case = MrgSort1DynFP32TestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(MrgSort1DynFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_mrgsort1_dyn_fp32_tensor(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort1_dyn_fp32_tensor(self, test_runner, platform):
         """Tensor-level sort32 + mrgsort + gather pipeline for 2048-element sort."""
-        test_case = MrgSort1DynFP32TensorTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(MrgSort1DynFP32TensorTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_mrgsort1_dyn_fp32_tensor_val_idx(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort1_dyn_fp32_tensor_val_idx(self, test_runner, platform):
         """Tensor-level sort32 + mrgsort + P0101/P1010 mask-gather: returns values and indices."""
-        test_case = MrgSort1DynFP32TensorValIdxTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(MrgSort1DynFP32TensorValIdxTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

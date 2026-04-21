@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 from examples.models.vector_dag import VectorDAGProgram
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 
 class VectorDAGTestCase(PTOTestCase):
@@ -40,8 +39,8 @@ class VectorDAGTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "vector_dag_128x128"
@@ -68,10 +67,10 @@ class VectorDAGTestCase(PTOTestCase):
 class TestDAGOperations:
     """Test suite for DAG operations."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_vector_dag(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_vector_dag(self, test_runner, platform):
         """Test vector DAG computation with 128x128 shape."""
-        result = test_runner.run(VectorDAGTestCase(backend_type=backend))
+        result = test_runner.run(VectorDAGTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

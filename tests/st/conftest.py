@@ -39,7 +39,7 @@ from harness.core.environment import (  # noqa: E402
     get_simpler_python_path,
     get_simpler_scripts_path,
 )
-from harness.core.harness import PTOTestCase  # noqa: E402
+from harness.core.harness import ALL_PLATFORM_IDS, PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
@@ -74,9 +74,13 @@ def pytest_addoption(parser):
     parser.addoption(
         "--platform",
         action="store",
-        default="a2a3",
-        choices=["a2a3sim", "a2a3", "a5sim", "a5"],
-        help="Target platform for tests (default: a2a3sim)",
+        default="a2a3sim,a5sim",
+        help=(
+            "Comma-separated allowlist of target platforms; each test under "
+            "tests/st/runtime/ is parametrized over a2a3, a5, a2a3sim, a5sim "
+            "and only variants whose id appears here are run "
+            "(default: a2a3sim,a5sim)."
+        ),
     )
     parser.addoption(
         "--device",
@@ -158,12 +162,29 @@ def pytest_addoption(parser):
     )
 
 
+def _parse_platform_filter(raw: str) -> set[str]:
+    """Parse the comma-separated --platform value into a set of platform ids.
+
+    Unknown ids are silently dropped so that bogus user input degrades to the
+    intersection with the canonical platform set rather than producing a
+    confusing collection error.
+    """
+    requested = {tok.strip() for tok in str(raw).split(",") if tok.strip()}
+    return requested & set(ALL_PLATFORM_IDS)
+
+
 @pytest.fixture(scope="session")
 def test_config(request) -> RunConfig:
     """Session-scoped fixture providing test configuration from CLI options.
 
     Session scope means the config is created once and shared across all tests,
     which is appropriate since CLI options don't change during a test run.
+
+    ``RunConfig.platform`` carries a single representative platform id; this
+    is only used as a fallback for legacy code paths that have not been
+    migrated to ``PTOTestCase.get_platform()``. Per-test parametrized variants
+    forward their own ``platform`` to the test case constructor and therefore
+    override this value via ``tc.get_platform()`` inside ``TestRunner``.
     """
     save_kernels = request.config.getoption("--save-kernels")
     save_kernels_dir = None
@@ -172,8 +193,11 @@ def test_config(request) -> RunConfig:
         # If --kernels-dir is specified, use it; otherwise None will use session output directory
         save_kernels_dir = kernels_dir
 
+    platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
+    fallback_platform = next(iter(platform_filter), "a2a3sim")
+
     return RunConfig(
-        platform=request.config.getoption("--platform"),
+        platform=fallback_platform,
         device_id=request.config.getoption("--device"),
         save_kernels=save_kernels,
         save_kernels_dir=save_kernels_dir,
@@ -231,8 +255,11 @@ def tensor_shape(request):
 # Skip markers
 def pytest_configure(config):
     """Register custom markers and apply early global settings."""
-    config.addinivalue_line("markers", "hardware: mark test as requiring hardware (--platform=a2a3)")
-    config.addinivalue_line("markers", "a5: mark test as requiring Ascend 950 (--platform=a5 or a5sim)")
+    config.addinivalue_line(
+        "markers",
+        "platforms(*ids): restrict the test to the given platform ids "
+        "(intersected with the --platform CLI filter)",
+    )
     config.addinivalue_line("markers", "slow: mark test as slow")
     config.addinivalue_line("markers", "fuzz: mark test as fuzz test")
 
@@ -246,17 +273,53 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Modify test collection based on platform."""
-    platform = config.getoption("--platform")
+    """Deselect items that fall outside the active platform allowlist.
 
-    skip_hardware = pytest.mark.skip(reason="hardware tests require --platform=a2a3")
-    skip_a5 = pytest.mark.skip(reason="Ascend 950 tests require --platform=a5 or a5sim")
+    Two layers of filtering are applied:
+
+    1. The ``--platform`` CLI option is parsed into a set of platform ids
+       and intersected with the canonical ``ALL_PLATFORM_IDS``.
+    2. Each item may carry a ``@pytest.mark.platforms(...)`` whitelist; the
+       effective allowed set for that item is ``cli_filter & item_filter``.
+
+    For parametrized variants (named after the platform id, e.g. ``[a5sim]``),
+    the variant's own platform must lie inside the effective allowed set.
+    Items without a platform parameter pass as long as the effective set is
+    non-empty.
+    """
+    cli_filter = _parse_platform_filter(config.getoption("--platform"))
+    if not cli_filter:
+        cli_filter = set(ALL_PLATFORM_IDS)
+    canonical = set(ALL_PLATFORM_IDS)
+
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
 
     for item in items:
-        if "hardware" in item.keywords and platform != "a2a3":
-            item.add_marker(skip_hardware)
-        if "a5" in item.keywords and not platform.startswith("a5"):
-            item.add_marker(skip_a5)
+        item_marker = next(item.iter_markers(name="platforms"), None)
+        if item_marker is not None:
+            item_filter = {p for p in item_marker.args if p in canonical}
+        else:
+            item_filter = canonical
+        allowed = cli_filter & item_filter
+
+        callspec = getattr(item, "callspec", None)
+        params = callspec.params if callspec else {}
+        platform_param = params.get("platform")
+
+        if platform_param is not None:
+            if platform_param in allowed:
+                selected.append(item)
+            else:
+                deselected.append(item)
+        elif allowed:
+            selected.append(item)
+        else:
+            deselected.append(item)
+
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
 
 
 def _collect_test_case_from_item(item: pytest.Item, seen: dict[str, PTOTestCase]) -> None:
@@ -374,7 +437,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             for tc in test_cases
             if _cache_key(tc) in _precompile_cache and _precompile_cache[_cache_key(tc)][1] is None
         ]
-        platform: str = session.config.getoption("--platform")
+        # ``--platform`` is a CSV allowlist; the per-test value resolved by
+        # ``tc.get_platform()`` overrides this fallback inside ``TestRunner``,
+        # so any one entry from the filter is sufficient here.
+        platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
+        platform: str = next(iter(platform_filter), "a2a3sim")
         pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
         print(
             f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"

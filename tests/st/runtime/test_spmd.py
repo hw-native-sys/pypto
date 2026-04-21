@@ -27,8 +27,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Programs ---
@@ -376,9 +375,6 @@ class SPMDAddTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
@@ -402,9 +398,6 @@ class SPMDMulTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("a", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
@@ -426,9 +419,6 @@ ESC5_TOTAL_ROWS = 2048
 class _BaseSPMDTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
 
 class SPMDThreeSubmitTestCase(_BaseSPMDTestCase):
@@ -549,6 +539,7 @@ class TestSPMDOperations:
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize(
         ("test_case_cls", "description"),
         [
@@ -556,30 +547,35 @@ class TestSPMDOperations:
             pytest.param(SPMDMulTestCase, "mul", id="mul"),
         ],
     )
-    def test_spmd_single_submit(self, test_runner, test_case_cls, description):
+    def test_spmd_single_submit(self, test_runner, test_case_cls, description, platform):
         """Single-submit SPMD smoke tests for basic vector kernels."""
-        self._run_case(test_runner, test_case_cls())
+        self._run_case(test_runner, test_case_cls(platform=platform))
 
-    def test_spmd_three_submit(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_three_submit(self, test_runner, platform):
         """Three-submit chain covers sequential SPMD dependency handling."""
-        self._run_case(test_runner, SPMDThreeSubmitTestCase())
+        self._run_case(test_runner, SPMDThreeSubmitTestCase(platform=platform))
 
-    def test_spmd_escalating_5(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_escalating_5(self, test_runner, platform):
         """Wide escalating dispatch covers the smaller 3-submit escalating case."""
-        self._run_case(test_runner, SPMDEscalating5TestCase())
+        self._run_case(test_runner, SPMDEscalating5TestCase(platform=platform))
 
     @pytest.mark.xfail(reason="SPMD+MixedKernel precision issue under investigation")
-    def test_spmd_mixed_kernel(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_mixed_kernel(self, test_runner, platform):
         """SPMD MixedKernel: matmul + bias (cube + vector → AIC + AIV split)."""
-        self._run_case(test_runner, SPMDMixedKernelTestCase())
+        self._run_case(test_runner, SPMDMixedKernelTestCase(platform=platform))
 
-    def test_spmd_sync_start_single(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_sync_start_single(self, test_runner, platform):
         """Single SPMD with sync_start=True: verifies the flag is accepted and produces correct output."""
-        self._run_case(test_runner, SPMDSyncStartSingleTestCase())
+        self._run_case(test_runner, SPMDSyncStartSingleTestCase(platform=platform))
 
-    def test_spmd_sync_start_mixed(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_sync_start_mixed(self, test_runner, platform):
         """4 submissions: T0 baseline + T1/T2/T3 with sync_start=True, mirroring the sync_start test."""
-        self._run_case(test_runner, SPMDSyncStartMixedTestCase())
+        self._run_case(test_runner, SPMDSyncStartMixedTestCase(platform=platform))
 
 
 if __name__ == "__main__":

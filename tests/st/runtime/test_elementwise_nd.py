@@ -21,7 +21,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 # --- Programs (partial coverage) ---
 
@@ -203,8 +202,8 @@ class Tile4DMulPartialTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tile_4d_mul_partial"
@@ -227,8 +226,8 @@ class Tile4DTopToBottomTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tile_4d_top_to_bottom"
@@ -252,8 +251,8 @@ class Tile4DQuadrantTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tile_4d_quadrant"
@@ -282,8 +281,8 @@ class Tile2DStoreTo3DTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tile_2d_store_to_3d"
@@ -307,8 +306,8 @@ class TensorAssemble2DTo3DTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tensor_assemble_2d_to_3d"
@@ -333,34 +332,34 @@ class TensorAssemble2DTo3DTestCase(PTOTestCase):
 class TestElementwise4D:
     """End-to-end tests for elementwise ops on 4D tiles (exercises FlattenTileNdTo2D pass)."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_4d_top_to_bottom(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_4d_top_to_bottom(self, test_runner, platform):
         """4D tensor [2,2,8,16]; a*b on top row via a single [1,2,8,16] tile, store to bottom row."""
-        result = test_runner.run(Tile4DTopToBottomTestCase(backend_type=backend))
+        result = test_runner.run(Tile4DTopToBottomTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_4d_quadrant(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_4d_quadrant(self, test_runner, platform):
         """4D tensor [2,2,8,16] divided into 4 blocks of [1,1,8,16]."""
-        result = test_runner.run(Tile4DQuadrantTestCase(backend_type=backend))
+        result = test_runner.run(Tile4DQuadrantTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_4d_mul_partial(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_4d_mul_partial(self, test_runner, platform):
         """Partial-coverage 4D tile store: tile [2,3,8,64] at offset [2,0,0,0] of [4,3,8,64] tensor."""
-        result = test_runner.run(Tile4DMulPartialTestCase(backend_type=backend))
+        result = test_runner.run(Tile4DMulPartialTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_2d_store_to_3d(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_2d_store_to_3d(self, test_runner, platform):
         """2D tile [1, 16] stored into a 3D tensor [2, 4, 16]."""
-        result = test_runner.run(Tile2DStoreTo3DTestCase(backend_type=backend))
+        result = test_runner.run(Tile2DStoreTo3DTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tensor_assemble_2d_to_3d(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tensor_assemble_2d_to_3d(self, test_runner, platform):
         """2D create assembled into 3D target, fused to slice with padding (#1006)."""
-        result = test_runner.run(TensorAssemble2DTo3DTestCase(backend_type=backend))
+        result = test_runner.run(TensorAssemble2DTo3DTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

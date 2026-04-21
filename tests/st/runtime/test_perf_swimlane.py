@@ -12,9 +12,9 @@
 Runs matmul 64x64x64 (PTO backend) with profiling and validates the
 generated perf_swimlane_*.json in build_output/<run_dir>/swimlane_data/.
 
-Requires --runtime-profiling and real hardware (--platform=a2a3).
-All tests in this file are skipped automatically when --runtime-profiling
-is not passed.
+Requires ``--runtime-profiling`` to be set; pass ``--platform=a2a3`` (or
+``a5``) to switch the target.  All tests in this file are skipped
+automatically when ``--runtime-profiling`` is not passed.
 """
 
 import json
@@ -25,7 +25,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
@@ -41,9 +40,6 @@ class _MatmulPTO(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [

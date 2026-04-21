@@ -17,7 +17,7 @@ Three scenarios are covered, each parametrized over [(128, 128)]:
   variables captured by @pl.function; M and N read via pl.tensor.dim.
 - Dynamic M dim with scf.for loop (step=2, tile rows=2): col count from shape param.
 
-All tests use OptimizationStrategy.Default and BackendType.Ascend910B.
+All tests use OptimizationStrategy.Default and run across all PLATFORMS.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors
@@ -30,7 +30,6 @@ import pypto.language as pl
 import pytest
 import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 from pypto.runtime.runner import RunConfig
 
 M = pl.dynamic("M")
@@ -53,10 +52,10 @@ class DynShapeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -121,10 +120,10 @@ class ValidShapeAddTestCase(PTOTestCase):
         shape: tuple[int, int],
         valid_shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
         self._valid_rows, self._valid_cols = valid_shape
 
@@ -202,10 +201,10 @@ class LoopDynShapeAddTestCase(PTOTestCase):
         self,
         shape: tuple[int, int],
         *,
-        backend_type: BackendType | None = None,
+        platform: str | None = None,
         config: RunConfig | None = None,
     ):
-        super().__init__(config, backend_type=backend_type)
+        super().__init__(config, platform=platform)
         self._rows, self._cols = shape
 
     def get_name(self) -> str:
@@ -265,25 +264,25 @@ class LoopDynShapeAddTestCase(PTOTestCase):
 class TestDynamicShapeOperations:
     """Test suite for dynamic shape kernel operations."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _SHAPES)
-    def test_dyn_shape_add(self, test_runner, shape, backend):
+    def test_dyn_shape_add(self, test_runner, shape, platform):
         """Test add with fully dynamic M×N tensor shapes."""
-        result = test_runner.run(DynShapeAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(DynShapeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((128, 128), (64, 64))])
-    def test_valid_shape_add(self, test_runner, shape, valid_shape, backend):
+    def test_valid_shape_add(self, test_runner, shape, valid_shape, platform):
         """Test add with static tensors and valid_shapes read from an input tensor."""
-        result = test_runner.run(ValidShapeAddTestCase(shape, valid_shape, backend_type=backend))
+        result = test_runner.run(ValidShapeAddTestCase(shape, valid_shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _SHAPES)
-    def test_loop_dyn_shape_add(self, test_runner, shape, backend):
+    def test_loop_dyn_shape_add(self, test_runner, shape, platform):
         """Test add with dynamic M dim iterated in pairs via scf.for."""
-        result = test_runner.run(LoopDynShapeAddTestCase(shape, backend_type=backend))
+        result = test_runner.run(LoopDynShapeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
 

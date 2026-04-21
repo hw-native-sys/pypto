@@ -36,8 +36,7 @@ from examples.kernels.assemble import (
     TileAssembleRowByRowProgram,
     TileAssembleVecProgram,
 )
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # ---------------------------------------------------------------------------
@@ -64,9 +63,6 @@ class TileAssembleAccMatTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def compute_expected(self, tensors, params=None):
         # matmul(a, b) overwrites the right half; left half (columns 0..15) remains x (1.0)
@@ -98,9 +94,6 @@ class TileAssembleVecTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def compute_expected(self, tensors, params=None):
         tensors["y"][:] = tensors["x"]
@@ -135,9 +128,6 @@ class TileAssembleRowByRowTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def compute_expected(self, tensors, params=None):
         tensors["y"][:] = tensors["x"]
         tensors["y"][:, :16] = tensors["src"]
@@ -170,9 +160,6 @@ class TileAssembleDoubleLoopTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def compute_expected(self, tensors, params=None):
         tensors["y"][:] = tensors["x"]
@@ -207,9 +194,6 @@ class TileAssembleLoopColBroadcastTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def compute_expected(self, tensors, params=None):
         for c in range(4):
             tensors["y"][:, c * 8 : (c + 1) * 8] = tensors["src"]
@@ -243,9 +227,6 @@ class TileAssembleDoubleLoopBroadcastTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def compute_expected(self, tensors, params=None):
         for b in range(2):
             for c in range(2):
@@ -257,45 +238,52 @@ class TileAssembleDoubleLoopBroadcastTestCase(PTOTestCase):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.a5
+# tile.assemble lowers to TINSERT, which is only available on Ascend 950.
+@pytest.mark.platforms("a5", "a5sim")
 class TestAssembleOperations:
     """Test suite for tile.assemble: one test per distinct pattern."""
 
     @pytest.mark.skip(reason="Codegen bug: MemRef not found in mapping for Acc→Mat assemble")
-    def test_tile_assemble_acc_mat(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_acc_mat(self, test_runner, platform):
         """Acc→Mat (NZ mode): matmul result assembled into right half of Mat target."""
-        result = test_runner.run(TileAssembleAccMatTestCase())
+        result = test_runner.run(TileAssembleAccMatTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_assemble_vec(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_vec(self, test_runner, platform):
         """Vec→Vec single-shot (ND_VEC mode): src assembled into left half of target."""
-        result = test_runner.run(TileAssembleVecTestCase())
+        result = test_runner.run(TileAssembleVecTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(
         reason="Sim bug: Vec→Vec assemble with pl.slice produces wrong output (496/1024 mismatch)"
     )
-    def test_tile_assemble_row_by_row(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_row_by_row(self, test_runner, platform):
         """Vec→Vec single loop + pl.slice: dynamic row gather into left half."""
-        result = test_runner.run(TileAssembleRowByRowTestCase())
+        result = test_runner.run(TileAssembleRowByRowTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(
         reason="Sim bug: Vec→Vec assemble with pl.slice produces wrong output (496/1024 mismatch)"
     )
-    def test_tile_assemble_double_loop(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_double_loop(self, test_runner, platform):
         """Vec→Vec nested loops + pl.slice: batch×head two-level index (b*8+i)."""
-        result = test_runner.run(TileAssembleDoubleLoopTestCase())
+        result = test_runner.run(TileAssembleDoubleLoopTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_assemble_loop_col_broadcast(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_loop_col_broadcast(self, test_runner, platform):
         """Vec→Vec single loop, no pl.slice: same src column-block at each c*8 offset."""
-        result = test_runner.run(TileAssembleLoopColBroadcastTestCase())
+        result = test_runner.run(TileAssembleLoopColBroadcastTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_tile_assemble_double_loop_broadcast(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_assemble_double_loop_broadcast(self, test_runner, platform):
         """Vec→Vec nested loops, no pl.slice: same src[16,16] fills all four quadrants."""
-        result = test_runner.run(TileAssembleDoubleLoopBroadcastTestCase())
+        result = test_runner.run(TileAssembleDoubleLoopBroadcastTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

@@ -26,8 +26,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 # =============================================================================
 # Programs
@@ -247,9 +246,6 @@ class MscatterFP32SeqTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_fp32_8x32_seq"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
@@ -274,9 +270,6 @@ class MscatterFP32RevTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_fp32_8x32_rev"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP32, init_value=torch.randn),
@@ -300,9 +293,6 @@ class MscatterFP32RandPermTestCase(PTOTestCase):
 
     def get_name(self) -> str:
         return "mscatter_fp32_8x32_rand_perm"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -330,9 +320,6 @@ class MscatterFP32StridedTestCase(PTOTestCase):
 
     def get_name(self) -> str:
         return "mscatter_fp32_8x32_strided"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -363,9 +350,6 @@ class MscatterFP16SeqTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_fp16_8x32_seq"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.FP16, init_value=torch.randn),
@@ -389,9 +373,6 @@ class MscatterFP16RandPermTestCase(PTOTestCase):
 
     def get_name(self) -> str:
         return "mscatter_fp16_8x32_rand_perm"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -422,9 +403,6 @@ class MscatterINT32SeqTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_int32_8x32_seq"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [8, 32], DataType.INT32, init_value=_init_randint_8x32),
@@ -448,9 +426,6 @@ class MscatterINT32RevTestCase(PTOTestCase):
 
     def get_name(self) -> str:
         return "mscatter_int32_8x32_rev"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -481,9 +456,6 @@ class MscatterFP32_16x64SeqTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_fp32_16x64_seq"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [16, 64], DataType.FP32, init_value=torch.randn),
@@ -507,9 +479,6 @@ class MscatterFP32_16x64RandPermTestCase(PTOTestCase):
 
     def get_name(self) -> str:
         return "mscatter_fp32_16x64_rand_perm"
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -535,9 +504,6 @@ class MscatterFP16_16x64RandPermTestCase(PTOTestCase):
     def get_name(self) -> str:
         return "mscatter_fp16_16x64_rand_perm"
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend950
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("src_tensor", [16, 64], DataType.FP16, init_value=torch.randn),
@@ -559,78 +525,89 @@ class MscatterFP16_16x64RandPermTestCase(PTOTestCase):
 # =============================================================================
 
 
-@pytest.mark.a5
+@pytest.mark.platforms("a5", "a5sim")
 class TestMscatterFP32_8x32:
     """FP32 [8, 32] mscatter with various index patterns."""
 
-    def test_sequential(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sequential(self, test_runner, platform):
         """Sequential indices [0..255] — identity scatter."""
-        result = test_runner.run(MscatterFP32SeqTestCase())
+        result = test_runner.run(MscatterFP32SeqTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_reversed(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_reversed(self, test_runner, platform):
         """Reversed indices [255..0] — reverse element order in output."""
-        result = test_runner.run(MscatterFP32RevTestCase())
+        result = test_runner.run(MscatterFP32RevTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_random_permutation(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_random_permutation(self, test_runner, platform):
         """Random permutation of [0..255] — each position written exactly once."""
-        result = test_runner.run(MscatterFP32RandPermTestCase())
+        result = test_runner.run(MscatterFP32RandPermTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_strided(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_strided(self, test_runner, platform):
         """Strided indices [0, 2, 4, ...] into 512-element output — sparse scatter."""
-        result = test_runner.run(MscatterFP32StridedTestCase())
+        result = test_runner.run(MscatterFP32StridedTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
-@pytest.mark.a5
+@pytest.mark.platforms("a5", "a5sim")
 class TestMscatterFP16_8x32:
     """FP16 [8, 32] mscatter tests."""
 
-    def test_sequential(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sequential(self, test_runner, platform):
         """FP16 sequential indices."""
-        result = test_runner.run(MscatterFP16SeqTestCase())
+        result = test_runner.run(MscatterFP16SeqTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_random_permutation(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_random_permutation(self, test_runner, platform):
         """FP16 random permutation."""
-        result = test_runner.run(MscatterFP16RandPermTestCase())
+        result = test_runner.run(MscatterFP16RandPermTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
-@pytest.mark.a5
+@pytest.mark.platforms("a5", "a5sim")
 class TestMscatterINT32_8x32:
     """INT32 [8, 32] mscatter tests."""
 
-    def test_sequential(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_sequential(self, test_runner, platform):
         """INT32 sequential indices."""
-        result = test_runner.run(MscatterINT32SeqTestCase())
+        result = test_runner.run(MscatterINT32SeqTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_reversed(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_reversed(self, test_runner, platform):
         """INT32 reversed indices."""
-        result = test_runner.run(MscatterINT32RevTestCase())
+        result = test_runner.run(MscatterINT32RevTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
-@pytest.mark.a5
+@pytest.mark.platforms("a5", "a5sim")
 class TestMscatterLargeShape:
     """Larger tile shape [16, 64] mscatter tests."""
 
-    def test_fp32_sequential(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp32_sequential(self, test_runner, platform):
         """FP32 16x64 sequential indices."""
-        result = test_runner.run(MscatterFP32_16x64SeqTestCase())
+        result = test_runner.run(MscatterFP32_16x64SeqTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fp32_random_permutation(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp32_random_permutation(self, test_runner, platform):
         """FP32 16x64 random permutation."""
-        result = test_runner.run(MscatterFP32_16x64RandPermTestCase())
+        result = test_runner.run(MscatterFP32_16x64RandPermTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fp16_random_permutation(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fp16_random_permutation(self, test_runner, platform):
         """FP16 16x64 random permutation."""
-        result = test_runner.run(MscatterFP16_16x64RandPermTestCase())
+        result = test_runner.run(MscatterFP16_16x64RandPermTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

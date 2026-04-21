@@ -74,18 +74,36 @@ pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes
 
 ### Platform Selection
 
-Tests can run on simulation or hardware platforms:
+Each runtime test case is automatically parametrized over four target
+platforms: `a2a3`, `a5`, `a2a3sim`, `a5sim`. The `--platform` CLI option acts
+as a **filter** that selects which subset is actually executed (it accepts a
+comma-separated list and defaults to `a2a3sim,a5sim` when omitted, so the two
+simulator variants run by default).
 
 ```bash
-# Run on simulator (default, no hardware required)
+# Default: run a2a3sim + a5sim (no hardware required)
+pytest tests/st/ -v --forked
+
+# Run only the a2a3 simulator
 pytest tests/st/ -v --forked --platform=a2a3sim
 
-# Run on real hardware (requires NPU device)
+# Run only the Ascend 950 simulator
+pytest tests/st/ -v --forked --platform=a5sim
+
+# Run on real Ascend 910B hardware (requires NPU device)
 pytest tests/st/ -v --forked --platform=a2a3 --device=0
 
-# Specify different device ID
-pytest tests/st/ -v --forked --platform=a2a3 --device=1
+# Run on real Ascend 950 hardware
+pytest tests/st/ -v --forked --platform=a5 --device=0
+
+# Run on multiple platforms in a single invocation
+pytest tests/st/ -v --forked --platform=a2a3sim,a5sim,a2a3
 ```
+
+A test case can additionally restrict itself to a subset of platforms via the
+``@pytest.mark.platforms(...)`` marker, e.g. ``@pytest.mark.platforms("a5",
+"a5sim")`` to mark a test as Ascend 950 only. The intersection of the CLI
+filter and the per-test whitelist determines which variants actually run.
 
 ### Verbose Output
 
@@ -119,8 +137,9 @@ pytest tests/st/ -v --forked -k "not matmul"
 # Run tests with specific marker
 pytest tests/st/ -v --forked -m "slow"
 
-# Skip tests with specific marker
-pytest tests/st/ -v --forked -m "not hardware"
+# Filter by parametrized platform id (works because variants are
+# named after the platform, e.g. ``test_foo[a5sim]``)
+pytest tests/st/ -v --forked -k "a5sim"
 ```
 
 ## Test Configuration Options
@@ -131,7 +150,7 @@ The test framework provides extensive configuration through pytest command-line 
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--platform` | `a2a3sim` | Target platform: `a2a3sim` (simulator) or `a2a3` (hardware) |
+| `--platform` | `a2a3sim,a5sim` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
 | `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `DebugTileOptimization` |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |
@@ -395,16 +414,32 @@ The [`conftest.py`](conftest.py) provides useful fixtures:
 
 ### Custom Markers
 
-Use pytest markers to categorize tests:
+Use pytest markers to categorize or restrict tests:
 
 ```python
-@pytest.mark.hardware  # Requires --platform=a2a3
-def test_hardware_specific(test_runner):
+# Restrict a test (or a whole class) to a subset of platforms.  The
+# intersection with the --platform CLI filter decides which variants run.
+@pytest.mark.platforms("a5", "a5sim")
+def test_ascend950_specific(test_runner, platform):
     ...
 
 @pytest.mark.slow  # Long-running test
 def test_large_model(test_runner):
     ...
+```
+
+To make a single test run on every supported platform, parametrize it with
+the canonical ``PLATFORMS`` list and accept a ``platform`` argument that you
+forward to your ``PTOTestCase`` subclass:
+
+```python
+from harness.core.harness import PLATFORMS
+
+class TestFoo:
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_foo(self, test_runner, platform):
+        result = test_runner.run(FooTestCase(platform=platform))
+        assert result.passed
 ```
 
 ### Test Framework Package
@@ -419,9 +454,9 @@ The testing framework lives at `tests/st/harness/`:
 Tests are organized by execution mode:
 
 - `runtime/` - Tests that execute on hardware or simulator
-  - Includes hardware availability detection
-  - Automatically skips when hardware unavailable (platform=a2a3)
-  - Always runs on simulator (platform=a2a3sim)
+  - Each test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`
+  - Tests automatically skip when the requested platform set is onboard-only
+    (`a2a3` and/or `a5`) but no NPU device nodes are present
 - `codegen/` - Tests that only verify code generation
   - Automatically uses --codegen-only mode
   - Does not require Simpler runtime
@@ -497,13 +532,18 @@ pytest tests/st/ -v --forked --collect-only
 
 #### Hardware Tests Skipped
 
-**Problem:** Tests marked with `@pytest.mark.hardware` are automatically skipped.
+**Problem:** Runtime tests are auto-skipped because the requested platform
+set only contains onboard platforms (`a2a3`, `a5`) and no NPU device nodes
+were detected.
 
 **Solution:**
 
 ```bash
-# Run hardware tests on device
+# Either provide real hardware and re-run with the onboard platform...
 pytest tests/st/ -v --forked --platform=a2a3 --device=0
+
+# ...or include a simulator platform in the filter to run those variants.
+pytest tests/st/ -v --forked --platform=a2a3sim
 ```
 
 ### Verification Checklist

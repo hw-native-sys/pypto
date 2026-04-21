@@ -12,7 +12,7 @@ Runtime tests for tile-based elementwise operations using the PyPTO frontend.
 
 This module defines integration tests for elementwise add and multiply
 kernels implemented with the internal PTOTestCase harness.  Each test case
-accepts an optional ``backend_type`` parameter so a single class can run
+accepts an optional ``platform`` parameter so a single class can run
 on multiple platforms via ``@pytest.mark.parametrize``.
 """
 
@@ -27,7 +27,6 @@ from examples.kernels.elementwise import (
     TileMul128Program,
 )
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 
 class TileAddTestCase(PTOTestCase):
@@ -35,8 +34,8 @@ class TileAddTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, size: int = 128, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, size: int = 128, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.size = size
 
     def get_name(self) -> str:
@@ -62,8 +61,8 @@ class TileMulTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, size: int = 128, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, size: int = 128, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.size = size
 
     def get_name(self) -> str:
@@ -94,18 +93,18 @@ _SIZES = [64, 128]
 class TestElementwiseOperations:
     """Test suite for elementwise operations across all platforms."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("size", _SIZES)
-    def test_tile_add(self, test_runner, backend, size):
+    def test_tile_add(self, test_runner, platform, size):
         """Test tile addition with configurable shape and platform."""
-        result = test_runner.run(TileAddTestCase(size=size, backend_type=backend))
+        result = test_runner.run(TileAddTestCase(size=size, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("size", _SIZES)
-    def test_tile_mul(self, test_runner, backend, size):
+    def test_tile_mul(self, test_runner, platform, size):
         """Test tile multiplication with configurable shape and platform."""
-        result = test_runner.run(TileMulTestCase(size=size, backend_type=backend))
+        result = test_runner.run(TileMulTestCase(size=size, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

@@ -59,9 +59,9 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Maps cache_key → (work_dir, error_str | None).
-# The cache key combines test name and backend architecture (e.g.
-# "matmul_64x64x64@a2a3") so the same PTOTestCase can be compiled for
-# multiple backends without collisions.
+# The cache key combines test name and target platform (e.g.
+# "matmul_64x64x64@a2a3sim") so the same PTOTestCase can be compiled for
+# multiple platforms (a2a3 vs a5, sim vs onboard) without cache-key collisions.
 # Populated by precompile_test_cases() in the parent process during
 # pytest_collection_finish, before any test forks.  Forked children inherit
 # the populated dict via os.fork() copy-on-write and find their pre-compiled
@@ -83,27 +83,35 @@ _BACKEND_TO_ARCH: dict[BackendType, str] = {
 
 
 def _cache_key(tc: PTOTestCase) -> str:
-    """Return a unique cache key combining test name and backend architecture.
+    """Return a unique cache key combining test name and target platform.
 
-    Using a composite key allows the same ``PTOTestCase`` (same ``get_name()``)
-    to be compiled for multiple backends (e.g. Ascend910B *and* Ascend950)
-    without cache-key collisions.
+    Uses ``tc.get_platform()`` so the same ``PTOTestCase`` can be compiled for
+    multiple platforms (e.g. ``a2a3sim`` *and* ``a5sim``) without cache-key
+    collisions.  Falls back to the backend architecture for legacy callers
+    that override ``get_backend_type()`` without setting a platform.
     """
-    arch = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
-    return f"{tc.get_name()}@{arch}"
+    try:
+        platform = tc.get_platform()
+    except AttributeError:
+        platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
+    return f"{tc.get_name()}@{platform}"
 
 
-def _resolve_platform(config_platform: str, backend_type: BackendType) -> str:
-    """Return the platform string required to compile for *backend_type*.
+def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None) -> str:
+    """Return the platform string used to compile/execute *test_case*.
 
-    Preserves the sim/hardware distinction from *config_platform* (i.e. the
-    ``sim`` suffix) while replacing the architecture prefix to match the
-    backend.  For example, if the global config says ``"a2a3sim"`` but the
-    test case requests ``Ascend950``, this returns ``"a5sim"``.
+    The test-case-level platform (set via the ``platform`` constructor arg or
+    overridden in :py:meth:`PTOTestCase.get_platform`) takes precedence over
+    the session-wide ``--platform`` value.  When *test_case* is ``None`` the
+    function preserves the historical behaviour of returning ``config_platform``
+    so legacy code paths still work.
     """
-    is_sim = config_platform.endswith("sim")
-    arch = _BACKEND_TO_ARCH.get(backend_type, config_platform.rstrip("sim").rstrip("_"))
-    return f"{arch}sim" if is_sim else arch
+    if test_case is not None:
+        try:
+            return test_case.get_platform()
+        except AttributeError:
+            pass
+    return config_platform
 
 
 def _default_work_dir(test_name: str) -> Path:
@@ -327,7 +335,7 @@ def prebuild_binaries(
         mod = _load_kc(work_dir)
         if mod is None:
             continue
-        tc_platform = _resolve_platform(platform, tc.get_backend_type())
+        tc_platform = _resolve_platform(platform, tc)
         runtime_name = getattr(mod, "RUNTIME_CONFIG", {}).get("runtime", "host_build_graph")
         compiler = KernelCompiler(platform=tc_platform)
         case_configs.append(
@@ -442,8 +450,7 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
             try:
-                backend_type = test_case.get_backend_type()
-                platform = _resolve_platform(self.config.platform, backend_type)
+                platform = _resolve_platform(self.config.platform, test_case)
                 # Re-write golden.py with the actual test case's tolerances.
                 # The pre-compiled golden.py may have been written with default
                 # tolerances (1e-5) because pytest_collection_finish instantiates
@@ -534,7 +541,7 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
 
-            platform = _resolve_platform(self.config.platform, backend_type)
+            platform = _resolve_platform(self.config.platform, test_case)
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
             chip_callable, runtime_name = compile_and_assemble(

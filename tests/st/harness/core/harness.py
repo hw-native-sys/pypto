@@ -30,23 +30,50 @@ from pypto.runtime.tensor_spec import ScalarSpec
 # ---------------------------------------------------------------------------
 # Pre-defined platform parameter lists for @pytest.mark.parametrize.
 #
+# A platform string is one of "a2a3", "a5", "a2a3sim", "a5sim".  The architecture
+# prefix selects the backend (Ascend910B / Ascend950) and the optional ``sim``
+# suffix toggles between simulator and on-board (real chip) execution.
+#
+# Filtering happens in two layers:
+#     1. CLI ``--platform`` accepts a comma-separated subset (default
+#        ``a2a3sim,a5sim``); non-matching parametrize variants are deselected
+#        during collection.
+#     2. ``@pytest.mark.platforms("a5", "a5sim")`` on a test function further
+#        restricts that test to the listed platforms.
+#
 # Usage:
-#     @pytest.mark.parametrize("backend", PLATFORMS)
-#     def test_foo(self, test_runner, backend):
-#         result = test_runner.run(MyTestCase(backend_type=backend))
+#     @pytest.mark.parametrize("platform", PLATFORMS)
+#     def test_foo(self, test_runner, platform):
+#         result = test_runner.run(MyTestCase(platform=platform))
 #         assert result.passed
 # ---------------------------------------------------------------------------
 
 PLATFORMS = [
-    pytest.param(BackendType.Ascend910B, id="a2a3"),
-    pytest.param(BackendType.Ascend950, id="a5", marks=pytest.mark.a5),
+    pytest.param("a2a3sim", id="a2a3sim"),
+    pytest.param("a5sim", id="a5sim"),
+    pytest.param("a2a3", id="a2a3"),
+    pytest.param("a5", id="a5"),
 ]
 
-ALL_PLATFORMS = PLATFORMS
+SIM_PLATFORMS = [PLATFORMS[0], PLATFORMS[1]]
+ONBOARD_PLATFORMS = [PLATFORMS[2], PLATFORMS[3]]
 
-A2A3_ONLY = [pytest.param(BackendType.Ascend910B, id="a2a3")]
+ALL_PLATFORM_IDS: tuple[str, ...] = ("a2a3sim", "a5sim", "a2a3", "a5")
 
-A5_ONLY = [pytest.param(BackendType.Ascend950, id="a5", marks=pytest.mark.a5)]
+_PLATFORM_TO_BACKEND: dict[str, BackendType] = {
+    "a2a3": BackendType.Ascend910B,
+    "a2a3sim": BackendType.Ascend910B,
+    "a5": BackendType.Ascend950,
+    "a5sim": BackendType.Ascend950,
+}
+
+
+def platform_to_backend(platform: str) -> BackendType:
+    """Return the BackendType corresponding to *platform* string."""
+    try:
+        return _PLATFORM_TO_BACKEND[platform]
+    except KeyError as exc:
+        raise ValueError(f"Unknown platform '{platform}'. Expected one of {ALL_PLATFORM_IDS}.") from exc
 
 
 class DataType(Enum):
@@ -151,6 +178,7 @@ class PTOTestCase(ABC):
         self,
         config: RunConfig | None = None,
         *,
+        platform: str | None = None,
         backend_type: BackendType | None = None,
         strategy: OptimizationStrategy | None = None,
     ):
@@ -158,14 +186,19 @@ class PTOTestCase(ABC):
 
         Args:
             config: Test configuration. If None, uses default config.
-            backend_type: Override the backend type for code generation.
-                If None, falls back to the class-level ``get_backend_type()``
-                default (Ascend910B).  Pass explicitly to run the same test
-                case on a different platform without subclassing.
+            platform: Override the target platform string ("a2a3", "a5",
+                "a2a3sim", "a5sim").  If None, falls back to the class-level
+                ``get_platform()`` default (``"a2a3sim"``).  Pass explicitly
+                to run the same test case on a different platform without
+                subclassing.
+            backend_type: (Legacy) Override the backend type for code
+                generation.  Prefer ``platform``.  If both are given, the
+                value derived from ``platform`` wins.
             strategy: Override the optimization strategy.  If None, falls
                 back to the class-level ``get_strategy()`` default (Default).
         """
         self.config = config or RunConfig()
+        self._override_platform = platform
         self._override_backend = backend_type
         self._override_strategy = strategy
         self._tensor_specs: list[TensorSpec] | None = None
@@ -209,17 +242,32 @@ class PTOTestCase(ABC):
             return self._override_strategy
         return OptimizationStrategy.Default
 
+    def get_platform(self) -> str:
+        """Return the target platform string ("a2a3"/"a5"/"a2a3sim"/"a5sim").
+
+        If *platform* was passed to the constructor, that value takes
+        precedence.  Otherwise falls back to the default ``"a2a3sim"``.
+        Subclasses may still override this method; the constructor override
+        only applies when the subclass does **not** redefine the method.
+        """
+        if self._override_platform is not None:
+            return self._override_platform
+        return "a2a3sim"
+
     def get_backend_type(self) -> BackendType:
         """Return the backend type for code generation.
 
-        If *backend_type* was passed to the constructor, that value takes
-        precedence.  Otherwise falls back to ``BackendType.Ascend910B``.
+        Resolution order:
+            1. The ``platform`` constructor arg, if set, decides the backend
+               via :data:`_PLATFORM_TO_BACKEND` (preferred path).
+            2. The legacy ``backend_type`` constructor arg, if set.
+            3. ``BackendType.Ascend910B`` as the global default.
+
         Subclasses may still override this method; the constructor override
         only applies when the subclass does **not** redefine the method.
-
-        Returns:
-            BackendType enum value.
         """
+        if self._override_platform is not None:
+            return platform_to_backend(self._override_platform)
         if self._override_backend is not None:
             return self._override_backend
         return BackendType.Ascend910B

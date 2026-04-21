@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 from examples.kernels.concat import TileConcat32x32Program
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 
 class TileConcatTestCase(PTOTestCase):
@@ -24,8 +23,8 @@ class TileConcatTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "tile_concat_32x32"
@@ -49,10 +48,10 @@ class TestConcatOperations:
     """Test suite for concat operations."""
 
     @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_tile_concat_32x32(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_tile_concat_32x32(self, test_runner, platform):
         """Test tile concatenation: 32x16 + 32x16 -> 32x32."""
-        result = test_runner.run(TileConcatTestCase(backend_type=backend))
+        result = test_runner.run(TileConcatTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

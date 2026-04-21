@@ -30,7 +30,6 @@ from typing import Any
 import pypto.language as pl
 import pytest
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
 
 
 class TestForLoopAdd(PTOTestCase):
@@ -42,8 +41,8 @@ class TestForLoopAdd(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_add_64x64"
@@ -98,8 +97,8 @@ class TestForLoopMul(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_mul_64x64"
@@ -155,8 +154,8 @@ class TestForLoopYieldAdd(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_yield_add_64x64"
@@ -213,8 +212,8 @@ class TestForLoopYieldTileAccum(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_yield_tile_accum"
@@ -268,8 +267,8 @@ class TestIfYieldTensor(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "if_yield_tensor"
@@ -326,8 +325,8 @@ class TestForIfElseNested(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_if_else_nested"
@@ -394,8 +393,8 @@ class TestWhileLoopAdd(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "while_loop_add_64x64"
@@ -453,8 +452,8 @@ class TestForLoopBreak(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_break_64x64"
@@ -513,8 +512,8 @@ class TestForLoopContinue(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_continue_64x64"
@@ -576,8 +575,8 @@ class TestForLoopBreakContinue(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type: BackendType | None = None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "for_loop_break_continue_64x64"
@@ -633,68 +632,68 @@ class TestForLoopBreakContinue(PTOTestCase):
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_add(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_add(self, test_runner, platform):
         """Test for loop wrapping tile add."""
-        result = test_runner.run(TestForLoopAdd(backend_type=backend))
+        result = test_runner.run(TestForLoopAdd(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_mul(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_mul(self, test_runner, platform):
         """Test for loop wrapping tile mul."""
-        result = test_runner.run(TestForLoopMul(backend_type=backend))
+        result = test_runner.run(TestForLoopMul(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_yield_add(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_yield_add(self, test_runner, platform):
         """Test for loop with yield carrying tensor across iterations."""
-        result = test_runner.run(TestForLoopYieldAdd(backend_type=backend))
+        result = test_runner.run(TestForLoopYieldAdd(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_yield_tile_accum(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_yield_tile_accum(self, test_runner, platform):
         """Test for loop with yield carrying tile accumulator across iterations."""
-        result = test_runner.run(TestForLoopYieldTileAccum(backend_type=backend))
+        result = test_runner.run(TestForLoopYieldTileAccum(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_if_yield_tensor(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_if_yield_tensor(self, test_runner, platform):
         """Test if-else with yield carrying tensors."""
-        result = test_runner.run(TestIfYieldTensor(backend_type=backend))
+        result = test_runner.run(TestIfYieldTensor(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_if_else_nested(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_if_else_nested(self, test_runner, platform):
         """Test if-else nested inside a for loop."""
-        result = test_runner.run(TestForIfElseNested(backend_type=backend))
+        result = test_runner.run(TestForIfElseNested(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_while_loop_add(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_while_loop_add(self, test_runner, platform):
         """Test while loop add (scf.while codegen)."""
-        result = test_runner.run(TestWhileLoopAdd(backend_type=backend))
+        result = test_runner.run(TestWhileLoopAdd(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_break(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_break(self, test_runner, platform):
         """Test for loop with break."""
-        result = test_runner.run(TestForLoopBreak(backend_type=backend))
+        result = test_runner.run(TestForLoopBreak(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_continue(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_continue(self, test_runner, platform):
         """Test for loop with continue."""
-        result = test_runner.run(TestForLoopContinue(backend_type=backend))
+        result = test_runner.run(TestForLoopContinue(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(reason="PTOAS BUG")
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_for_loop_break_continue(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_for_loop_break_continue(self, test_runner, platform):
         """Test for loop with break and continue."""
-        result = test_runner.run(TestForLoopBreakContinue(backend_type=backend))
+        result = test_runner.run(TestForLoopBreakContinue(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

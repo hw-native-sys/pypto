@@ -22,8 +22,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
+from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # --- Programs ---
@@ -122,9 +121,6 @@ class FillpadInplaceZeroTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [48, 64], DataType.FP32, init_value=torch.randn),
@@ -149,9 +145,6 @@ class FillpadInplaceMaxTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -178,9 +171,6 @@ class FillpadInplaceMinTestCase(PTOTestCase):
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
 
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
     def define_tensors(self) -> list[TensorSpec]:
         return [
             TensorSpec("input_tensor", [48, 64], DataType.FP32, init_value=torch.randn),
@@ -203,22 +193,22 @@ class FillpadInplaceMinTestCase(PTOTestCase):
 class TestFillpadInplace:
     """Test suite to verify fillpad_inplace fills padding region in place with different pad values."""
 
-    def test_fillpad_inplace_zero(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fillpad_inplace_zero(self, test_runner, platform):
         """Verify fillpad_inplace fills the padding region with 0.0."""
-        test_case = FillpadInplaceZeroTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadInplaceZeroTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fillpad_inplace_max(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fillpad_inplace_max(self, test_runner, platform):
         """Verify fillpad_inplace fills the padding region with FP32 max value."""
-        test_case = FillpadInplaceMaxTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadInplaceMaxTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_fillpad_inplace_min(self, test_runner):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fillpad_inplace_min(self, test_runner, platform):
         """Verify fillpad_inplace fills the padding region with FP32 min value (-inf)."""
-        test_case = FillpadInplaceMinTestCase()
-        result = test_runner.run(test_case)
+        result = test_runner.run(FillpadInplaceMinTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

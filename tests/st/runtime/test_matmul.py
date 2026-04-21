@@ -12,7 +12,7 @@ Tests for matrix multiplication operation using PyPTO frontend.
 
 This test validates the matmul operation implementation through the
 pto-testing-framework, ensuring correct code generation and execution.
-Each test case accepts an optional ``backend_type`` parameter so a single
+Each test case accepts an optional ``platform`` parameter so a single
 class can run on multiple platforms via ``@pytest.mark.parametrize``.
 """
 
@@ -30,8 +30,8 @@ class TestMatmul(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.K = k
         self.N = n
@@ -90,8 +90,8 @@ class TestMatmulBTranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.K = k
         self.N = n
@@ -152,8 +152,8 @@ class TestMatmulATranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.K = k
         self.N = n
@@ -214,8 +214,8 @@ class TestMatmulABTranspose(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, backend_type=None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, m: int = 64, k: int = 64, n: int = 64, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
         self.M = m
         self.K = k
         self.N = n
@@ -279,8 +279,8 @@ class TestMatmulAcc(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, backend_type=None, config=None):
-        super().__init__(config, backend_type=backend_type)
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
         return "matmulacc_64x64x64"
@@ -310,38 +310,38 @@ _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
 class TestMatmulOperations:
     """Test suite for matrix multiplication (matmul) operations."""
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _MATMUL_SHAPES)
-    def test_matmul(self, test_runner, backend, m, k, n):
+    def test_matmul(self, test_runner, platform, m, k, n):
         """Test matmul with configurable matrix dimensions."""
-        result = test_runner.run(TestMatmul(m=m, k=k, n=n, backend_type=backend))
+        result = test_runner.run(TestMatmul(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
-    def test_matmul_btranspose(self, test_runner, backend, m, k, n):
+    def test_matmul_btranspose(self, test_runner, platform, m, k, n):
         """Test matmul with B transposed (C = A @ B^T)."""
-        result = test_runner.run(TestMatmulBTranspose(m=m, k=k, n=n, backend_type=backend))
+        result = test_runner.run(TestMatmulBTranspose(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
-    def test_matmul_atranspose(self, test_runner, backend, m, k, n):
+    def test_matmul_atranspose(self, test_runner, platform, m, k, n):
         """Test matmul with A transposed (C = A^T @ B)."""
-        result = test_runner.run(TestMatmulATranspose(m=m, k=k, n=n, backend_type=backend))
+        result = test_runner.run(TestMatmulATranspose(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
+    @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _TRANSPOSE_SHAPES)
-    def test_matmul_abtranspose(self, test_runner, backend, m, k, n):
+    def test_matmul_abtranspose(self, test_runner, platform, m, k, n):
         """Test matmul with both A and B transposed (C = A^T @ B^T)."""
-        result = test_runner.run(TestMatmulABTranspose(m=m, k=k, n=n, backend_type=backend))
+        result = test_runner.run(TestMatmulABTranspose(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("backend", PLATFORMS)
-    def test_matmulacc(self, test_runner, backend):
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_matmulacc(self, test_runner, platform):
         """Test matmul with accumulation (K split into two chunks)."""
-        result = test_runner.run(TestMatmulAcc(backend_type=backend))
+        result = test_runner.run(TestMatmulAcc(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
