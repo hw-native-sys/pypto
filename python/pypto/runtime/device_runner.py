@@ -467,7 +467,7 @@ def execute_on_device(
     device_id: int,
     *,
     block_dim: int = 24,
-    aicpu_thread_num: int = 3,
+    aicpu_thread_num: int = 4,
     enable_profiling: bool = False,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
