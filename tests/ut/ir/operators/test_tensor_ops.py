@@ -2275,6 +2275,9 @@ class TestTensorCiOp:
         with pytest.raises(ValueError, match="innermost dimension"):
             tensor.ci(0, [32, 1], dtype=DataType.INT32)
 
+    def test_tensor_arange_alias_is_ci(self):
+        assert pl.tensor.arange is pl.tensor.ci
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -516,6 +516,9 @@ def ci(
     return _ir_core.create_op_call("tile.ci", [start_expr, shape_tuple], kwargs, actual_span)
 
 
+arange = ci
+
+
 def fillpad(tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None) -> Call:
     """Fill remaining tile elements with specified padding value.
 

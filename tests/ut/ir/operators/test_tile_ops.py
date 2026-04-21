@@ -2549,6 +2549,9 @@ class TestTileCiOp:
         with pytest.raises(ValueError, match="start.*dtype"):
             tile.ci(start, [4, 32], dtype=DataType.INT32)
 
+    def test_tile_arange_alias_is_ci(self):
+        assert pl.tile.arange is pl.tile.ci
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -116,6 +116,9 @@ def ci(
     return _ir_core.create_op_call("tensor.ci", [start_expr, shape_tuple], kwargs, actual_span)
 
 
+arange = ci
+
+
 def read(
     tensor: Expr, indices: Expr | list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
 ) -> Call:
