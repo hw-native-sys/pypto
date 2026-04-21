@@ -409,13 +409,13 @@ def test_system_ops_are_noops():
 
 
 def test_pipe_ops():
-    """tile.tpush/tpop should emit pipe simulation."""
+    """tile.tpush/tpop should emit pipe simulation with split support."""
     tile = _tile_var("tile", [64, 64])
     push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
     body = ir.EvalStmt(push_call, _span())
     func = _simple_function("f", [tile], body)
     code = torch_codegen(func)
-    assert "_pipes['to_aiv'].append" in code
+    assert "_tpush_to_aiv(_pipes['to_aiv'], tile, 0)" in code
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +815,978 @@ def test_variable_name_uniquing():
     assert cg._unique_name("a") == "a"
     assert cg._unique_name("a") == "a_1"
     assert cg._unique_name("a") == "a_2"
+
+
+# ---------------------------------------------------------------------------
+# Test: split-aware tpush/tpop
+# ---------------------------------------------------------------------------
+
+
+def test_tpush_no_split():
+    """tpush with split=0 should push whole tensor (backward compatible)."""
+    tile = _tile_var("tile", [64, 64])
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    body = ir.EvalStmt(push_call, _span())
+    func = _simple_function("f", [tile], body)
+    code = torch_codegen(func)
+    assert "_tpush_to_aiv(_pipes['to_aiv'], tile, 0)" in code
+
+
+def test_tpush_updown_split():
+    """tpush with split=1 (UpDown) should use the AIC->AIV split helper."""
+    tile = _tile_var("tile", [64, 64])
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 1})
+    body = ir.EvalStmt(push_call, _span())
+    func = _simple_function("f", [tile], body)
+    code = torch_codegen(func)
+    assert "_tpush_to_aiv(_pipes['to_aiv'], tile, 1)" in code
+
+
+def test_tpush_leftright_split():
+    """tpush with split=2 (LeftRight) should use the V2C helper."""
+    tile = _tile_var("tile", [64, 64])
+    push_call = _op_call("tile.tpush_to_aic", [tile], {"split": 2})
+    body = ir.EvalStmt(push_call, _span())
+    func = _simple_function("f", [tile], body)
+    code = torch_codegen(func)
+    assert "_tpush_to_aic(_pipes['to_aic'], tile, 2)" in code
+
+
+def test_tpop_no_split():
+    """tpop_from_aic with split=0 should pop whole tensor (backward compatible)."""
+    pop_call = _op_call("tile.tpop_from_aic", [], {"split": 0})
+    out = _tile_var("out", [64, 64])
+    assign = ir.AssignStmt(out, pop_call, _span())
+    func = _simple_function("f", [], assign)
+    code = torch_codegen(func)
+    # tpop_from_aic reads from the AIC→AIV pipe ('to_aiv')
+    assert "_tpop_from_aic(_pipes['to_aiv'], 0)" in code
+
+
+def test_tpop_updown_split():
+    """tpop_from_aiv with split=1 should still use the full-tile V2C helper."""
+    pop_call = _op_call("tile.tpop_from_aiv", [], {"split": 1})
+    out = _tile_var("out", [64, 64])
+    assign = ir.AssignStmt(out, pop_call, _span())
+    func = _simple_function("f", [], assign)
+    code = torch_codegen(func)
+    # tpop_from_aiv reads from the AIV→AIC pipe ('to_aic')
+    assert "_tpop_from_aiv(_pipes['to_aic'], 1)" in code
+
+
+def test_tpop_leftright_split():
+    """tpop_from_aic with split=2 should use the split-aware C2V helper."""
+    pop_call = _op_call("tile.tpop_from_aic", [], {"split": 2})
+    out = _tile_var("out", [64, 64])
+    assign = ir.AssignStmt(out, pop_call, _span())
+    func = _simple_function("f", [], assign)
+    code = torch_codegen(func)
+    # tpop_from_aic reads from the AIC→AIV pipe ('to_aiv')
+    assert "_tpop_from_aic(_pipes['to_aiv'], 2)" in code
+
+
+# ---------------------------------------------------------------------------
+# Test: numerical roundtrip for tpush/tpop with split
+# ---------------------------------------------------------------------------
+
+
+def test_numerical_roundtrip_tpush_tpop_no_split():
+    """End-to-end: tpush then tpop with no split should preserve data."""
+    tile = _tile_var("tile", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    pop_call = _op_call("tile.tpop_from_aic", [], {"split": 0})
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_call, _span()),
+            ir.AssignStmt(out, pop_call, _span()),
+            ir.ReturnStmt([out], _span()),
+        ],
+        _span(),
+    )
+    func = _simple_function("f", [tile], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    result = ns["f"](t)
+    assert torch.allclose(result, t)
+
+
+def test_numerical_roundtrip_tpush_tpop_updown_split():
+    """Legacy non-Group roundtrip: tpush(split=UpDown) + tpop reassembles full tile."""
+    tile = _tile_var("tile", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 1})
+    pop_call = _op_call("tile.tpop_from_aic", [], {"split": 1})
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_call, _span()),
+            ir.AssignStmt(out, pop_call, _span()),
+            ir.ReturnStmt([out], _span()),
+        ],
+        _span(),
+    )
+    func = _simple_function("f", [tile], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    result = ns["f"](t)
+    assert torch.allclose(result, t)
+
+
+def test_numerical_roundtrip_tpush_tpop_leftright_split():
+    """Legacy non-Group roundtrip: V2C tpush+tpop with split kwarg returns full tile.
+
+    Outside the scheduler we do not model two AIV subblocks pushing
+    independent halves; the legacy single-subblock path pushes the full
+    tile and pops the full tile, so split is informational only.
+    """
+    tile = _tile_var("tile", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    push_call = _op_call("tile.tpush_to_aic", [tile], {"split": 2})
+    pop_call = _op_call("tile.tpop_from_aiv", [], {"split": 2})
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_call, _span()),
+            ir.AssignStmt(out, pop_call, _span()),
+            ir.ReturnStmt([out], _span()),
+        ],
+        _span(),
+    )
+    func = _simple_function("f", [tile], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    result = ns["f"](t)
+    assert torch.allclose(result, t)
+
+
+# ---------------------------------------------------------------------------
+# Test: cross-core program simulation
+# ---------------------------------------------------------------------------
+
+
+def test_program_with_aic_aiv_functions():
+    """Program with AIC+AIV functions should emit both function definitions."""
+    span = _span()
+
+    # AIC function: takes tile, pushes to AIV
+    tile = _tile_var("tile", [4, 4])
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    aic_body = ir.EvalStmt(push_call, span)
+    aic_func = ir.Function("aic_compute", [tile], [], aic_body, span, type=ir.FunctionType.AIC)
+
+    # AIV function: pops from AIV, adds 1, returns
+    pop_op = ir.get_op("tile.tpop_from_aic")
+    pop_call = ir.Call(pop_op, [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+    out = _tile_var("out", [4, 4])
+    add_call = _op_call("tile.adds", [pop_call, _float(1.0)])
+    aiv_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(out, add_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    aiv_func = ir.Function(
+        "aiv_compute", [], [ir.TileType([4, 4], DataType.FP32)], aiv_body, span, type=ir.FunctionType.AIV
+    )
+
+    prog = _program([aic_func, aiv_func])
+    code = torch_codegen(prog)
+
+    assert "def aic_compute" in code
+    assert "def aiv_compute" in code
+    assert "_tpush_to_aiv" in code
+    assert "_tpop_from_aic" in code
+
+
+def test_program_with_group_function():
+    """Program with Group function should emit coordinated AIC+AIV calls."""
+    span = _span()
+
+    # AIC function
+    tile = _tile_var("tile", [4, 4])
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    aic_body = ir.EvalStmt(push_call, span)
+    aic_func = ir.Function("aic_kernel", [tile], [], aic_body, span, type=ir.FunctionType.AIC)
+
+    # AIV function
+    pop_op = ir.get_op("tile.tpop_from_aic")
+    pop_call = ir.Call(pop_op, [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+    out = _tile_var("out", [4, 4])
+    add_call = _op_call("tile.adds", [pop_call, _float(1.0)])
+    aiv_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(out, add_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    aiv_func = ir.Function(
+        "aiv_kernel", [], [ir.TileType([4, 4], DataType.FP32)], aiv_body, span, type=ir.FunctionType.AIV
+    )
+
+    # Group function that calls both
+    aic_gv = ir.GlobalVar("aic_kernel")
+    aiv_gv = ir.GlobalVar("aiv_kernel")
+    group_body = ir.SeqStmts(
+        [
+            ir.EvalStmt(ir.Call(aic_gv, [tile], span), span),
+            ir.EvalStmt(ir.Call(aiv_gv, [], span), span),
+        ],
+        span,
+    )
+    group_func = ir.Function(
+        "my_group", [tile], [ir.TileType([4, 4], DataType.FP32)], group_body, span, type=ir.FunctionType.Group
+    )
+
+    prog = _program([aic_func, aiv_func, group_func])
+    code = torch_codegen(prog)
+
+    assert "def aic_kernel" in code
+    assert "def aiv_kernel" in code
+    assert "def my_group" in code
+    assert "# Group:" in code
+
+
+def test_program_with_multiple_group_functions():
+    """Program with multiple Group functions should emit all with isolated variable scopes."""
+    span = _span()
+
+    # === Group 1: matmul pipeline ===
+    # AIC function for group 1
+    tile1 = _tile_var("tile", [4, 4])  # same name as tile2, but different scope
+    push_call1 = _op_call("tile.tpush_to_aiv", [tile1], {"split": 0})
+    aic_body1 = ir.EvalStmt(push_call1, span)
+    aic_func1 = ir.Function("aic_matmul", [tile1], [], aic_body1, span, type=ir.FunctionType.AIC)
+
+    # AIV function for group 1
+    pop_call1 = ir.Call(
+        ir.get_op("tile.tpop_from_aic"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+    out1 = _tile_var("out", [4, 4])
+    add_call1 = _op_call("tile.adds", [pop_call1, _float(1.0)])
+    aiv_body1 = ir.SeqStmts(
+        [ir.AssignStmt(out1, add_call1, span), ir.ReturnStmt([out1], span)],
+        span,
+    )
+    aiv_func1 = ir.Function(
+        "aiv_gelu", [], [ir.TileType([4, 4], DataType.FP32)], aiv_body1, span, type=ir.FunctionType.AIV
+    )
+
+    # Group 1 function
+    group_body1 = ir.SeqStmts(
+        [
+            ir.EvalStmt(ir.Call(ir.GlobalVar("aic_matmul"), [tile1], span), span),
+            ir.AssignStmt(out1, ir.Call(ir.GlobalVar("aiv_gelu"), [], span), span),
+            ir.ReturnStmt([out1], span),
+        ],
+        span,
+    )
+    group_func1 = ir.Function(
+        "matmul_pipeline",
+        [tile1],
+        [ir.TileType([4, 4], DataType.FP32)],
+        group_body1,
+        span,
+        type=ir.FunctionType.Group,
+    )
+
+    # === Group 2: activation pipeline (AIV pushes to AIC, AIC consumes) ===
+    # AIV function for group 2
+    tile2 = _tile_var("tile", [4, 4])  # same name as tile1
+    push_call2 = _op_call("tile.tpush_to_aic", [tile2], {"split": 0})
+    aiv_body2 = ir.EvalStmt(push_call2, span)
+    aiv_func2 = ir.Function("aiv_activation", [tile2], [], aiv_body2, span, type=ir.FunctionType.AIV)
+
+    # AIC function for group 2
+    pop_call2 = ir.Call(
+        ir.get_op("tile.tpop_from_aiv"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+    out2 = _tile_var("out", [4, 4])
+    mul_call2 = _op_call("tile.muls", [pop_call2, _float(2.0)])
+    aic_body2 = ir.SeqStmts(
+        [ir.AssignStmt(out2, mul_call2, span), ir.ReturnStmt([out2], span)],
+        span,
+    )
+    aic_func2 = ir.Function(
+        "aic_norm", [], [ir.TileType([4, 4], DataType.FP32)], aic_body2, span, type=ir.FunctionType.AIC
+    )
+
+    # Group 2 function
+    group_body2 = ir.SeqStmts(
+        [
+            ir.EvalStmt(ir.Call(ir.GlobalVar("aiv_activation"), [tile2], span), span),
+            ir.AssignStmt(out2, ir.Call(ir.GlobalVar("aic_norm"), [], span), span),
+            ir.ReturnStmt([out2], span),
+        ],
+        span,
+    )
+    group_func2 = ir.Function(
+        "activation_pipeline",
+        [tile2],
+        [ir.TileType([4, 4], DataType.FP32)],
+        group_body2,
+        span,
+        type=ir.FunctionType.Group,
+    )
+
+    # Build program with both groups
+    prog = _program([aic_func1, aiv_func1, aiv_func2, aic_func2, group_func1, group_func2])
+    code = torch_codegen(prog)
+
+    # Verify all functions are generated
+    assert "def aic_matmul" in code
+    assert "def aiv_gelu" in code
+    assert "def aiv_activation" in code
+    assert "def aic_norm" in code
+    assert "def matmul_pipeline" in code
+    assert "def activation_pipeline" in code
+
+    # Verify both Group comments are present
+    assert code.count("# Group:") == 2
+
+    # Execute and verify numerical correctness for both groups
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+
+    t = torch.randn(4, 4)
+
+    # Group 1: adds 1.0
+    result1 = ns["matmul_pipeline"](t)
+    assert torch.allclose(result1, t + 1.0, atol=1e-6)
+
+    # Group 2: multiplies by 2.0
+    result2 = ns["activation_pipeline"](t)
+    assert torch.allclose(result2, t * 2.0, atol=1e-6)
+
+
+def test_program_emits_entry_point():
+    """Program codegen should emit a run() entry point for Opaque functions."""
+    span = _span()
+
+    a = _tensor_var("a", [4, 4])
+    ret = ir.ReturnStmt([a], span)
+    func = ir.Function(
+        "main", [a], [ir.TensorType([4, 4], DataType.FP32)], ret, span, type=ir.FunctionType.Opaque
+    )
+    prog = _program([func])
+    code = torch_codegen(prog)
+
+    assert "def run(a):" in code
+    assert "return main(a)" in code
+
+
+def test_program_entry_point_sanitizes_parameter_names():
+    """Program entry point should sanitize/unique parameter names like function codegen."""
+    span = _span()
+
+    class_kw = _tensor_var("class", [4, 4])
+    duplicate = _tensor_var("class", [4, 4])
+    ret = ir.ReturnStmt([class_kw], span)
+    func = ir.Function(
+        "main",
+        [class_kw, duplicate],
+        [ir.TensorType([4, 4], DataType.FP32)],
+        ret,
+        span,
+        type=ir.FunctionType.Opaque,
+    )
+    prog = _program([func])
+    code = torch_codegen(prog)
+
+    assert "def main(class_v, class_v_1):" in code
+    assert "def run(class_v, class_v_1):" in code
+    compile(code, "<generated>", "exec")
+
+
+def test_program_entry_point_prefers_orchestration():
+    """Program entry point should prefer Orchestration function over Opaque."""
+    span = _span()
+
+    a = _tensor_var("a", [4, 4])
+
+    opaque_ret = ir.ReturnStmt([a], span)
+    opaque_func = ir.Function(
+        "helper", [a], [ir.TensorType([4, 4], DataType.FP32)], opaque_ret, span, type=ir.FunctionType.Opaque
+    )
+
+    orch_ret = ir.ReturnStmt([a], span)
+    orch_func = ir.Function(
+        "orch_main",
+        [a],
+        [ir.TensorType([4, 4], DataType.FP32)],
+        orch_ret,
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+
+    prog = _program([opaque_func, orch_func])
+    code = torch_codegen(prog)
+
+    assert "return orch_main(a)" in code
+
+
+# ---------------------------------------------------------------------------
+# Test: qwen3-style cross-core precision verification
+# ---------------------------------------------------------------------------
+
+
+def test_numerical_cross_core_matmul_residual():
+    """End-to-end cross-core: AIC does matmul, pushes to AIV, AIV adds residual.
+
+    Simulates the qwen3 pattern: output = matmul(a, b), then result = output + residual.
+    """
+    span = _span()
+
+    # AIC function: matmul then tpush
+    a = _tile_var("a", [4, 4])
+    b = _tile_var("b", [4, 4])
+    matmul_call = _op_call("tile.matmul", [a, b])
+    result = _tile_var("result", [4, 4])
+    push_call = _op_call("tile.tpush_to_aiv", [result], {"split": 0})
+    aic_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(result, matmul_call, span),
+            ir.EvalStmt(push_call, span),
+        ],
+        span,
+    )
+    aic_func = ir.Function("aic_matmul", [a, b], [], aic_body, span, type=ir.FunctionType.AIC)
+
+    # AIV function: tpop then add residual
+    residual = _tile_var("residual", [4, 4])
+    pop_op = ir.get_op("tile.tpop_from_aic")
+    pop_call = ir.Call(pop_op, [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+    out = _tile_var("out", [4, 4])
+    add_call = _op_call("tile.add", [pop_call, residual])
+    aiv_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(out, add_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    aiv_func = ir.Function(
+        "aiv_add_residual",
+        [residual],
+        [ir.TileType([4, 4], DataType.FP32)],
+        aiv_body,
+        span,
+        type=ir.FunctionType.AIV,
+    )
+
+    # Group function: calls AIC then AIV
+    aic_call = ir.Call(ir.GlobalVar("aic_matmul"), [a, b], span)
+    aiv_call = ir.Call(ir.GlobalVar("aiv_add_residual"), [residual], span)
+    group_body = ir.SeqStmts(
+        [
+            ir.EvalStmt(aic_call, span),
+            ir.AssignStmt(out, aiv_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    group_func = ir.Function(
+        "matmul_add_group",
+        [a, b, residual],
+        [ir.TileType([4, 4], DataType.FP32)],
+        group_body,
+        span,
+        type=ir.FunctionType.Group,
+    )
+
+    prog = _program([aic_func, aiv_func, group_func])
+    code = torch_codegen(prog)
+
+    # Execute and verify
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+
+    t_a = torch.randn(4, 4)
+    t_b = torch.randn(4, 4)
+    t_residual = torch.randn(4, 4)
+
+    result_val = ns["matmul_add_group"](t_a, t_b, t_residual)
+    expected = torch.matmul(t_a, t_b).float() + t_residual
+    assert torch.allclose(result_val, expected, atol=1e-5)
+
+
+def _build_cross_core_matmul_residual_program(split: int) -> ir.Program:
+    """Build a cross-core Program: AIC matmul → tpush → AIV tpop + add residual.
+
+    For split == 0: AIV pops the full tile, adds residual, returns it; the
+    Group binds the AIV return to ``out`` and returns it.  For split > 0:
+    the kernel is restructured as a bidirectional roundtrip — AIC pushes the
+    matmul output split, each AIV subblock pops its half, adds the matching
+    half of residual (sliced via ``tile.get_subblock_idx``), pushes the
+    half-result back to AIC; AIC pops with the same split and reassembles
+    the full tile, storing into the ``out`` output tensor.  The Group has
+    no return value in this mode (``out`` is an output param).
+    """
+    span = _span()
+
+    if split == 0:
+        a = _tile_var("a", [4, 4])
+        b = _tile_var("b", [4, 4])
+        matmul_call = _op_call("tile.matmul", [a, b])
+        result = _tile_var("result", [4, 4])
+        push_call = _op_call("tile.tpush_to_aiv", [result], {"split": 0})
+        aic_body = ir.SeqStmts(
+            [ir.AssignStmt(result, matmul_call, span), ir.EvalStmt(push_call, span)],
+            span,
+        )
+        aic_func = ir.Function("aic_matmul", [a, b], [], aic_body, span, type=ir.FunctionType.AIC)
+
+        residual = _tile_var("residual", [4, 4])
+        pop_op = ir.get_op("tile.tpop_from_aic")
+        pop_call = ir.Call(pop_op, [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+        out = _tile_var("out", [4, 4])
+        add_call = _op_call("tile.add", [pop_call, residual])
+        aiv_body = ir.SeqStmts(
+            [ir.AssignStmt(out, add_call, span), ir.ReturnStmt([out], span)],
+            span,
+        )
+        aiv_func = ir.Function(
+            "aiv_add_residual",
+            [residual],
+            [ir.TileType([4, 4], DataType.FP32)],
+            aiv_body,
+            span,
+            type=ir.FunctionType.AIV,
+        )
+
+        aic_call = ir.Call(ir.GlobalVar("aic_matmul"), [a, b], span)
+        aiv_call = ir.Call(ir.GlobalVar("aiv_add_residual"), [residual], span)
+        group_body = ir.SeqStmts(
+            [
+                ir.EvalStmt(aic_call, span),
+                ir.AssignStmt(out, aiv_call, span),
+                ir.ReturnStmt([out], span),
+            ],
+            span,
+        )
+        group_func = ir.Function(
+            "matmul_add_group",
+            [a, b, residual],
+            [ir.TileType([4, 4], DataType.FP32)],
+            group_body,
+            span,
+            type=ir.FunctionType.Group,
+        )
+        return _program([aic_func, aiv_func, group_func])
+
+    # split > 0: bidirectional roundtrip with reassembly at AIC.  Output is a
+    # full-shape tensor written via tile.store at offset (0, 0).
+    full_shape = [4, 4]
+
+    # AIC: result = matmul(a, b); tpush_to_aiv(result, split); reassembled =
+    # tpop_from_aiv(split); store(reassembled, (0,0), out_tensor)
+    a = _tile_var("a", full_shape)
+    b = _tile_var("b", full_shape)
+    out_tensor = _tensor_var("out_tensor", full_shape)
+    matmul_call = _op_call("tile.matmul", [a, b])
+    result = _tile_var("result", full_shape)
+    push_call = _op_call("tile.tpush_to_aiv", [result], {"split": split})
+    pop_back_op = ir.get_op("tile.tpop_from_aiv")
+    pop_back_call = ir.Call(
+        pop_back_op,
+        [],
+        {"split": split},
+        ir.TileType(full_shape, DataType.FP32),
+        span,
+    )
+    reassembled = _tile_var("reassembled", full_shape)
+    offsets_zero = ir.MakeTuple([_int(0), _int(0)], span)
+    store_call = _op_call("tile.store", [reassembled, offsets_zero, out_tensor])
+    aic_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(result, matmul_call, span),
+            ir.EvalStmt(push_call, span),
+            ir.AssignStmt(reassembled, pop_back_call, span),
+            ir.EvalStmt(store_call, span),
+        ],
+        span,
+    )
+    aic_func = ir.Function(
+        "aic_matmul",
+        [a, b, out_tensor],
+        [],
+        aic_body,
+        span,
+        type=ir.FunctionType.AIC,
+    )
+
+    # AIV body (runs once per subblock): pop half from AIC, add the matching
+    # half of residual sliced by subblock_idx, push back to AIC.
+    if split == 1:  # UpDown
+        half_shape = [full_shape[0] // 2, full_shape[1]]
+        # offset along dim 0 = subblock_idx * (H/2)
+        offset_dim0 = ir.Mul(
+            ir.create_op_call("tile.get_subblock_idx", [], span),
+            _int(half_shape[0]),
+            DataType.INT64,
+            span,
+        )
+        slice_offsets = ir.MakeTuple([offset_dim0, _int(0)], span)
+    else:  # LeftRight
+        half_shape = [full_shape[0], full_shape[1] // 2]
+        offset_dim1 = ir.Mul(
+            ir.create_op_call("tile.get_subblock_idx", [], span),
+            _int(half_shape[1]),
+            DataType.INT64,
+            span,
+        )
+        slice_offsets = ir.MakeTuple([_int(0), offset_dim1], span)
+
+    residual_full = _tile_var("residual", full_shape)
+    pop_op = ir.get_op("tile.tpop_from_aic")
+    pop_call = ir.Call(
+        pop_op,
+        [],
+        {"split": split},
+        ir.TileType(half_shape, DataType.FP32),
+        span,
+    )
+    popped_half = _tile_var("popped_half", half_shape)
+    half_shape_tuple = ir.MakeTuple([_int(d) for d in half_shape], span)
+    residual_half_call = _op_call("tile.slice", [residual_full, half_shape_tuple, slice_offsets])
+    residual_half = _tile_var("residual_half", half_shape)
+    add_call = _op_call("tile.add", [popped_half, residual_half])
+    add_half = _tile_var("add_half", half_shape)
+    push_back_call = _op_call("tile.tpush_to_aic", [add_half], {"split": split})
+    aiv_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(popped_half, pop_call, span),
+            ir.AssignStmt(residual_half, residual_half_call, span),
+            ir.AssignStmt(add_half, add_call, span),
+            ir.EvalStmt(push_back_call, span),
+        ],
+        span,
+    )
+    aiv_func = ir.Function(
+        "aiv_add_residual",
+        [residual_full],
+        [],
+        aiv_body,
+        span,
+        type=ir.FunctionType.AIV,
+    )
+
+    aic_call = ir.Call(ir.GlobalVar("aic_matmul"), [a, b, out_tensor], span)
+    aiv_call = ir.Call(ir.GlobalVar("aiv_add_residual"), [residual_full], span)
+    group_body = ir.SeqStmts(
+        [
+            ir.EvalStmt(aic_call, span),
+            ir.EvalStmt(aiv_call, span),
+        ],
+        span,
+    )
+    group_func = ir.Function(
+        "matmul_add_group",
+        [a, b, residual_full, out_tensor],
+        [],
+        group_body,
+        span,
+        type=ir.FunctionType.Group,
+    )
+    return _program([aic_func, aiv_func, group_func])
+
+
+def test_numerical_cross_core_matmul_residual_updown_split():
+    """Cross-core matmul+residual with UpDown split=1, full-tile correctness.
+
+    The Group runs as a bidirectional scheduler: AIC pushes split=1, both AIV
+    subblocks pop their halves and add the matching half of residual, push
+    back, AIC reassembles into the full output.
+    """
+    prog = _build_cross_core_matmul_residual_program(split=1)
+    code = torch_codegen(prog)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+
+    t_a = torch.randn(4, 4)
+    t_b = torch.randn(4, 4)
+    t_residual = torch.randn(4, 4)
+    t_out = torch.zeros(4, 4)
+
+    ns["matmul_add_group"](t_a, t_b, t_residual, t_out)
+    expected = torch.matmul(t_a, t_b).float() + t_residual
+    assert torch.allclose(t_out, expected, atol=1e-5)
+
+
+def test_numerical_cross_core_matmul_residual_leftright_split():
+    """Cross-core matmul+residual with LeftRight split=2, full-tile correctness."""
+    prog = _build_cross_core_matmul_residual_program(split=2)
+    code = torch_codegen(prog)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+
+    t_a = torch.randn(4, 4)
+    t_b = torch.randn(4, 4)
+    t_residual = torch.randn(4, 4)
+    t_out = torch.zeros(4, 4)
+
+    ns["matmul_add_group"](t_a, t_b, t_residual, t_out)
+    expected = torch.matmul(t_a, t_b).float() + t_residual
+    assert torch.allclose(t_out, expected, atol=1e-5)
+
+
+def test_nested_tpop_in_expression():
+    """tpop used directly inside tile.add (nested Call) should work via dispatch workaround."""
+    span = _span()
+
+    tile = _tile_var("tile", [4, 4])
+    residual = _tile_var("residual", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    # Build: out = tile.add(tpop_from_aic(), residual) — tpop nested inside add
+    pop_op = ir.get_op("tile.tpop_from_aic")
+    pop_call = ir.Call(pop_op, [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+    add_call = _op_call("tile.add", [pop_call, residual])
+
+    # Push first, then pop inside add
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_call, span),
+            ir.AssignStmt(out, add_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    func = _simple_function("f", [tile, residual], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    # Verify nested tpop is generated correctly
+    assert "_tpop_from_aic(" in code
+
+    # Execute and verify numerical correctness
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    r = torch.randn(4, 4)
+    result_val = ns["f"](t, r)
+    assert torch.allclose(result_val, t + r, atol=1e-6)
+
+
+def test_bidirectional_pipe_communication():
+    """AIC → tpush_to_aiv → AIV tpop_from_aic → tpush_to_aic → AIC tpop_from_aiv: bidirectional pipes."""
+    span = _span()
+
+    tile = _tile_var("tile", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    # Step 1: push to to_aiv pipe (AIC→AIV direction)
+    push_to_aiv = _op_call("tile.tpush_to_aiv", [tile], {"split": 0})
+    # Step 2: pop from to_aiv pipe (AIV reads data from AIC)
+    pop_from_aic = ir.Call(
+        ir.get_op("tile.tpop_from_aic"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+    mid = _tile_var("mid", [4, 4])
+    # Step 3: push to to_aic pipe (AIV→AIC direction)
+    push_to_aic = _op_call("tile.tpush_to_aic", [mid], {"split": 0})
+    # Step 4: pop from to_aic pipe (AIC reads data from AIV)
+    pop_from_aiv = ir.Call(
+        ir.get_op("tile.tpop_from_aiv"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_to_aiv, span),
+            ir.AssignStmt(mid, pop_from_aic, span),
+            ir.EvalStmt(push_to_aic, span),
+            ir.AssignStmt(out, pop_from_aiv, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    func = _simple_function("f", [tile], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    assert "_pipes['to_aiv']" in code
+    assert "_pipes['to_aic']" in code
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    result_val = ns["f"](t)
+    assert torch.allclose(result_val, t, atol=1e-6)
+
+
+def test_pipe_empty_after_balanced_pushpop():
+    """After pushing N times and popping N times, the pipe should be empty."""
+    span = _span()
+
+    t1 = _tile_var("t1", [4, 4])
+    t2 = _tile_var("t2", [4, 4])
+    o1 = _tile_var("o1", [4, 4])
+    o2 = _tile_var("o2", [4, 4])
+
+    push1 = _op_call("tile.tpush_to_aiv", [t1], {"split": 0})
+    push2 = _op_call("tile.tpush_to_aiv", [t2], {"split": 0})
+    pop1 = ir.Call(
+        ir.get_op("tile.tpop_from_aic"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+    pop2 = ir.Call(
+        ir.get_op("tile.tpop_from_aic"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span
+    )
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push1, span),
+            ir.EvalStmt(push2, span),
+            ir.AssignStmt(o1, pop1, span),
+            ir.AssignStmt(o2, pop2, span),
+            ir.ReturnStmt([o1, o2], span),
+        ],
+        span,
+    )
+    func = _simple_function(
+        "f", [t1, t2], body, [ir.TileType([4, 4], DataType.FP32), ir.TileType([4, 4], DataType.FP32)]
+    )
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    a = torch.randn(4, 4)
+    b = torch.randn(4, 4)
+    r1, r2 = ns["f"](a, b)
+
+    # FIFO order: first pushed = first popped
+    assert torch.allclose(r1, a, atol=1e-6)
+    assert torch.allclose(r2, b, atol=1e-6)
+
+    # Pipe should be empty after balanced push/pop
+    assert len(ns["_pipes"]["to_aiv"]) == 0
+
+
+def test_tpop_from_aiv_split_keeps_full_tile_with_shape_checks():
+    """AIC-side tpop_from_aiv must keep full-tile shape under split mode."""
+    span = _span()
+
+    tile = _tile_var("tile", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    push_call = _op_call("tile.tpush_to_aic", [tile], {"split": 1})
+    pop_call = ir.Call(
+        ir.get_op("tile.tpop_from_aiv"), [], {"split": 1}, ir.TileType([4, 4], DataType.FP32), span
+    )
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push_call, span),
+            ir.AssignStmt(out, pop_call, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    func = _simple_function("f", [tile], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func, check_shapes=True)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    result = ns["f"](t)
+    assert torch.allclose(result, t, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Test: edge cases and error handling
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_split_mode_fallback():
+    """Invalid split_mode (not 0, 1, 2) should fallback to no-split behavior."""
+    span = _span()
+
+    # Test split=3 (invalid)
+    tile = _tile_var("tile", [4, 4])
+    push_call = _op_call("tile.tpush_to_aiv", [tile], {"split": 3})
+    body = ir.EvalStmt(push_call, span)
+    func = _simple_function("f", [tile], body)
+    code = torch_codegen(func)
+
+    # Should fallback to no-split: push 1 chunk
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    t = torch.randn(4, 4)
+    ns["f"](t)
+    # Pipe should have 1 element (not 2 like split=1 or split=2)
+    assert len(ns["_pipes"]["to_aiv"]) == 1
+
+
+def test_pop_from_empty_pipe_raises():
+    """Popping from an empty pipe should raise IndexError."""
+    span = _span()
+
+    # Function that only pops without pushing
+    pop_call = _op_call("tile.tpop_from_aic", [], {"split": 0})
+    out = _tile_var("out", [4, 4])
+    body = ir.AssignStmt(out, pop_call, span)
+    func = _simple_function("f", [], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+
+    # Should raise IndexError when popping from empty pipe
+    with pytest.raises(IndexError, match="pop from an empty"):
+        ns["f"]()
+
+
+def test_unbalanced_push_pop_pipe_state():
+    """Push 2 times, pop 1 time: pipe should have 1 element remaining."""
+    span = _span()
+
+    t1 = _tile_var("t1", [4, 4])
+    t2 = _tile_var("t2", [4, 4])
+    out = _tile_var("out", [4, 4])
+
+    push1 = _op_call("tile.tpush_to_aiv", [t1], {"split": 0})
+    push2 = _op_call("tile.tpush_to_aiv", [t2], {"split": 0})
+    pop = ir.Call(ir.get_op("tile.tpop_from_aic"), [], {"split": 0}, ir.TileType([4, 4], DataType.FP32), span)
+
+    body = ir.SeqStmts(
+        [
+            ir.EvalStmt(push1, span),
+            ir.EvalStmt(push2, span),
+            ir.AssignStmt(out, pop, span),
+            ir.ReturnStmt([out], span),
+        ],
+        span,
+    )
+    func = _simple_function("f", [t1, t2], body, [ir.TileType([4, 4], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    a = torch.randn(4, 4)
+    b = torch.randn(4, 4)
+    result = ns["f"](a, b)
+
+    # First pushed should be popped (FIFO)
+    assert torch.allclose(result, a, atol=1e-6)
+
+    # Pipe should have 1 element remaining (second push)
+    assert len(ns["_pipes"]["to_aiv"]) == 1
+    # The remaining element should be the second pushed
+    assert torch.allclose(ns["_pipes"]["to_aiv"][0], b, atol=1e-6)
 
 
 if __name__ == "__main__":
