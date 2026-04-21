@@ -219,7 +219,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 **Location**: `src/ir/op/tensor_ops/`
 **Python API**: `from pypto.ir.op import tensor`
 
-**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.set_validshape` (internal, update valid-shape metadata without data movement — compiler-generated only), `tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2` (sorting; tensor-level counterparts of `tile.sort32` / `tile.mrgsort` — converted to tile ops by `ConvertTensorToTileOps`), `tensor.gather` (per-dim indexing; MVP supports rank-2 inputs with `dim=-1` and lowers to a per-row `tile.gather` loop via `ConvertTensorToTileOps`), `tensor.gather_mask` (mask-pattern gather; tensor-level counterpart of `tile.gather_mask`, with optional same-bit-width `output_dtype`)
+**Operations:** `tensor.add/sub/mul/div` (element-wise with full N-D broadcasting), `tensor.set_validshape` (internal, update valid-shape metadata without data movement — compiler-generated only), `tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2` (sorting; tensor-level counterparts of `tile.sort32` / `tile.mrgsort` — converted to tile ops by `ConvertTensorToTileOps`), `tensor.gather` (per-dim indexing; MVP supports rank-2 inputs with `dim=-1` and lowers to a per-row `tile.gather` loop via `ConvertTensorToTileOps`), `tensor.gather_mask` (mask-pattern gather; tensor-level counterpart of `tile.gather_mask`, with optional same-bit-width `output_dtype`), `tensor.ci` / `tensor.arange` (contiguous integer sequence generation; lowers to `tile.ci`)
 
 **Example:**
 
@@ -258,6 +258,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match) |
 | - | `tile.transpose` | Swap two axes of a tile |
 | - | `tile.set_validshape` | Update valid-shape metadata without data movement |
+| - | `tile.ci` | Generate contiguous integer sequence (start + k / start - k); dtype ∈ {INT16, INT32}; innermost dim != 1 |
 | **Reduction** | `tile.sum` | Reduction along axis (axis, keepdim) |
 
 **Data Flow:** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`

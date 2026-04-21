@@ -33,6 +33,8 @@ __all__ = [
     "concat",
     "move",
     "full",
+    "ci",
+    "arange",
     "fillpad",
     "fillpad_inplace",
     "get_block_idx",
@@ -412,6 +414,33 @@ def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     """
     call_expr = _ir_ops.full(shape, dtype, value)
     return Tile(expr=call_expr)
+
+
+def ci(
+    start: int | Scalar,
+    shape: Sequence[int],
+    dtype: DataType = DataType.INT32,
+    descending: bool = False,
+) -> Tile:
+    """Generate a contiguous integer sequence into a tile.
+
+    Equivalent to ``numpy.arange``-style index generation. Maps to ``pto.tci``.
+
+    Args:
+        start: Starting integer (plain int or a Scalar). Must match ``dtype``.
+        shape: Shape of the destination tile (static, innermost dim != 1).
+        dtype: Destination dtype. One of {INT16, INT32}. Defaults to INT32.
+        descending: If True, generate a descending sequence.
+
+    Returns:
+        Tile wrapping the ci operation.
+    """
+    start_expr = start.unwrap() if isinstance(start, Scalar) else start
+    call_expr = _ir_ops.ci(start_expr, list(shape), dtype=dtype, descending=descending)
+    return Tile(expr=call_expr)
+
+
+arange = ci
 
 
 def fillpad(tile: Tile, pad_value: PadValue | int | float = PadValue.zero) -> Tile:

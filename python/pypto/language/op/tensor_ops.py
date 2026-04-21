@@ -26,6 +26,8 @@ __all__ = [
     "slice",
     "fillpad",
     "full",
+    "ci",
+    "arange",
     "matmul",
     "matmul_acc",
     "mul",
@@ -263,6 +265,33 @@ def full(shape: Sequence[IntLike], dtype: DataType, value: int | float) -> Tenso
     """
     call_expr = _ir_ops.full(_normalize_intlike(shape), dtype, value)
     return Tensor(expr=call_expr)
+
+
+def ci(
+    start: int | Scalar,
+    shape: Sequence[IntLike],
+    dtype: DataType = DataType.INT32,
+    descending: bool = False,
+) -> Tensor:
+    """Generate a contiguous integer sequence into a tensor.
+
+    Equivalent to ``numpy.arange`` / ``torch.arange``. Lowers to ``tile.ci`` → ``pto.tci``.
+
+    Args:
+        start: Starting integer (plain int or Scalar). Must match ``dtype``.
+        shape: Destination tensor shape (innermost dim != 1).
+        dtype: Destination dtype. One of {INT16, INT32}. Defaults to INT32.
+        descending: If True, generate a descending sequence.
+
+    Returns:
+        Tensor wrapping the ci operation.
+    """
+    start_expr = start.unwrap() if isinstance(start, Scalar) else start
+    call_expr = _ir_ops.ci(start_expr, _normalize_intlike(shape), dtype=dtype, descending=descending)
+    return Tensor(expr=call_expr)
+
+
+arange = ci
 
 
 def matmul(

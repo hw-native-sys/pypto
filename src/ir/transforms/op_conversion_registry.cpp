@@ -164,6 +164,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.set_validshape", "tile.set_validshape");
 
   RegisterSimple("tensor.full", "tile.full");
+  RegisterSimple("tensor.ci", "tile.ci");
 }
 
 // ============================================================================

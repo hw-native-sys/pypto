@@ -2248,5 +2248,33 @@ def test_tensor_gather_rejects_mixed_index_and_mask():
         ir.op.tensor.gather(inp, dim=-1, index=idx, mask_pattern=1)
 
 
+class TestTensorCiOp:
+    """Tests for tensor.ci (contiguous integer sequence)."""
+
+    def test_tensor_ci_ascending(self):
+        call = tensor.ci(0, [4, 32], dtype=DataType.INT32)
+        t = call.type
+        assert isinstance(t, ir.TensorType)
+        assert t.dtype == DataType.INT32
+        assert len(t.shape) == 2
+        assert "tensor.ci" in str(call)
+
+    def test_tensor_ci_descending_kwarg_printed(self):
+        call = tensor.ci(10, [2, 16], dtype=DataType.INT32, descending=True)
+        assert "descending=True" in str(call)
+
+    def test_tensor_ci_rejects_float_dtype(self):
+        with pytest.raises(ValueError, match=r"INT16.*INT32"):
+            tensor.ci(0, [4, 32], dtype=DataType.FP32)
+
+    def test_tensor_ci_rejects_uint_dtype(self):
+        with pytest.raises(ValueError, match=r"INT16.*INT32"):
+            tensor.ci(0, [2, 16], dtype=DataType.UINT32)
+
+    def test_tensor_ci_rejects_cols_equal_one(self):
+        with pytest.raises(ValueError, match="innermost dimension"):
+            tensor.ci(0, [32, 1], dtype=DataType.INT32)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

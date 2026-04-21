@@ -216,7 +216,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 **位置**：`src/ir/op/tensor_ops/`
 **Python API**：`from pypto.ir.op import tensor`
 
-**操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.set_validshape`（内部 API，更新 valid_shape 元数据，不搬移数据 — 仅供编译器生成代码使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（按维索引；MVP 仅支持 2D 输入 + `dim=-1`，由 `ConvertTensorToTileOps` 按行展开为 `tile.gather` 循环），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`）
+**操作：** `tensor.add/sub/mul/div`（逐元素，支持完整 N 维广播），`tensor.set_validshape`（内部 API，更新 valid_shape 元数据，不搬移数据 — 仅供编译器生成代码使用），`tensor.sort32` / `tensor.mrgsort_format1` / `tensor.mrgsort_format2`（排序；分别对应 `tile.sort32` / `tile.mrgsort` 的 tensor 层接口，由 `ConvertTensorToTileOps` 转换为 tile 操作），`tensor.gather`（按维索引；MVP 仅支持 2D 输入 + `dim=-1`，由 `ConvertTensorToTileOps` 按行展开为 `tile.gather` 循环），`tensor.gather_mask`（掩码模式选择；对应 `tile.gather_mask`，支持可选同位宽 `output_dtype`），`tensor.ci` / `tensor.arange`（生成连续整数序列，下层降到 `tile.ci`）
 
 **示例：**
 
@@ -255,6 +255,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致） |
 | - | `tile.transpose` | 交换 tile 的两个轴 |
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |
+| - | `tile.ci` | 生成连续整数序列（升序 start+k 或降序 start-k）；dtype ∈ {INT16, INT32}；最内维 != 1 |
 | **规约** | `tile.sum` | 沿轴规约（axis, keepdim） |
 
 **数据流：** `TensorType (DDR) → tile.load → TileType (Unified Buffer) → tile.{ops} → TileType → tile.store → TensorType (DDR)`

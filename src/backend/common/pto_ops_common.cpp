@@ -456,13 +456,25 @@ static std::string MakeAssignCodegenPTO(const std::string& pto_op_name, const Ca
 static std::string MakeCiCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                     codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 1) << "Operation:[" << pto_op_name << "] requires 1 argument, but got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name
+                               << "] requires 2 arguments (start, shape), but got " << op->args_.size();
   bool descending = op->GetKwarg<bool>("descending");
   std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string config_attr = descending ? "{descending = true}" : "{descending = false}";
   std::string dst = codegen.GetCurrentResultTarget();
-  codegen.Emit(pto_op_name + " ins(" + src + " " + config_attr + ") outs(" + dst + ")");
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  std::ostringstream oss;
+  oss << pto_op_name << " ins(" << src << " " << config_attr;
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
   return "";
 }
 

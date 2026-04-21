@@ -388,6 +388,62 @@ TypePtr DeduceTileFullType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
 }
 
+TypePtr DeduceTileCiType(const std::vector<ExprPtr>& args,
+                         const std::vector<std::pair<std::string, std::any>>& kwargs,
+                         const std::string& op_name) {
+  // tile.ci signature: (start, shape) with attrs {dtype, descending}
+  CHECK(args.size() == 2) << "The operator " << op_name
+                          << " requires exactly 2 arguments (start, shape), but got " << args.size();
+
+  // Extract dtype and validate it is one of the supported integer types.
+  DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
+  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32)
+      << "The operator " << op_name << " requires dtype to be one of {INT16, INT32}, but got "
+      << dtype.ToString();
+
+  // First argument is the scalar start value; its dtype must match the destination dtype.
+  auto start_scalar_type = As<ScalarType>(args[0]->GetType());
+  CHECK(start_scalar_type) << "The operator " << op_name
+                           << " requires first argument 'start' to be a scalar, but got "
+                           << args[0]->GetType()->TypeName();
+  CHECK(start_scalar_type->dtype_ == dtype)
+      << "The operator " << op_name << " requires 'start' dtype (" << start_scalar_type->dtype_.ToString()
+      << ") to match destination dtype (" << dtype.ToString() << ")";
+
+  // Second argument must be a MakeTuple of static ConstInt elements.
+  auto make_tuple = As<MakeTuple>(args[1]);
+  CHECK(make_tuple)
+      << "The operator " << op_name
+      << " requires second argument 'shape' to be a MakeTuple of compile-time constants, but got "
+      << args[1]->TypeName();
+
+  std::vector<ExprPtr> tile_shape;
+  tile_shape.reserve(make_tuple->elements_.size());
+  for (size_t i = 0; i < make_tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(make_tuple->elements_[i]);
+    CHECK(const_int) << "The operator " << op_name << " shape element " << i
+                     << " must be a compile-time constant (ConstInt), but got "
+                     << make_tuple->elements_[i]->TypeName();
+    CHECK(const_int->value_ > 0) << "The operator " << op_name << " shape element " << i
+                                 << " must be positive, got " << const_int->value_;
+    tile_shape.push_back(make_tuple->elements_[i]);
+  }
+  CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
+
+  // ISA constraint: destination Cols != 1 (column vectors not supported by pto.tci).
+  auto last_dim = As<ConstInt>(tile_shape.back());
+  CHECK(last_dim && last_dim->value_ != 1)
+      << "The operator " << op_name << " requires the innermost dimension (Cols) to be != 1, got "
+      << (last_dim ? last_dim->value_ : -1);
+
+  // descending kwarg is optional and defaults to false; just validate type if provided.
+  (void)GetKwarg<bool>(kwargs, "descending");
+
+  TileView tile_view;
+  tile_view.valid_shape = tile_shape;
+  return std::make_shared<TileType>(tile_shape, dtype, std::nullopt, tile_view);
+}
+
 TypePtr DeduceTileReadType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -681,6 +737,19 @@ REGISTER_OP("tile.full")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileFullType(args, kwargs, "tile.full");
+    });
+
+REGISTER_OP("tile.ci")
+    .set_op_category("TileOp")
+    .set_description("Generate a contiguous integer sequence into a destination tile (pto.tci)")
+    .add_argument("start", "Starting integer scalar (must match dst dtype)")
+    .add_argument("shape", "Destination shape (TupleType of ConstInt)")
+    .set_attr<DataType>("dtype")
+    .set_attr<bool>("descending")
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileCiType(args, kwargs, "tile.ci");
     });
 
 }  // namespace ir

@@ -1764,6 +1764,30 @@ class TestTensorFullConversion:
         assert "tensor.full" not in ir_str
 
 
+class TestTensorCiConversion:
+    def test_tensor_ci_conversion(self):
+        """tensor.ci -> tile.ci conversion preserves dtype + descending kwargs."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[4, 32], pl.INT32]) -> pl.Tensor[[4, 32], pl.INT32]:
+                idx: pl.Tensor[[4, 32], pl.INT32] = pl.tensor.ci(0, [4, 32], dtype=pl.INT32, descending=True)
+                y: pl.Tensor[[4, 32], pl.INT32] = pl.add(idx, x)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[4, 32], pl.INT32]) -> pl.Tensor[[4, 32], pl.INT32]:
+                y: pl.Tensor[[4, 32], pl.INT32] = self.main_incore_0(x)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.ci" in ir_str
+        assert "tensor.ci" not in ir_str
+        assert "descending=True" in ir_str
+
+
 class TestAssembleParentStride:
     """Tests for physical stride propagation when assemble is in orchestration."""
 

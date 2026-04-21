@@ -480,6 +480,42 @@ def full(
     return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
+def ci(
+    start: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    dtype: DataType = DataType.INT32,
+    descending: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Generate a contiguous integer sequence into a tile (pto.tci).
+
+    For a linearized index ``k`` over the valid elements:
+    - Ascending: ``dst[k] = start + k``
+    - Descending: ``dst[k] = start - k``
+
+    Args:
+        start: Starting integer (plain int or a scalar Expr). Its dtype must match ``dtype``.
+        shape: Destination tile shape (static).
+        dtype: Destination dtype. Must be one of {INT16, INT32}.
+        descending: If True, generate a descending sequence.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression that returns a TileType with the generated sequence.
+    """
+    actual_span = _get_span_or_capture(span)
+    if isinstance(start, Expr):
+        if isinstance(start, ConstInt) and start.dtype != dtype:
+            start_expr = ConstInt(start.value, dtype, actual_span)
+        else:
+            start_expr = start
+    else:
+        start_expr = ConstInt(start, dtype, actual_span)
+    shape_tuple = _to_make_tuple(shape, actual_span)
+    kwargs: dict[str, Any] = {"dtype": dtype, "descending": descending}
+    return _ir_core.create_op_call("tile.ci", [start_expr, shape_tuple], kwargs, actual_span)
+
+
 def fillpad(tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None) -> Call:
     """Fill remaining tile elements with specified padding value.
 

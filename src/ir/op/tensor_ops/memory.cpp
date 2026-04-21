@@ -412,6 +412,79 @@ REGISTER_OP("tensor.full")
       return DeduceTensorFullType(args, kwargs);
     });
 
+TypePtr DeduceTensorCiType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.ci signature: (start, shape) with attrs {dtype, descending}
+  CHECK(args.size() == 2) << "tensor.ci requires exactly 2 arguments (start, shape), but got " << args.size();
+
+  bool found_dtype = false;
+  DataType dtype;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dtype") {
+      dtype = AnyCast<DataType>(value, "kwarg key: dtype");
+      found_dtype = true;
+      break;
+    }
+  }
+  CHECK(found_dtype) << "tensor.ci requires 'dtype' kwarg";
+  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32)
+      << "tensor.ci dtype must be one of {INT16, INT32}, but got " << dtype.ToString();
+
+  // First arg: start scalar; dtype must match destination dtype.
+  auto start_scalar_type = As<ScalarType>(args[0]->GetType());
+  CHECK(start_scalar_type) << "tensor.ci requires first argument 'start' to be a scalar, but got "
+                           << args[0]->GetType()->TypeName();
+  CHECK(start_scalar_type->dtype_ == dtype)
+      << "tensor.ci 'start' dtype (" << start_scalar_type->dtype_.ToString()
+      << ") must match destination dtype (" << dtype.ToString() << ")";
+
+  // Second arg: shape TupleType.
+  auto shape_tuple_type = As<TupleType>(args[1]->GetType());
+  CHECK(shape_tuple_type) << "tensor.ci requires shape to be TupleType, but got "
+                          << args[1]->GetType()->TypeName();
+
+  for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+    auto scalar_type = As<ScalarType>(shape_tuple_type->types_[i]);
+    CHECK(scalar_type) << "tensor.ci shape element " << i << " must be ScalarType, but got "
+                       << shape_tuple_type->types_[i]->TypeName();
+    CHECK(scalar_type->dtype_.IsInt())
+        << "tensor.ci shape element " << i << " must have integer dtype, but got "
+        << scalar_type->dtype_.ToString();
+  }
+
+  std::vector<ExprPtr> shape;
+  shape.reserve(shape_tuple_type->types_.size());
+  if (auto make_tuple = As<MakeTuple>(args[1])) {
+    shape = make_tuple->elements_;
+  } else {
+    for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
+      shape.emplace_back(std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
+    }
+  }
+  CHECK(!shape.empty()) << "tensor.ci requires non-empty shape";
+
+  // ISA constraint: innermost dim Cols != 1.
+  if (auto last_const = As<ConstInt>(shape.back())) {
+    CHECK(last_const->value_ != 1) << "tensor.ci requires the innermost dimension (Cols) to be != 1, got "
+                                   << last_const->value_;
+  }
+
+  (void)kwargs;  // descending is optional bool kwarg, no validation needed beyond type.
+  return std::make_shared<TensorType>(shape, dtype);
+}
+
+REGISTER_OP("tensor.ci")
+    .set_op_category("TensorOp")
+    .set_description("Generate a contiguous integer sequence into a tensor (lowers to tile.ci)")
+    .add_argument("start", "Starting integer scalar (must match dst dtype)")
+    .add_argument("shape", "Destination shape (TupleType of ScalarType integer)")
+    .set_attr<DataType>("dtype")
+    .set_attr<bool>("descending")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorCiType(args, kwargs);
+    });
+
 TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   // tensor.dim: Extract a shape dimension from a tensor as a scalar
