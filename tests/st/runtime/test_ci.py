@@ -173,6 +173,21 @@ class TileArangeDescendingProgram:
 
 
 @pl.program
+class TensorArangeAscendingProgram:
+    """pl.tensor.arange ascending — alias of pl.tensor.ci."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.INT32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.INT32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            seq = pl.tensor.arange(0, [ROWS, COLS], dtype=pl.INT32)
+            output = pl.assemble(output, seq, [0, 0])
+        return output
+
+
+@pl.program
 class TensorArangeAliasProgram:
     """pl.tensor.arange should be the alias of pl.tensor.ci."""
 
@@ -298,6 +313,20 @@ class TileArangeDescendingTestCase(_CiBaseTestCase):
         tensors["output"][:] = torch.arange(N - 1, -1, -1, dtype=torch.int32).reshape(ROWS, COLS)
 
 
+class TensorArangeAscendingTestCase(_CiBaseTestCase):
+    def get_name(self) -> str:
+        return "tensor_arange_ascending"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [TensorSpec("output", [ROWS, COLS], DataType.INT32, is_output=True)]
+
+    def get_program(self) -> Any:
+        return TensorArangeAscendingProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.arange(0, N, dtype=torch.int32).reshape(ROWS, COLS)
+
+
 class TensorArangeAliasTestCase(_CiBaseTestCase):
     def get_name(self) -> str:
         return "tensor_arange_alias"
@@ -348,6 +377,10 @@ class TestCi:
 
     def test_tensor_arange_alias(self, test_runner):
         result = test_runner.run(TensorArangeAliasTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_tensor_arange_ascending(self, test_runner):
+        result = test_runner.run(TensorArangeAscendingTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
 
