@@ -1814,7 +1814,7 @@ def col_sum(tile: Expr, tmp_tile: Expr, is_binary: bool = False, span: Span | No
     Args:
         tile: Input tile (TileType [M, N])
         tmp_tile: Temporary tile (TileType, same shape as input)
-        is_binary: If True, binary-tree reduction (O(log N) depth).
+        is_binary: If True, binary-tree reduction (O(log M) depth).
             If False (default), sequential reduction.
         span: Optional source span for debugging (auto-captured if not provided)
 
