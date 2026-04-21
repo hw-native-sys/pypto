@@ -252,9 +252,11 @@ PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully
- * populated ``Call::arg_directions_`` vector that is internally consistent
- * with the callee's ``param_directions_``. Specifically, for each call:
- *   - ``arg_directions_.size() == args_.size()`` and is non-empty;
+ * populated ``attrs_["arg_directions"]`` vector (accessed via
+ * ``Call::GetArgDirections``) that is internally consistent with the callee's
+ * ``param_directions_``. Specifically, for each call:
+ *   - the ``arg_directions`` attr is present, has size ``args_.size()`` and
+ *     is non-empty;
  *   - tensor arguments carry a non-Scalar direction; scalar arguments carry
  *     ``ArgDirection::Scalar``;
  *   - the per-argument ``ArgDirection`` is consistent with the callee's

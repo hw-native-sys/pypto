@@ -749,10 +749,17 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       origin_map["type"] = msgpack::object("LoopOrigin", zone_);
       origin_map["value"] = msgpack::object(LoopOriginToString(origin), zone_);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(origin_map, zone_)));
+    } else if (value.type() == typeid(std::vector<ArgDirection>)) {
+      const auto& dirs = AnyCast<std::vector<ArgDirection>>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> dir_map;
+      dir_map["type"] = msgpack::object("ArgDirectionVector", zone_);
+      dir_map["value"] = VisitLeafField(dirs);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(dir_map, zone_)));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "TensorLayout, TileLayout, PadValue, or LoopOrigin, but got " +
+                      "TensorLayout, TileLayout, PadValue, LoopOrigin, or "
+                      "std::vector<ArgDirection>, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

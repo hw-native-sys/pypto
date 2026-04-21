@@ -398,7 +398,7 @@ def simplify() -> Pass:
 def derive_call_directions() -> Pass:
     """Create a pass that derives per-argument :class:`ir.ArgDirection` for every cross-function ``Call``.
 
-    Walks each ``Function``'s body and writes ``Call::arg_directions_`` based on
+    Walks each ``Function``'s body and writes ``Call.attrs['arg_directions']`` based on
     callee :class:`ir.ParamDirection` and argument origin (function param vs.
     locally allocated tensor vs. scalar). Establishes the
     :class:`IRProperty.CallDirectionsResolved` post-condition, which is then

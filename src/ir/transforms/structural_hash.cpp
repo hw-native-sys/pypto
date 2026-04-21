@@ -338,6 +338,9 @@ class StructuralHasher {
       } else if (value.type() == typeid(PadValue)) {
         h = hash_combine(
             h, std::hash<uint8_t>{}(static_cast<uint8_t>(AnyCast<PadValue>(value, "hashing kwarg: " + key))));
+      } else if (value.type() == typeid(std::vector<ArgDirection>)) {
+        h = hash_combine(h,
+                         VisitLeafField(AnyCast<std::vector<ArgDirection>>(value, "hashing kwarg: " + key)));
       } else {
         throw TypeError("Unsupported kwarg type for key: " + key + ": " +
                         DemangleTypeName(value.type().name()));

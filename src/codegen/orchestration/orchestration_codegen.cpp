@@ -441,8 +441,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Phase-5 invariant: every Call entering codegen must carry an explicit
     // ArgDirection vector (populated by the DeriveCallDirections IR pass).
     // The legacy ParamDirection fallback has been removed.
-    INTERNAL_CHECK_SPAN(call->arg_directions_.size() == call->args_.size(), call->span_)
-        << "Call to '" << callee_name << "' has arg_directions size " << call->arg_directions_.size()
+    auto call_arg_directions = call->GetArgDirections();
+    INTERNAL_CHECK_SPAN(call_arg_directions.size() == call->args_.size(), call->span_)
+        << "Call to '" << callee_name << "' has arg_directions size " << call_arg_directions.size()
         << " but args size " << call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
 
@@ -457,7 +458,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
-        params.push_back({call->arg_directions_[arg_idx], ext_name});
+        params.push_back({call_arg_directions[arg_idx], ext_name});
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -468,8 +469,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
         params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
       } else if (auto const_bool = As<ConstBool>(arg)) {
         params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+      } else {
+        INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
+                                                << " is neither a variable nor a recognized constant literal "
+                                                << "(unsupported expression kind for orchestration codegen).";
       }
     }
+
+    INTERNAL_CHECK_SPAN(params.size() == call->args_.size(), call->span_)
+        << "Call to '" << callee_name << "' built " << params.size() << " params for " << call->args_.size()
+        << " call args (1:1 invariant violated).";
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
     std::stable_partition(params.begin(), params.end(),
@@ -618,9 +627,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Phase-5 invariant: the outer Call must carry explicit arg_directions
     // (populated by DeriveCallDirections). The legacy ParamDirection fallback
     // has been removed from codegen.
-    INTERNAL_CHECK_SPAN(outer_call->arg_directions_.size() == outer_call->args_.size(), outer_call->span_)
+    auto outer_arg_directions = outer_call->GetArgDirections();
+    INTERNAL_CHECK_SPAN(outer_arg_directions.size() == outer_call->args_.size(), outer_call->span_)
         << "Outer call to wrapper '" << wrapper_func->name_ << "' has arg_directions size "
-        << outer_call->arg_directions_.size() << " but args size " << outer_call->args_.size()
+        << outer_arg_directions.size() << " but args size " << outer_call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
 
     std::vector<ParamEntry> params;
@@ -663,7 +673,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
-        params.push_back({outer_call->arg_directions_[outer_idx], ext_name});
+        params.push_back({outer_arg_directions[outer_idx], ext_name});
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -674,8 +684,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
       } else if (auto const_bool = As<ConstBool>(outer_arg)) {
         params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+      } else {
+        INTERNAL_CHECK_SPAN(false, outer_call->span_)
+            << "Outer call to wrapper '" << wrapper_func->name_ << "' arg " << outer_idx
+            << " is neither a variable nor a recognized constant literal "
+            << "(unsupported expression kind for orchestration codegen).";
       }
     }
+
+    INTERNAL_CHECK_SPAN(params.size() == inner_call->args_.size(), inner_call->span_)
+        << "Wrapper '" << wrapper_func->name_ << "' built " << params.size() << " params for "
+        << inner_call->args_.size() << " inner-call args (1:1 invariant violated).";
 
     // Tensors must precede scalars
     std::stable_partition(params.begin(), params.end(),

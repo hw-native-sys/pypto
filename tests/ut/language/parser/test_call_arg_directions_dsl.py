@@ -9,12 +9,13 @@
 
 """Printer + parser coverage for the ``pl.adir.<dir>(...)`` DSL surface syntax.
 
-``Call.arg_directions_`` is normally populated by the ``DeriveCallDirections``
-pass and is invisible in the DSL surface syntax. To make the field round-trip
-through ``python_print`` → ``parse``, the printer wraps each cross-function
-call argument with ``pl.adir.<dir>(...)`` (an identity helper provided by
-``pypto.language.arg_direction``). The parser then strips these wrappers and
-restores ``arg_directions_`` on the rebuilt :class:`ir.Call`.
+``Call.attrs['arg_directions']`` is normally populated by the
+``DeriveCallDirections`` pass and is invisible in the DSL surface syntax. To
+make the attr round-trip through ``python_print`` → ``parse``, the printer
+wraps each cross-function call argument with ``pl.adir.<dir>(...)`` (an
+identity helper provided by ``pypto.language.arg_direction``). The parser then
+strips these wrappers and restores ``arg_directions`` on the rebuilt
+:class:`ir.Call`.
 
 These tests pin down both halves of that contract independently of the
 ``DeriveCallDirections`` pass.
@@ -329,8 +330,8 @@ class TestAdirRoundTrip:
         printed = derived.as_python()
         reparsed = pl.parse(printed)
 
-        # Structural equality covers ``arg_directions_`` because Call::arg_directions_
-        # is declared as ``UsualField`` in the IR reflection.
+        # Structural equality covers ``arg_directions`` because ``Call::attrs_`` is
+        # declared as ``UsualField`` in the IR reflection.
         ir.assert_structural_equal(derived, reparsed, enable_auto_mapping=True)
 
         # And the directions on the rebuilt call match the original ones explicitly.

@@ -176,7 +176,7 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
 
 // -- Call-site direction pass -----------------------------------------------
 //
-// The integrity of ``Call::arg_directions_`` is checked by the
+// The integrity of ``Call::attrs_["arg_directions"]`` is checked by the
 // ``CallDirectionsResolved`` PropertyVerifier (registered in
 // PropertyVerifierRegistry), so PassPipeline auto-verifies it whenever this
 // pass produces the property — no separate verify pass is needed.

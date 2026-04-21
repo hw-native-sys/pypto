@@ -608,6 +608,12 @@ class StructuralEqualImpl {
       } else if (lhs_val.type() == typeid(float)) {
         values_equal = (AnyCast<float>(lhs_val, "comparing kwarg: " + lhs[i].first) ==
                         AnyCast<float>(rhs_val, "comparing kwarg: " + lhs[i].first));
+      } else if (lhs_val.type() == typeid(std::vector<ArgDirection>)) {
+        const auto& lhs_dirs =
+            AnyCast<std::vector<ArgDirection>>(lhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& rhs_dirs =
+            AnyCast<std::vector<ArgDirection>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        values_equal = VisitLeafField(lhs_dirs, rhs_dirs);
       } else {
         INTERNAL_CHECK(false) << "Unsupported kwargs value type for key '" << lhs[i].first
                               << "': " << DemangleTypeName(lhs_val.type().name());

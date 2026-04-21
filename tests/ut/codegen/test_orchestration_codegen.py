@@ -2258,7 +2258,7 @@ class TestLocalAllocWAWPromotion:
     must use add_inout (not add_output) to establish WAW dependencies.
 
     The promotion is now performed by the ``DeriveCallDirections`` IR pass,
-    which writes ``ArgDirection::InOut`` into ``Call::arg_directions_`` for
+    which writes ``ArgDirection::InOut`` into ``Call.attrs['arg_directions']`` for
     locally allocated buffers (replacing the legacy ``CallSiteDirectionResolver``
     analysis that lived in orchestration codegen).
     """
@@ -2359,7 +2359,7 @@ class TestLocalAllocWAWPromotion:
 
 
 class TestArgDirectionsCodegen:
-    """Verify that orchestration codegen prefers Call.arg_directions_ when present.
+    """Verify that orchestration codegen prefers Call.attrs['arg_directions'] when present.
 
     These tests exercise the new ArgDirection-driven path in BuildTaskParams:
     every recognised ArgDirection enum value is mapped to the matching runtime
@@ -2427,9 +2427,8 @@ class TestArgDirectionsCodegen:
                 call = expr if isinstance(expr, ir.Call) else op
                 if call.op.name != "kernel" or len(call.args) != len(arg_dirs):
                     return expr
-                return ir.Call(
-                    call.op, list(call.args), list(arg_dirs), dict(call.kwargs), call.type, call.span
-                )
+                attrs = {"arg_directions": list(arg_dirs)}
+                return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
 
         return _RewriteKernel().visit_program(program)
 

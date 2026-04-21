@@ -522,17 +522,24 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // This is a cross-function call - print as self.method_name()
       stream_ << "self." << gvar->name_ << "(";
 
-      // When ``arg_directions_`` is populated (post DeriveCallDirections), wrap
-      // each argument with ``pl.adir.<dir>(...)`` so the parser can recover the
-      // direction vector on the round-trip. When empty (legacy / pre-derive)
+      // When ``attrs_["arg_directions"]`` is populated (post DeriveCallDirections),
+      // wrap each argument with ``pl.adir.<dir>(...)`` so the parser can recover
+      // the direction vector on the round-trip. When empty (legacy / pre-derive)
       // print bare arguments to keep the DSL clean and back-compatible.
-      const bool emit_directions =
-          !op->arg_directions_.empty() && op->arg_directions_.size() == op->args_.size();
+      // A non-empty vector with a mismatched size is invalid IR — fail loudly
+      // instead of silently dropping the metadata.
+      auto call_arg_directions = op->GetArgDirections();
+      if (!call_arg_directions.empty()) {
+        INTERNAL_CHECK_SPAN(call_arg_directions.size() == op->args_.size(), op->span_)
+            << "Call arg_directions size (" << call_arg_directions.size() << ") must match args size ("
+            << op->args_.size() << ")";
+      }
+      const bool emit_directions = !call_arg_directions.empty();
 
       for (size_t i = 0; i < op->args_.size(); ++i) {
         if (i > 0) stream_ << ", ";
         if (emit_directions) {
-          stream_ << prefix_ << ".adir." << ArgDirectionToDslName(op->arg_directions_[i]) << "(";
+          stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]) << "(";
           VisitExpr(op->args_[i]);
           stream_ << ")";
         } else {

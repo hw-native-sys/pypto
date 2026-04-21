@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
-#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -118,11 +117,12 @@ class CallDirectionMutator : public IRMutator {
     }
 
     // Skip rewriting if directions are unchanged.
-    if (call->arg_directions_ == dirs) {
+    if (call->GetArgDirections() == dirs) {
       return call;
     }
 
-    return std::make_shared<const Call>(call->op_, call->args_, std::move(dirs), call->kwargs_,
+    auto new_attrs = WithArgDirectionsAttr(call->attrs_, std::move(dirs));
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                         call->GetType(), call->span_);
   }
 

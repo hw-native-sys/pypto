@@ -117,6 +117,12 @@ __all__ = [
     "make_roundtrip_instrument",
     "directions",
     "make_call",
+    "input",
+    "output",
+    "output_existing",
+    "inout",
+    "no_dep",
+    "scalar_dir",
 ]  # fmt: skip
 
 # Re-export the lowercase ArgDirection aliases at the top level so callers can

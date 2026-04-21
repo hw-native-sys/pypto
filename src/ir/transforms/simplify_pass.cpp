@@ -105,7 +105,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     if (new_type.get() == base->GetType().get()) return base;
     auto call = std::dynamic_pointer_cast<const Call>(base);
     if (!call) return base;
-    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, call->attrs_, new_type,
+                                        call->span_);
   }
 
   /// Fold arithmetic nodes (Add/Sub/Mul/Div/Min/Max/compare/bitwise/logical)

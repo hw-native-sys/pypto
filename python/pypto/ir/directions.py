@@ -58,9 +58,9 @@ def make_call(
         args: Positional argument expressions.
         directions: Optional explicit per-argument :class:`ArgDirection` vector.
             When ``None`` the resulting call has an empty ``arg_directions``
-            vector (matches legacy behavior; codegen falls back to deriving from
-            the callee's :attr:`ParamDirection`). When provided the length must
-            match ``args``.
+            vector (legacy / pre-DeriveCallDirections state). Run
+            ``DeriveCallDirections`` before consumers that require resolved
+            call-site directions. When provided the length must match ``args``.
         kwargs: Optional keyword arguments to attach to the call.
         type: Optional explicit return type.
         span: Optional source span; defaults to :meth:`ir.Span.unknown`.
@@ -84,7 +84,8 @@ def make_call(
         raise ValueError(
             f"make_call: directions length ({len(directions_list)}) must match args length ({len(args_list)})"
         )
-    return _ir.Call(op, args_list, directions_list, actual_kwargs, actual_type, actual_span)
+    attrs: dict[str, Any] = {"arg_directions": directions_list}
+    return _ir.Call(op, args_list, actual_kwargs, attrs, actual_type, actual_span)
 
 
 __all__ = [

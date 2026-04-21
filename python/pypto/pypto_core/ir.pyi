@@ -1070,14 +1070,25 @@ class Call(Expr):
     args: Final[Sequence[Expr]]
     """Positional arguments."""
 
-    arg_directions: Final[Sequence[ArgDirection]]
-    """Optional per-argument call-site directions.
+    @property
+    def arg_directions(self) -> Sequence[ArgDirection]:
+        """Resolved per-argument call-site directions.
 
-    Empty by default for backward compatibility (codegen falls back to deriving
-    from the callee's `param_directions`). When non-empty must have the same
-    length as `args` and is the source of truth for runtime task-submission
-    semantics.
-    """
+        Stored under ``attrs['arg_directions']``. Returns an empty list when
+        not yet derived (legacy / pre-DeriveCallDirections state). When non-empty
+        the length must match ``args`` and is the source of truth for runtime
+        task-submission semantics.
+        """
+
+    @property
+    def attrs(self) -> Mapping[str, Any]:
+        """Compiler-internal node metadata.
+
+        Reserved keys:
+
+        - ``"arg_directions"`` -> ``list[ArgDirection]`` (use the
+          :attr:`arg_directions` shortcut for typed access).
+        """
 
     kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue]]
     """Keyword arguments (metadata)."""
@@ -1155,18 +1166,19 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        arg_directions: Sequence[ArgDirection],
         kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        attrs: Mapping[str, object] | Sequence[tuple[str, object]] | None,
         type: Type,
         span: Span,
     ) -> None:
-        """Create a function call expression with explicit call-site directions.
+        """Create a function call expression with kwargs, explicit attrs and type.
 
         Args:
             op: Operation/function to call
             args: List of argument expressions
-            arg_directions: Per-argument call-site directions (empty or len(args))
             kwargs: Keyword arguments (metadata)
+            attrs: Compiler-internal node metadata. Reserved keys:
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
             type: Explicit result type
             span: Source location
         """

@@ -128,6 +128,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<LoopOrigin>(item.second)) {
       kwargs.emplace_back(key, nb::cast<LoopOrigin>(item.second));
+    } else if (nb::isinstance<ArgDirection>(item.second)) {
+      kwargs.emplace_back(key, nb::cast<ArgDirection>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -136,6 +138,18 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<std::string>(item.second));
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
+    } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
+      // Lists/tuples currently only used to carry `vector<ArgDirection>` (e.g. attrs["arg_directions"]).
+      // Reject non-ArgDirection sequences to avoid silently dropping metadata.
+      std::vector<ArgDirection> dirs;
+      for (auto elem : nb::cast<nb::sequence>(item.second)) {
+        if (!nb::isinstance<ArgDirection>(elem)) {
+          throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                 " (expected ArgDirection)");
+        }
+        dirs.push_back(nb::cast<ArgDirection>(elem));
+      }
+      kwargs.emplace_back(key, std::move(dirs));
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
     }
@@ -612,52 +626,79 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("type"), nb::arg("span"),
       "Create a function call expression with kwargs and explicit type");
 
-  // Constructor with explicit per-argument call-site directions
+  // Constructor with kwargs and explicit attrs (e.g. {"arg_directions": [...]}) and type
   call_class.def(
       "__init__",
-      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args,
-         const std::vector<ArgDirection>& arg_directions, const nb::dict& kwargs_dict, const TypePtr& type,
-         const Span& span) {
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
+         const nb::object& attrs_or_none, const TypePtr& type, const Span& span) {
         auto kwargs = ConvertKwargsDict(kwargs_dict);
-        new (self) Call(op, args, arg_directions, kwargs, type, span);
+        auto attrs = ConvertAttrsFromPython(attrs_or_none);
+        new (self) Call(op, args, std::move(kwargs), std::move(attrs), type, span);
       },
-      nb::arg("op"), nb::arg("args"), nb::arg("arg_directions"), nb::arg("kwargs"), nb::arg("type"),
+      nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),
       nb::arg("span"),
-      "Create a function call expression with explicit call-site arg directions, kwargs and type");
+      "Create a function call expression with kwargs and explicit attrs map and type. "
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
 
   BindFields<Call>(call_class);
 
-  // Expose kwargs as a read-only property
+  // Convert a vector<pair<string, any>> kwargs/attrs container to a Python dict.
+  auto kwargs_to_pydict = [](const std::vector<std::pair<std::string, std::any>>& items) {
+    nb::dict result;
+    for (const auto& [key, value] : items) {
+      if (value.type() == typeid(int)) {
+        result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(bool)) {
+        result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(std::string)) {
+        result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(double)) {
+        result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(float)) {
+        result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(DataType)) {
+        result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(MemorySpace)) {
+        result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(TensorLayout)) {
+        result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(TileLayout)) {
+        result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(PadValue)) {
+        result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(LoopOrigin)) {
+        result[key.c_str()] = AnyCast<LoopOrigin>(value, "converting to Python: " + key);
+      } else if (value.type() == typeid(std::vector<ArgDirection>)) {
+        const auto& dirs = AnyCast<std::vector<ArgDirection>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (auto d : dirs) {
+          lst.append(nb::cast(d));
+        }
+        result[key.c_str()] = lst;
+      }
+    }
+    return result;
+  };
+
   call_class.def_prop_ro(
-      "kwargs",
+      "kwargs", [kwargs_to_pydict](const CallPtr& self) { return kwargs_to_pydict(self->kwargs_); },
+      "Keyword arguments (metadata) for this call");
+
+  call_class.def_prop_ro(
+      "attrs", [kwargs_to_pydict](const CallPtr& self) { return kwargs_to_pydict(self->attrs_); },
+      "Compiler-internal node metadata. Reserved keys: 'arg_directions' -> list[ArgDirection].");
+
+  call_class.def_prop_ro(
+      "arg_directions",
       [](const CallPtr& self) {
-        nb::dict result;
-        for (const auto& [key, value] : self->kwargs_) {
-          if (value.type() == typeid(int)) {
-            result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(bool)) {
-            result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(std::string)) {
-            result[key.c_str()] = AnyCast<std::string>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(double)) {
-            result[key.c_str()] = AnyCast<double>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(float)) {
-            result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(DataType)) {
-            result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(MemorySpace)) {
-            result[key.c_str()] = AnyCast<MemorySpace>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(TensorLayout)) {
-            result[key.c_str()] = AnyCast<TensorLayout>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(TileLayout)) {
-            result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
-          } else if (value.type() == typeid(PadValue)) {
-            result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
-          }
+        nb::list result;
+        for (auto d : self->GetArgDirections()) {
+          result.append(nb::cast(d));
         }
         return result;
       },
-      "Keyword arguments (metadata) for this call");
+      "Resolved per-argument call-site directions (empty list when not yet derived). "
+      "Stored under attrs['arg_directions'].");
 
   // MakeTuple - const shared_ptr
   auto make_tuple_class = nb::class_<MakeTuple, Expr>(ir, "MakeTuple", "Tuple construction expression");
@@ -1097,8 +1138,10 @@ void BindIR(nb::module_& m) {
              "(add_output(tensor) / TensorArgType::OUTPUT_EXISTING)")
       .value("NoDep", ArgDirection::NoDep,
              "No-dependency existing tensor (add_no_dep / TensorArgType::NO_DEP)")
-      .value("Scalar", ArgDirection::Scalar, "Scalar (non-tensor) argument (add_scalar)")
-      .export_values();
+      .value("Scalar", ArgDirection::Scalar, "Scalar (non-tensor) argument (add_scalar)");
+  // Intentionally do NOT call .export_values(): ArgDirection::InOut would shadow
+  // ParamDirection::InOut at module scope. Users access values via the enum class
+  // (ir.ArgDirection.InOut) to keep the two direction models cleanly separated.
 
   // IsInCoreType helper
   ir.def("is_incore_type", &IsInCoreType, nb::arg("func_type"),

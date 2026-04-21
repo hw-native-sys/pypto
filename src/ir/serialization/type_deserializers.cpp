@@ -182,6 +182,8 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
       // Try to deserialize as DataType or TensorLayout
       std::string type_name;
       std::string value_str;
+      msgpack::object value_obj_inner;
+      bool has_value_obj = false;
       msgpack::object_kv* const map_p = value_obj.via.map.ptr;
       msgpack::object_kv* const map_pend = value_obj.via.map.ptr + value_obj.via.map.size;
       for (auto* it = map_p; it < map_pend; ++it) {
@@ -190,10 +192,29 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
         if (field_key == "type") {
           it->val.convert(type_name);
         } else if (field_key == "value") {
-          it->val.convert(value_str);
+          value_obj_inner = it->val;
+          has_value_obj = true;
+          if (it->val.type == msgpack::type::STR) {
+            it->val.convert(value_str);
+          }
         }
       }
-      if (type_name == "TensorLayout") {
+      if (type_name == "ArgDirectionVector") {
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
+          throw TypeError("ArgDirectionVector kwarg '" + key + "' must have ARRAY value");
+        }
+        std::vector<ArgDirection> dirs;
+        dirs.reserve(value_obj_inner.via.array.size);
+        for (uint32_t j = 0; j < value_obj_inner.via.array.size; ++j) {
+          uint8_t code = value_obj_inner.via.array.ptr[j].as<uint8_t>();
+          if (code > static_cast<uint8_t>(ArgDirection::Scalar)) {
+            throw TypeError("Invalid ArgDirection value " + std::to_string(static_cast<int>(code)) +
+                            " for kwarg: " + key);
+          }
+          dirs.push_back(static_cast<ArgDirection>(code));
+        }
+        kwargs.emplace_back(key, std::move(dirs));
+      } else if (type_name == "TensorLayout") {
         if (value_str.empty()) {
           throw TypeError("Missing 'value' field for TensorLayout kwarg: " + key);
         }
@@ -326,12 +347,24 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
     }
   }
 
-  // Optional arg_directions: backward compatible — absent in old .pir, and empty means "legacy /
-  // not yet derived" (codegen will fall back to deriving from callee param_directions).
-  std::vector<ArgDirection> arg_directions;
+  // Deserialize generic attrs map (preserve order using vector). Optional in payloads
+  // produced by older serializers that only carried a top-level `arg_directions` field.
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs");
+  }
+
+  // Backward compatibility: legacy .pir payloads stored arg_directions as a top-level
+  // ARRAY field on Call. Lift it into attrs_["arg_directions"] so consumers continue
+  // to work via the new GetArgDirections() API. Absent or NIL means "legacy /
+  // not yet derived"; any other msgpack type indicates a malformed payload.
   auto arg_dirs_opt = GetOptionalFieldObj(fields_obj, "arg_directions", ctx);
-  if (arg_dirs_opt.has_value() && arg_dirs_opt->type == msgpack::type::ARRAY &&
-      arg_dirs_opt->via.array.size > 0) {
+  if (arg_dirs_opt.has_value() && arg_dirs_opt->type != msgpack::type::NIL) {
+    CHECK(arg_dirs_opt->type == msgpack::type::ARRAY)
+        << "Invalid arg_directions field for Call: expected ARRAY, got msgpack type "
+        << static_cast<int>(arg_dirs_opt->type);
+    std::vector<ArgDirection> arg_directions;
     arg_directions.reserve(arg_dirs_opt->via.array.size);
     for (uint32_t i = 0; i < arg_dirs_opt->via.array.size; ++i) {
       uint8_t code = arg_dirs_opt->via.array.ptr[i].as<uint8_t>();
@@ -339,15 +372,18 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
           << "Invalid ArgDirection value: " << static_cast<int>(code);
       arg_directions.push_back(static_cast<ArgDirection>(code));
     }
-    CHECK(arg_directions.size() == args.size()) << "Call arg_directions size (" << arg_directions.size()
-                                                << ") must match args size (" << args.size() << ")";
+    if (!arg_directions.empty()) {
+      CHECK(arg_directions.size() == args.size()) << "Call arg_directions size (" << arg_directions.size()
+                                                  << ") must match args size (" << args.size() << ")";
+      attrs = WithArgDirectionsAttr(std::move(attrs), std::move(arg_directions));
+    }
   }
 
   // Deserialize kwargs (preserve order using vector)
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
 
-  return std::make_shared<Call>(op, args, std::move(arg_directions), kwargs, type, span);
+  return std::make_shared<Call>(op, args, std::move(kwargs), std::move(attrs), type, span);
 }
 
 // Macro for binary expressions

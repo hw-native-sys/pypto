@@ -470,11 +470,13 @@ Pass NormalizeReturnOrder();
 Pass FuseCreateAssembleToSlice();
 
 /**
- * @brief Derive Call::arg_directions_ from callee param directions and buffer lineage.
+ * @brief Derive Call::GetArgDirections() (stored in attrs_["arg_directions"]) from
+ *        callee param directions and buffer lineage.
  *
  * For every non-builtin call in Orchestration / Group / Spmd functions,
  * compute the runtime call-site direction (Input/Output/InOut/OutputExisting/Scalar)
- * for each argument and write it into Call::arg_directions_.
+ * for each argument and write it into Call::attrs_ under the reserved key
+ * ``"arg_directions"``.
  *
  * Mapping:
  *   - scalar argument                        -> ArgDirection::Scalar

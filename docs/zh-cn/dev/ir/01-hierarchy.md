@@ -72,7 +72,7 @@
 | **ConstInt** | `value_`, `dtype_` | 整数常量 |
 | **ConstBool** | `value_` | 布尔常量（始终为 BOOL dtype） |
 | **ConstFloat** | `value_`, `dtype_` | 浮点常量 |
-| **Call** | `op_`, `args_`, `kwargs_` | 函数/运算符调用 |
+| **Call** | `op_`, `args_`, `kwargs_`, `attrs_` | 函数/运算符调用（参见 [Call attrs 与 kwargs 的区别](#call-attrs-与-kwargs-的区别)） |
 | **TupleGetItemExpr** | `tuple_`, `index_` | 元组元素访问 |
 
 ### Var 的标识（Identity）
@@ -131,6 +131,24 @@ auto x_ref = x1;
 op = ir.Op("my_function"); call = ir.Call(op, [x, y], span)  # External
 gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 ```
+
+### Call attrs 与 kwargs 的区别
+
+`Call` 同时持有两个有序的字符串键映射，C++ 类型完全一致
+（`std::vector<std::pair<std::string, std::any>>`），但所有权与语义完全不同：
+
+| 字段 | 用途 | 来源 | 保留键 |
+| ---- | ---- | ---- | ------ |
+| `kwargs_` | 用户在调用点书写的语言层关键字参数（例如 `kernel(x, y, axis=2)`），在 parser、printer 与 Python bindings 之间作为面向用户的数据原样往返。 | 前端 / DSL 解析 | 无 —— 键由用户代码决定。 |
+| `attrs_` | 编译器内部的节点元数据，由 pass / verifier 生产与消费，不会作为 DSL 关键字参数暴露给用户。 | 编译器 pass（以及反序列化器在加载旧 payload 时使用） | `"arg_directions"`（见下文）。后续新增的内部属性建议使用 `"hint.*"`、`"profile.*"` 这类带前缀的命名空间。 |
+
+**`arg_directions` 的存放位置。** 解析后的逐参数 `ArgDirection` 序列以
+`std::vector<ArgDirection>` 形式存储在保留键 `attrs_["arg_directions"]` 下；
+访问器 `Call::HasArgDirections()`、`Call::GetArgDirections()`（以及 Python
+端的 `Call.arg_directions` 属性）都是该 attr 的薄封装，
+`WithArgDirectionsAttr(...)` 是构造带该 attr 的 `attrs` 向量的标准入口。
+`IRProperty::CallDirectionsResolved` 校验的就是该 attr 在 `DeriveCallDirections`
+pass 之后是否存在。
 
 ### IterArg - 循环携带值
 

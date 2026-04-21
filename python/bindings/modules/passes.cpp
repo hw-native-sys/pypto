@@ -77,7 +77,7 @@ void BindPass(nb::module_& m) {
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
-             "Every non-builtin Call has explicit Call::arg_directions_");
+             "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
@@ -391,12 +391,12 @@ void BindPass(nb::module_& m) {
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,
-             "Derive Call::arg_directions_ from callee param directions and buffer lineage.\n\n"
+             "Derive Call attrs['arg_directions'] from callee param directions and buffer lineage.\n\n"
              "Writes per-argument runtime ArgDirection (Input / Output / InOut /\n"
              "OutputExisting / Scalar) onto every non-builtin Call. Locally allocated\n"
              "Out arguments are promoted to InOut to model WAW dependencies.\n\n"
              "Post-condition: ``IRProperty::CallDirectionsResolved``. The integrity of\n"
-             "the produced ``Call::arg_directions_`` is verified automatically by the\n"
+             "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")

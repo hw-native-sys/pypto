@@ -11,8 +11,9 @@
 
 These wrappers attach an explicit :class:`pypto.ir.ArgDirection` to a call
 argument. They are identity functions at Python runtime and are recognized
-by the parser, which strips them and stores the direction on
-``ir.Call.arg_directions_``.
+by the parser, which strips them and stores the direction vector on
+``ir.Call.attrs['arg_directions']`` (also accessible via the
+``ir.Call.arg_directions`` shortcut property).
 
 Usage in a printed (or hand-written) DSL Orchestration function::
 
@@ -40,8 +41,8 @@ Helper               ``ArgDirection``
 ``pl.adir.scalar``           ``Scalar``
 ==================== ================================
 
-The wrappers exist so that ``Call.arg_directions_`` survives a
-``python_print`` → ``parse`` round-trip (it is otherwise a derived field
+The wrappers exist so that ``Call.attrs['arg_directions']`` survives a
+``python_print`` → ``parse`` round-trip (it is otherwise a derived attr
 populated by the ``DeriveCallDirections`` pass and not visible in the
 DSL surface syntax).
 
@@ -110,8 +111,8 @@ __all__ = [
     "ArgDirection",
     "DIRECTION_TO_NAME",
     "NAME_TO_DIRECTION",
-    "input",
     "inout",
+    "input",
     "no_dep",
     "output",
     "output_existing",

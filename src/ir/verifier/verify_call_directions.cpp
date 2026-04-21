@@ -42,7 +42,8 @@ bool IsTensorTypedArg(const ExprPtr& arg) {
 }
 
 /// Walks every non-builtin Call in a function body and validates the integrity
-/// of ``Call::arg_directions_`` against the callee's ``param_directions_``.
+/// of ``Call::GetArgDirections()`` (stored in ``attrs_["arg_directions"]``)
+/// against the callee's ``param_directions_``.
 class CallDirectionChecker : public IRVisitor {
  public:
   CallDirectionChecker(ProgramPtr program, std::vector<Diagnostic>& diagnostics, std::string func_name)
@@ -56,13 +57,18 @@ class CallDirectionChecker : public IRVisitor {
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) return;  // Opaque / not in program — skip.
 
-    if (call->arg_directions_.empty()) {
-      Fail(call, "Call::arg_directions_ is empty after DeriveCallDirections");
+    if (!call->HasArgDirections()) {
+      Fail(call, "Call attrs['arg_directions'] is missing after DeriveCallDirections");
       return;
     }
-    if (call->arg_directions_.size() != call->args_.size()) {
+    auto arg_dirs = call->GetArgDirections();
+    if (arg_dirs.empty()) {
+      Fail(call, "Call attrs['arg_directions'] is empty after DeriveCallDirections");
+      return;
+    }
+    if (arg_dirs.size() != call->args_.size()) {
       std::ostringstream oss;
-      oss << "Call::arg_directions_ size (" << call->arg_directions_.size() << ") != args_ size ("
+      oss << "Call attrs['arg_directions'] size (" << arg_dirs.size() << ") != args_ size ("
           << call->args_.size() << ")";
       Fail(call, oss.str());
       return;
@@ -74,7 +80,7 @@ class CallDirectionChecker : public IRVisitor {
     }
 
     for (size_t i = 0; i < call->args_.size(); ++i) {
-      ArgDirection d = call->arg_directions_[i];
+      ArgDirection d = arg_dirs[i];
       bool is_tensor = IsTensorTypedArg(call->args_[i]);
 
       // 1) Scalar / tensor consistency

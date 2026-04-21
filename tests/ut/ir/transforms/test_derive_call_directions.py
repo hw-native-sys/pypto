@@ -19,7 +19,7 @@ def _verify_call_directions(program):
     """Run the CallDirectionsResolved property verifier on *program*.
 
     Replaces the now-deleted ``passes.verify_call_directions()`` pass: the
-    integrity of ``Call::arg_directions_`` is now a verifiable IR property
+    integrity of ``Call.attrs['arg_directions']`` is now a verifiable IR property
     (``IRProperty.CallDirectionsResolved``) auto-checked by the pipeline.
     """
     props = _core_passes.IRPropertySet()
@@ -298,7 +298,7 @@ class TestVerifyPositive:
 
 
 class TestVerifyNegative:
-    """Verify pass rejects ill-formed Call::arg_directions_ assignments."""
+    """Verify pass rejects ill-formed Call.attrs['arg_directions'] assignments."""
 
     @staticmethod
     def _build_program(call_dirs):
@@ -330,13 +330,13 @@ class TestVerifyNegative:
     def test_input_with_output_rejected(self):
         # Position 0 is callee In; using Output there must fail.
         prog = self._build_program([ir.ArgDirection.Output, ir.ArgDirection.OutputExisting])
-        with pytest.raises(Exception):  # noqa: PT011
+        with pytest.raises(Exception, match=r"(?i)arg_direction|CallDirectionsResolved"):  # noqa: PT011
             _verify_call_directions(prog)
 
     def test_out_with_input_rejected(self):
         # Position 1 is callee Out; using Input there must fail.
         prog = self._build_program([ir.ArgDirection.Input, ir.ArgDirection.Input])
-        with pytest.raises(Exception):  # noqa: PT011
+        with pytest.raises(Exception, match=r"(?i)arg_direction|CallDirectionsResolved"):  # noqa: PT011
             _verify_call_directions(prog)
 
 
@@ -357,7 +357,8 @@ class _RewriteUserCall(ir.IRMutator):
         if name.startswith(("tile.", "tensor.", "system.")):
             return super().visit_call(op)
         new_args = [self.visit_expr(a) for a in op.args]
-        return ir.Call(op.op, new_args, list(self._new_dirs), op.kwargs, op.type, op.span)
+        attrs = {"arg_directions": list(self._new_dirs)}
+        return ir.Call(op.op, new_args, op.kwargs, attrs, op.type, op.span)
 
     def run(self, program):
         return self.visit_program(program)

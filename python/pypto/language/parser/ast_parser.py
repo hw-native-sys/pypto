@@ -3217,10 +3217,10 @@ class ASTParser:
             span: Source span for the call
             arg_directions: Optional explicit per-argument :class:`ir.ArgDirection`
                 vector. When non-empty its length must equal ``len(args)`` and the
-                resulting :class:`ir.Call` is constructed via the directions
-                overload so that ``arg_directions_`` is populated. When ``None``
-                or empty the call is constructed without explicit directions
-                (legacy form; ``DeriveCallDirections`` will fill them in later).
+                resulting :class:`ir.Call` is constructed via the attrs overload
+                with ``attrs['arg_directions']`` populated. When ``None`` or empty
+                the call is constructed without explicit directions (legacy form;
+                ``DeriveCallDirections`` will fill them in later).
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -3230,7 +3230,8 @@ class ASTParser:
             return_type = ir.TupleType(return_types)
 
         if arg_directions:
-            return ir.Call(gvar, args, list(arg_directions), {}, return_type, span)
+            attrs = {"arg_directions": list(arg_directions)}
+            return ir.Call(gvar, args, {}, attrs, return_type, span)
 
         if not return_types:
             return ir.Call(gvar, args, span)

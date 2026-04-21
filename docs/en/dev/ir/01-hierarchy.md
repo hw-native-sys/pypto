@@ -72,7 +72,7 @@ is present, `memory_space` must also be present on the `TileType`.
 | **ConstInt** | `value_`, `dtype_` | Integer constant |
 | **ConstBool** | `value_` | Boolean constant (always BOOL dtype) |
 | **ConstFloat** | `value_`, `dtype_` | Floating-point constant |
-| **Call** | `op_`, `args_`, `kwargs_` | Function/operator call |
+| **Call** | `op_`, `args_`, `kwargs_`, `attrs_` | Function/operator call (see [Call attrs vs kwargs](#call-attrs-vs-kwargs)) |
 | **TupleGetItemExpr** | `tuple_`, `index_` | Tuple element access |
 
 ### Var Identity
@@ -131,6 +131,26 @@ All unary expressions have: `operand_`, `dtype_`
 op = ir.Op("my_function"); call = ir.Call(op, [x, y], span)  # External
 gvar = ir.GlobalVar("helper"); call = ir.Call(gvar, [x], span)  # Internal
 ```
+
+### Call attrs vs kwargs
+
+`Call` carries two ordered string-keyed maps with identical C++ types
+(`std::vector<std::pair<std::string, std::any>>`) but different ownership and
+intent:
+
+| Field | Purpose | Producer | Reserved keys |
+| ----- | ------- | -------- | ------------- |
+| `kwargs_` | Language-level keyword arguments supplied by the user at the call site (e.g. `kernel(x, y, axis=2)`). Round-tripped through the parser, printer, and bindings as user-facing data. | Frontend / DSL parser | None — keys come from user code. |
+| `attrs_` | Compiler-internal node metadata produced and consumed by passes/verifiers. Not visible as DSL keyword arguments. | Compiler passes (and the deserializer for legacy payloads) | `"arg_directions"` — see below. Future internal attributes should use namespaced keys such as `"hint.*"` or `"profile.*"`. |
+
+**`arg_directions` storage.** Resolved per-argument `ArgDirection` values are
+stored under the reserved key `attrs_["arg_directions"]` as
+`std::vector<ArgDirection>`. The accessors `Call::HasArgDirections()` and
+`Call::GetArgDirections()` (and the Python `Call.arg_directions` property) are
+thin wrappers over this attr; `WithArgDirectionsAttr(...)` is the canonical way
+to construct an `attrs` vector with the entry set. The existence of this attr
+is what `IRProperty::CallDirectionsResolved` verifies after the
+`DeriveCallDirections` pass.
 
 ### IterArg - Loop-Carried Values
 
