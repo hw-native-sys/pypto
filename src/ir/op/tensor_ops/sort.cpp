@@ -161,8 +161,8 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
   } else {
     last_dim = src_types[0]->shape_.back();
     for (size_t i = 1; i < src_types.size(); ++i) {
-      last_dim = std::make_shared<Add>(last_dim, src_types[i]->shape_.back(), DataType::INDEX,
-                                       Span::unknown());
+      last_dim =
+          std::make_shared<Add>(last_dim, src_types[i]->shape_.back(), DataType::INDEX, Span::unknown());
     }
   }
   out_shape.push_back(last_dim);
@@ -171,10 +171,11 @@ TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tensor.mrgsort_format2")
     .set_op_category("TensorOp")
-    .set_description("Merge sort 2-4 sorted lists, format2 (tensor-level). "
-                     "Args: (src0, src1[, src2[, src3]]). "
-                     "The scratch tmp and executed tiles required by tile.mrgsort_format2 are "
-                     "synthesized during conversion — users do not pass them at the tensor level.")
+    .set_description(
+        "Merge sort 2-4 sorted lists, format2 (tensor-level). "
+        "Args: (src0, src1[, src2[, src3]]). "
+        "The scratch tmp and executed tiles required by tile.mrgsort_format2 are "
+        "synthesized during conversion — users do not pass them at the tensor level.")
     .add_argument("src0", "First sorted input tensor (FP16 or FP32)")
     .add_argument("src1", "Second sorted input tensor")
     .add_argument("src2", "(3/4-way only) Third sorted input tensor")

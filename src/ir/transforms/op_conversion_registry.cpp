@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -789,8 +790,8 @@ void OpConversionRegistry::RegisterSortOps() {
         } else {
           last_dim = src_tile_types[0]->shape_.back();
           for (size_t i = 1; i < src_tile_types.size(); ++i) {
-            last_dim = std::make_shared<Add>(last_dim, src_tile_types[i]->shape_.back(),
-                                             DataType::INDEX, span);
+            last_dim =
+                std::make_shared<Add>(last_dim, src_tile_types[i]->shape_.back(), DataType::INDEX, span);
           }
         }
         tmp_shape.push_back(last_dim);

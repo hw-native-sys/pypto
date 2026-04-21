@@ -1025,8 +1025,8 @@ def mrgsort(
     src1: Expr | None = None,
     src2: Expr | None = None,
     src3: Expr | None = None,
-    exhausted: bool = False,
     *,
+    exhausted: bool = False,
     block_len: int | Expr | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -1070,8 +1070,7 @@ def mrgsort(
     # format2: 2-4 way merge
     if src1 is None:
         raise ValueError(
-            "mrgsort() requires either block_len=<int> for format1, "
-            "or at least (src0, src1) for format2"
+            "mrgsort() requires either block_len=<int> for format1, or at least (src0, src1) for format2"
         )
     kwargs: dict[str, Any] = {"exhausted": exhausted}
     if src2 is None:

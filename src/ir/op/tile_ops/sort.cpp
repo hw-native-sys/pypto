@@ -126,8 +126,8 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
   //   3-way: 5 args  (src0, src1, src2, tmp, executed)
   //   4-way: 6 args  (src0, src1, src2, src3, tmp, executed)
   CHECK(args.size() >= 4 && args.size() <= 6)
-      << "The operator " << op_name
-      << " requires 4-6 arguments (2-4 srcs + tmp + executed), but got " << args.size();
+      << "The operator " << op_name << " requires 4-6 arguments (2-4 srcs + tmp + executed), but got "
+      << args.size();
 
   size_t n_srcs = args.size() - 2;
 
@@ -171,9 +171,10 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.mrgsort_format2")
     .set_op_category("TileOp")
-    .set_description("Merge sort 2-4 sorted lists, format2 (maps to pto.tmrgsort). "
-                     "Args: (src0, src1[, src2[, src3]], tmp, executed). "
-                     "2-way: 4 args, 3-way: 5 args, 4-way: 6 args.")
+    .set_description(
+        "Merge sort 2-4 sorted lists, format2 (maps to pto.tmrgsort). "
+        "Args: (src0, src1[, src2[, src3]], tmp, executed). "
+        "2-way: 4 args, 3-way: 5 args, 4-way: 6 args.")
     .add_argument("src0", "First sorted input tile (FP16 or FP32)")
     .add_argument("src1", "Second sorted input tile")
     .add_argument("tmp_or_src2", "Third sorted input tile (3/4-way) or tmp workspace (2-way)")

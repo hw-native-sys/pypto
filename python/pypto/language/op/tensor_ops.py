@@ -857,16 +857,16 @@ def mrgsort(src0: Tensor, *, block_len: int | Scalar) -> Tensor: ...
 
 
 @overload
-def mrgsort(src0: Tensor, src1: Tensor, exhausted: bool = ...) -> Tensor: ...
+def mrgsort(src0: Tensor, src1: Tensor, *, exhausted: bool = ...) -> Tensor: ...
 
 
 @overload
-def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, exhausted: bool = ...) -> Tensor: ...
+def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, *, exhausted: bool = ...) -> Tensor: ...
 
 
 @overload
 def mrgsort(
-    src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, exhausted: bool = ...
+    src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, *, exhausted: bool = ...
 ) -> Tensor: ...
 
 
@@ -875,8 +875,8 @@ def mrgsort(
     src1: Tensor | None = None,
     src2: Tensor | None = None,
     src3: Tensor | None = None,
-    exhausted: bool = False,
     *,
+    exhausted: bool = False,
     block_len: int | Scalar | None = None,
 ) -> Tensor:
     """Merge sort — format1 (single-list) or format2 (2-4 way merge), tensor-level.
@@ -918,8 +918,7 @@ def mrgsort(
     # format2: 2-4 way merge
     if src1 is None:
         raise ValueError(
-            "mrgsort() requires either block_len=<int> for format1, "
-            "or at least (src0, src1) for format2"
+            "mrgsort() requires either block_len=<int> for format1, or at least (src0, src1) for format2"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),
