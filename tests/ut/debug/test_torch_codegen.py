@@ -124,6 +124,18 @@ def test_tensor_matmul_with_transpose():
     assert "torch.matmul" in code
 
 
+def test_tensor_matmul_respects_out_dtype():
+    """tensor.matmul with out_dtype should cast result to the requested dtype."""
+    a = _tensor_var("a", [64, 128], DataType.BF16)
+    b = _tensor_var("b", [128, 64], DataType.BF16)
+    out = _tensor_var("out", [64, 64], DataType.FP32)
+    call = _op_call("tensor.matmul", [a, b], {"a_trans": False, "b_trans": False, "out_dtype": DataType.FP32})
+    assign = ir.AssignStmt(out, call, _span())
+    func = _simple_function("f", [a, b], assign)
+    code = torch_codegen(func)
+    assert "torch.matmul(a, b).to(torch.float32)" in code
+
+
 def test_tensor_cast():
     """tensor.cast should emit .to(dtype)."""
     a = _tensor_var("a", [64])
@@ -133,6 +145,22 @@ def test_tensor_cast():
     func = _simple_function("f", [a], assign)
     code = torch_codegen(func)
     assert ".to(torch.float16)" in code
+
+
+def test_nested_call_arg_preserves_call_codegen():
+    """Nested call arg (cast(slice(...))) should emit slice expression, not tuple."""
+    hidden_states = _tensor_var("hidden_states", [16, 512], DataType.BF16)
+    out = _tensor_var("out", [16, 512], DataType.FP32)
+    shapes = _make_tuple(_int(16), _int(512))
+    offsets = _make_tuple(_int(0), _int(0))
+    slice_call = _op_call("tensor.slice", [hidden_states, shapes, offsets])
+    cast_call = _op_call("tensor.cast", [slice_call], {"target_type": DataType.FP32, "mode": 2})
+    assign = ir.AssignStmt(out, cast_call, _span())
+    func = _simple_function("f", [hidden_states], assign)
+    code = torch_codegen(func)
+
+    assert "_tensor_slice(hidden_states, (0, 0), (16, 512)).to(torch.float32)" in code
+    assert "(0, 0).to(torch.float32)" not in code
 
 
 def test_tensor_row_reduction():
@@ -656,6 +684,52 @@ def test_tensor_assemble_writes_source():
     assert result_val[0, 0] == 5.0
     assert result_val[3, 3] == 5.0
     assert result_val[4, 4] == 0.0
+
+
+def test_tensor_slice_out_of_bounds_is_padded():
+    """tensor.slice should pad to requested shape when slicing out of bounds."""
+    src = _tensor_var("src", [96, 64], DataType.FP32)
+    result = _tensor_var("result", [64, 64], DataType.FP32)
+    shapes = _make_tuple(_int(64), _int(64))
+    offsets = _make_tuple(_int(64), _int(0))
+    call = _op_call("tensor.slice", [src, shapes, offsets])
+    assign = ir.AssignStmt(result, call, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [src], body, [ir.TensorType([64, 64], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    x = torch.ones(96, 64, dtype=torch.float32)
+    out = ns["f"](x)
+    assert out.shape == (64, 64)
+    assert torch.allclose(out[:32, :], torch.ones(32, 64))
+    assert torch.allclose(out[32:, :], torch.zeros(32, 64))
+
+
+def test_tensor_fillpad_min_uses_valid_shape():
+    """tensor.fillpad should apply pad_value outside valid_shape metadata."""
+    src = _tensor_var("src", [8, 64], DataType.FP32)
+    result = _tensor_var("result", [8, 64], DataType.FP32)
+    shapes = _make_tuple(_int(8), _int(64))
+    offsets = _make_tuple(_int(0), _int(0))
+    valid_shapes = _make_tuple(_int(8), _int(32))
+    sliced = _op_call("tensor.slice", [src, shapes, offsets, valid_shapes])
+    padded = _op_call("tensor.fillpad", [sliced], {"pad_value": ir.PadValue.min})
+    assign = ir.AssignStmt(result, padded, _span())
+    ret = ir.ReturnStmt([result], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [src], body, [ir.TensorType([8, 64], DataType.FP32)])
+    code = torch_codegen(func)
+
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    x = torch.rand(8, 64, dtype=torch.float32)
+    out = ns["f"](x)
+    assert out.shape == (8, 64)
+    assert torch.allclose(out[:, :32], x[:, :32])
+    assert torch.all(out[:, 32:] == torch.finfo(torch.float32).min)
 
 
 # ---------------------------------------------------------------------------

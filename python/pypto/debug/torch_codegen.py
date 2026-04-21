@@ -63,41 +63,105 @@ from collections import deque
 
 _pipes = {'to_aiv': deque(), 'to_aic': deque()}
 
+def _coerce_shape(shape):
+    return tuple(int(s) for s in shape)
+
+def _pad_scalar(tensor, pad_mode):
+    if pad_mode == "zero":
+        return 0
+    if tensor.dtype.is_floating_point:
+        finfo = torch.finfo(tensor.dtype)
+        return finfo.min if pad_mode == "min" else finfo.max
+    if tensor.dtype == torch.bool:
+        return False if pad_mode == "min" else True
+    iinfo = torch.iinfo(tensor.dtype)
+    return iinfo.min if pad_mode == "min" else iinfo.max
+
 def _mask_valid_region(tensor, shapes, valid_shapes):
-    if valid_shapes is not None and tuple(valid_shapes) != tuple(shapes):
-        masked = tensor.new_zeros(shapes)
-        valid_slices = tuple(slice(0, s) for s in valid_shapes)
-        masked[valid_slices] = tensor[valid_slices]
-        return masked
+    shapes_t = _coerce_shape(shapes)
+    valid_t = _coerce_shape(valid_shapes) if valid_shapes is not None else None
+    if valid_t is not None:
+        if valid_t != shapes_t:
+            masked = tensor.new_zeros(shapes_t)
+            valid_slices = tuple(slice(0, s) for s in valid_t)
+            masked[valid_slices] = tensor[valid_slices]
+            tensor = masked
+        tensor._pypto_valid_shape = valid_t
+        tensor._pypto_full_shape = shapes_t
     return tensor
 
 def _tile_load(tensor, offsets, shapes, valid_shapes=None):
-    slices = tuple(slice(o, o + s) for o, s in zip(offsets, shapes))
+    offsets_t = _coerce_shape(offsets)
+    shapes_t = _coerce_shape(shapes)
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
     tile = tensor[slices].clone()
+    actual_shape = tuple(tile.shape)
     # Pad to requested shape if source is smaller (boundary case)
-    if tile.shape != tuple(shapes):
-        padded = tile.new_zeros(shapes)
-        pad_slices = tuple(slice(0, s) for s in tile.shape)
+    if actual_shape != shapes_t:
+        padded = tile.new_zeros(shapes_t)
+        pad_slices = tuple(slice(0, s) for s in actual_shape)
         padded[pad_slices] = tile
         tile = padded
-    return _mask_valid_region(tile, shapes, valid_shapes)
+    # Use provided valid_shapes or fall back to the physical boundary; cap by actual data bounds.
+    v_shape = _coerce_shape(valid_shapes) if valid_shapes is not None else actual_shape
+    v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
+    return _mask_valid_region(tile, shapes_t, v_shape)
 
 def _tile_store(tile, offsets, output_tensor):
-    slices = tuple(slice(o, o + s) for o, s in zip(offsets, tile.shape))
-    output_tensor[slices] = tile
+    offsets_t = _coerce_shape(offsets)
+    valid_shape = getattr(tile, "_pypto_valid_shape", tuple(tile.shape))
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, valid_shape))
+    valid_slices = tuple(slice(0, s) for s in valid_shape)
+    output_tensor[slices] = tile[valid_slices]
     return output_tensor
 
-def _tensor_slice(tensor, offsets, shapes):
-    slices = tuple(slice(o, o + s) for o, s in zip(offsets, shapes))
-    return tensor[slices]
+def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
+    offsets_t = _coerce_shape(offsets)
+    shapes_t = _coerce_shape(shapes)
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, shapes_t))
+    sliced = tensor[slices]
+    # Out-of-bounds tensor.slice in kernels should still materialize the
+    # requested shape for downstream matmul/fillpad paths.
+    if tuple(sliced.shape) != shapes_t:
+        padded = sliced.new_zeros(shapes_t)
+        pad_slices = tuple(slice(0, s) for s in sliced.shape)
+        padded[pad_slices] = sliced
+        sliced = padded
+    if valid_shapes is not None:
+        sliced._pypto_valid_shape = _coerce_shape(valid_shapes)
+        sliced._pypto_full_shape = shapes_t
+    return sliced
+
+def _fillpad(tensor, pad_mode="zero"):
+    valid_shape = getattr(tensor, "_pypto_valid_shape", None)
+    full_shape = getattr(tensor, "_pypto_full_shape", tuple(tensor.shape))
+    full_shape = _coerce_shape(full_shape)
+    if tuple(tensor.shape) != full_shape:
+        padded = tensor.new_zeros(full_shape)
+        pad_slices = tuple(slice(0, s) for s in tensor.shape)
+        padded[pad_slices] = tensor
+        tensor = padded
+    if valid_shape is None:
+        return tensor
+    valid_shape = _coerce_shape(valid_shape)
+    if valid_shape == full_shape:
+        return tensor
+    fill_value = _pad_scalar(tensor, pad_mode)
+    padded = tensor.new_full(full_shape, fill_value)
+    valid_slices = tuple(slice(0, s) for s in valid_shape)
+    padded[valid_slices] = tensor[valid_slices]
+    return padded
 
 def _write_and_return(container, index, value):
     container[index] = value
     return container
 
 def _assemble(target, source, offsets):
-    slices = tuple(slice(o, o + s) for o, s in zip(offsets, source.shape))
-    target[slices] = source
+    offsets_t = _coerce_shape(offsets)
+    valid_shape = getattr(source, "_pypto_valid_shape", tuple(source.shape))
+    slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, valid_shape))
+    valid_slices = tuple(slice(0, s) for s in valid_shape)
+    target[slices] = source[valid_slices]
     return target
 """
 
@@ -147,7 +211,11 @@ def _handle_tensor_matmul(a: list[str], kw: dict[str, Any]) -> str:
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    return f"torch.matmul({lhs}, {rhs})"
+    expr = f"torch.matmul({lhs}, {rhs})"
+    out_dtype = kw.get("out_dtype")
+    if isinstance(out_dtype, DataType):
+        expr = f"{expr}.to({_torch_dtype(out_dtype)})"
+    return expr
 
 
 def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
@@ -156,7 +224,11 @@ def _handle_tensor_matmul_acc(a: list[str], kw: dict[str, Any]) -> str:
         lhs = f"{lhs}.mT"
     if kw.get("b_trans"):
         rhs = f"{rhs}.mT"
-    return f"({acc} + torch.matmul({lhs}, {rhs}))"
+    expr = f"({acc} + torch.matmul({lhs}, {rhs}))"
+    out_dtype = kw.get("out_dtype")
+    if isinstance(out_dtype, DataType):
+        expr = f"{expr}.to({_torch_dtype(out_dtype)})"
+    return expr
 
 
 def _handle_cast(a: list[str], kw: dict[str, Any]) -> str:
@@ -209,9 +281,26 @@ def _handle_reduction(torch_fn: str) -> OpHandler:
 
 
 def _handle_slice(a: list[str], _kw: dict[str, Any]) -> str:
-    # Slice returns a view — valid_shapes is metadata only and must not
-    # trigger masking, otherwise in-place writes won't propagate back.
+    # args: [tensor, shapes, offsets] or [tensor, shapes, offsets, valid_shapes]
+    if len(a) >= 4:
+        return f"_tensor_slice({a[0]}, {a[2]}, {a[1]}, {a[3]})"
     return f"_tensor_slice({a[0]}, {a[2]}, {a[1]})"
+
+
+def _pad_mode_literal(kw: dict[str, Any]) -> str:
+    pad_value = kw.get("pad_value")
+    if pad_value is None:
+        return '"zero"'
+    s = getattr(pad_value, "name", str(pad_value)).lower()
+    if "min" in s:
+        return '"min"'
+    if "max" in s:
+        return '"max"'
+    return '"zero"'
+
+
+def _handle_fillpad(a: list[str], kw: dict[str, Any]) -> str:
+    return f"_fillpad({a[0]}, {_pad_mode_literal(kw)})"
 
 
 # Build the dispatch table
@@ -262,8 +351,8 @@ def _register_ops() -> None:
         m[f"{prefix}.transpose"] = lambda a, _kw: f"{a[0]}.transpose({a[1]}, {a[2]})"
         m[f"{prefix}.concat"] = lambda a, _kw: f"torch.cat([{a[0]}, {a[1]}], dim=-1)"
 
-        # fillpad -> identity
-        m[f"{prefix}.fillpad"] = _identity()
+        # fillpad
+        m[f"{prefix}.fillpad"] = _handle_fillpad
 
         # assemble -> write source into target at offset
         m[f"{prefix}.assemble"] = lambda a, _kw: f"_assemble({a[0]}, {a[1]}, {a[2]})"
@@ -460,7 +549,13 @@ class TorchCodegen(_ir.IRVisitor):
         return self._var_names[vid]
 
     def _visit_expr_str(self, expr: _ir.Expr) -> str:
-        self.visit_expr(expr)
+        # Force nested Call nodes through our Python visit_call implementation.
+        # Some C++ visitor dispatch paths can bypass visit_call for nested calls
+        # and leave only the last-visited argument string in _expr_result.
+        if isinstance(expr, _ir.Call):
+            self.visit_call(expr)
+        else:
+            self.visit_expr(expr)
         return self._expr_result
 
     def _has_body_content(self, stmt: _ir.Stmt) -> bool:
