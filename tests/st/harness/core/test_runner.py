@@ -82,21 +82,30 @@ _BACKEND_TO_ARCH: dict[BackendType, str] = {
 }
 
 
-def _cache_key(tc: PTOTestCase) -> str:
+def _cache_key(tc: PTOTestCase, resolved_platform: str | None = None) -> str:
     """Return a unique cache key combining test name and target platform.
 
-    Uses ``tc.get_platform()`` so the same ``PTOTestCase`` can be compiled for
-    multiple platforms (e.g. ``a2a3sim`` *and* ``a5sim``) without cache-key
-    collisions.  Falls back to the backend architecture for legacy callers
-    that override ``get_backend_type()`` without setting a platform.
+    The cache key is anchored to the *resolved* platform so that the
+    pre-compilation cache, the binary cache and the executor all agree on
+    which toolchain a given artifact was produced for. Resolution order:
+
+    1. ``resolved_platform`` (the value returned by :func:`_resolve_platform`
+       for the current session). Callers should pass it whenever they have it
+       so a legacy test case run with ``--platform=a2a3sim`` is keyed to
+       ``a2a3sim`` rather than the backend-derived ``a2a3``.
+    2. ``tc.get_platform()`` for parametrized cases that pinned a platform on
+       the test case itself.
+    3. The backend architecture (``a2a3``/``a5``) as a final fallback for
+       cases that neither set a platform nor receive a resolved one.
     """
-    try:
-        platform = tc.get_platform()
-    except AttributeError:
-        platform = None
-    if not platform:
-        platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
-    return f"{tc.get_name()}@{platform}"
+    if not resolved_platform:
+        try:
+            resolved_platform = tc.get_platform()
+        except AttributeError:
+            resolved_platform = None
+    if not resolved_platform:
+        resolved_platform = _BACKEND_TO_ARCH.get(tc.get_backend_type(), "unknown")
+    return f"{tc.get_name()}@{resolved_platform}"
 
 
 def _resolve_platform(config_platform: str, test_case: PTOTestCase | None = None) -> str:
@@ -227,6 +236,7 @@ def precompile_test_cases(
     test_cases: "list[PTOTestCase]",
     cache_dir: Path,
     *,
+    platform: str | None = None,
     dump_passes: bool = False,
     max_workers: int | None = None,
 ) -> None:
@@ -249,6 +259,9 @@ def precompile_test_cases(
             ``_cache_key`` before calling).
         cache_dir: Root output directory; each test case is compiled into
             ``cache_dir / <cache_key>``.
+        platform: Session platform string used to resolve the cache key for
+            legacy (non-parametrized) test cases. ``None`` keeps the
+            backend-derived fallback.
         dump_passes: If ``True``, dump intermediate IR after each pass.
         max_workers: Thread-pool size per backend group.  Defaults to
             ``os.cpu_count()``.
@@ -259,7 +272,7 @@ def precompile_test_cases(
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
     def _compile_one(tc: "PTOTestCase") -> tuple[str, Path, str | None]:
-        key = _cache_key(tc)
+        key = _cache_key(tc, _resolve_platform(platform, tc) if platform else None)
         work_dir = cache_dir / key
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -332,14 +345,14 @@ def prebuild_binaries(
     # ── Collect configs for all valid test cases ──────────────────────────────
     case_configs: list[tuple] = []
     for tc in test_cases:
-        key = _cache_key(tc)
+        tc_platform = _resolve_platform(platform, tc)
+        key = _cache_key(tc, tc_platform)
         if key not in _precompile_cache or _precompile_cache[key][1] is not None:
             continue
         work_dir = _precompile_cache[key][0]
         mod = _load_kc(work_dir)
         if mod is None:
             continue
-        tc_platform = _resolve_platform(platform, tc)
         runtime_name = getattr(mod, "RUNTIME_CONFIG", {}).get("runtime", "host_build_graph")
         compiler = KernelCompiler(platform=tc_platform)
         case_configs.append(
@@ -435,7 +448,8 @@ class TestRunner:
         """
         start_time = time.time()
         test_name = test_case.get_name()
-        cache_k = _cache_key(test_case)
+        resolved_platform = _resolve_platform(self.config.platform, test_case)
+        cache_k = _cache_key(test_case, resolved_platform)
 
         # --- Phase 2: pre-compiled artifacts available — skip compilation ---
         if cache_k in _precompile_cache:
@@ -454,7 +468,6 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
             try:
-                platform = _resolve_platform(self.config.platform, test_case)
                 # Re-write golden.py with the actual test case's tolerances.
                 # The pre-compiled golden.py may have been written with default
                 # tolerances (1e-5) because pytest_collection_finish instantiates
@@ -463,14 +476,14 @@ class TestRunner:
                 from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
                 chip_callable, runtime_name = compile_and_assemble(
-                    cached_dir, platform, pto_isa_commit=self.config.pto_isa_commit
+                    cached_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
                 )
                 _execute_on_device(
                     cached_dir,
                     cached_dir / "golden.py",
                     chip_callable,
                     runtime_name,
-                    platform,
+                    resolved_platform,
                     self.config.device_id,
                 )
                 return RunResult(
@@ -545,7 +558,7 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
 
-            platform = _resolve_platform(self.config.platform, test_case)
+            platform = resolved_platform
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
             chip_callable, runtime_name = compile_and_assemble(

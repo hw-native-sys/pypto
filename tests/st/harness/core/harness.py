@@ -35,11 +35,20 @@ from pypto.runtime.tensor_spec import ScalarSpec
 # suffix toggles between simulator and on-board (real chip) execution.
 #
 # Filtering happens in two layers:
-#     1. CLI ``--platform`` accepts a comma-separated subset (default
-#        ``a2a3sim,a5sim``); non-matching parametrize variants are deselected
-#        during collection.
+#     1. CLI ``--platform`` accepts a comma-separated subset (default ``a2a3``,
+#        matching legacy on-NPU CI behaviour); non-matching parametrize
+#        variants are deselected during collection.
 #     2. ``@pytest.mark.platforms("a5", "a5sim")`` on a test function further
 #        restricts that test to the listed platforms.
+#
+# Two parallel families of constants exist here on purpose:
+#     - ``*_PLATFORM_IDS`` are plain string tuples used by code that needs
+#       to *compare* against requested platform ids (e.g. the runtime
+#       hardware-availability gate or the CLI parser).
+#     - ``PLATFORMS`` / ``SIM_PLATFORMS`` / ``ONBOARD_PLATFORMS`` are
+#       ``pytest.param`` lists used by ``@pytest.mark.parametrize``; they
+#       cannot be put in a ``set()`` and therefore must not be used for
+#       string membership checks.
 #
 # Usage:
 #     @pytest.mark.parametrize("platform", PLATFORMS)
@@ -48,17 +57,13 @@ from pypto.runtime.tensor_spec import ScalarSpec
 #         assert result.passed
 # ---------------------------------------------------------------------------
 
-PLATFORMS = [
-    pytest.param("a2a3sim", id="a2a3sim"),
-    pytest.param("a5sim", id="a5sim"),
-    pytest.param("a2a3", id="a2a3"),
-    pytest.param("a5", id="a5"),
-]
+SIM_PLATFORM_IDS: tuple[str, ...] = ("a2a3sim", "a5sim")
+ONBOARD_PLATFORM_IDS: tuple[str, ...] = ("a2a3", "a5")
+ALL_PLATFORM_IDS: tuple[str, ...] = (*SIM_PLATFORM_IDS, *ONBOARD_PLATFORM_IDS)
 
-SIM_PLATFORMS = [PLATFORMS[0], PLATFORMS[1]]
-ONBOARD_PLATFORMS = [PLATFORMS[2], PLATFORMS[3]]
-
-ALL_PLATFORM_IDS: tuple[str, ...] = ("a2a3sim", "a5sim", "a2a3", "a5")
+PLATFORMS = [pytest.param(p, id=p) for p in ALL_PLATFORM_IDS]
+SIM_PLATFORMS = [pytest.param(p, id=p) for p in SIM_PLATFORM_IDS]
+ONBOARD_PLATFORMS = [pytest.param(p, id=p) for p in ONBOARD_PLATFORM_IDS]
 
 _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
@@ -188,9 +193,10 @@ class PTOTestCase(ABC):
             config: Test configuration. If None, uses default config.
             platform: Override the target platform string ("a2a3", "a5",
                 "a2a3sim", "a5sim").  If None, falls back to the class-level
-                ``get_platform()`` default (``"a2a3sim"``).  Pass explicitly
-                to run the same test case on a different platform without
-                subclassing.
+                ``get_platform()`` (which defaults to ``None``, deferring to
+                the session-wide ``--platform`` CLI value, currently
+                ``a2a3``).  Pass explicitly to run the same test case on a
+                different platform without subclassing.
             backend_type: (Legacy) Override the backend type for code
                 generation.  Prefer ``platform``.  If both are given, the
                 value derived from ``platform`` wins.

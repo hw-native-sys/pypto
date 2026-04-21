@@ -15,7 +15,7 @@ skipped when hardware is not available.
 
 import pytest
 from harness.core.environment import is_hardware_available
-from harness.core.harness import ONBOARD_PLATFORMS
+from harness.core.harness import ONBOARD_PLATFORM_IDS
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -30,7 +30,7 @@ def check_hardware_availability(request):
     """
     raw = request.config.getoption("--platform")
     requested = {p.strip() for p in str(raw).split(",") if p.strip()}
-    onboard_set = set(ONBOARD_PLATFORMS)
+    onboard_set = set(ONBOARD_PLATFORM_IDS)
     if requested and requested.issubset(onboard_set) and not is_hardware_available():
         pytest.skip(
             "Hardware not available: Ascend NPU device nodes not found "

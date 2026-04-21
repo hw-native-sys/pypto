@@ -77,11 +77,11 @@ pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes
 Each runtime test case is automatically parametrized over four target
 platforms: `a2a3`, `a5`, `a2a3sim`, `a5sim`. The `--platform` CLI option acts
 as a **filter** that selects which subset is actually executed (it accepts a
-comma-separated list and defaults to `a2a3sim,a5sim` when omitted, so the two
-simulator variants run by default).
+comma-separated list and defaults to `a2a3` when omitted, matching the
+legacy on-NPU CI behaviour).
 
 ```bash
-# Default: run a2a3sim + a5sim (no hardware required)
+# Default: run a2a3 only (matches legacy CI; requires Ascend 910B hardware)
 pytest tests/st/ -v --forked
 
 # Run only the a2a3 simulator
@@ -150,7 +150,7 @@ The test framework provides extensive configuration through pytest command-line 
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--platform` | `a2a3sim,a5sim` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
+| `--platform` | `a2a3` | Comma-separated allowlist of target platforms. Each runtime test case is parametrized over `a2a3`, `a5`, `a2a3sim`, `a5sim`; only variants whose id appears here run. |
 | `--device` | `0` | Device ID for hardware tests (0, 1, 2, ...) |
 | `--strategy` | `Default` | PyPTO optimization strategy: `Default` or `DebugTileOptimization` |
 | `--save-kernels` | `False` | Save generated kernels and artifacts to disk |

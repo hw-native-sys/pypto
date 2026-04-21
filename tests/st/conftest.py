@@ -44,6 +44,7 @@ from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
     _precompile_cache,
+    _resolve_platform,
     prebuild_binaries,
     precompile_test_cases,
 )
@@ -163,15 +164,28 @@ def pytest_addoption(parser):
     )
 
 
-def _parse_platform_filter(raw: str) -> set[str]:
-    """Parse the comma-separated --platform value into a set of platform ids.
+def _parse_platform_filter(raw: str) -> tuple[str, ...]:
+    """Parse the comma-separated ``--platform`` value into an ordered tuple.
 
-    Unknown ids are silently dropped so that bogus user input degrades to the
-    intersection with the canonical platform set rather than producing a
-    confusing collection error.
+    The returned tuple preserves the order in which the user wrote the ids on
+    the command line (and de-duplicates them) so that downstream consumers
+    that need a single representative platform – e.g. the precompile fallback
+    – pick a deterministic value instead of an arbitrary set element.
+
+    An empty string (the user passed nothing) yields an empty tuple, which
+    callers expand to "every known platform". A non-empty input that contains
+    *only* unknown ids raises ``pytest.UsageError`` so a typo such as
+    ``--platform=a2a3typo`` fails loudly instead of silently expanding to the
+    full platform set.
     """
-    requested = {tok.strip() for tok in str(raw).split(",") if tok.strip()}
-    return requested & set(ALL_PLATFORM_IDS)
+    tokens = [tok.strip() for tok in str(raw).split(",") if tok.strip()]
+    canonical = set(ALL_PLATFORM_IDS)
+    valid = tuple(dict.fromkeys(tok for tok in tokens if tok in canonical))
+    if tokens and not valid:
+        raise pytest.UsageError(
+            f"--platform must include at least one of: {', '.join(ALL_PLATFORM_IDS)}; got {raw!r}"
+        )
+    return valid
 
 
 @pytest.fixture(scope="session")
@@ -195,7 +209,7 @@ def test_config(request) -> RunConfig:
         save_kernels_dir = kernels_dir
 
     platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
-    fallback_platform = next(iter(platform_filter), "a2a3")
+    fallback_platform = platform_filter[0] if platform_filter else "a2a3"
 
     return RunConfig(
         platform=fallback_platform,
@@ -288,9 +302,8 @@ def pytest_collection_modifyitems(config, items):
     Items without a platform parameter pass as long as the effective set is
     non-empty.
     """
-    cli_filter = _parse_platform_filter(config.getoption("--platform"))
-    if not cli_filter:
-        cli_filter = set(ALL_PLATFORM_IDS)
+    cli_platforms = _parse_platform_filter(config.getoption("--platform"))
+    cli_filter = set(cli_platforms or ALL_PLATFORM_IDS)
     canonical = set(ALL_PLATFORM_IDS)
 
     selected: list[pytest.Item] = []
@@ -422,8 +435,21 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     # ── compile in parallel ───────────────────────────────────────────────────
     test_cases = list(seen.values())
     workers_str = str(max_workers) if max_workers is not None else "auto"
+    # ``--platform`` is a CSV allowlist; the per-test value resolved by
+    # ``tc.get_platform()`` overrides this fallback inside ``TestRunner``,
+    # so any one entry from the filter is sufficient here. We compute it
+    # *before* precompilation so the cache key reflects the resolved
+    # platform for legacy (non-parametrized) test cases.
+    platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
+    platform: str = platform_filter[0] if platform_filter else "a2a3"
     print(f"\n[PyPTO] Pre-compiling {len(test_cases)} test case(s) in parallel (workers={workers_str})…")
-    precompile_test_cases(test_cases, cache_dir, dump_passes=dump_passes, max_workers=max_workers)
+    precompile_test_cases(
+        test_cases,
+        cache_dir,
+        platform=platform,
+        dump_passes=dump_passes,
+        max_workers=max_workers,
+    )
 
     n_ok = sum(1 for _, err in _precompile_cache.values() if err is None)
     n_fail = len(_precompile_cache) - n_ok
@@ -433,16 +459,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     # Compile incore kernels and orchestration .so in parallel.
     # Results are saved to work_dir/cache/.
     if n_ok > 0 and not session.config.getoption("--codegen-only"):
-        ok_cases = [
-            tc
-            for tc in test_cases
-            if _cache_key(tc) in _precompile_cache and _precompile_cache[_cache_key(tc)][1] is None
-        ]
-        # ``--platform`` is a CSV allowlist; the per-test value resolved by
-        # ``tc.get_platform()`` overrides this fallback inside ``TestRunner``,
-        # so any one entry from the filter is sufficient here.
-        platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
-        platform: str = next(iter(platform_filter), "a2a3")
+        ok_cases = []
+        for tc in test_cases:
+            key = _cache_key(tc, _resolve_platform(platform, tc))
+            if key in _precompile_cache and _precompile_cache[key][1] is None:
+                ok_cases.append(tc)
         pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
         print(
             f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"

@@ -815,11 +815,12 @@ class TestDynOrchShapeOperations:
     ):
         """Test paged attention with fully dynamic dims in the orchestration signature.
 
-        The A5 variants of this test currently exercise a CPU sim path bug
-        (TMATMUL bf16 unsupported); they are skipped via the platforms marker
-        until that is resolved.
+        The a5sim variant exercises a CPU sim path bug (TMATMUL bf16
+        unsupported) and is skipped at runtime until that is resolved. The
+        onboard a5 variant is intentionally **not** skipped so real hardware
+        coverage is preserved.
         """
-        if platform.startswith("a5"):
+        if platform == "a5sim":
             pytest.skip("CPU sim path bug: TMATMUL does not support bf16 data type")
         result = test_runner.run(
             DynOrchPagedAttentionTestCase(
