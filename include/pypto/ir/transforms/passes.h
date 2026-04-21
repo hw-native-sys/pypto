@@ -470,6 +470,29 @@ Pass NormalizeReturnOrder();
 Pass FuseCreateAssembleToSlice();
 
 /**
+ * @brief Derive Call::arg_directions_ from callee param directions and buffer lineage.
+ *
+ * For every non-builtin call in Orchestration / Group / Spmd functions,
+ * compute the runtime call-site direction (Input/Output/InOut/OutputExisting/Scalar)
+ * for each argument and write it into Call::arg_directions_.
+ *
+ * Mapping:
+ *   - scalar argument                        -> ArgDirection::Scalar
+ *   - tensor + callee dir == In              -> ArgDirection::Input
+ *   - tensor + callee dir == InOut           -> ArgDirection::InOut
+ *   - tensor + callee dir == Out, locally allocated buffer
+ *                                            -> ArgDirection::InOut (WAW promotion)
+ *   - tensor + callee dir == Out, external (param-rooted) buffer
+ *                                            -> ArgDirection::OutputExisting
+ *
+ * Builtin ops (tensor.*, tile.*, system.*) are left untouched (arg_directions empty).
+ *
+ * Requirements:
+ *   - InCore scopes outlined (run OutlineIncoreScopes first)
+ */
+Pass DeriveCallDirections();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

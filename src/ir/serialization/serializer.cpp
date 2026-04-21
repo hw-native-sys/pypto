@@ -103,6 +103,8 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const std::optional<bool>& field);
   result_type VisitLeafField(const ParamDirection& field);
   result_type VisitLeafField(const std::vector<ParamDirection>& field);
+  result_type VisitLeafField(const ArgDirection& field);
+  result_type VisitLeafField(const std::vector<ArgDirection>& field);
   result_type VisitLeafField(const std::vector<std::string>& field);
   result_type VisitLeafField(const TypePtr& field);
   result_type VisitLeafField(const OpPtr& field);
@@ -622,6 +624,19 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const ParamDirection& fie
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const std::vector<ParamDirection>& field) {
+  std::vector<msgpack::object> vec;
+  vec.reserve(field.size());
+  for (const auto& dir : field) {
+    vec.emplace_back(static_cast<uint8_t>(dir), zone_);
+  }
+  return msgpack::object(vec, zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const ArgDirection& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::vector<ArgDirection>& field) {
   std::vector<msgpack::object> vec;
   vec.reserve(field.size());
   for (const auto& dir : field) {

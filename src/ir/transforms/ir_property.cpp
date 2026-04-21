@@ -65,6 +65,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "NoNestedInCore";
     case IRProperty::InOutUseValid:
       return "InOutUseValid";
+    case IRProperty::PipelineResolved:
+      return "PipelineResolved";
+    case IRProperty::CallDirectionsResolved:
+      return "CallDirectionsResolved";
     default:
       return "Unknown";
   }
@@ -106,7 +110,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::AllocatedMemoryAddr,
                                    IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,
-                                   IRProperty::InOutUseValid};
+                                   IRProperty::InOutUseValid,
+                                   IRProperty::CallDirectionsResolved};
   return props;
 }
 

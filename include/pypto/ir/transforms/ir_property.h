@@ -52,6 +52,7 @@ enum class IRProperty : uint64_t {
   NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
   InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
   PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
+  CallDirectionsResolved,   ///< Every non-builtin Call has explicit Call::arg_directions_
   kCount                    ///< Sentinel (must be last)
 };
 

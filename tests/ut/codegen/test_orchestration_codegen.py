@@ -40,8 +40,20 @@ def assert_code_equal(actual: str, expected: str) -> None:
         raise AssertionError(f"Code mismatch:\n{diff}")
 
 
+def _ensure_arg_directions(program):
+    """Phase-5 invariant: codegen requires Call.arg_directions to be populated.
+
+    Tests that hand-build IR (without going through PassManager) need to invoke
+    DeriveCallDirections before codegen so the Call sites carry explicit
+    ArgDirection vectors. This helper makes that step a no-op when the program
+    was already produced by the pass pipeline.
+    """
+    return passes.derive_call_directions()(program)
+
+
 def _generate_orch_code(program) -> str:
     """Generate orchestration code using backend-agnostic codegen."""
+    program = _ensure_arg_directions(program)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             result = codegen.generate_orchestration(program, func)
@@ -51,6 +63,7 @@ def _generate_orch_code(program) -> str:
 
 def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     """Generate orchestration result using backend-agnostic codegen."""
+    program = _ensure_arg_directions(program)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func)
@@ -2237,12 +2250,17 @@ class TestUnregisteredOpError:
             codegen.generate_orchestration(program, orch_func)
 
 
-class TestCallSiteDirectionResolver:
+class TestLocalAllocWAWPromotion:
     """Test that locally allocated tensors get add_inout instead of add_output.
 
     Issue #1022: when a tensor is pre-allocated via alloc_tensors and then
     passed as Out to multiple InCore tasks in separate loops, the codegen
     must use add_inout (not add_output) to establish WAW dependencies.
+
+    The promotion is now performed by the ``DeriveCallDirections`` IR pass,
+    which writes ``ArgDirection::InOut`` into ``Call::arg_directions_`` for
+    locally allocated buffers (replacing the legacy ``CallSiteDirectionResolver``
+    analysis that lived in orchestration codegen).
     """
 
     def test_alloc_tensor_two_loops_gets_inout(self):
@@ -2337,6 +2355,119 @@ class TestCallSiteDirectionResolver:
 
         assert "add_output(ext_out)" in code, (
             f"External (parameter) tensor should keep add_output. Generated code:\n{code}"
+        )
+
+
+class TestArgDirectionsCodegen:
+    """Verify that orchestration codegen prefers Call.arg_directions_ when present.
+
+    These tests exercise the new ArgDirection-driven path in BuildTaskParams:
+    every recognised ArgDirection enum value is mapped to the matching runtime
+    method (add_input / add_output / add_inout / add_no_dep / add_scalar) and
+    the value emitted at the call site reflects the per-argument direction
+    written by the DeriveCallDirections pass — independently of the callee's
+    ParamDirection.
+    """
+
+    @staticmethod
+    def _generate_orch_direct(program) -> str:
+        """Bypass ``_ensure_arg_directions`` so explicit overrides survive."""
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                return codegen.generate_orchestration(program, func).code
+        raise ValueError("No orchestration function found in program")
+
+    def _build_program_with_arg_directions(self, arg_dirs):
+        """Build a tiny Orchestration program where the call site has explicit arg_directions.
+
+        The callee declares ``Out`` for the second parameter, and the orchestration
+        body pre-allocates the tensor with ``tensor.create``. We then patch the
+        call expression with the requested ``arg_directions`` so that codegen
+        consumes them directly (bypassing the legacy ParamDirection mapping).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ArgDirProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buf: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                buf = self.kernel(a, buf)
+                out = self.kernel(buf, out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        program = pm.run_passes(ArgDirProgram)
+
+        rewritten = self._rewrite_kernel_calls(program, arg_dirs)
+        return rewritten
+
+    @staticmethod
+    def _rewrite_kernel_calls(program, arg_dirs):
+        """Replace every ``self.kernel(...)`` Call with a copy carrying the given arg_directions."""
+
+        class _RewriteKernel(ir.IRMutator):
+            def visit_call(self, op: ir.Call) -> ir.Expr:
+                expr = super().visit_call(op)
+                call = expr if isinstance(expr, ir.Call) else op
+                if call.op.name != "kernel" or len(call.args) != len(arg_dirs):
+                    return expr
+                return ir.Call(
+                    call.op, list(call.args), list(arg_dirs), dict(call.kwargs), call.type, call.span
+                )
+
+        return _RewriteKernel().visit_program(program)
+
+    def test_arg_direction_inout_emits_add_inout(self):
+        program = self._build_program_with_arg_directions([ir.ArgDirection.Input, ir.ArgDirection.InOut])
+        code = self._generate_orch_direct(program)
+        assert "add_inout(buf)" in code, (
+            f"ArgDirection::InOut on the second argument must produce add_inout(...). Generated code:\n{code}"
+        )
+
+    def test_arg_direction_output_existing_emits_add_output(self):
+        program = self._build_program_with_arg_directions(
+            [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        )
+        code = self._generate_orch_direct(program)
+        assert "add_output(" in code, (
+            f"ArgDirection::OutputExisting must produce add_output(...). Generated code:\n{code}"
+        )
+        assert "add_inout(" not in code or code.count("add_inout(") < code.count("add_output("), (
+            f"Expected add_output to dominate over add_inout. Generated code:\n{code}"
+        )
+
+    def test_arg_direction_no_dep_emits_add_no_dep(self):
+        program = self._build_program_with_arg_directions([ir.ArgDirection.Input, ir.ArgDirection.NoDep])
+        code = self._generate_orch_direct(program)
+        assert "add_no_dep(" in code, (
+            f"ArgDirection::NoDep must produce add_no_dep(...). Generated code:\n{code}"
+        )
+
+    def test_arg_direction_input_emits_add_input(self):
+        program = self._build_program_with_arg_directions([ir.ArgDirection.Input, ir.ArgDirection.Input])
+        code = self._generate_orch_direct(program)
+        assert "add_input(" in code, (
+            f"ArgDirection::Input must produce add_input(...). Generated code:\n{code}"
+        )
+        assert "add_output(" not in code and "add_inout(" not in code, (
+            "When all tensor args are ArgDirection::Input the codegen must not emit add_output/add_inout. "
+            f"Generated code:\n{code}"
         )
 
 

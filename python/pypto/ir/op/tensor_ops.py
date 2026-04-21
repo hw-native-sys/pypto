@@ -23,6 +23,7 @@ def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
     layout: TensorLayout = TensorLayout.ND,
+    manual_dep: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Create a new tensor with specified shape and dtype.
@@ -31,6 +32,10 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        manual_dep: When True, mark the buffer as ``manual_dep`` so codegen
+            opts out of automatic dependency tracking. Used by passes that
+            inject orchestrator workspace buffers (e.g. GM pipe buffer); most
+            users should leave it as the default ``False``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -42,6 +47,8 @@ def create(
 
     args = [shape_tuple]
     kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
+    if manual_dep:
+        kwargs["manual_dep"] = True
 
     return _ir_core.create_op_call("tensor.create", args, kwargs, actual_span)
 
@@ -875,8 +882,8 @@ def reshape(
 
 def transpose(
     tensor: Expr,
-    axis1: int,
-    axis2: int,
+    axis1: int | ConstInt,
+    axis2: int | ConstInt,
     valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -884,8 +891,8 @@ def transpose(
 
     Args:
         tensor: Input tensor expression
-        axis1: First axis to swap (supports negative indexing)
-        axis2: Second axis to swap (supports negative indexing)
+        axis1: First axis to swap as an int or ConstInt (supports negative indexing)
+        axis2: Second axis to swap as an int or ConstInt (supports negative indexing)
         valid_shape: Valid shape dimensions (optional, defaults to empty)
         span: Optional source span for debugging (auto-captured if not provided)
 
@@ -893,8 +900,19 @@ def transpose(
         Call expression for tensor transpose
     """
     actual_span = _get_span_or_capture(span)
-    axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
-    axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    if isinstance(axis1, ConstInt):
+        axis1_expr = axis1
+    elif isinstance(axis1, int):
+        axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
+    else:
+        raise TypeError(f"axis1 must be int or ConstInt, got {type(axis1)}")
+
+    if isinstance(axis2, ConstInt):
+        axis2_expr = axis2
+    elif isinstance(axis2, int):
+        axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
+    else:
+        raise TypeError(f"axis2 must be int or ConstInt, got {type(axis2)}")
 
     args = [tensor, axis1_expr, axis2_expr]
     if valid_shape is not None:

@@ -321,16 +321,96 @@ class IterArg : public Var {
 using IterArgPtr = std::shared_ptr<const IterArg>;
 
 /**
+ * @brief Call-site argument direction classification
+ *
+ * Models the runtime task-submission semantics for each positional argument of a Call.
+ * Mirrors the runtime TensorArgType enum (INPUT/OUTPUT/INOUT/OUTPUT_EXISTING/NO_DEP)
+ * one-to-one, plus a Scalar tag for non-tensor arguments.
+ *
+ * Distinct from `ParamDirection` (which lives on the callee Function and describes
+ * the function-signature contract — "I read/write this parameter"). `ArgDirection`
+ * describes the call-site task behavior — "this submission establishes these
+ * dependencies and uses this memory ownership model".
+ *
+ * - Input:           Read-only input → runtime add_input, TensorArgType::INPUT
+ * - Output:          Runtime allocates a new buffer → add_output(create_info),
+ *                    TensorArgType::OUTPUT
+ * - InOut:           Read-then-write → add_inout, TensorArgType::INOUT
+ * - OutputExisting:  Write into an already-existing tensor (skips OverlapMap,
+ *                    keeps creator dependency) → add_output(tensor),
+ *                    TensorArgType::OUTPUT_EXISTING
+ * - NoDep:           No-dependency existing tensor (skips OverlapMap, no publish)
+ *                    → add_no_dep, TensorArgType::NO_DEP
+ * - Scalar:          Non-tensor scalar argument → add_scalar (must follow all
+ *                    tensors in the runtime arg list)
+ */
+enum class ArgDirection : uint8_t {
+  Input = 0,           ///< Read-only input (default for tensors)
+  Output = 1,          ///< Runtime-allocated output buffer
+  InOut = 2,           ///< Read-then-write
+  OutputExisting = 3,  ///< Write-only into an existing tensor
+  NoDep = 4,           ///< No-dependency existing tensor
+  Scalar = 5,          ///< Scalar (non-tensor) argument
+};
+
+/**
+ * @brief Convert ArgDirection to string
+ */
+inline std::string ArgDirectionToString(ArgDirection dir) {
+  switch (dir) {
+    case ArgDirection::Input:
+      return "Input";
+    case ArgDirection::Output:
+      return "Output";
+    case ArgDirection::InOut:
+      return "InOut";
+    case ArgDirection::OutputExisting:
+      return "OutputExisting";
+    case ArgDirection::NoDep:
+      return "NoDep";
+    case ArgDirection::Scalar:
+      return "Scalar";
+  }
+  throw pypto::TypeError("Unknown ArgDirection");
+}
+
+/**
+ * @brief Convert string to ArgDirection
+ */
+inline ArgDirection StringToArgDirection(const std::string& str) {
+  if (str == "Input") {
+    return ArgDirection::Input;
+  } else if (str == "Output") {
+    return ArgDirection::Output;
+  } else if (str == "InOut") {
+    return ArgDirection::InOut;
+  } else if (str == "OutputExisting") {
+    return ArgDirection::OutputExisting;
+  } else if (str == "NoDep") {
+    return ArgDirection::NoDep;
+  } else if (str == "Scalar") {
+    return ArgDirection::Scalar;
+  }
+  throw pypto::TypeError("Unknown ArgDirection: " + str);
+}
+
+/**
  * @brief Function call expression
  *
  * Represents a function call with an operation and arguments.
  * Can accept any Expr as arguments, not just scalar expressions.
  * Supports keyword arguments (kwargs) for operator metadata.
+ *
+ * Optional `arg_directions_` carries call-site task-submission semantics for each
+ * positional argument. When non-empty it must have the same length as `args_`.
+ * When empty the call falls back to legacy behavior where codegen derives
+ * directions from the callee Function's `param_directions_`.
  */
 class Call : public Expr {
  public:
   OpPtr op_;                                              // Operation/function
   std::vector<ExprPtr> args_;                             // Positional arguments
+  std::vector<ArgDirection> arg_directions_;              // Optional call-site directions (empty = legacy)
   std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
   /**
@@ -341,7 +421,7 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, Span span)
-      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), kwargs_() {}
+      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), arg_directions_(), kwargs_() {}
 
   /**
    * @brief Create a function call expression with explicit type
@@ -352,7 +432,11 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, TypePtr type, Span span)
-      : Expr(std::move(span), std::move(type)), op_(std::move(op)), args_(std::move(args)), kwargs_() {}
+      : Expr(std::move(span), std::move(type)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        arg_directions_(),
+        kwargs_() {}
 
   /**
    * @brief Create a function call expression with kwargs
@@ -363,7 +447,11 @@ class Call : public Expr {
    * @param span Source location
    */
   Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs, Span span)
-      : Expr(std::move(span)), op_(std::move(op)), args_(std::move(args)), kwargs_(std::move(kwargs)) {}
+      : Expr(std::move(span)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        arg_directions_(),
+        kwargs_(std::move(kwargs)) {}
 
   /**
    * @brief Create a function call expression with kwargs and explicit type
@@ -379,7 +467,31 @@ class Call : public Expr {
       : Expr(std::move(span), std::move(type)),
         op_(std::move(op)),
         args_(std::move(args)),
+        arg_directions_(),
         kwargs_(std::move(kwargs)) {}
+
+  /**
+   * @brief Create a function call expression with explicit call-site arg directions
+   *
+   * @param op Operation/function to call
+   * @param args List of argument expressions
+   * @param arg_directions Per-argument call-site directions (must be empty or same length as args)
+   * @param kwargs Keyword arguments (metadata)
+   * @param type Result type of the call
+   * @param span Source location
+   */
+  Call(OpPtr op, std::vector<ExprPtr> args, std::vector<ArgDirection> arg_directions,
+       std::vector<std::pair<std::string, std::any>> kwargs, TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        arg_directions_(std::move(arg_directions)),
+        kwargs_(std::move(kwargs)) {
+    if (!arg_directions_.empty() && arg_directions_.size() != args_.size()) {
+      throw pypto::TypeError("Call::arg_directions_ size (" + std::to_string(arg_directions_.size()) +
+                             ") must match args_ size (" + std::to_string(args_.size()) + ")");
+    }
+  }
 
   /**
    * @brief Get a kwarg value with type checking
@@ -420,12 +532,13 @@ class Call : public Expr {
   /**
    * @brief Get field descriptors for reflection-based visitation
    *
-   * @return Tuple of field descriptors (op, args, and kwargs as USUAL fields)
+   * @return Tuple of field descriptors (op, args, arg_directions, and kwargs as USUAL fields)
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Expr::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&Call::op_, "op"),
                                           reflection::UsualField(&Call::args_, "args"),
+                                          reflection::UsualField(&Call::arg_directions_, "arg_directions"),
                                           reflection::UsualField(&Call::kwargs_, "kwargs")));
   }
 };

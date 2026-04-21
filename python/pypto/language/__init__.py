@@ -57,6 +57,7 @@ from pypto.pypto_core.ir import (
     TileLayout,
 )
 
+from . import arg_direction as adir
 from . import optimizations, parser
 from .dsl_api import (
     at,
@@ -256,6 +257,7 @@ __all__ = [
     "optimizations",
     "split",
     "auto_chunk",
+    "adir",
     "tile",
     "system",
     "tensor",

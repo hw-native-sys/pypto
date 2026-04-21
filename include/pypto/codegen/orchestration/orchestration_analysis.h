@@ -15,7 +15,6 @@
 #include <map>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -132,43 +131,6 @@ class VarLineageCollector : public ir::IRVisitor {
   [[nodiscard]] const ir::Var* ResolveExpr(const ir::ExprPtr& expr) const;
 
   ir::ProgramPtr program_;
-};
-
-/**
- * @brief Compute effective call-site parameter directions for orchestration calls
- *
- * Resolves the semantic mismatch between function-level ParamDirection (a property
- * of the callee: "this function reads/writes this parameter") and orchestration
- * call-site direction (a property of the task submission: "establish dependencies
- * and manage memory for this buffer").
- *
- * Key rule: when a locally allocated tensor (from tensor.create / alloc_tensors)
- * is passed as Out to an InCore call, the call-site direction must be InOut so
- * that the runtime establishes WAW dependencies between tasks sharing the buffer.
- *
- * Uses BufferRootCollector results to trace each argument back to its buffer root
- * and determine whether it originates from a function parameter (external) or a
- * local tensor.create (pre-allocated).
- */
-class CallSiteDirectionResolver : public ir::IRVisitor {
- public:
-  CallSiteDirectionResolver(ir::ProgramPtr program,
-                            const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots,
-                            const std::vector<ir::VarPtr>& params);
-
-  /// Per-call effective directions. Only populated for calls that need overrides
-  /// (i.e., at least one Out parameter targets a locally allocated buffer).
-  std::unordered_map<const ir::Call*, std::vector<ir::ParamDirection>> call_site_directions;
-
- protected:
-  void VisitExpr_(const ir::CallPtr& call) override;
-
- private:
-  [[nodiscard]] bool IsLocallyAllocated(const ir::Var* var) const;
-
-  ir::ProgramPtr program_;
-  const std::unordered_map<const ir::Var*, const ir::Var*>& buffer_roots_;
-  std::unordered_set<const ir::Var*> param_vars_;
 };
 
 /// Compute effective param directions for a Group function.

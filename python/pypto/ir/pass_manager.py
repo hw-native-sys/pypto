@@ -152,6 +152,7 @@ class PassManager:
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
+            ("DeriveCallDirections", lambda: passes.derive_call_directions()),
             ("Simplify", lambda: passes.simplify()),
         ]
         cls._strategy_passes = {

@@ -174,6 +174,16 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
                  IRProperty::PipelineResolved}};
 
+// -- Call-site direction pass -----------------------------------------------
+//
+// The integrity of ``Call::arg_directions_`` is checked by the
+// ``CallDirectionsResolved`` PropertyVerifier (registered in
+// PropertyVerifierRegistry), so PassPipeline auto-verifies it whenever this
+// pass produces the property — no separate verify pass is needed.
+
+inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRProperty::SplitIncoreOrch},
+                                                            .produced = {IRProperty::CallDirectionsResolved}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

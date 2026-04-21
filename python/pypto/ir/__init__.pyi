@@ -18,6 +18,9 @@ accept integer arguments, but the public type signature is unchanged.
 from pypto.pypto_core import DataType as DataType
 from pypto.pypto_core.ir import *  # noqa: F401, F403
 from pypto.pypto_core.ir import (
+    ArgDirection as ArgDirection,
+)
+from pypto.pypto_core.ir import (
     IRMutator,
     IRVisitor,
     TensorType,
@@ -27,13 +30,23 @@ from pypto.pypto_core.ir import (
 )
 from pypto.pypto_core.passes import PassContext, VerificationLevel, VerificationMode
 
+from . import directions as directions
 from . import op as op
 from .builder import IRBuilder
 from .compile import compile
+from .directions import make_call
 from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
 from .pass_manager import OptimizationStrategy, PassManager
 from .printer import python_print
+
+# Per-call-site direction aliases re-exported at the top level.
+input: ArgDirection
+output: ArgDirection
+output_existing: ArgDirection
+inout: ArgDirection
+no_dep: ArgDirection
+scalar_dir: ArgDirection
 
 # DataType aliases (mirrors runtime __init__.py)
 FP4: DataType
@@ -77,4 +90,13 @@ __all__ = [
     "op_conversion",
     "register_op_conversion",
     "make_roundtrip_instrument",
+    "directions",
+    "make_call",
+    "input",
+    "output",
+    "output_existing",
+    "inout",
+    "no_dep",
+    "scalar_dir",
+    "ArgDirection",
 ]

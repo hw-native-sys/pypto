@@ -3050,7 +3050,10 @@ class ASTParser:
                     if func_obj is not None:
                         self._validate_call_arg_count(method_name, func_obj, len(call.args), span)
 
-                    args = [self.parse_expression(arg) for arg in call.args]
+                    raw_args, arg_directions = self._strip_arg_direction_wrappers(
+                        method_name, call.args, span
+                    )
+                    args = [self.parse_expression(arg) for arg in raw_args]
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3058,7 +3061,9 @@ class ASTParser:
                             args,
                             return_types,
                         )
-                    return self._make_call_with_return_type(gvar, args, return_types, span)
+                    return self._make_call_with_return_type(
+                        gvar, args, return_types, span, arg_directions=arg_directions
+                    )
                 else:
                     raise UndefinedVariableError(
                         f"Function '{method_name}' not defined in program",
@@ -3201,20 +3206,112 @@ class ASTParser:
         args: list[ir.Expr],
         return_types: list[ir.Type],
         span: ir.Span,
+        arg_directions: list[ir.ArgDirection] | None = None,
     ) -> ir.Expr:
-        """Create an ir.Call, attaching the return type when known.
+        """Create an ir.Call, attaching the return type and (optional) call-site directions.
 
         Args:
             gvar: GlobalVar identifying the callee
             args: Parsed argument expressions
             return_types: The callee's return type list (may be empty)
             span: Source span for the call
+            arg_directions: Optional explicit per-argument :class:`ir.ArgDirection`
+                vector. When non-empty its length must equal ``len(args)`` and the
+                resulting :class:`ir.Call` is constructed via the directions
+                overload so that ``arg_directions_`` is populated. When ``None``
+                or empty the call is constructed without explicit directions
+                (legacy form; ``DeriveCallDirections`` will fill them in later).
         """
         if not return_types:
+            return_type: ir.Type = ir.UnknownType()
+        elif len(return_types) == 1:
+            return_type = return_types[0]
+        else:
+            return_type = ir.TupleType(return_types)
+
+        if arg_directions:
+            return ir.Call(gvar, args, list(arg_directions), {}, return_type, span)
+
+        if not return_types:
             return ir.Call(gvar, args, span)
-        if len(return_types) == 1:
-            return ir.Call(gvar, args, return_types[0], span)
-        return ir.Call(gvar, args, ir.TupleType(return_types), span)
+        return ir.Call(gvar, args, return_type, span)
+
+    def _strip_arg_direction_wrappers(
+        self,
+        method_name: str,
+        ast_args: list[ast.expr],
+        span: ir.Span,
+    ) -> tuple[list[ast.expr], list[ir.ArgDirection]]:
+        """Detect ``pl.adir.<dir>(inner)`` wrappers around ``self.method`` arguments.
+
+        Either every positional argument is wrapped or none are (mixed forms are
+        rejected). When all wrappers are present, returns the unwrapped inner AST
+        nodes and the matching :class:`ir.ArgDirection` vector. When none are
+        wrapped, returns the original args and an empty vector (legacy form).
+
+        Args:
+            method_name: Name of the cross-function method being called (used in
+                error messages).
+            ast_args: Positional ``ast.expr`` nodes from the call.
+            span: Source span of the call (used for error reporting).
+
+        Returns:
+            ``(inner_args, directions)`` where ``directions`` is empty if no
+            wrapper was found.
+
+        Raises:
+            ParserSyntaxError: If wrappers are partially present or use an
+                unknown direction name.
+        """
+        from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
+
+        wrapper_info: list[tuple[ast.expr, ir.ArgDirection] | None] = []
+        for arg in ast_args:
+            if not isinstance(arg, ast.Call):
+                wrapper_info.append(None)
+                continue
+            func = arg.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr == "adir"
+                and isinstance(func.value.value, ast.Name)
+                and func.value.value.id == "pl"
+            ):
+                dir_name = func.attr
+                if dir_name not in NAME_TO_DIRECTION:
+                    raise ParserSyntaxError(
+                        f"Unknown call-site direction marker 'pl.adir.{dir_name}' in call to '{method_name}'",
+                        span=self.span_tracker.get_span(arg),
+                        hint=("Valid markers: " + ", ".join(f"pl.adir.{n}" for n in NAME_TO_DIRECTION)),
+                    )
+                if len(arg.args) != 1 or arg.keywords:
+                    raise ParserSyntaxError(
+                        f"'pl.adir.{dir_name}' must wrap exactly one positional argument",
+                        span=self.span_tracker.get_span(arg),
+                    )
+                wrapper_info.append((arg.args[0], NAME_TO_DIRECTION[dir_name]))
+            else:
+                wrapper_info.append(None)
+
+        wrapped_count = sum(1 for w in wrapper_info if w is not None)
+        if wrapped_count == 0:
+            return list(ast_args), []
+        if wrapped_count != len(ast_args):
+            raise ParserSyntaxError(
+                f"Call to '{method_name}' mixes wrapped (pl.adir.*) and bare "
+                f"arguments; either wrap all of them or none",
+                span=span,
+            )
+
+        inner_args: list[ast.expr] = []
+        directions: list[ir.ArgDirection] = []
+        for entry in wrapper_info:
+            assert entry is not None  # narrowed by wrapped_count check
+            inner, direction = entry
+            inner_args.append(inner)
+            directions.append(direction)
+        return inner_args, directions
 
     @staticmethod
     def _reject_keyword_args(func_name: str, call: ast.Call, span: ir.Span) -> None:

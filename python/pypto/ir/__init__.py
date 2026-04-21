@@ -33,6 +33,9 @@ from pypto.pypto_core.passes import (
     WarningLevel,
 )
 
+# Import call-site direction helpers (input/output/inout/...) for hand-written IR.
+from . import directions as _directions
+
 # Import operation modules
 from . import op, operators  # noqa: F401
 
@@ -42,6 +45,7 @@ from .builder import IRBuilder
 # Import high-level API functions
 from .compile import compile
 from .compiled_program import CompiledProgram
+from .directions import make_call
 
 # Import roundtrip instrument factory
 from .instruments import make_roundtrip_instrument
@@ -111,7 +115,22 @@ __all__ = [
     "op_conversion",
     "register_op_conversion",
     "make_roundtrip_instrument",
+    "directions",
+    "make_call",
 ]  # fmt: skip
+
+# Re-export the lowercase ArgDirection aliases at the top level so callers can
+# spell ``ir.input``, ``ir.output``, etc. without importing the submodule.
+# These intentionally shadow the builtin ``input`` name; users only ever access
+# them via ``ir.input``, which keeps the global builtin untouched.
+input = _directions.input
+output = _directions.output
+output_existing = _directions.output_existing
+inout = _directions.inout
+no_dep = _directions.no_dep
+scalar_dir = _directions.scalar  # avoid clashing with potential ``ir.scalar`` op helpers
+directions = _directions
+del _directions
 
 # Register ruff as the format callback for IR printing (best-effort: no-op if ruff is unavailable)
 try:

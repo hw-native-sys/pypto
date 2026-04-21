@@ -60,6 +60,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
   Register(IRProperty::InOutUseValid, CreateInOutUseValidPropertyVerifier);
   Register(IRProperty::PipelineResolved, CreatePipelineResolvedPropertyVerifier);
+  Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

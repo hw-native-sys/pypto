@@ -38,6 +38,9 @@ class IRProperty(Enum):
     VectorKernelSplit = ...
     OutParamNotShadowed = ...
     NoNestedInCore = ...
+    InOutUseValid = ...
+    PipelineResolved = ...
+    CallDirectionsResolved = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -392,6 +395,16 @@ def split_vector_kernel() -> Pass:
 def simplify() -> Pass:
     """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
+def derive_call_directions() -> Pass:
+    """Create a pass that derives per-argument :class:`ir.ArgDirection` for every cross-function ``Call``.
+
+    Walks each ``Function``'s body and writes ``Call::arg_directions_`` based on
+    callee :class:`ir.ParamDirection` and argument origin (function param vs.
+    locally allocated tensor vs. scalar). Establishes the
+    :class:`IRProperty.CallDirectionsResolved` post-condition, which is then
+    auto-verified by the pipeline.
+    """
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
@@ -520,6 +533,7 @@ __all__ = [
     "simplify",
     "flatten_call_expr",
     "normalize_stmt_structure",
+    "derive_call_directions",
     "NestedCallErrorType",
     "UseAfterDefErrorType",
     "DiagnosticSeverity",

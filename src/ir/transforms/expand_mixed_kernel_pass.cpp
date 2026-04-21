@@ -1057,7 +1057,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
 /// Create a tensor.create Call for the GM pipe buffer workspace.
 CallPtr CreateGMPipeBufferTensorCreate(int64_t buffer_size_bytes, const Span& span) {
   int64_t shape_dim = (buffer_size_bytes + 3) / 4;  // FP32 elements (ceil)
-  auto shape_elem = std::make_shared<ConstInt>(shape_dim, DataType::INT64, span);
+  auto shape_elem = std::make_shared<ConstInt>(shape_dim, DataType::INDEX, span);
   auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{shape_elem}, span);
   return OpRegistry::GetInstance().Create("tensor.create", {shape_tuple},
                                           {{"dtype", std::any(DataType::FP32)},

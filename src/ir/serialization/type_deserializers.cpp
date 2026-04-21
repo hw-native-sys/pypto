@@ -326,11 +326,28 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
     }
   }
 
+  // Optional arg_directions: backward compatible — absent in old .pir, and empty means "legacy /
+  // not yet derived" (codegen will fall back to deriving from callee param_directions).
+  std::vector<ArgDirection> arg_directions;
+  auto arg_dirs_opt = GetOptionalFieldObj(fields_obj, "arg_directions", ctx);
+  if (arg_dirs_opt.has_value() && arg_dirs_opt->type == msgpack::type::ARRAY &&
+      arg_dirs_opt->via.array.size > 0) {
+    arg_directions.reserve(arg_dirs_opt->via.array.size);
+    for (uint32_t i = 0; i < arg_dirs_opt->via.array.size; ++i) {
+      uint8_t code = arg_dirs_opt->via.array.ptr[i].as<uint8_t>();
+      CHECK(code <= static_cast<uint8_t>(ArgDirection::Scalar))
+          << "Invalid ArgDirection value: " << static_cast<int>(code);
+      arg_directions.push_back(static_cast<ArgDirection>(code));
+    }
+    CHECK(arg_directions.size() == args.size()) << "Call arg_directions size (" << arg_directions.size()
+                                                << ") must match args size (" << args.size() << ")";
+  }
+
   // Deserialize kwargs (preserve order using vector)
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
   std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
 
-  return std::make_shared<Call>(op, args, kwargs, type, span);
+  return std::make_shared<Call>(op, args, std::move(arg_directions), kwargs, type, span);
 }
 
 // Macro for binary expressions

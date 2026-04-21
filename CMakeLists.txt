@@ -138,6 +138,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/normalize_return_order_pass.cpp
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
+    src/ir/transforms/derive_call_directions_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
@@ -198,6 +199,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
+    src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/warning_verifier_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
 

@@ -201,7 +201,7 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                [1024],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
             )
@@ -309,7 +309,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                [1024],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
             )
@@ -635,13 +635,13 @@ def test_gm_pipe_buffer_per_call_allocation():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                [1024],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
             )
             out_1: pl.Tensor[[16, 16], pl.FP16] = self.group_func(a, out, gm_pipe_buffer_0)
             gm_pipe_buffer_1: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                [1024],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
             )
@@ -749,7 +749,7 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             for b, (out_iter,) in pl.range(4, init_values=(out,)):
                 gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                    [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                    [1024],
                     dtype=pl.FP32,
                     layout=pl.TensorLayout.ND,
                 )
@@ -861,7 +861,7 @@ def test_gm_pipe_buffer_param_direction_is_out():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [pl.const(1024, pl.INT64)],  # pyright: ignore[reportArgumentType]
+                [1024],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
             )

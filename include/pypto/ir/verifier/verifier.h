@@ -248,6 +248,31 @@ PropertyVerifierPtr CreateInOutUseValidPropertyVerifier();
  */
 PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
 
+/**
+ * @brief Factory function for creating CallDirectionsResolved property verifier
+ *
+ * Verifies that every non-builtin ``Call`` in the program carries a fully
+ * populated ``Call::arg_directions_`` vector that is internally consistent
+ * with the callee's ``param_directions_``. Specifically, for each call:
+ *   - ``arg_directions_.size() == args_.size()`` and is non-empty;
+ *   - tensor arguments carry a non-Scalar direction; scalar arguments carry
+ *     ``ArgDirection::Scalar``;
+ *   - the per-argument ``ArgDirection`` is consistent with the callee's
+ *     ``ParamDirection`` (``In`` ↔ ``Input``; ``InOut`` ↔ ``InOut``;
+ *     ``Out`` ↔ ``Output`` / ``OutputExisting`` / ``InOut`` for WAW promotion).
+ *
+ * The runtime requirement that ``add_input/add_output`` come before
+ * ``add_scalar`` is satisfied by orchestration codegen (``stable_partition``
+ * over ``ParamEntry``); the IR Call itself is allowed to interleave tensors
+ * and scalars to preserve the user's parameter order.
+ *
+ * This is the post-condition of the ``DeriveCallDirections`` pass and is
+ * automatically run by ``PassPipeline`` whenever that pass is executed.
+ *
+ * @return Shared pointer to CallDirectionsResolved PropertyVerifier
+ */
+PropertyVerifierPtr CreateCallDirectionsResolvedPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

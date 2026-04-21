@@ -612,6 +612,19 @@ void BindIR(nb::module_& m) {
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("type"), nb::arg("span"),
       "Create a function call expression with kwargs and explicit type");
 
+  // Constructor with explicit per-argument call-site directions
+  call_class.def(
+      "__init__",
+      [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args,
+         const std::vector<ArgDirection>& arg_directions, const nb::dict& kwargs_dict, const TypePtr& type,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        new (self) Call(op, args, arg_directions, kwargs, type, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("arg_directions"), nb::arg("kwargs"), nb::arg("type"),
+      nb::arg("span"),
+      "Create a function call expression with explicit call-site arg directions, kwargs and type");
+
   BindFields<Call>(call_class);
 
   // Expose kwargs as a read-only property
@@ -1071,6 +1084,20 @@ void BindIR(nb::module_& m) {
       .value("In", ParamDirection::In, "Read-only input (default)")
       .value("Out", ParamDirection::Out, "Write-only output")
       .value("InOut", ParamDirection::InOut, "Read-write input/output")
+      .export_values();
+
+  // ArgDirection enum (call-site task-submission semantics)
+  nb::enum_<ArgDirection>(ir, "ArgDirection", "Call-site argument direction (mirrors runtime TensorArgType)")
+      .value("Input", ArgDirection::Input, "Read-only input (add_input / TensorArgType::INPUT)")
+      .value("Output", ArgDirection::Output,
+             "Runtime-allocated output buffer (add_output(create_info) / TensorArgType::OUTPUT)")
+      .value("InOut", ArgDirection::InOut, "Read-then-write (add_inout / TensorArgType::INOUT)")
+      .value("OutputExisting", ArgDirection::OutputExisting,
+             "Write-only into an existing tensor "
+             "(add_output(tensor) / TensorArgType::OUTPUT_EXISTING)")
+      .value("NoDep", ArgDirection::NoDep,
+             "No-dependency existing tensor (add_no_dep / TensorArgType::NO_DEP)")
+      .value("Scalar", ArgDirection::Scalar, "Scalar (non-tensor) argument (add_scalar)")
       .export_values();
 
   // IsInCoreType helper

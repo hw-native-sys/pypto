@@ -492,6 +492,27 @@ void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const ConstBoolPtr& op) { stream_ << (op->value_ ? "True" : "False"); }
 
+// Lowercase-snake-case names for ArgDirection used by the DSL helpers in
+// ``pypto.language.arg_direction`` (``pl.adir.<name>``). Kept in sync with
+// ``python/pypto/language/arg_direction.py::NAME_TO_DIRECTION``.
+static const char* ArgDirectionToDslName(ArgDirection dir) {
+  switch (dir) {
+    case ArgDirection::Input:
+      return "input";
+    case ArgDirection::Output:
+      return "output";
+    case ArgDirection::OutputExisting:
+      return "output_existing";
+    case ArgDirection::InOut:
+      return "inout";
+    case ArgDirection::NoDep:
+      return "no_dep";
+    case ArgDirection::Scalar:
+      return "scalar";
+  }
+  throw pypto::TypeError("Unknown ArgDirection in printer");
+}
+
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
   // Check if this is a GlobalVar call within a Program context
@@ -501,10 +522,22 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // This is a cross-function call - print as self.method_name()
       stream_ << "self." << gvar->name_ << "(";
 
-      // Print positional arguments
+      // When ``arg_directions_`` is populated (post DeriveCallDirections), wrap
+      // each argument with ``pl.adir.<dir>(...)`` so the parser can recover the
+      // direction vector on the round-trip. When empty (legacy / pre-derive)
+      // print bare arguments to keep the DSL clean and back-compatible.
+      const bool emit_directions =
+          !op->arg_directions_.empty() && op->arg_directions_.size() == op->args_.size();
+
       for (size_t i = 0; i < op->args_.size(); ++i) {
         if (i > 0) stream_ << ", ";
-        VisitExpr(op->args_[i]);
+        if (emit_directions) {
+          stream_ << prefix_ << ".adir." << ArgDirectionToDslName(op->arg_directions_[i]) << "(";
+          VisitExpr(op->args_[i]);
+          stream_ << ")";
+        } else {
+          VisitExpr(op->args_[i]);
+        }
       }
 
       stream_ << ")";

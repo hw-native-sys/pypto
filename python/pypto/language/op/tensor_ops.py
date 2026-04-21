@@ -88,18 +88,27 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = TensorLayout.ND) -> Tensor:
+def create(
+    shape: Sequence[IntLike],
+    dtype: DataType,
+    layout: TensorLayout = TensorLayout.ND,
+    manual_dep: bool = False,
+) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
     Args:
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        manual_dep: When True, the tensor opts out of automatic dependency
+            tracking by codegen (used internally for orchestrator-injected
+            workspace buffers like the GM pipe buffer). Most user code should
+            leave this as False.
 
     Returns:
         Tensor wrapping the create operation
     """
-    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout)
+    call_expr = _ir_ops.create(_normalize_intlike(shape), dtype, layout, manual_dep=manual_dep)
     return Tensor(expr=call_expr)
 
 

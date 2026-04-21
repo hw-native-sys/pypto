@@ -265,6 +265,18 @@ class StructuralHasher {
     return h;
   }
 
+  result_type VisitLeafField(const ArgDirection& field) {
+    return static_cast<result_type>(std::hash<uint8_t>{}(static_cast<uint8_t>(field)));
+  }
+
+  result_type VisitLeafField(const std::vector<ArgDirection>& field) {
+    result_type h = 0;
+    for (const auto& dir : field) {
+      h = hash_combine(h, VisitLeafField(dir));
+    }
+    return h;
+  }
+
   result_type VisitLeafField(const MemorySpace& field) {
     return static_cast<result_type>(std::hash<int>{}(static_cast<int>(field)));
   }

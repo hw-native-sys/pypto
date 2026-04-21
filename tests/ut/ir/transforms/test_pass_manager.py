@@ -49,6 +49,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LegalizePTOBufferReuse",
     "AllocateMemoryAddr",
     "FuseCreateAssembleToSlice",
+    "DeriveCallDirections",
     "Simplify",
 ]
 
@@ -74,6 +75,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "LegalizePTOBufferReuse",
     "AllocateMemoryAddr",
     "FuseCreateAssembleToSlice",
+    "DeriveCallDirections",
     "Simplify",
 ]
 

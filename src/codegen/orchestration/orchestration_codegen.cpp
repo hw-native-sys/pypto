@@ -186,10 +186,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
-  void SetCallSiteDirections(std::unordered_map<const Call*, std::vector<ParamDirection>> directions) {
-    call_site_directions_ = std::move(directions);
-  }
-
   void SetInitialIndent(int indent) { indent_ = indent; }
 
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
@@ -406,34 +402,49 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return name;
   }
 
-  enum class ParamKind { Input, Output, InOut, Scalar };
-
-  static const char* ParamKindToMethodName(ParamKind kind) {
-    switch (kind) {
-      case ParamKind::Input:
+  // Map an IR ArgDirection directly to the runtime Arg::add_* method name.
+  // ArgDirection is the single source of truth for codegen.
+  static const char* ArgDirectionToMethodName(ArgDirection dir) {
+    switch (dir) {
+      case ArgDirection::Input:
         return "add_input";
-      case ParamKind::Output:
+      case ArgDirection::Output:
+      case ArgDirection::OutputExisting:
+        // The runtime overloads add_output on the argument type:
+        //   add_output(TensorCreateInfo&)  -> OUTPUT       (runtime allocates)
+        //   add_output(Tensor&)            -> OUTPUT_EXISTING (write-only existing tensor)
+        // The codegen pre-allocates via tensor.create + alloc_tensors, so the emitted
+        // call site always passes a Tensor& and the OUTPUT_EXISTING overload is selected.
+        // We still distinguish the two ArgDirections in the IR to let downstream phases
+        // switch to the runtime-allocated form without an IR change.
         return "add_output";
-      case ParamKind::InOut:
+      case ArgDirection::InOut:
         return "add_inout";
-      case ParamKind::Scalar:
+      case ArgDirection::NoDep:
+        return "add_no_dep";
+      case ArgDirection::Scalar:
         return "add_scalar";
     }
-    INTERNAL_CHECK(false) << "Internal error: unexpected ParamKind value";
+    INTERNAL_CHECK(false) << "Internal error: unexpected ArgDirection value";
     return "";
   }
 
   struct ParamEntry {
-    ParamKind kind;
+    ArgDirection direction;
     std::string value;
   };
 
-  std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func,
-                                          const std::vector<ParamDirection>* directions_override = nullptr) {
+  std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
     const std::string& callee_name = callee_func->name_;
-    const auto& directions =
-        directions_override != nullptr ? *directions_override : callee_func->param_directions_;
+
+    // Phase-5 invariant: every Call entering codegen must carry an explicit
+    // ArgDirection vector (populated by the DeriveCallDirections IR pass).
+    // The legacy ParamDirection fallback has been removed.
+    INTERNAL_CHECK_SPAN(call->arg_directions_.size() == call->args_.size(), call->span_)
+        << "Call to '" << callee_name << "' has arg_directions size " << call->arg_directions_.size()
+        << " but args size " << call->args_.size()
+        << ". DeriveCallDirections must run before orchestration codegen.";
 
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
       const auto& arg = call->args_[arg_idx];
@@ -441,47 +452,28 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!var_name.empty()) {
         if (auto scalar_type = As<ScalarType>(arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type)});
+          params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
           continue;
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
-
-        INTERNAL_CHECK_SPAN(arg_idx < directions.size(), call->span_)
-            << "arg count (" << call->args_.size() << ") exceeds param count (" << directions.size()
-            << ") for callee '" << callee_name << "'";
-
-        ParamDirection dir = directions[arg_idx];
-        switch (dir) {
-          case ParamDirection::Out:
-            params.push_back({ParamKind::Output, ext_name});
-            break;
-          case ParamDirection::InOut:
-            params.push_back({ParamKind::InOut, ext_name});
-            break;
-          case ParamDirection::In:
-            params.push_back({ParamKind::Input, ext_name});
-            break;
-          default:
-            INTERNAL_CHECK_SPAN(false, call->span_)
-                << "Internal error: unexpected ParamDirection value " << static_cast<int>(dir);
-        }
+        params.push_back({call->arg_directions_[arg_idx], ext_name});
       } else if (auto const_int = As<ConstInt>(arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
+        params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
       } else if (auto const_float = As<ConstFloat>(arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
+        params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
       } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
       }
     }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
     std::stable_partition(params.begin(), params.end(),
-                          [](const ParamEntry& p) { return p.kind != ParamKind::Scalar; });
+                          [](const ParamEntry& p) { return p.direction != ArgDirection::Scalar; });
 
     return params;
   }
@@ -623,6 +615,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
     }
 
+    // Phase-5 invariant: the outer Call must carry explicit arg_directions
+    // (populated by DeriveCallDirections). The legacy ParamDirection fallback
+    // has been removed from codegen.
+    INTERNAL_CHECK_SPAN(outer_call->arg_directions_.size() == outer_call->args_.size(), outer_call->span_)
+        << "Outer call to wrapper '" << wrapper_func->name_ << "' has arg_directions size "
+        << outer_call->arg_directions_.size() << " but args size " << outer_call->args_.size()
+        << ". DeriveCallDirections must run before orchestration codegen.";
+
     std::vector<ParamEntry> params;
     for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
       const auto& inner_arg = inner_call->args_[inner_idx];
@@ -633,13 +633,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (auto const_int = As<ConstInt>(inner_arg)) {
           std::string cpp_type = const_int->dtype().ToCTypeString();
           std::string value = FormatConstIntValue(const_int, cpp_type);
-          params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
+          params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
         } else if (auto const_float = As<ConstFloat>(inner_arg)) {
           std::string cpp_type = const_float->dtype().ToCTypeString();
           std::string value = FormatConstFloatValue(const_float, cpp_type);
-          params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
+          params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
         } else if (auto const_bool = As<ConstBool>(inner_arg)) {
-          params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+          params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
         } else {
           INTERNAL_CHECK_SPAN(false, inner_call->span_) << "Internal error: inner call arg " << inner_idx
                                                         << " is neither a variable nor a recognized constant";
@@ -658,58 +658,28 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!var_name.empty()) {
         if (auto scalar_type = As<ScalarType>(outer_arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ParamKind::Scalar, EncodeScalarVar(var_name, cpp_type)});
+          params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
           continue;
         }
 
         std::string ext_name = GetExternalTensorName(var_name);
-
-        INTERNAL_CHECK_SPAN(inner_idx < inner_callee->param_directions_.size(), inner_call->span_)
-            << "arg index " << inner_idx << " exceeds param count (" << inner_callee->param_directions_.size()
-            << ") for callee '" << inner_callee->name_ << "'";
-
-        ParamDirection dir = inner_callee->param_directions_[inner_idx];
-
-        // Apply call-site direction override: if the outer call has an override
-        // (e.g., Out→InOut for locally allocated tensors), use it.
-        auto cs_it = call_site_directions_.find(outer_call.get());
-        if (cs_it != call_site_directions_.end() && outer_idx < cs_it->second.size()) {
-          ParamDirection call_site_dir = cs_it->second[outer_idx];
-          if (dir == ParamDirection::Out && call_site_dir == ParamDirection::InOut) {
-            dir = ParamDirection::InOut;
-          }
-        }
-
-        switch (dir) {
-          case ParamDirection::Out:
-            params.push_back({ParamKind::Output, ext_name});
-            break;
-          case ParamDirection::InOut:
-            params.push_back({ParamKind::InOut, ext_name});
-            break;
-          case ParamDirection::In:
-            params.push_back({ParamKind::Input, ext_name});
-            break;
-          default:
-            INTERNAL_CHECK_SPAN(false, inner_call->span_)
-                << "Internal error: unexpected ParamDirection value " << static_cast<int>(dir);
-        }
+        params.push_back({outer_call->arg_directions_[outer_idx], ext_name});
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ParamKind::Scalar, "(uint64_t)" + value});
+        params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
       } else if (auto const_float = As<ConstFloat>(outer_arg)) {
         std::string cpp_type = const_float->dtype().ToCTypeString();
         std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ParamKind::Scalar, EncodeScalarConst(value, cpp_type)});
+        params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
       } else if (auto const_bool = As<ConstBool>(outer_arg)) {
-        params.push_back({ParamKind::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
+        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
       }
     }
 
     // Tensors must precede scalars
     std::stable_partition(params.begin(), params.end(),
-                          [](const ParamEntry& p) { return p.kind != ParamKind::Scalar; });
+                          [](const ParamEntry& p) { return p.direction != ArgDirection::Scalar; });
 
     return params;
   }
@@ -869,7 +839,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
 
-    auto params = BuildTaskParams(call, callee_func, LookupCallSiteDirections(call));
+    auto params = BuildTaskParams(call, callee_func);
 
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -877,7 +847,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
 
     std::string submit_expr =
@@ -908,7 +878,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "// Spmd " << spmd_func->name_ << ": " << callee_name << "\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
     EmitLaunchSpec(ind, task_var, spmd_func);
 
@@ -946,7 +916,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
       code_ << ind << "Arg " << task_var << ";\n";
       for (const auto& p : params) {
-        code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+        code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
       }
 
       EmitLaunchSpec(ind, task_var, launch_func);
@@ -987,7 +957,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV lanes)\n";
     code_ << ind << "Arg " << task_var << ";\n";
     for (const auto& p : params) {
-      code_ << ind << task_var << "." << ParamKindToMethodName(p.kind) << "(" << p.value << ");\n";
+      code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
     // Split AIV groups dispatch the same kernel on both vector lanes. The
     // kernel body uses tile.get_subblock_idx() to select its lane-local slice.
@@ -1138,13 +1108,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::map<const Call*, std::string> call_to_tuple_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
-  std::unordered_map<const Call*, std::vector<ParamDirection>> call_site_directions_;
   std::unordered_set<const Var*> effective_uses_;
-
-  const std::vector<ParamDirection>* LookupCallSiteDirections(const CallPtr& call) const {
-    auto it = call_site_directions_.find(call.get());
-    return it != call_site_directions_.end() ? &it->second : nullptr;
-  }
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
@@ -1167,9 +1131,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   BufferRootCollector root_collector(program);
   root_collector.Initialize(func->params_);
   root_collector.VisitStmt(func->body_);
-
-  CallSiteDirectionResolver direction_resolver(program, root_collector.buffer_roots, func->params_);
-  direction_resolver.VisitStmt(func->body_);
 
   CodegenEffectiveUseCollector use_collector;
   use_collector.VisitStmt(func->body_);
@@ -1213,7 +1174,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
-  stmt_codegen.SetCallSiteDirections(std::move(direction_resolver.call_site_directions));
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);
