@@ -2252,7 +2252,7 @@ class TestTensorCiOp:
     """Tests for tensor.ci (contiguous integer sequence)."""
 
     def test_tensor_ci_ascending(self):
-        call = tensor.ci(0, [4, 32], dtype=DataType.INT32)
+        call = tensor.ci(0, [1, 32], dtype=DataType.INT32)
         t = call.type
         assert isinstance(t, ir.TensorType)
         assert t.dtype == DataType.INT32
@@ -2260,20 +2260,25 @@ class TestTensorCiOp:
         assert "tensor.ci" in str(call)
 
     def test_tensor_ci_descending_kwarg_printed(self):
-        call = tensor.ci(10, [2, 16], dtype=DataType.INT32, descending=True)
+        call = tensor.ci(10, [1, 16], dtype=DataType.INT32, descending=True)
         assert "descending=True" in str(call)
 
     def test_tensor_ci_rejects_float_dtype(self):
         with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tensor.ci(0, [4, 32], dtype=DataType.FP32)
+            tensor.ci(0, [1, 32], dtype=DataType.FP32)
 
     def test_tensor_ci_rejects_uint_dtype(self):
         with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tensor.ci(0, [2, 16], dtype=DataType.UINT32)
+            tensor.ci(0, [1, 16], dtype=DataType.UINT32)
 
     def test_tensor_ci_rejects_cols_equal_one(self):
         with pytest.raises(ValueError, match="innermost dimension"):
             tensor.ci(0, [32, 1], dtype=DataType.INT32)
+
+    def test_tensor_ci_rejects_multi_row_shape(self):
+        """pto.tci only populates the first row, so leading dims must be 1."""
+        with pytest.raises(ValueError, match=r"leading dimensions must be 1"):
+            tensor.ci(0, [4, 32], dtype=DataType.INT32)
 
     def test_tensor_arange_alias_is_ci(self):
         assert pl.tensor.arange is pl.tensor.ci

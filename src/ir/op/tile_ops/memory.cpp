@@ -436,8 +436,18 @@ TypePtr DeduceTileCiType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires the innermost dimension (Cols) to be != 1, got "
       << (last_dim ? last_dim->value_ : -1);
 
-  // descending kwarg is optional and defaults to false; just validate type if provided.
-  (void)GetKwarg<bool>(kwargs, "descending");
+  // ISA constraint: pto.tci only populates the first row and ignores valid rows, so every
+  // leading dimension must be 1. Reject multi-row shapes here to keep type metadata truthful.
+  for (size_t i = 0; i + 1 < tile_shape.size(); ++i) {
+    auto leading_dim = As<ConstInt>(tile_shape[i]);
+    CHECK(leading_dim && leading_dim->value_ == 1)
+        << "The operator " << op_name << " only populates the first row because pto.tci ignores valid rows; "
+        << "leading dimensions must be 1, but got " << (leading_dim ? leading_dim->value_ : -1)
+        << " at index " << i;
+  }
+
+  // descending kwarg is optional and defaults to false.
+  (void)GetKwarg<bool>(kwargs, "descending", false);
 
   TileView tile_view;
   tile_view.valid_shape = tile_shape;

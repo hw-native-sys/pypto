@@ -2518,7 +2518,7 @@ class TestTileCiOp:
 
     def test_tile_ci_ascending(self):
         """tile.ci returns a TileType with requested shape / dtype."""
-        call = tile.ci(0, [4, 32], dtype=DataType.INT32)
+        call = tile.ci(0, [1, 32], dtype=DataType.INT32)
         t = call.type
         assert isinstance(t, ir.TileType)
         assert t.dtype == DataType.INT32
@@ -2528,26 +2528,31 @@ class TestTileCiOp:
 
     def test_tile_ci_descending_kwarg_printed(self):
         """descending=True should appear in the printed IR."""
-        call = tile.ci(10, [2, 16], dtype=DataType.INT32, descending=True)
+        call = tile.ci(10, [1, 16], dtype=DataType.INT32, descending=True)
         assert "descending=True" in str(call)
 
     def test_tile_ci_rejects_float_dtype(self):
         with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tile.ci(0, [4, 32], dtype=DataType.FP32)
+            tile.ci(0, [1, 32], dtype=DataType.FP32)
 
     def test_tile_ci_rejects_uint_dtype(self):
         with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tile.ci(0, [2, 16], dtype=DataType.UINT32)
+            tile.ci(0, [1, 16], dtype=DataType.UINT32)
 
     def test_tile_ci_rejects_cols_equal_one(self):
         with pytest.raises(ValueError, match="innermost dimension"):
             tile.ci(0, [32, 1], dtype=DataType.INT32)
 
+    def test_tile_ci_rejects_multi_row_shape(self):
+        """pto.tci only populates the first row, so leading dims must be 1."""
+        with pytest.raises(ValueError, match=r"leading dimensions must be 1"):
+            tile.ci(0, [4, 32], dtype=DataType.INT32)
+
     def test_tile_ci_rejects_start_dtype_mismatch(self):
         span = ir.Span.unknown()
         start = ir.Var("s", ir.ScalarType(DataType.INT16), span)
-        with pytest.raises(ValueError, match="start.*dtype"):
-            tile.ci(start, [4, 32], dtype=DataType.INT32)
+        with pytest.raises(ValueError, match=r"start.*dtype"):
+            tile.ci(start, [1, 32], dtype=DataType.INT32)
 
     def test_tile_arange_alias_is_ci(self):
         assert pl.tile.arange is pl.tile.ci

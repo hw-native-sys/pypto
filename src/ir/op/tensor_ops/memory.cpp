@@ -469,6 +469,16 @@ TypePtr DeduceTensorCiType(const std::vector<ExprPtr>& args,
                                    << last_const->value_;
   }
 
+  // ISA constraint: pto.tci only populates the first row. Reject multi-row compile-time
+  // shapes so tensor.ci metadata stays consistent with the tile.ci lowering.
+  for (size_t i = 0; i + 1 < shape.size(); ++i) {
+    if (auto const_dim = As<ConstInt>(shape[i])) {
+      CHECK(const_dim->value_ == 1)
+          << "tensor.ci only populates the first row because pto.tci ignores valid rows; "
+          << "leading dimensions must be 1, but got " << const_dim->value_ << " at index " << i;
+    }
+  }
+
   (void)kwargs;  // descending is optional bool kwarg, no validation needed beyond type.
   return std::make_shared<TensorType>(shape, dtype);
 }

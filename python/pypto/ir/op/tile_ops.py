@@ -489,13 +489,18 @@ def ci(
 ) -> Call:
     """Generate a contiguous integer sequence into a tile (pto.tci).
 
-    For a linearized index ``k`` over the valid elements:
-    - Ascending: ``dst[k] = start + k``
-    - Descending: ``dst[k] = start - k``
+    For a column index ``k`` in the first row of the destination tile:
+    - Ascending: ``dst[0, k] = start + k``
+    - Descending: ``dst[0, k] = start - k``
+
+    Note:
+        ``pto.tci`` uses the destination's valid-column count as the sequence
+        length and does NOT populate additional rows. Leading dimensions must
+        be 1 — prefer shapes of the form ``[1, N]``.
 
     Args:
         start: Starting integer (plain int or a scalar Expr). Its dtype must match ``dtype``.
-        shape: Destination tile shape (static).
+        shape: Destination tile shape (static, leading dims must be 1, innermost dim != 1).
         dtype: Destination dtype. Must be one of {INT16, INT32}.
         descending: If True, generate a descending sequence.
         span: Optional source span for debugging (auto-captured if not provided).

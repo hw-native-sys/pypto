@@ -93,9 +93,13 @@ def ci(
 ) -> Call:
     """Generate a contiguous integer sequence into a tensor (lowers to tile.ci).
 
+    Note:
+        Lowers to ``pto.tci`` which only populates the first row. Leading
+        dimensions must be 1 — prefer shapes of the form ``[1, N]``.
+
     Args:
         start: Starting integer (plain int or scalar Expr). Must match ``dtype``.
-        shape: Destination shape.
+        shape: Destination shape (leading dims must be 1, innermost dim != 1).
         dtype: Destination dtype. One of {INT16, INT32}.
         descending: If True, generate a descending sequence.
         span: Optional source span for debugging (auto-captured if not provided).
