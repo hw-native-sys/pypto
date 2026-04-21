@@ -749,7 +749,7 @@ class TestDynOrchShapeOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _DYN_SHAPES)
     def test_dyn_orch_add(self, test_runner, shape, platform):
-        """Test add where both InCore and orchestration use dynamic M×N dims."""
+        """Test add where both InCore and orchestration use dynamic M x N dims."""
         result = test_runner.run(DynOrchAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 
@@ -779,7 +779,7 @@ class TestDynOrchShapeOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape,valid_shape", [((32, 32), (16, 16))])
     def test_dyn_orch_valid_shape_add(self, test_runner, shape, valid_shape, platform):
-        """Test add with dynamic M×N orchestration and valid_shapes from INT64 tensor."""
+        """Test add with dynamic M x N orchestration and valid_shapes from INT64 tensor."""
         result = test_runner.run(DynOrchValidShapeAddTestCase(shape, valid_shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}, valid_shape {valid_shape}: {result.error}"
 

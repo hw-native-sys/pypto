@@ -267,7 +267,7 @@ class TestDynamicShapeOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _SHAPES)
     def test_dyn_shape_add(self, test_runner, shape, platform):
-        """Test add with fully dynamic M×N tensor shapes."""
+        """Test add with fully dynamic M x N tensor shapes."""
         result = test_runner.run(DynShapeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
 

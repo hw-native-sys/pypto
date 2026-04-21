@@ -270,7 +270,7 @@ class TestAssembleOperations:
     )
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_tile_assemble_double_loop(self, test_runner, platform):
-        """Vec→Vec nested loops + pl.slice: batch×head two-level index (b*8+i)."""
+        """Vec->Vec nested loops + pl.slice: batch x head two-level index (b*8+i)."""
         result = test_runner.run(TileAssembleDoubleLoopTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
