@@ -75,6 +75,7 @@ jobs:
 
       - name: Run qwen3 decode examples
         working-directory: ${{ github.workspace }}/pypto-lib
+        shell: bash
         run: |
           failed=()
           for f in \
