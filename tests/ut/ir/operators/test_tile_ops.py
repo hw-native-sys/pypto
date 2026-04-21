@@ -11,10 +11,8 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, ir
-from pypto.backend import BackendType
+from pypto import DataType, ir
 from pypto.ir.op import tile
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 class TestTileElementwiseOps:
@@ -421,7 +419,7 @@ class TestTileReductionOps:
         ir_str = str(Program)
         assert "tile.max" in ir_str
 
-    def test_tile_row_max(self):
+    def test_tile_row_max(self, ascend_backend, default_pass_manager):
         """Test tile.row_max operation."""
 
         @pl.program
@@ -438,16 +436,12 @@ class TestTileReductionOps:
                 result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_max, [0, 0], output)
                 return result
 
-        program = RowMaxKernel
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized_program = pm.run_passes(program)
+        optimized_program = default_pass_manager.run_passes(RowMaxKernel)
 
         assert optimized_program is not None
         assert "tile.row_max" in str(optimized_program)
 
-    def test_tile_row_sum(self):
+    def test_tile_row_sum(self, ascend_backend, default_pass_manager):
         """Test tile.row_sum operation."""
 
         @pl.program
@@ -464,11 +458,7 @@ class TestTileReductionOps:
                 result: pl.Tensor[[128, 1], pl.FP32] = pl.store(tile_sum, [0, 0], output)
                 return result
 
-        program = RowSumKernel
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized_program = pm.run_passes(program)
+        optimized_program = default_pass_manager.run_passes(RowSumKernel)
 
         assert optimized_program is not None
         assert "tile.row_sum" in str(optimized_program)
@@ -1024,7 +1014,7 @@ class TestTileSliceReshapeOps:
         tile_type = ir.TileType([dim8, dim16], DataType.FP16)
         tile_var = ir.Var("tile", tile_type, span)
 
-        with pytest.raises(Exception, match="compile-time constant"):
+        with pytest.raises(ValueError, match="compile-time constant"):
             tile.slice(tile_var, [8, valid_n], [0, 0])
 
     def test_tile_reshape(self):
@@ -1188,111 +1178,44 @@ class TestTileSliceReshapeOps:
         assert ir.is_op_registered("tile.set_validshape")
 
 
+def _const_dims(span, *values):
+    """Build a list of ConstInt dims (INT32) from Python ints."""
+    return [ir.ConstInt(v, DataType.INT32, span) for v in values]
+
+
 class TestTileBatchMatMulOps:
     """Tests for tile batch matrix multiplication operations."""
 
-    def test_batch_matmul_2d(self):
-        """Test tile.batch_matmul with 2D tiles (equivalent to regular matmul)."""
+    @pytest.mark.parametrize(
+        ("lhs_shape", "rhs_shape", "input_dtype", "expected_rank"),
+        [
+            # 2D: [16,32] @ [32,64] -> [16,64] (regular matmul)
+            ([16, 32], [32, 64], DataType.FP16, 2),
+            # 3D: [4,16,32] @ [4,32,64] -> [4,16,64] (one batch dim)
+            ([4, 16, 32], [4, 32, 64], DataType.FP32, 3),
+            # 4D: [2,3,16,32] @ [2,3,32,64] -> [2,3,16,64] (multiple batch dims, FP16 in)
+            ([2, 3, 16, 32], [2, 3, 32, 64], DataType.FP16, 4),
+            # Broadcast: [1,16,32] @ [4,32,64] -> [4,16,64]
+            ([1, 16, 32], [4, 32, 64], DataType.FP32, 3),
+        ],
+        ids=["2d", "3d", "4d", "broadcast"],
+    )
+    def test_batch_matmul(self, lhs_shape, rhs_shape, input_dtype, expected_rank):
+        """tile.batch_matmul handles batch ranks + broadcasting; result dtype is promoted to FP32."""
         span = ir.Span.unknown()
-
-        # Create 2D tiles: [16, 32] @ [32, 64] -> [16, 64]
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim64 = ir.ConstInt(64, DataType.INT32, span)
-
-        lhs_type = ir.TileType([dim16, dim32], DataType.FP16)
-        rhs_type = ir.TileType([dim32, dim64], DataType.FP16)
-
+        lhs_type = ir.TileType(_const_dims(span, *lhs_shape), input_dtype)
+        rhs_type = ir.TileType(_const_dims(span, *rhs_shape), input_dtype)
         lhs = ir.Var("lhs", lhs_type, span)
         rhs = ir.Var("rhs", rhs_type, span)
 
-        # Create batch_matmul call
         call = tile.batch_matmul(lhs, rhs, span)
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
-        assert len(result_type.shape) == 2
+        assert len(result_type.shape) == expected_rank
         assert result_type.dtype == DataType.FP32
-
-    def test_batch_matmul_3d(self):
-        """Test tile.batch_matmul with 3D tiles (batch dimension)."""
-        span = ir.Span.unknown()
-
-        # Create 3D tiles: [4, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
-        dim4 = ir.ConstInt(4, DataType.INT32, span)
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim64 = ir.ConstInt(64, DataType.INT32, span)
-
-        lhs_type = ir.TileType([dim4, dim16, dim32], DataType.FP32)
-        rhs_type = ir.TileType([dim4, dim32, dim64], DataType.FP32)
-
-        lhs = ir.Var("lhs", lhs_type, span)
-        rhs = ir.Var("rhs", rhs_type, span)
-
-        # Create batch_matmul call
-        call = tile.batch_matmul(lhs, rhs, span)
-
-        assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul"
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert len(result_type.shape) == 3
-        assert result_type.dtype == DataType.FP32
-
-    def test_batch_matmul_4d(self):
-        """Test tile.batch_matmul with 4D tiles (multiple batch dimensions)."""
-        span = ir.Span.unknown()
-
-        # Create 4D tiles: [2, 3, 16, 32] @ [2, 3, 32, 64] -> [2, 3, 16, 64]
-        dim2 = ir.ConstInt(2, DataType.INT32, span)
-        dim3 = ir.ConstInt(3, DataType.INT32, span)
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim64 = ir.ConstInt(64, DataType.INT32, span)
-
-        lhs_type = ir.TileType([dim2, dim3, dim16, dim32], DataType.FP16)
-        rhs_type = ir.TileType([dim2, dim3, dim32, dim64], DataType.FP16)
-
-        lhs = ir.Var("lhs", lhs_type, span)
-        rhs = ir.Var("rhs", rhs_type, span)
-
-        # Create batch_matmul call
-        call = tile.batch_matmul(lhs, rhs, span)
-
-        assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.batch_matmul"
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert len(result_type.shape) == 4
-        assert result_type.dtype == DataType.FP32
-
-    def test_batch_matmul_broadcast(self):
-        """Test tile.batch_matmul with broadcasting batch dimensions."""
-        span = ir.Span.unknown()
-
-        # Create tiles with different batch shapes: [1, 16, 32] @ [4, 32, 64] -> [4, 16, 64]
-        dim1 = ir.ConstInt(1, DataType.INT32, span)
-        dim4 = ir.ConstInt(4, DataType.INT32, span)
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim64 = ir.ConstInt(64, DataType.INT32, span)
-
-        lhs_type = ir.TileType([dim1, dim16, dim32], DataType.FP32)
-        rhs_type = ir.TileType([dim4, dim32, dim64], DataType.FP32)
-
-        lhs = ir.Var("lhs", lhs_type, span)
-        rhs = ir.Var("rhs", rhs_type, span)
-
-        # Create batch_matmul call
-        call = tile.batch_matmul(lhs, rhs, span)
-
-        assert isinstance(call, ir.Call)
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert len(result_type.shape) == 3
 
     def test_batch_matmul_dtype_mismatch(self):
         """Test tile.batch_matmul rejects mismatched dtypes."""
@@ -2145,98 +2068,59 @@ class TestTileAssembleOp:
 class TestTileScatterUpdateOps:
     """Test suite for tile.scatter_update operation."""
 
-    def test_tile_scatter_update_2d(self):
-        """Test tile.scatter_update with 2D input and src."""
+    @pytest.mark.parametrize(
+        ("input_shape", "src_shape", "dtype"),
+        [
+            # 2D scatter: rows=16, src first dim = b*s = 8.
+            ([16, 64], [8, 64], DataType.FP16),
+            # 4D KV-cache style: [block_num, block_size, 1, d] with src [b, s, 1, d].
+            ([4, 4, 1, 64], [2, 4, 1, 64], DataType.BF16),
+        ],
+        ids=["2d", "4d"],
+    )
+    def test_tile_scatter_update_valid(self, input_shape, src_shape, dtype):
+        """tile.scatter_update preserves input rank/dtype across 2D and 4D inputs."""
         span = ir.Span.unknown()
-        rows = ir.ConstInt(16, DataType.INT32, span)
-        d = ir.ConstInt(64, DataType.INT32, span)
-        b = ir.ConstInt(2, DataType.INT32, span)
-        s = ir.ConstInt(4, DataType.INT32, span)
-        bs = ir.ConstInt(8, DataType.INT32, span)
+        input_type = ir.TileType(_const_dims(span, *input_shape), dtype)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        src_type = ir.TileType(_const_dims(span, *src_shape), dtype)
 
-        input_type = ir.TileType([rows, d], DataType.FP16)
-        index_type = ir.TileType([b, s], DataType.INT32)
-        src_type = ir.TileType([bs, d], DataType.FP16)
-
-        input_var = ir.Var("inp", input_type, span)
-        index_var = ir.Var("idx", index_type, span)
-        src_var = ir.Var("src", src_type, span)
-
-        call = tile.scatter_update(input_var, -2, index_var, src_var)
+        call = tile.scatter_update(
+            ir.Var("inp", input_type, span),
+            -2,
+            ir.Var("idx", index_type, span),
+            ir.Var("src", src_type, span),
+        )
 
         assert isinstance(call, ir.Call)
         assert call.op.name == "tile.scatter_update"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
-        assert result_type.dtype == DataType.FP16
-        assert len(result_type.shape) == 2
+        assert result_type.dtype == dtype
+        assert len(result_type.shape) == len(input_shape)
 
-    def test_tile_scatter_update_4d(self):
-        """Test tile.scatter_update with 4D input and src."""
+    @pytest.mark.parametrize(
+        ("src_dtype", "dim", "match"),
+        [
+            (DataType.FP32, -2, "src dtype"),  # input is FP16; src must match
+            (DataType.FP16, -1, "dim=-2"),  # only dim=-2 is supported
+        ],
+        ids=["dtype_mismatch", "invalid_dim"],
+    )
+    def test_tile_scatter_update_rejects_invalid(self, src_dtype, dim, match):
+        """tile.scatter_update validates src dtype and the dim argument."""
         span = ir.Span.unknown()
-        block_num = ir.ConstInt(4, DataType.INT32, span)
-        block_size = ir.ConstInt(4, DataType.INT32, span)
-        one = ir.ConstInt(1, DataType.INT32, span)
-        d = ir.ConstInt(64, DataType.INT32, span)
-        b = ir.ConstInt(2, DataType.INT32, span)
-        s = ir.ConstInt(4, DataType.INT32, span)
+        input_type = ir.TileType(_const_dims(span, 16, 64), DataType.FP16)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        src_type = ir.TileType(_const_dims(span, 8, 64), src_dtype)
 
-        input_type = ir.TileType([block_num, block_size, one, d], DataType.BF16)
-        index_type = ir.TileType([b, s], DataType.INT32)
-        src_type = ir.TileType([b, s, one, d], DataType.BF16)
-
-        input_var = ir.Var("kv_cache", input_type, span)
-        index_var = ir.Var("block_table", index_type, span)
-        src_var = ir.Var("new_kv", src_type, span)
-
-        call = tile.scatter_update(input_var, -2, index_var, src_var)
-
-        assert isinstance(call, ir.Call)
-        assert call.op.name == "tile.scatter_update"
-        result_type = call.type
-        assert isinstance(result_type, ir.TileType)
-        assert result_type.dtype == DataType.BF16
-        assert len(result_type.shape) == 4
-
-    def test_tile_scatter_update_dtype_mismatch(self):
-        """Test tile.scatter_update rejects mismatched dtypes between input and src."""
-        span = ir.Span.unknown()
-        rows = ir.ConstInt(16, DataType.INT32, span)
-        d = ir.ConstInt(64, DataType.INT32, span)
-        b = ir.ConstInt(2, DataType.INT32, span)
-        s = ir.ConstInt(4, DataType.INT32, span)
-        bs = ir.ConstInt(8, DataType.INT32, span)
-
-        input_type = ir.TileType([rows, d], DataType.FP16)
-        index_type = ir.TileType([b, s], DataType.INT32)
-        src_type = ir.TileType([bs, d], DataType.FP32)  # wrong dtype
-
-        input_var = ir.Var("inp", input_type, span)
-        index_var = ir.Var("idx", index_type, span)
-        src_var = ir.Var("src", src_type, span)
-
-        with pytest.raises(ValueError, match="src dtype"):
-            tile.scatter_update(input_var, -2, index_var, src_var)
-
-    def test_tile_scatter_update_invalid_dim(self):
-        """Test tile.scatter_update rejects dim values other than -2."""
-        span = ir.Span.unknown()
-        rows = ir.ConstInt(16, DataType.INT32, span)
-        d = ir.ConstInt(64, DataType.INT32, span)
-        b = ir.ConstInt(2, DataType.INT32, span)
-        s = ir.ConstInt(4, DataType.INT32, span)
-        bs = ir.ConstInt(8, DataType.INT32, span)
-
-        input_type = ir.TileType([rows, d], DataType.FP16)
-        index_type = ir.TileType([b, s], DataType.INT32)
-        src_type = ir.TileType([bs, d], DataType.FP16)
-
-        input_var = ir.Var("inp", input_type, span)
-        index_var = ir.Var("idx", index_type, span)
-        src_var = ir.Var("src", src_type, span)
-
-        with pytest.raises(ValueError, match="dim=-2"):
-            tile.scatter_update(input_var, -1, index_var, src_var)
+        with pytest.raises(ValueError, match=match):
+            tile.scatter_update(
+                ir.Var("inp", input_type, span),
+                dim,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", src_type, span),
+            )
 
 
 class TestTileMscatterOps:
@@ -2459,88 +2343,59 @@ class TestTileConcatOps:
         assert isinstance(result_type.shape[1], ir.ConstInt)
         assert result_type.shape[1].value == 32
 
-    def test_tile_concat_dtype_mismatch(self):
-        """Test tile.concat rejects mismatched dtypes."""
+    @pytest.mark.parametrize(
+        ("t0_shape", "t0_dtype", "t1_shape", "t1_dtype", "match"),
+        [
+            ([32, 16], DataType.FP32, [32, 16], DataType.FP16, "same dtype"),
+            ([32, 16], DataType.FP32, [8, 16], DataType.FP32, "row count must match"),
+        ],
+        ids=["dtype_mismatch", "row_mismatch"],
+    )
+    def test_tile_concat_rejects_invalid(self, t0_shape, t0_dtype, t1_shape, t1_dtype, match):
+        """tile.concat enforces matching dtype and matching row counts."""
         span = ir.Span.unknown()
+        t0_type = ir.TileType(_const_dims(span, *t0_shape), t0_dtype)
+        t1_type = ir.TileType(_const_dims(span, *t1_shape), t1_dtype)
 
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        t0_type = ir.TileType([dim32, dim16], DataType.FP32)
-        t1_type = ir.TileType([dim32, dim16], DataType.FP16)
-        t0_var = ir.Var("src0", t0_type, span)
-        t1_var = ir.Var("src1", t1_type, span)
-
-        with pytest.raises(ValueError, match="same dtype"):
-            tile.concat(t0_var, t1_var)
-
-    def test_tile_concat_row_mismatch(self):
-        """Test tile.concat rejects mismatched row counts."""
-        span = ir.Span.unknown()
-
-        dim32 = ir.ConstInt(32, DataType.INT32, span)
-        dim16 = ir.ConstInt(16, DataType.INT32, span)
-        dim8 = ir.ConstInt(8, DataType.INT32, span)
-        t0_type = ir.TileType([dim32, dim16], DataType.FP32)
-        t1_type = ir.TileType([dim8, dim16], DataType.FP32)
-        t0_var = ir.Var("src0", t0_type, span)
-        t1_var = ir.Var("src1", t1_type, span)
-
-        with pytest.raises(ValueError, match="row count must match"):
-            tile.concat(t0_var, t1_var)
+        with pytest.raises(ValueError, match=match):
+            tile.concat(ir.Var("src0", t0_type, span), ir.Var("src1", t1_type, span))
 
 
 class TestTileFormatShapeError:
     """Regression tests for issue #824: FormatShape prints readable shapes, not pointer addresses."""
 
-    def test_tile_add_shape_mismatch_shows_readable_dims(self):
-        """Test that shape mismatch errors show readable dimensions, not pointer addresses."""
+    @staticmethod
+    def _make_dim(span, value):
+        """Create a dim that is either a ConstInt (from ``int``) or a symbolic Var (from ``str``)."""
+        if isinstance(value, str):
+            return ir.Var(value, ir.ScalarType(DataType.INT32), span)
+        return ir.ConstInt(value, DataType.DEFAULT_CONST_INT, span)
+
+    @pytest.mark.parametrize(
+        ("op_callable", "lhs_dims", "rhs_dims", "match"),
+        [
+            # Static shape mismatch surfaces the concrete dims (not pointers).
+            (tile.add, [16, 16], [32, 16], r"\[16, 16\].*\[32, 16\]"),
+            (tile.mul, [8, 16], [32, 16], r"\[8, 16\].*\[32, 16\]"),
+            # Symbolic mismatch surfaces variable names instead of dim addresses.
+            (tile.add, ["M", 16], ["N", 16], r"\[M, 16\].*\[N, 16\]"),
+        ],
+        ids=[
+            "add_shape_mismatch_shows_readable_dims",
+            "mul_shape_mismatch_shows_readable_dims",
+            "add_symbolic_shape_mismatch_shows_var_names",
+        ],
+    )
+    def test_tile_shape_mismatch_message(self, op_callable, lhs_dims, rhs_dims, match):
+        """Shape-mismatch errors render dims/symbols as readable text (regression for #824)."""
         span = ir.Span.unknown()
+        lhs_type = ir.TileType([self._make_dim(span, d) for d in lhs_dims], DataType.FP32)
+        rhs_type = ir.TileType([self._make_dim(span, d) for d in rhs_dims], DataType.FP32)
+        tile_a = ir.Var("a", lhs_type, span)
+        tile_b = ir.Var("b", rhs_type, span)
 
-        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
-        dim32 = ir.ConstInt(32, DataType.DEFAULT_CONST_INT, span)
-
-        tile_type1 = ir.TileType([dim16, dim16], DataType.FP32)
-        tile_type2 = ir.TileType([dim32, dim16], DataType.FP32)
-
-        tile_a = ir.Var("a", tile_type1, span)
-        tile_b = ir.Var("b", tile_type2, span)
-
-        with pytest.raises(ValueError, match=r"\[16, 16\].*\[32, 16\]"):
-            tile.add(tile_a, tile_b)
-
-    def test_tile_mul_shape_mismatch_shows_readable_dims(self):
-        """Test that tile.mul shape mismatch shows readable shapes."""
-        span = ir.Span.unknown()
-
-        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
-        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
-        dim32 = ir.ConstInt(32, DataType.DEFAULT_CONST_INT, span)
-
-        tile_type1 = ir.TileType([dim8, dim16], DataType.FP32)
-        tile_type2 = ir.TileType([dim32, dim16], DataType.FP32)
-
-        tile_a = ir.Var("a", tile_type1, span)
-        tile_b = ir.Var("b", tile_type2, span)
-
-        with pytest.raises(ValueError, match=r"\[8, 16\].*\[32, 16\]"):
-            tile.mul(tile_a, tile_b)
-
-    def test_tile_add_symbolic_shape_mismatch_shows_var_names(self):
-        """Test that symbolic shape mismatch errors show variable names."""
-        span = ir.Span.unknown()
-
-        sym_m = ir.Var("M", ir.ScalarType(DataType.INT32), span)
-        sym_n = ir.Var("N", ir.ScalarType(DataType.INT32), span)
-        dim16 = ir.ConstInt(16, DataType.DEFAULT_CONST_INT, span)
-
-        tile_type1 = ir.TileType([sym_m, dim16], DataType.FP32)
-        tile_type2 = ir.TileType([sym_n, dim16], DataType.FP32)
-
-        tile_a = ir.Var("a", tile_type1, span)
-        tile_b = ir.Var("b", tile_type2, span)
-
-        with pytest.raises(ValueError, match=r"\[M, 16\].*\[N, 16\]"):
-            tile.add(tile_a, tile_b)
+        with pytest.raises(ValueError, match=match):
+            op_callable(tile_a, tile_b)
 
 
 if __name__ == "__main__":

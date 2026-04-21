@@ -12,7 +12,41 @@
 import os
 
 import pytest
+from pypto import backend as _backend
+from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import passes
+
+
+@pytest.fixture
+def ascend_backend(request):
+    """Configure an Ascend backend for the duration of a test, then reset.
+
+    Use either as a plain fixture (defaults to ``Ascend910B``) or via
+    ``pytest.mark.parametrize("ascend_backend", [...], indirect=True)`` to
+    cycle through multiple backends. Replaces the per-test
+    ``backend.reset_for_testing()`` + ``backend.set_backend_type(...)`` pair
+    that is otherwise duplicated across pass / codegen tests.
+    """
+    backend_type = getattr(request, "param", BackendType.Ascend910B)
+    _backend.reset_for_testing()
+    _backend.set_backend_type(backend_type)
+    try:
+        yield backend_type
+    finally:
+        _backend.reset_for_testing()
+
+
+@pytest.fixture
+def default_pass_manager():
+    """Return the default-strategy PassManager.
+
+    Use this in tests that want to run the production pipeline without
+    constructing the manager inline. Strategy-specific tests (covering
+    ``DebugTileOptimization`` etc.) should keep building the manager
+    themselves so the choice stays visible at the test site.
+    """
+    return PassManager.get_strategy(OptimizationStrategy.Default)
 
 
 @pytest.fixture(autouse=True)
