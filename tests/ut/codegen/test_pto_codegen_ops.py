@@ -1066,7 +1066,26 @@ class TestColReductionCodegen:
         return codegen_instance.generate(single)
 
     def test_col_sum_codegen(self):
-        """tile.col_sum default emits pto.tcolsum with isBinary = false."""
+        """tile.col_sum without tmp_tile emits pto.tcolsum with no isBinary attribute."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Tensor[[1, 16], pl.FP32],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
+                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in)
+                return pl.store(result, [0, 0], output)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolsum" in mlir, f"Expected pto.tcolsum in codegen output:\n{mlir}"
+        assert "isBinary" not in mlir, f"Expected no isBinary attribute in codegen output:\n{mlir}"
+
+    def test_col_sum_codegen_binary(self):
+        """tile.col_sum with tmp_tile emits isBinary = true."""
 
         @pl.program
         class Prog:
@@ -1081,28 +1100,6 @@ class TestColReductionCodegen:
                     [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
                 )
                 result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in, tmp_tile)
-                return pl.store(result, [0, 0], output)
-
-        mlir = self._generate_mlir(Prog)
-        assert "pto.tcolsum" in mlir, f"Expected pto.tcolsum in codegen output:\n{mlir}"
-        assert "isBinary = false" in mlir, f"Expected isBinary = false (default) in codegen output:\n{mlir}"
-
-    def test_col_sum_codegen_binary(self):
-        """tile.col_sum with is_binary=True emits isBinary = true."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main(
-                self,
-                input: pl.Tensor[[16, 16], pl.FP32],
-                output: pl.Tensor[[1, 16], pl.FP32],
-            ) -> pl.Tensor[[1, 16], pl.FP32]:
-                tile_in: pl.Tile[[16, 16], pl.FP32] = pl.load(input, [0, 0], [16, 16])
-                tmp_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
-                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile_in, tmp_tile, is_binary=True)
                 return pl.store(result, [0, 0], output)
 
         mlir = self._generate_mlir(Prog)

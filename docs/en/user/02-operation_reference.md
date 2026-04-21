@@ -24,7 +24,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None, is_binary: bool = False) -> T` | Column-wise sum (tile-only; tile path requires `tmp_tile`). `is_binary=True` uses binary-tree reduction. |
+| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise sum (tile-only). Passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. |
 | `col_max` | `(input: Tile) -> Tile` | Column-wise max (tile-only) |
 | `col_min` | `(input: Tile) -> Tile` | Column-wise min (tile-only) |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
@@ -134,7 +134,7 @@ Transfer data between memory hierarchy levels.
 | `row_max` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise max (requires tmp buffer) |
 | `row_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise sum (requires tmp buffer) |
 | `row_min` | `(tile: Tile, tmp_tile: Tile) -> Tile` | Row-wise min (requires tmp buffer) |
-| `col_sum` | `(tile: Tile, tmp_tile: Tile, is_binary: bool = False) -> Tile` | Column-wise sum (requires tmp buffer). `is_binary=True` uses binary-tree reduction. |
+| `col_sum` | `(tile: Tile, tmp_tile: Tile \| None = None) -> Tile` | Column-wise sum. Passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. |
 | `col_max` | `(tile: Tile) -> Tile` | Column-wise max |
 | `col_min` | `(tile: Tile) -> Tile` | Column-wise min |
 | `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | Sum along axis |

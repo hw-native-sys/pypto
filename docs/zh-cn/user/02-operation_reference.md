@@ -24,7 +24,7 @@
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | 带累加的矩阵乘法：`acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None, is_binary: bool = False) -> T` | 列求和（仅 tile；tile 路径需要 `tmp_tile`）；`is_binary=True` 使用二叉树归约 |
+| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列求和（仅 tile）；传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约 |
 | `col_max` | `(input: Tile) -> Tile` | 列最大值（仅 tile） |
 | `col_min` | `(input: Tile) -> Tile` | 列最小值（仅 tile） |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
@@ -129,7 +129,7 @@
 | `row_max` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行最大值（需要临时缓冲区） |
 | `row_sum` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行求和（需要临时缓冲区） |
 | `row_min` | `(tile: Tile, tmp_tile: Tile) -> Tile` | 行最小值（需要临时缓冲区） |
-| `col_sum` | `(tile: Tile, tmp_tile: Tile, is_binary: bool = False) -> Tile` | 列求和（需要临时缓冲区）；`is_binary=True` 使用二叉树归约 |
+| `col_sum` | `(tile: Tile, tmp_tile: Tile \| None = None) -> Tile` | 列求和；传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约 |
 | `col_max` | `(tile: Tile) -> Tile` | 列最大值 |
 | `col_min` | `(tile: Tile) -> Tile` | 列最小值 |
 | `sum` | `(tile: Tile, axis: int, keepdim: bool = False) -> Tile` | 沿轴求和 |

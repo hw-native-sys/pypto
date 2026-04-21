@@ -155,7 +155,8 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
 }
 
 // Type deduction for column reduction operations (reduces along first axis with keepdim=True)
-// col_sum requires 2 arguments (tile + tmp_tile); col_max and col_min require 1 argument
+// col_sum accepts 1 arg (sequential) or 2 args (tile + tmp_tile for binary-tree reduction).
+// col_max and col_min require 1 argument.
 TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const std::string& op_name) {
@@ -272,24 +273,28 @@ REGISTER_OP("tile.row_min")
 
 REGISTER_OP("tile.col_sum")
     .set_op_category("TileOp")
-    .set_description("Column-wise sum reduction (reduces along axis=0, maps to TCOLSUM)")
+    .set_description(
+        "Column-wise sum reduction (reduces along axis=0, maps to TCOLSUM). "
+        "Passing an optional second tmp_tile activates the binary-tree reduction path.")
     .add_argument("tile", "Input tile (TileType)")
-    .add_argument("tmp_tile", "Temporary tile (TileType)")
-    .set_attr<bool>("is_binary")
+    .add_argument("tmp_tile", "Optional scratch tile for binary-tree reduction (TileType)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 2) << "The operator tile.col_sum requires 2 arguments (tile, tmp_tile), but got "
-                              << args.size();
-      // Validate tmp_tile: must be TileType with matching dtype
+      CHECK(args.size() == 1 || args.size() == 2)
+          << "The operator tile.col_sum requires 1 or 2 arguments, but got " << args.size();
       auto tile_type = As<TileType>(args[0]->GetType());
-      auto tmp_type = As<TileType>(args[1]->GetType());
-      CHECK(tmp_type) << "The operator tile.col_sum requires tmp_tile to be a TileType, but got "
-                      << args[1]->GetType()->TypeName();
-      CHECK(tmp_type->dtype_ == tile_type->dtype_)
-          << "The operator tile.col_sum requires tmp_tile dtype to match input dtype";
+      CHECK(tile_type) << "The operator tile.col_sum requires first argument to be a TileType, but got "
+                       << args[0]->GetType()->TypeName();
+      if (args.size() == 2) {
+        auto tmp_type = As<TileType>(args[1]->GetType());
+        CHECK(tmp_type) << "The operator tile.col_sum requires tmp_tile to be a TileType, but got "
+                        << args[1]->GetType()->TypeName();
+        CHECK(tmp_type->dtype_ == tile_type->dtype_)
+            << "The operator tile.col_sum requires tmp_tile dtype to match input dtype";
+      }
       return DeduceTileColReductionType(args, kwargs, "tile.col_sum");
     });
 

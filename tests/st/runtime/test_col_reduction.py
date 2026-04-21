@@ -14,8 +14,9 @@ Covers multiple shapes and dtypes:
 - Shapes: [32, 64] (tall), [16, 16] (square), [8, 128] (wide)
 - Dtypes: FP32, FP16
 
-col_sum requires a tmp_tile argument (same shape as input) because
-TCOLSUM on a2a3 uses a 4-arg IMPL(dst, src, tmp, isBinary).
+col_sum accepts an optional tmp_tile argument. Passing tmp_tile activates
+the binary-tree reduction path (TCOLSUM 4-arg form); omitting it uses the
+sequential reduction path (TCOLSUM 2-arg form).
 """
 
 from typing import Any
@@ -28,37 +29,12 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
 # =============================================================================
-# Programs — col_sum (requires tmp_tile)
+# Programs — col_sum (tmp_tile optional; provide it for binary-tree reduction)
 # =============================================================================
 
 
 @pl.program
 class ColSum_32x64_FP32:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
-    ) -> pl.Tensor[[1, 64], pl.FP32]:
-        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
-        tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
-            [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
-        result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
-        return pl.store(result, [0, 0], output)
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        input_tensor: pl.Tensor[[32, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
-    ) -> pl.Tensor[[1, 64], pl.FP32]:
-        output = self.kernel(input_tensor, output)
-        return output
-
-
-@pl.program
-class ColSum_32x64_FP32_Sequential:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
         self,
@@ -83,6 +59,29 @@ class ColSum_32x64_FP32_Sequential:
 
 
 @pl.program
+class ColSum_32x64_FP32_Sequential:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
+        result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_sum(tile)
+        return pl.store(result, [0, 0], output)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        output = self.kernel(input_tensor, output)
+        return output
+
+
+@pl.program
 class ColSum_16x16_FP32:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -94,7 +93,7 @@ class ColSum_16x16_FP32:
         tmp: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
             [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
+        result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile, tmp)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -119,7 +118,7 @@ class ColSum_8x128_FP32:
         tmp: pl.Tile[[8, 128], pl.FP32] = pl.tile.create(
             [8, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
+        result: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_sum(tile, tmp)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -144,7 +143,7 @@ class ColSum_32x64_FP16:
         tmp: pl.Tile[[32, 64], pl.FP16] = pl.tile.create(
             [32, 64], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 64], pl.FP16] = pl.tile.col_sum(tile, tmp, is_binary=True)
+        result: pl.Tile[[1, 64], pl.FP16] = pl.tile.col_sum(tile, tmp)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -692,6 +691,10 @@ class TestColSum:
         result = test_runner.run(ColSum32x64FP16())
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.skip(
+        reason="PTOAS NPU backend (a2a3/a5) only provides 4-arg TCOLSUM_IMPL; "
+        "sequential path (2-arg, no tmp) requires PTOAS to add NPU 2-arg overload."
+    )
     def test_32x64_fp32_sequential(self, test_runner):
         result = test_runner.run(ColSum32x64FP32Sequential())
         assert result.passed, f"Test failed: {result.error}"
