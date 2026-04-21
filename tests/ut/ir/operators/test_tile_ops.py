@@ -1187,20 +1187,20 @@ class TestTileBatchMatMulOps:
     """Tests for tile batch matrix multiplication operations."""
 
     @pytest.mark.parametrize(
-        ("lhs_shape", "rhs_shape", "input_dtype", "expected_rank"),
+        ("lhs_shape", "rhs_shape", "input_dtype", "expected_shape"),
         [
             # 2D: [16,32] @ [32,64] -> [16,64] (regular matmul)
-            ([16, 32], [32, 64], DataType.FP16, 2),
+            ([16, 32], [32, 64], DataType.FP16, [16, 64]),
             # 3D: [4,16,32] @ [4,32,64] -> [4,16,64] (one batch dim)
-            ([4, 16, 32], [4, 32, 64], DataType.FP32, 3),
+            ([4, 16, 32], [4, 32, 64], DataType.FP32, [4, 16, 64]),
             # 4D: [2,3,16,32] @ [2,3,32,64] -> [2,3,16,64] (multiple batch dims, FP16 in)
-            ([2, 3, 16, 32], [2, 3, 32, 64], DataType.FP16, 4),
+            ([2, 3, 16, 32], [2, 3, 32, 64], DataType.FP16, [2, 3, 16, 64]),
             # Broadcast: [1,16,32] @ [4,32,64] -> [4,16,64]
-            ([1, 16, 32], [4, 32, 64], DataType.FP32, 3),
+            ([1, 16, 32], [4, 32, 64], DataType.FP32, [4, 16, 64]),
         ],
         ids=["2d", "3d", "4d", "broadcast"],
     )
-    def test_batch_matmul(self, lhs_shape, rhs_shape, input_dtype, expected_rank):
+    def test_batch_matmul(self, lhs_shape, rhs_shape, input_dtype, expected_shape):
         """tile.batch_matmul handles batch ranks + broadcasting; result dtype is promoted to FP32."""
         span = ir.Span.unknown()
         lhs_type = ir.TileType(_const_dims(span, *lhs_shape), input_dtype)
@@ -1214,7 +1214,9 @@ class TestTileBatchMatMulOps:
         assert call.op.name == "tile.batch_matmul"
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
-        assert len(result_type.shape) == expected_rank
+        const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert len(const_dims) == len(result_type.shape)
+        assert [dim.value for dim in const_dims] == expected_shape
         assert result_type.dtype == DataType.FP32
 
     def test_batch_matmul_dtype_mismatch(self):
@@ -2097,7 +2099,9 @@ class TestTileScatterUpdateOps:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.dtype == dtype
-        assert len(result_type.shape) == len(input_shape)
+        const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert len(const_dims) == len(result_type.shape)
+        assert [dim.value for dim in const_dims] == input_shape
 
     @pytest.mark.parametrize(
         ("src_dtype", "dim", "match"),
