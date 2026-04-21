@@ -1806,7 +1806,7 @@ def row_min(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.row_min", [tile, tmp_tile], {}, actual_span)
 
 
-def col_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
+def col_sum(tile: Expr, tmp_tile: Expr, is_binary: bool = False, span: Span | None = None) -> Call:
     """Column-wise sum reduction of a tile (reduces along axis=0, maps to TCOLSUM).
 
     Output shape is [1, N] for an [M, N] input.
@@ -1814,13 +1814,15 @@ def col_sum(tile: Expr, tmp_tile: Expr, span: Span | None = None) -> Call:
     Args:
         tile: Input tile (TileType [M, N])
         tmp_tile: Temporary tile (TileType, same shape as input)
+        is_binary: If True, binary-tree reduction (O(log N) depth).
+            If False (default), sequential reduction.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for column-wise sum reduction (TileType [1, N])
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.col_sum", [tile, tmp_tile], {}, actual_span)
+    return _ir_core.create_op_call("tile.col_sum", [tile, tmp_tile], {"is_binary": is_binary}, actual_span)
 
 
 def col_max(tile: Expr, span: Span | None = None) -> Call:

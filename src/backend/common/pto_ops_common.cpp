@@ -1562,15 +1562,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         .set_output_layout(ir::TileLayout::row_major);
   }
   // tile.col_sum (TCOLSUM): registered separately because PTOAS requires an isBinary attribute.
-  // isBinary is hardcoded to true (binary-tree reduction) — the sequential path (false) offers
-  // no advantage in precision or performance.
   if (exclude_ops.count("tile.col_sum") == 0) {
     backend.RegisterOp("tile.col_sum")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
           auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
           CHECK(op->args_.size() == 2)
               << "tile.col_sum requires 2 arguments (tile, tmp_tile), but got " << op->args_.size();
-          std::string config_attr = " {isBinary = true}";
+          bool is_binary = op->GetKwarg<bool>("is_binary", false);
+          std::string config_attr = std::string(" {isBinary = ") + (is_binary ? "true" : "false") + "}";
           codegen.Emit("pto.tcolsum " + GenerateInsOutsClause(op, codegen, config_attr));
           return std::string("");
         });

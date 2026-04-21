@@ -883,17 +883,19 @@ def row_min(tile: Tile, tmp_tile: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def col_sum(tile: Tile, tmp_tile: Tile) -> Tile:
+def col_sum(tile: Tile, tmp_tile: Tile, is_binary: bool = False) -> Tile:
     """Column-wise sum reduction.
 
     Args:
         tile: Input tile
         tmp_tile: Temporary tile (same shape as input)
+        is_binary: If True, binary-tree reduction.
+            If False (default), sequential reduction.
 
     Returns:
         Tile wrapping the col_sum operation
     """
-    call_expr = _ir_ops.col_sum(tile.unwrap(), tmp_tile.unwrap())
+    call_expr = _ir_ops.col_sum(tile.unwrap(), tmp_tile.unwrap(), is_binary=is_binary)
     return Tile(expr=call_expr)
 
 

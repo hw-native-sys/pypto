@@ -488,15 +488,16 @@ def row_min(input: T, tmp_tile: Tile | None = None) -> T:
     raise TypeError(f"row_min: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
+def col_sum(input: T, tmp_tile: Tile | None = None, is_binary: bool = False) -> T:
     """Column-wise sum reduction, dispatched by input type.
 
     For Tile inputs, tmp_tile is required as a temporary buffer.
+    is_binary controls the reduction algorithm (see pl.tile.col_sum).
     """
     if isinstance(input, Tile):
         if tmp_tile is None:
             raise ValueError("col_sum on Tile requires tmp_tile argument")
-        return _tile.col_sum(input, tmp_tile)
+        return _tile.col_sum(input, tmp_tile, is_binary=is_binary)
     _raise_type_dispatch_error("col_sum", input)
 
 

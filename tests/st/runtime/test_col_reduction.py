@@ -44,6 +44,31 @@ class ColSum_32x64_FP32:
         tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
+        result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        output = self.kernel(input_tensor, output)
+        return output
+
+
+@pl.program
+class ColSum_32x64_FP32_Sequential:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+    ) -> pl.Tensor[[1, 64], pl.FP32]:
+        tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
+        tmp: pl.Tile[[32, 64], pl.FP32] = pl.tile.create(
+            [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+        )
         result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_sum(tile, tmp)
         return pl.store(result, [0, 0], output)
 
@@ -69,7 +94,7 @@ class ColSum_16x16_FP32:
         tmp: pl.Tile[[16, 16], pl.FP32] = pl.tile.create(
             [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile, tmp)
+        result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -94,7 +119,7 @@ class ColSum_8x128_FP32:
         tmp: pl.Tile[[8, 128], pl.FP32] = pl.tile.create(
             [8, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_sum(tile, tmp)
+        result: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_sum(tile, tmp, is_binary=True)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -119,7 +144,7 @@ class ColSum_32x64_FP16:
         tmp: pl.Tile[[32, 64], pl.FP16] = pl.tile.create(
             [32, 64], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec
         )
-        result: pl.Tile[[1, 64], pl.FP16] = pl.tile.col_sum(tile, tmp)
+        result: pl.Tile[[1, 64], pl.FP16] = pl.tile.col_sum(tile, tmp, is_binary=True)
         return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -341,6 +366,29 @@ class ColSum32x64FP32(PTOTestCase):
 
     def get_program(self) -> Any:
         return ColSum_32x64_FP32
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.sum(tensors["input_tensor"], dim=0, keepdim=True)
+
+
+class ColSum32x64FP32Sequential(PTOTestCase):
+    def get_name(self) -> str:
+        return "col_sum_32x64_fp32_sequential"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("input_tensor", [32, 64], DataType.FP32, init_value=torch.randn),
+            TensorSpec("output", [1, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ColSum_32x64_FP32_Sequential
 
     def compute_expected(self, tensors, params=None):
         tensors["output"][:] = torch.sum(tensors["input_tensor"], dim=0, keepdim=True)
@@ -642,6 +690,10 @@ class TestColSum:
 
     def test_32x64_fp16(self, test_runner):
         result = test_runner.run(ColSum32x64FP16())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_32x64_fp32_sequential(self, test_runner):
+        result = test_runner.run(ColSum32x64FP32Sequential())
         assert result.passed, f"Test failed: {result.error}"
 
 
