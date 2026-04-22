@@ -11,7 +11,7 @@
 - 输入 IR 必须为静态单赋值 (SSA) 形式（需先运行 ConvertToSSA）
 - 仅处理 Opaque 和 Orchestration 函数
 
-**使用时机**：在 `OutlineIncoreScopes` 之后运行，当 IR 包含需要提取的 `with pl.cluster():` 作用域或 standalone `with pl.spmd(...):` 作用域时使用。
+**使用时机**：在 `OutlineIncoreScopes` 之后运行，当 IR 包含需要提取的 `with pl.cluster():` 作用域或 standalone `with pl.spmd(...):` / `for i in pl.spmd(...)` 作用域时使用。loop-form 是解析器对 `SpmdScopeStmt(body=InCoreScopeStmt(...))` 的语法糖；`OutlineIncoreScopes` 先把 InCore 体提取为独立函数，使 Spmd 体变成单次函数调用，之后本 pass 再把它提升为 `Function(Spmd)`。
 
 ## API
 

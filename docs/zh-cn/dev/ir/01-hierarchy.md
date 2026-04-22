@@ -248,6 +248,17 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
 # with pl.spmd(core_num=8):
 spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
                         name_hint="", body=body, span=span)
+
+# for i in pl.spmd(core_num=8):          # loop-style 语法糖
+#     offset = i * 64
+#     tile = pl.load(a, [offset, 0], [64, 128])
+#     ...
+# 解析器会将此 for-loop 脱糖为：
+#   SpmdScopeStmt(body=InCoreScopeStmt(body=[i = tile.get_block_idx(); ...]))
+# 这样块索引 `i` 就在隐式的 InCore 区域里被绑定。随后
+# `OutlineIncoreScopes` + `OutlineClusterScopes` 会把 InCore 体提取为
+# 合成的 `Function(InCore)`，并把 Spmd 包装提取为 `Function(Spmd)`，
+# 行为与 `with`-form 单内核调用路径一致。
 ```
 
 **属性：**

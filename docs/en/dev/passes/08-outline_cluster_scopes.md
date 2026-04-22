@@ -11,7 +11,7 @@ This pass transforms `ClusterScopeStmt` nodes into separate `Function(Group)` de
 - Input IR must be in SSA form (run ConvertToSSA first)
 - Only processes Opaque and Orchestration functions
 
-**When to use**: Run after `OutlineIncoreScopes` when the IR contains `with pl.cluster():` scopes or standalone `with pl.spmd(...):` scopes that need to be extracted into wrapper functions.
+**When to use**: Run after `OutlineIncoreScopes` when the IR contains `with pl.cluster():` scopes or standalone `with pl.spmd(...):` / `for i in pl.spmd(...)` scopes that need to be extracted into wrapper functions. The loop form is a parser-level desugaring for `SpmdScopeStmt(body=InCoreScopeStmt(...))`; `OutlineIncoreScopes` outlines the InCore body first, leaving a single-call Spmd body for this pass to lift into a `Function(Spmd)`.
 
 ## API
 

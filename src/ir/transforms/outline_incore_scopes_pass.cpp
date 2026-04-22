@@ -39,10 +39,12 @@ namespace pass {
  *
  * Requirements:
  * - Input IR must be in SSA form (run ConvertToSSA first)
- * - Only processes Opaque functions (InCore functions are left unchanged)
+ * - Processes Opaque and Orchestration functions. Orchestration functions can
+ *   carry InCore scopes when the parser desugars high-level constructs
+ *   (e.g. ``for i in pl.spmd(...)``) into SpmdScopeStmt(InCoreScopeStmt(...)).
  *
  * Transformation:
- * 1. For each ScopeStmt(InCore) in an Opaque function:
+ * 1. For each ScopeStmt(InCore) in an Opaque/Orchestration function:
  *    - Analyze body to determine external variable references (inputs)
  *    - Analyze subsequent statements to determine which definitions are outputs
  *    - Extract body into new Function(InCore) with appropriate params/returns
@@ -50,7 +52,8 @@ namespace pass {
  *    - EvalStmt(store) calls on output tensors are converted to AssignStmt
  * 2. Recursively handles nested InCore scopes
  * 3. Add outlined functions to the program
- * 4. Promote the parent function from Opaque to Orchestration
+ * 4. Promote Opaque parents to Orchestration when at least one InCore scope is
+ *    outlined. Orchestration parents stay Orchestration.
  */
 Pass OutlineIncoreScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
@@ -58,8 +61,10 @@ Pass OutlineIncoreScopes() {
     std::vector<FunctionPtr> all_outlined_functions;
 
     for (const auto& [gvar, func] : program->functions_) {
-      // Only process Opaque functions (InCore functions are already outlined)
-      if (func->func_type_ != FunctionType::Opaque) {
+      // Process Opaque and Orchestration functions; other function types
+      // (InCore/Group/Spmd) are already outlined or not expected to carry
+      // InCore scopes.
+      if (func->func_type_ != FunctionType::Opaque && func->func_type_ != FunctionType::Orchestration) {
         new_functions.push_back(func);
         continue;
       }

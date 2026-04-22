@@ -301,6 +301,60 @@ class TestOutlineClusterScopes:
         # Verify it has 2 return types (y and z)
         assert len(group_func.return_types) == 2
 
+    def test_outline_spmd_for_loop_auto_outlines_incore(self):
+        """`for i in pl.spmd(core_num=N)` auto-outlines into Spmd + InCore.
+
+        The new loop form binds the iteration variable to
+        ``pl.tile.get_block_idx()`` inside an implicit InCoreScopeStmt,
+        giving inline tile ops direct access to the block index without a
+        separate ``@pl.function(type=InCore)`` declaration.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=4):
+                    offset = i * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
+                    out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
+                return out
+
+        After = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(After)
+        After = passes.outline_cluster_scopes()(After)
+
+        # The pipeline produces three functions: main (Orchestration), a Spmd
+        # wrapper, and an InCore leaf.  Check the structural properties that
+        # matter rather than pinning exact stmt counts, since downstream SSA
+        # and store-alias normalization inserts book-keeping assignments that
+        # are not user-visible.
+        func_names = sorted(f.name for f in After.functions.values())
+        assert func_names == ["main", "main_incore_0", "main_spmd_0"]
+
+        main_incore = next(f for f in After.functions.values() if f.name == "main_incore_0")
+        assert main_incore.func_type == pl.FunctionType.InCore
+
+        main_spmd = next(f for f in After.functions.values() if f.name == "main_spmd_0")
+        assert main_spmd.func_type == pl.FunctionType.Spmd
+        assert main_spmd.attrs.get("core_num") == 4
+
+        main_fn = next(f for f in After.functions.values() if f.name == "main")
+        assert main_fn.func_type == pl.FunctionType.Orchestration
+
+        # The InCore leaf must start by binding the block index.
+        body = main_incore.body
+        first = body.stmts[0] if isinstance(body, ir.SeqStmts) else body
+        assert isinstance(first, ir.AssignStmt)
+        assert isinstance(first.value, ir.Call)
+        assert first.value.op.name == "tile.get_block_idx"
+
     def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
         """Test that ClusterOutlined verifier flags Cluster scopes in InCore functions."""
 

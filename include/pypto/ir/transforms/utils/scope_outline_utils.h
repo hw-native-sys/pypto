@@ -71,6 +71,35 @@ class StoreTargetCollector : public IRVisitor {
 };
 
 /**
+ * @brief Collect SSA post-store aliases: variables bound via
+ *        ``AssignStmt(v, Call(tile.store, ..., target))``.
+ *
+ * Maps ``v`` (the SSA-assignee) to ``target`` (the store's last argument).
+ * Both identify the same tensor state (post-store) with different pointer
+ * identities — ``v`` lives in ``body_collector.var_defs`` while ``target``
+ * shows up as a ``store_targets`` entry.  ScopeOutliner uses this to avoid
+ * exporting the same tensor twice when both sets would otherwise contribute
+ * outputs.
+ */
+class PostStoreAliasCollector : public IRVisitor {
+ public:
+  /// alias var (the SSA assignee of a tile.store call) → original store target
+  std::unordered_map<const Var*, const Var*> alias_to_target;
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = std::dynamic_pointer_cast<const Call>(op->value_);
+    auto opnode = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    if (opnode && opnode->name_ == "tile.store" && call->args_.size() >= 3) {
+      if (auto target = As<Var>(call->args_[2])) {
+        alias_to_target.emplace(op->var_.get(), target.get());
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
+/**
  * @brief Mutator that converts EvalStmt(Call(tile.store, ...)) into
  *        AssignStmt(target_var, Call(tile.store, ...)) for specified
  *        store targets.
@@ -233,6 +262,30 @@ class ScopeOutliner : public IRMutator {
   }
 
   /**
+   * @brief Compute used_after when no explicit context is available.
+   *
+   * Two regimes:
+   *   1. Scope is nested inside another (non-target) ScopeStmt — only store
+   *      targets escape, because scope boundaries confine locally-defined
+   *      variables.
+   *   2. Scope is at the top level or inside a control-flow body — retain the
+   *      original defensive fallback: all defined vars + store targets are
+   *      treated as outputs so the caller retains access.
+   */
+  std::unordered_set<const Var*> ComputeFallbackUsedAfter(const ScopeStmtPtr& scope) const {
+    StoreTargetCollector store_collector;
+    store_collector.VisitStmt(scope->body_);
+    std::unordered_set<const Var*> used_after;
+    if (!inside_nested_scope_body_) {
+      VarDefUseCollector def_collector;
+      def_collector.VisitStmt(scope->body_);
+      used_after = def_collector.var_defs;
+    }
+    used_after.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
+    return used_after;
+  }
+
+  /**
    * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
    *
    * For each target scope, collects variables referenced in all subsequent statements
@@ -244,29 +297,30 @@ class ScopeOutliner : public IRMutator {
 
     for (size_t i = 0; i < op->stmts_.size(); ++i) {
       auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
+      // Always compute what's used in the tail of this SeqStmts; this set is
+      // the "used_after" for a target scope at position i, and doubles as the
+      // required_outputs_ propagated into a non-target statement so any
+      // target-kind scope nested inside knows what needs to leak out.
+      VarDefUseCollector after_ref_collector;
+      for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
+        after_ref_collector.VisitStmt(op->stmts_[j]);
+      }
+      auto after_refs = after_ref_collector.GetAllVarRefs();
+
       if (scope && scope->GetScopeKind() == target_scope_kind_) {
-        // Collect variables referenced in all subsequent statements
-        VarDefUseCollector after_ref_collector;
-        for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
-          after_ref_collector.VisitStmt(op->stmts_[j]);
-        }
         // Also include variables required by parent scope
-        auto used_after = after_ref_collector.GetAllVarRefs();
+        auto used_after = after_refs;
         used_after.insert(required_outputs_.begin(), required_outputs_.end());
 
         // When no context is available (no subsequent statements and no parent
-        // requirements), fall back to standalone behaviour: treat all
-        // scope-defined vars + store targets as outputs.  This happens when
-        // a single ScopeStmt is wrapped in SeqStmts inside a control-flow
-        // body (if/for/while) where the outer context hasn't propagated
-        // required_outputs_.
+        // requirements), fall back to scope-nesting-aware defaults.  This
+        // happens when a single ScopeStmt is wrapped in SeqStmts inside a
+        // control-flow body (if/for/while) where the outer context hasn't
+        // propagated required_outputs_, or when the scope sits directly
+        // inside another scope (e.g. an InCoreScopeStmt at the top of a
+        // SpmdScopeStmt body produced by the ``for i in pl.spmd(...)`` form).
         if (used_after.empty()) {
-          VarDefUseCollector fallback_def;
-          fallback_def.VisitStmt(scope->body_);
-          StoreTargetCollector fallback_store;
-          fallback_store.VisitStmt(scope->body_);
-          used_after = fallback_def.var_defs;
-          used_after.insert(fallback_store.store_targets.begin(), fallback_store.store_targets.end());
+          used_after = ComputeFallbackUsedAfter(scope);
         }
 
         // Outline this scope with context about what's used after
@@ -274,8 +328,13 @@ class ScopeOutliner : public IRMutator {
         new_stmts.push_back(outlined_stmt);
         changed = true;
       } else {
-        // Recursively visit non-scope statements
+        // Recursively visit non-target statements.  Temporarily extend
+        // required_outputs_ with the tail-use set so any target-kind scope
+        // nested inside this statement can compute a correct used_after.
+        auto saved_required_outputs = required_outputs_;
+        required_outputs_.insert(after_refs.begin(), after_refs.end());
         auto visited = VisitStmt(op->stmts_[i]);
+        required_outputs_ = saved_required_outputs;
         new_stmts.push_back(visited);
         if (visited != op->stmts_[i]) {
           changed = true;
@@ -290,22 +349,39 @@ class ScopeOutliner : public IRMutator {
   }
 
   /**
-   * @brief Handle standalone ScopeStmts (not inside SeqStmts).
+   * @brief Handle ScopeStmts that are direct children of another node (not
+   * inside a SeqStmts).
    *
-   * When a scope appears outside a SeqStmts, all defined variables are outputs.
+   * The fallback honours scope nesting via ``inside_nested_scope_body_``: an
+   * inner scope whose only "context" is an enclosing non-target scope has no
+   * way for its locally-defined variables to escape, so we only expose store
+   * targets. Scopes at the true top level (outside any parent scope body)
+   * retain the original defensive "all defs are outputs" behaviour.
    */
-  // Shared per-kind logic: outline if kind matches, else fall through to base default.
+  // Shared per-kind logic: outline if kind matches, else descend with the
+  // nested-scope flag set so any target-kind scope we find inside can make a
+  // correct used_after decision.
   template <typename ScopeT>
   StmtPtr VisitScopeKind(const std::shared_ptr<const ScopeT>& op) {
     if (op->GetScopeKind() != target_scope_kind_) {
-      return IRMutator::VisitStmt_(op);
+      bool prev = std::exchange(inside_nested_scope_body_, true);
+      auto result = IRMutator::VisitStmt_(op);
+      inside_nested_scope_body_ = prev;
+      return result;
     }
-    VarDefUseCollector def_collector;
-    def_collector.VisitStmt(op->body_);
+    // Prefer the enclosing SeqStmts' propagated requirements over the
+    // "no context" fallback.  This matters when a target scope is a direct
+    // child of another scope (SpmdScopeStmt{InCoreScopeStmt{...}}) — the
+    // enclosing SeqStmts visitor populates required_outputs_ with variables
+    // the post-scope statements still reference.
+    if (required_outputs_.empty()) {
+      return OutlineScope(op, ComputeFallbackUsedAfter(op));
+    }
+    std::unordered_set<const Var*> used_after = required_outputs_;
     StoreTargetCollector store_collector;
     store_collector.VisitStmt(op->body_);
-    def_collector.var_defs.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
-    return OutlineScope(op, def_collector.var_defs);
+    used_after.insert(store_collector.store_targets.begin(), store_collector.store_targets.end());
+    return OutlineScope(op, used_after);
   }
 
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override { return VisitScopeKind(op); }
@@ -372,13 +448,45 @@ class ScopeOutliner : public IRMutator {
     VarCollector scope_var_collector;
     scope_var_collector.VisitStmt(op->body_);
 
+    // Map any SSA post-store alias (var_def bound to a tile.store call) back
+    // to its store target so we don't export the same tensor twice.
+    PostStoreAliasCollector post_store_collector;
+    post_store_collector.VisitStmt(op->body_);
+
+    // Store targets present in the scope body — used to decide whether a
+    // post-store alias's original target will already appear in output_vars
+    // via the store-target-output pass below.
+    StoreTargetCollector store_collector;
+    store_collector.VisitStmt(op->body_);
+
+    // Aliases deferred to the call-site emission: each pair maps a
+    // scope-local SSA post-store alias (pointer identity in the scope body)
+    // to the external store target's var_objects_ pointer.  After the fresh
+    // store-target Var is created at the call site we rename the alias to
+    // it, so subsequent parent-function references resolve correctly.
+    std::vector<std::pair<const Var*, const Var*>> deferred_post_store_aliases;
     for (const Var* var_ptr : body_collector.var_defs_ordered) {
-      if (used_after.count(var_ptr)) {
-        auto scope_it = scope_var_collector.var_objects.find(var_ptr);
-        CHECK(scope_it != scope_var_collector.var_objects.end())
-            << "Variable " << var_ptr->name_hint_ << " not found in scope body";
-        output_vars.push_back(scope_it->second);
+      if (!used_after.count(var_ptr)) continue;
+
+      // Skip if this var_def is a post-store alias of an external store
+      // target: that same tensor will be exported by the store-target pass
+      // below, and we don't want a duplicated output entry.
+      auto alias_it = post_store_collector.alias_to_target.find(var_ptr);
+      const Var* target_ptr =
+          (alias_it != post_store_collector.alias_to_target.end()) ? alias_it->second : nullptr;
+      if (target_ptr && store_collector.store_targets.count(target_ptr) &&
+          !body_collector.var_defs.count(target_ptr)) {
+        auto ext_it = var_objects_.find(target_ptr);
+        CHECK(ext_it != var_objects_.end())
+            << "Store target " << target_ptr->name_hint_ << " not found in var_objects";
+        deferred_post_store_aliases.emplace_back(var_ptr, ext_it->second.get());
+        continue;
       }
+
+      auto scope_it = scope_var_collector.var_objects.find(var_ptr);
+      CHECK(scope_it != scope_var_collector.var_objects.end())
+          << "Variable " << var_ptr->name_hint_ << " not found in scope body";
+      output_vars.push_back(scope_it->second);
     }
 
     // Also treat store targets as outputs: external tensors modified via
@@ -392,8 +500,6 @@ class ScopeOutliner : public IRMutator {
     //   - body pointer (var_ptr) — kept in store_body_ptrs for the
     //     StoreEvalToAssignMutator, which matches against the un-substituted
     //     scope body where store targets retain their original pointers
-    StoreTargetCollector store_collector;
-    store_collector.VisitStmt(op->body_);
     std::unordered_map<const Var*, const Var*> store_body_ptrs;
     for (const Var* var_ptr : store_collector.store_targets) {
       if (!body_collector.var_defs.count(var_ptr)) {
@@ -616,12 +722,18 @@ class ScopeOutliner : public IRMutator {
       return CreateFreshStoreTargetVar(ext_it->second, op->span_);
     };
 
-    // Create assignments for output variables in the parent function
+    // Create assignments for output variables in the parent function.
+    // We assemble the result first, then register deferred post-store alias
+    // renames once — each alias maps to a store target whose fresh var is
+    // populated by resolve_call_site_var (via CreateFreshStoreTargetVar) into
+    // store_target_renames_, so the registration must happen after all
+    // resolve_call_site_var calls.
+    StmtPtr result;
     if (output_vars.empty()) {
-      return std::make_shared<EvalStmt>(call_expr, op->span_);
+      result = std::make_shared<EvalStmt>(call_expr, op->span_);
     } else if (output_vars.size() == 1) {
       auto output_var = resolve_call_site_var(output_vars[0]);
-      return std::make_shared<AssignStmt>(output_var, call_expr, op->span_);
+      result = std::make_shared<AssignStmt>(output_var, call_expr, op->span_);
     } else {
       // Assign call result to a temporary variable, then unpack with TupleGetItem
       auto ret_var =
@@ -633,8 +745,20 @@ class ScopeOutliner : public IRMutator {
         auto output_var = resolve_call_site_var(output_vars[i]);
         stmts.push_back(std::make_shared<AssignStmt>(output_var, tuple_get, op->span_));
       }
-      return std::make_shared<SeqStmts>(stmts, op->span_);
+      result = std::make_shared<SeqStmts>(stmts, op->span_);
     }
+
+    // For each scope-local SSA post-store alias we elided from output_vars,
+    // look up the already-renamed store target and map the alias body
+    // pointer to that fresh var so later parent-function references resolve
+    // correctly.
+    for (const auto& [alias_ptr, target_ptr] : deferred_post_store_aliases) {
+      auto rename_it = store_target_renames_.find(target_ptr);
+      if (rename_it != store_target_renames_.end()) {
+        store_target_renames_[alias_ptr] = rename_it->second;
+      }
+    }
+    return result;
   }
 
   /**
@@ -794,6 +918,11 @@ class ScopeOutliner : public IRMutator {
   std::string name_suffix_;
   ProgramPtr program_;
   int scope_counter_ = 0;
+  /// True while we are visiting the body of a non-target ScopeStmt — a
+  /// target-kind scope encountered here cannot leak locally-defined vars to
+  /// any surrounding context (scope boundaries confine them), so the
+  /// used_after fallback exposes only store targets.
+  bool inside_nested_scope_body_ = false;
   std::vector<FunctionPtr> outlined_functions_;
 };
 

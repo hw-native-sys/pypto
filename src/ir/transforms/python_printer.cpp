@@ -1105,6 +1105,44 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  // Detect the ``for i in pl.spmd(...):`` desugaring emitted by the parser:
+  // SpmdScopeStmt(body=InCoreScopeStmt(body=<AssignStmt(i, Call(tile.get_block_idx)), ...>)).
+  // Printing it back as a for-loop keeps round-trips stable (the
+  // with-form parser enforces a single kernel call, so printing a
+  // multi-statement InCore-wrapped body as `with pl.spmd():` would fail
+  // to reparse).
+  auto incore = As<InCoreScopeStmt>(op->body_);
+  auto incore_seq = incore ? As<SeqStmts>(incore->body_) : nullptr;
+  auto first_assign = incore_seq
+                          ? (incore_seq->stmts_.empty() ? nullptr : As<AssignStmt>(incore_seq->stmts_[0]))
+                          : (incore ? As<AssignStmt>(incore->body_) : nullptr);
+  auto first_call = first_assign ? As<Call>(first_assign->value_) : nullptr;
+  auto first_op = first_call ? As<Op>(first_call->op_) : nullptr;
+  if (first_op && first_op->name_ == "tile.get_block_idx") {
+    stream_ << "for " << first_assign->var_->name_hint_ << " in " << prefix_
+            << ".spmd(core_num=" << op->core_num_;
+    if (op->sync_start_) {
+      stream_ << ", sync_start=True";
+    }
+    if (!op->name_hint_.empty()) {
+      stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+    }
+    stream_ << "):\n";
+    IncreaseIndent();
+    // Emit the InCore body skipping the get_block_idx binding we just
+    // materialized as the loop variable.
+    if (incore_seq && incore_seq->stmts_.size() > 1) {
+      for (size_t i = 1; i < incore_seq->stmts_.size(); ++i) {
+        PrintStmtBlock(incore_seq->stmts_[i]);
+        if (i + 1 < incore_seq->stmts_.size()) stream_ << "\n";
+      }
+    } else {
+      stream_ << GetIndent() << "pass\n";
+    }
+    DecreaseIndent();
+    return;
+  }
+
   stream_ << "with " << prefix_ << ".spmd(core_num=" << op->core_num_;
   if (op->sync_start_) {
     stream_ << ", sync_start=True";

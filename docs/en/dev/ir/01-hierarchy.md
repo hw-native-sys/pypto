@@ -281,6 +281,17 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
 # with pl.spmd(core_num=8):
 spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
                         name_hint="", body=body, span=span)
+
+# for i in pl.spmd(core_num=8):          # loop-style surface syntax
+#     offset = i * 64
+#     tile = pl.load(a, [offset, 0], [64, 128])
+#     ...
+# The parser desugars the for-loop to:
+#   SpmdScopeStmt(body=InCoreScopeStmt(body=[i = tile.get_block_idx(); ...]))
+# so the block index `i` is bound inside the implicit InCore region. The
+# OutlineIncoreScopes + OutlineClusterScopes pair then outlines the InCore
+# body into a synthetic `Function(InCore)` and the Spmd wrapper into a
+# `Function(Spmd)` just like the `with`-form single-kernel case.
 ```
 
 **Properties:**

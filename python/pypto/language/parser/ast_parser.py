@@ -1084,12 +1084,12 @@ class ASTParser:
                     # Will be resolved from loop outputs
                     self.scope_manager.define_var(var_name, f"loop_yield_{i}")
 
-    _VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_"}
+    _VALID_ITERATORS = {"range", "parallel", "unroll", "pipeline", "while_", "spmd"}
     _ITERATOR_ERROR = (
-        "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_()"
+        "For loop must use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), or pl.spmd()"
     )
     _ITERATOR_HINT = (
-        "Use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), or pl.while_() as the iterator"
+        "Use pl.range(), pl.parallel(), pl.unroll(), pl.pipeline(), pl.while_(), or pl.spmd() as the iterator"
     )
 
     def _validate_for_loop_iterator(self, stmt: ast.For) -> tuple[ast.Call, str]:
@@ -1187,6 +1187,11 @@ class ASTParser:
         # Handle pl.while_() case
         if iterator_type == "while_":
             self._parse_while_as_for(stmt, iter_call)
+            return
+
+        # Handle pl.spmd() loop form — auto-outlines into Spmd(InCore(body)).
+        if iterator_type == "spmd":
+            self._parse_spmd_for_loop(stmt, iter_call)
             return
 
         loop_var_name, iter_args_node, is_simple_for = self._parse_for_loop_target(stmt)
@@ -2392,23 +2397,30 @@ class ASTParser:
         span = self.span_tracker.get_span(stmt)
         self._parse_scope_body(stmt, scope_kind, span, split=split_mode, name_hint=name_hint)
 
-    def _parse_spmd_scope(
+    def _parse_spmd_kwargs(
         self,
-        stmt: ast.With,
-        context_expr: ast.Call,
-        scope_kind_map: dict[str, "ir.ScopeKind"],
-    ) -> None:
-        """Parse pl.spmd() context manager into a ScopeStmt(Spmd)."""
-        if context_expr.args:
+        anchor: ast.AST,
+        call: ast.Call,
+        *,
+        usage_hint: str,
+    ) -> tuple[int, bool | None, str]:
+        """Parse pl.spmd() keyword arguments.
+
+        Returns ``(core_num, sync_start, name_hint)``. Raises ParserSyntaxError
+        for missing core_num, non-literal values, or unexpected kwargs.
+        Callers that want to pre-screen loop-specific kwargs should do so
+        before calling this helper.
+        """
+        if call.args:
             raise ParserSyntaxError(
                 "pl.spmd() does not accept positional arguments",
-                span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.spmd(core_num=4):'",
+                span=self.span_tracker.get_span(anchor),
+                hint=usage_hint,
             )
-        core_num = None
-        sync_start = None
+        core_num: int | None = None
+        sync_start: bool | None = None
         name_hint = ""
-        for kw in context_expr.keywords:
+        for kw in call.keywords:
             if kw.arg == "name_hint":
                 name_hint = self._parse_scope_name_hint(kw.value, "pl.spmd()")
             elif kw.arg == "core_num":
@@ -2419,40 +2431,54 @@ class ASTParser:
                 ):
                     raise ParserSyntaxError(
                         "core_num must be an integer literal",
-                        span=self.span_tracker.get_span(stmt),
-                        hint="Use 'with pl.spmd(core_num=8):'",
+                        span=self.span_tracker.get_span(anchor),
+                        hint=usage_hint,
                     )
                 if kw.value.value <= 0:
                     raise ParserSyntaxError(
                         f"core_num must be a positive integer, got {kw.value.value}",
-                        span=self.span_tracker.get_span(stmt),
-                        hint="Use 'with pl.spmd(core_num=8):'",
+                        span=self.span_tracker.get_span(anchor),
+                        hint=usage_hint,
                     )
                 core_num = kw.value.value
             elif kw.arg == "sync_start":
                 if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
                     raise ParserSyntaxError(
                         "sync_start must be a boolean literal (True/False)",
-                        span=self.span_tracker.get_span(stmt),
-                        hint="Use 'with pl.spmd(core_num=4, sync_start=True):'",
+                        span=self.span_tracker.get_span(anchor),
+                        hint=usage_hint,
                     )
                 sync_start = kw.value.value
             else:
                 raise ParserSyntaxError(
                     f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
-                    span=self.span_tracker.get_span(stmt),
+                    span=self.span_tracker.get_span(anchor),
                     hint="Supported keywords: 'core_num', 'sync_start', 'name_hint'",
                 )
         if core_num is None:
             raise ParserSyntaxError(
                 "pl.spmd() requires core_num argument",
-                span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.spmd(core_num=4):'",
+                span=self.span_tracker.get_span(anchor),
+                hint=usage_hint,
             )
-        # Validate body is exactly one statement that is a function call
+        return core_num, sync_start, name_hint
+
+    def _parse_spmd_scope(
+        self,
+        stmt: ast.With,
+        context_expr: ast.Call,
+        scope_kind_map: dict[str, "ir.ScopeKind"],
+    ) -> None:
+        """Parse ``with pl.spmd(...):`` into a ScopeStmt(Spmd)."""
+        with_hint = "Use 'with pl.spmd(core_num=4):' with a single function call inside."
+        core_num, sync_start, name_hint = self._parse_spmd_kwargs(stmt, context_expr, usage_hint=with_hint)
+        # Validate body is exactly one statement that is a function call.
+        # The loop form (for i in pl.spmd(...):) is what accepts inline
+        # multi-statement bodies.
         spmd_hint = (
-            "The SPMD scope should wrap a single function call: "
-            "'with pl.spmd(core_num=4):\\n    out = self.kernel(a, b, out)'"
+            "The 'with pl.spmd()' form wraps a single kernel call. Use "
+            "'for i in pl.spmd(core_num=4):' to write inline tile/tensor "
+            "ops with access to the block index."
         )
         if len(stmt.body) != 1:
             raise ParserSyntaxError(
@@ -2482,6 +2508,64 @@ class ASTParser:
             core_num=core_num,
             sync_start=sync_start,
         )
+
+    def _parse_spmd_for_loop(self, stmt: ast.For, iter_call: ast.Call) -> None:
+        """Parse ``for i in pl.spmd(core_num=N, ...): body`` into
+        ``SpmdScopeStmt(body=InCoreScopeStmt(body=<bind i; body>))``.
+
+        The loop variable is bound to ``pl.tile.get_block_idx()`` as the first
+        statement of the auto-outlined InCore function, giving per-block code
+        direct access to the block index without a separate kernel
+        declaration.
+        """
+        spmd_hint = (
+            "Use 'for i in pl.spmd(core_num=4):' — the loop variable is bound "
+            "to the per-block index (equivalent to pl.tile.get_block_idx())."
+        )
+        if not isinstance(stmt.target, ast.Name):
+            raise ParserSyntaxError(
+                "for ... in pl.spmd(...) must use a single loop variable",
+                span=self.span_tracker.get_span(stmt.target),
+                hint=spmd_hint,
+            )
+        loop_var_name = stmt.target.id
+
+        # Reject loop-specific kwargs that make no sense for SPMD blocks.
+        disallowed_loop_kwargs = {"init_values", "chunk", "chunk_policy", "attrs", "step", "stage"}
+        for kw in iter_call.keywords:
+            if kw.arg in disallowed_loop_kwargs:
+                raise ParserSyntaxError(
+                    f"pl.spmd() loop form does not accept '{kw.arg}='",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint=spmd_hint,
+                )
+
+        core_num, sync_start, name_hint = self._parse_spmd_kwargs(stmt, iter_call, usage_hint=spmd_hint)
+
+        span = self.span_tracker.get_span(stmt)
+        with self.builder.scope(
+            ir.ScopeKind.Spmd,
+            span,
+            name_hint=name_hint,
+            core_num=core_num,
+            sync_start=sync_start,
+        ):
+            with self._scope_kind_context(ir.ScopeKind.Spmd):
+                self.scope_manager.enter_scope("spmd_for")
+                with self.builder.scope(ir.ScopeKind.InCore, span):
+                    with self._scope_kind_context(ir.ScopeKind.InCore):
+                        # Bind `i = pl.tile.get_block_idx()` as the first
+                        # statement of the outlined InCore body.
+                        loop_var = self.builder.var(loop_var_name, ir.ScalarType(DataType.INDEX), span=span)
+                        self.scope_manager.define_var(loop_var_name, loop_var)
+                        self.builder.assign(loop_var, ir_op.tile.get_block_idx(span=span), span=span)
+                        self._parse_body_siblings(stmt.body)
+                self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
+                # Leak vars to parent so post-store rebindings (e.g.
+                # ``out = pl.store(...)`` inside the body) remain visible to
+                # subsequent statements like ``return out``. Matches Python's
+                # own for-loop variable-leaking semantics.
+                self.scope_manager.exit_scope(leak_vars=True)
 
     def _parse_scope_body(
         self,
