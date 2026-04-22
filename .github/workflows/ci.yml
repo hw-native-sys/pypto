@@ -137,12 +137,12 @@ jobs:
         run: pip install -v ./runtime
 
       - name: Test system tests
-        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=6eecebc5
+        run: pytest tests/st -v --device=$DEVICE_ID --forked --precompile-workers=128 --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device=$DEVICE_ID --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=6eecebc5
+            -v --device=$DEVICE_ID --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
@@ -185,13 +185,13 @@ jobs:
         run: pip install -v ./runtime
 
       - name: Test A5 system tests (simulator)
-        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=6eecebc5
+        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=6eecebc5
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=6eecebc5
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest

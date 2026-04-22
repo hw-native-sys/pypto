@@ -69,7 +69,6 @@ class ColSum_32x64_FP32_Sequential:
         tile: pl.Tile[[32, 64], pl.FP32] = pl.load(input_tensor, [0, 0], [32, 64])
         result: pl.Tile[[1, 64], pl.FP32] = pl.tile.col_sum(tile)
         return pl.store(result, [0, 0], output)
-        return pl.store(result, [0, 0], output)
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
@@ -691,10 +690,6 @@ class TestColSum:
         result = test_runner.run(ColSum32x64FP16())
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.skip(
-        reason="PTOAS NPU backend (a2a3/a5) only provides 4-arg TCOLSUM_IMPL; "
-        "sequential path (2-arg, no tmp) requires PTOAS to add NPU 2-arg overload."
-    )
     def test_32x64_fp32_sequential(self, test_runner):
         result = test_runner.run(ColSum32x64FP32Sequential())
         assert result.passed, f"Test failed: {result.error}"
