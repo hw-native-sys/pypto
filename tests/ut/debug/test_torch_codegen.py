@@ -9,11 +9,17 @@
 
 """Tests for PyTorch code emission from PyPTO IR."""
 
+import importlib
+from typing import Any
+
+import pypto.language as pl
 import pytest
 import torch
 from pypto import DataType, ir
 from pypto.debug import torch_codegen
 from pypto.debug.torch_codegen import TorchCodegen
+
+torch_codegen_module = importlib.import_module("pypto.debug.torch_codegen")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -415,7 +421,395 @@ def test_pipe_ops():
     body = ir.EvalStmt(push_call, _span())
     func = _simple_function("f", [tile], body)
     code = torch_codegen(func)
-    assert "_pipes['to_aiv'].append" in code
+    assert "_cross_core_rt.push_to_aiv(tile, 0)" in code
+
+
+def test_get_subblock_idx():
+    """tile.get_subblock_idx should emit thread-local lane helper."""
+    idx = _scalar("idx", DataType.INDEX)
+    call = _op_call("tile.get_subblock_idx", [])
+    assign = ir.AssignStmt(idx, call, _span())
+    ret = ir.ReturnStmt([idx], _span())
+    body = ir.SeqStmts([assign, ret], _span())
+    func = _simple_function("f", [], body, [ir.ScalarType(DataType.INDEX)])
+    code = torch_codegen(func)
+    assert "_get_subblock_idx()" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    assert ns["f"]() == 0
+
+
+def test_group_cross_core_split_runs_with_runtime_scheduler():
+    """Group calls with split cross-core ops should route through _run_group_call."""
+
+    @pl.program
+    class SplitCrossCoreProgram:
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cross_aic(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ):
+            recv: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                shape=[4, 2], dtype=pl.FP32, split=1
+            )
+            out = pl.store(recv, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cross_aiv(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            lane: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+            tile: pl.Tile[[2, 2], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [lane * 2, 0], [2, 2])
+            pl.tpush_to_aic(tile, split=1)
+            return out
+
+        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cross(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            self.cross_aic(inp, out)
+            result: pl.Tensor[[4, 2], pl.FP32] = self.cross_aiv(inp, out)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            return self.cross(inp, out)
+
+    code = torch_codegen(SplitCrossCoreProgram)
+    assert "_run_group_call('cross'" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    src = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    dst = torch.zeros_like(src)
+    out = ns["main"](src, dst)
+    assert torch.allclose(out, src)
+
+
+def test_group_cross_core_left_right_c2v_runs_with_runtime_scheduler():
+    """LEFT_RIGHT split C->V path should route through _run_group_call and preserve data."""
+
+    @pl.program
+    class SplitLeftRightC2VProgram:
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def cross_aic(
+            self,
+            inp: pl.Tensor[[2, 4], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+        ):
+            tile: pl.Tile[[2, 4], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                inp, [0, 0], [2, 4], target_memory=pl.MemorySpace.Mat
+            )
+            pl.tpush_to_aiv(tile, split=2)
+
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def cross_aiv(
+            self,
+            inp: pl.Tensor[[2, 4], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+        ) -> pl.Tensor[[2, 4], pl.FP32]:
+            lane: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+            recv: pl.Tile[[2, 2], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                shape=[2, 2], dtype=pl.FP32, split=2
+            )
+            out = pl.store(recv, [0, lane * 2], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def cross(
+            self,
+            inp: pl.Tensor[[2, 4], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+        ) -> pl.Tensor[[2, 4], pl.FP32]:
+            self.cross_aic(inp, out)
+            result: pl.Tensor[[2, 4], pl.FP32] = self.cross_aiv(inp, out)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            inp: pl.Tensor[[2, 4], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+        ) -> pl.Tensor[[2, 4], pl.FP32]:
+            return self.cross(inp, out)
+
+    code = torch_codegen(SplitLeftRightC2VProgram)
+    assert "_run_group_call('cross'" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    src = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    dst = torch.zeros_like(src)
+    out = ns["main"](src, dst)
+    assert torch.allclose(out, src)
+
+
+def test_group_cross_core_no_split_bidirect_runs_with_runtime_scheduler():
+    """No-split bidirectional path should run concurrently without deadlock."""
+
+    @pl.program
+    class NoSplitBidirectProgram:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cross_aic(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ):
+            recv: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                shape=[4, 2], dtype=pl.FP32, split=0
+            )
+            twice: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Mat] = pl.add(recv, recv)
+            pl.tpush_to_aiv(twice, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def cross_aiv(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            tile: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Vec] = pl.load(inp, [0, 0], [4, 2])
+            pl.tpush_to_aic(tile, split=0)
+            recv: pl.Tile[[4, 2], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(
+                shape=[4, 2], dtype=pl.FP32, split=0
+            )
+            out = pl.store(recv, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def cross(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            self.cross_aic(inp, out)
+            result: pl.Tensor[[4, 2], pl.FP32] = self.cross_aiv(inp, out)
+            return result
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            inp: pl.Tensor[[4, 2], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 2], pl.FP32]],
+        ) -> pl.Tensor[[4, 2], pl.FP32]:
+            return self.cross(inp, out)
+
+    code = torch_codegen(NoSplitBidirectProgram)
+    assert "_run_group_call('cross'" in code
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102
+    src = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    dst = torch.zeros_like(src)
+    out = ns["main"](src, dst)
+    assert torch.allclose(out, src * 2)
+
+
+def test_split_mode_to_int_invalid_value_raises():
+    """Invalid split value should fail fast with a clear error."""
+    with pytest.raises(ValueError, match="Invalid split mode"):
+        torch_codegen_module._split_mode_to_int("bad_split")
+
+
+def test_cross_core_split_merge_preserves_region_attrs():
+    """Split/merge path should preserve valid/full region metadata."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    rt = ns["_cross_core_rt"]
+    set_lane = ns["_set_subblock_idx"]
+
+    tile = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    setattr(tile, "_pypto_valid_shape", (2, 3))
+    setattr(tile, "_pypto_full_shape", (2, 4))
+
+    rt.push_to_aiv(tile, 2)
+    set_lane(0)
+    lane0 = rt.pop_from_aic(2)
+    set_lane(1)
+    lane1 = rt.pop_from_aic(2)
+
+    assert getattr(lane0, "_pypto_valid_shape", None) == (2, 2)
+    assert getattr(lane1, "_pypto_valid_shape", None) == (2, 1)
+    assert getattr(lane0, "_pypto_full_shape", None) == (2, 2)
+    assert getattr(lane1, "_pypto_full_shape", None) == (2, 2)
+
+    set_lane(0)
+    rt.push_to_aic(lane0, 2)
+    set_lane(1)
+    rt.push_to_aic(lane1, 2)
+    set_lane(0)
+    merged = rt.pop_from_aiv(2)
+
+    assert tuple(merged.shape) == (2, 4)
+    assert getattr(merged, "_pypto_valid_shape", None) == (2, 3)
+    assert getattr(merged, "_pypto_full_shape", None) == (2, 4)
+
+
+def test_cross_core_no_split_dual_dispatch_runtime_pipe_pairing():
+    """No-split dual-dispatch runtime should broadcast AIC->AIV and pair AIV->AIC traffic."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    rt = ns["_cross_core_rt"]
+    set_lane = ns["_set_subblock_idx"]
+
+    rt.reset(no_split_dual_aiv_dispatch=True)
+    assert rt.snapshot()["no_split_dual_aiv_dispatch"] is True
+
+    to_aiv_tile = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    rt.push_to_aiv(to_aiv_tile, 0)
+    set_lane(0)
+    lane0_recv = rt.pop_from_aic(0)
+    set_lane(1)
+    lane1_recv = rt.pop_from_aic(0)
+    assert torch.equal(lane0_recv, to_aiv_tile)
+    assert torch.equal(lane1_recv, to_aiv_tile)
+    assert rt.snapshot()["to_aiv_dual_nosplit"] == {0: 0, 1: 0}
+
+    lane0_tile = torch.full((2, 2), 1.0, dtype=torch.float32)
+    lane1_tile = torch.full((2, 2), 2.0, dtype=torch.float32)
+    set_lane(0)
+    rt.push_to_aic(lane0_tile, 0)
+    set_lane(1)
+    rt.push_to_aic(lane1_tile, 0)
+    set_lane(0)
+    paired = rt.pop_from_aiv(0)
+    assert torch.equal(paired, lane0_tile)
+    assert rt.snapshot()["to_aic_dual_nosplit"] == {0: 0, 1: 0}
+
+
+def test_mixed_kernel_timeout_cancels_waiters_and_runtime_recovers():
+    """Timeout should cancel blocked waiters and clear cancel event for next runs."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    ns["_PIPE_WAIT_TIMEOUT_SEC"] = 60.0
+    ns["_MIXED_KERNEL_TIMEOUT_SEC"] = 0.2
+
+    def blocked_aic(_x):
+        return ns["_cross_core_rt"].pop_from_aiv(0)
+
+    def blocked_aiv(_x):
+        return ns["_cross_core_rt"].pop_from_aic(0)
+
+    ns["blocked_aic"] = blocked_aic
+    ns["blocked_aiv"] = blocked_aiv
+
+    with pytest.raises(RuntimeError, match="Mixed-kernel execution timeout"):
+        ns["_run_mixed_kernels"](
+            "blocked_group",
+            {"aic": "blocked_aic", "aiv": "blocked_aiv", "split": 0},
+            torch.tensor(0.0),
+        )
+
+    assert ns["_get_runtime_cancel_event"]() is None
+
+    def ok_aic(_x):
+        return None
+
+    def ok_aiv(_x):
+        return torch.tensor([1.0], dtype=torch.float32)
+
+    ns["ok_aic"] = ok_aic
+    ns["ok_aiv"] = ok_aiv
+    out = ns["_run_mixed_kernels"](
+        "ok_group",
+        {"aic": "ok_aic", "aiv": "ok_aiv", "split": 0},
+        torch.tensor(0.0),
+    )
+    assert torch.equal(out, torch.tensor([1.0], dtype=torch.float32))
+
+
+def test_mixed_kernel_no_split_dual_aiv_dispatch_bidirect_pipe_runs():
+    """No-split dual-dispatch bidirectional pipe should complete without deadlock."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    def aic(_x):
+        recv = ns["_cross_core_rt"].pop_from_aiv(0)
+        ns["_cross_core_rt"].push_to_aiv(recv + 10.0, 0)
+
+    def aiv(_x):
+        lane = ns["_get_subblock_idx"]()
+        payload = torch.tensor([float(lane + 1)], dtype=torch.float32)
+        ns["_cross_core_rt"].push_to_aic(payload, 0)
+        recv = ns["_cross_core_rt"].pop_from_aic(0)
+        if lane == 0:
+            return recv
+        return None
+
+    ns["aic"] = aic
+    ns["aiv"] = aiv
+    out = ns["_run_mixed_kernels"](
+        "dual_bidirect_group",
+        {"aic": "aic", "aiv": "aiv", "split": 0, "dual_aiv_dispatch": True},
+        torch.tensor(0.0),
+    )
+    assert torch.equal(out, torch.tensor([11.0], dtype=torch.float32))
+
+
+def test_mixed_kernel_no_split_dual_aiv_dispatch_runs_two_lanes():
+    """No-split + dual_aiv_dispatch should dispatch AIV on lane0 and lane1."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    lanes_seen: list[int] = []
+    lane_lock = ns["threading"].Lock()
+
+    def aic(_x):
+        return None
+
+    def aiv(_x):
+        lane = ns["_get_subblock_idx"]()
+        with lane_lock:
+            lanes_seen.append(lane)
+        if lane == 0:
+            return torch.tensor([1.0], dtype=torch.float32)
+        return None
+
+    ns["aic"] = aic
+    ns["aiv"] = aiv
+    out = ns["_run_mixed_kernels"](
+        "dual_dispatch_group",
+        {"aic": "aic", "aiv": "aiv", "split": 0, "dual_aiv_dispatch": True},
+        torch.tensor(0.0),
+    )
+    assert torch.equal(out, torch.tensor([1.0], dtype=torch.float32))
+    assert sorted(lanes_seen) == [0, 1]
+
+
+def test_mixed_kernel_no_split_without_dual_dispatch_runs_single_lane():
+    """No-split without dual_aiv_dispatch should only run AIV lane0."""
+    ns: dict[str, Any] = {}
+    exec(torch_codegen_module._PREAMBLE, ns)  # noqa: S102
+
+    lanes_seen: list[int] = []
+    lane_lock = ns["threading"].Lock()
+
+    def aic(_x):
+        return None
+
+    def aiv(_x):
+        lane = ns["_get_subblock_idx"]()
+        with lane_lock:
+            lanes_seen.append(lane)
+        return torch.tensor([1.0], dtype=torch.float32)
+
+    ns["aic"] = aic
+    ns["aiv"] = aiv
+    out = ns["_run_mixed_kernels"](
+        "single_dispatch_group",
+        {"aic": "aic", "aiv": "aiv", "split": 0},
+        torch.tensor(0.0),
+    )
+    assert torch.equal(out, torch.tensor([1.0], dtype=torch.float32))
+    assert lanes_seen == [0]
 
 
 # ---------------------------------------------------------------------------

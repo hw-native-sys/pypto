@@ -59,9 +59,372 @@ _CMP_OPS: dict[int, str] = {
 # ---------------------------------------------------------------------------
 _PREAMBLE = """\
 import torch
+import threading
+import time
+import traceback
 from collections import deque
 
-_pipes = {'to_aiv': deque(), 'to_aic': deque()}
+_PIPE_WAIT_TIMEOUT_SEC = 10.0
+_MIXED_KERNEL_TIMEOUT_SEC = 30.0
+
+_GROUP_META = {}
+_thread_local = threading.local()
+_runtime_cancel_event = None
+
+
+def _set_subblock_idx(idx):
+    _thread_local.subblock_idx = int(idx)
+
+
+def _get_subblock_idx():
+    return int(getattr(_thread_local, "subblock_idx", 0))
+
+
+def _set_runtime_cancel_event(event):
+    global _runtime_cancel_event
+    _runtime_cancel_event = event
+
+
+def _get_runtime_cancel_event():
+    return _runtime_cancel_event
+
+
+def _copy_region_attrs(src, dst):
+    valid_shape = getattr(src, "_pypto_valid_shape", None)
+    full_shape = getattr(src, "_pypto_full_shape", None)
+    if valid_shape is not None:
+        dst._pypto_valid_shape = tuple(int(s) for s in valid_shape)
+    if full_shape is not None:
+        dst._pypto_full_shape = tuple(int(s) for s in full_shape)
+    return dst
+
+
+class _CrossCoreRuntime:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self.reset()
+
+    def reset(self, no_split_dual_aiv_dispatch=False):
+        with self._cv:
+            self._no_split_dual_aiv_dispatch = bool(no_split_dual_aiv_dispatch)
+            self._to_aiv = deque()
+            self._to_aiv_split = {1: {0: deque(), 1: deque()}, 2: {0: deque(), 1: deque()}}
+            self._to_aiv_dual_nosplit = {0: deque(), 1: deque()}
+            self._to_aic = deque()
+            self._to_aic_split = {1: {0: deque(), 1: deque()}, 2: {0: deque(), 1: deque()}}
+            self._to_aic_dual_nosplit = {0: deque(), 1: deque()}
+            self._cv.notify_all()
+
+    def snapshot(self):
+        with self._lock:
+            return self._snapshot_locked()
+
+    def notify_all(self):
+        with self._cv:
+            self._cv.notify_all()
+
+    def _snapshot_locked(self):
+        return {
+            "no_split_dual_aiv_dispatch": self._no_split_dual_aiv_dispatch,
+            "to_aiv": len(self._to_aiv),
+            "to_aiv_dual_nosplit": {
+                0: len(self._to_aiv_dual_nosplit[0]),
+                1: len(self._to_aiv_dual_nosplit[1]),
+            },
+            "to_aiv_split": {
+                1: {0: len(self._to_aiv_split[1][0]), 1: len(self._to_aiv_split[1][1])},
+                2: {0: len(self._to_aiv_split[2][0]), 1: len(self._to_aiv_split[2][1])},
+            },
+            "to_aic": len(self._to_aic),
+            "to_aic_dual_nosplit": {
+                0: len(self._to_aic_dual_nosplit[0]),
+                1: len(self._to_aic_dual_nosplit[1]),
+            },
+            "to_aic_split": {
+                1: {0: len(self._to_aic_split[1][0]), 1: len(self._to_aic_split[1][1])},
+                2: {0: len(self._to_aic_split[2][0]), 1: len(self._to_aic_split[2][1])},
+            },
+        }
+
+    def _wait_for_locked(self, predicate, op_name, split, lane):
+        deadline = time.monotonic() + _PIPE_WAIT_TIMEOUT_SEC
+        while not predicate():
+            cancel_event = _get_runtime_cancel_event()
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError(
+                    f"{op_name} cancelled (split={split}, lane={lane}); "
+                    f"pipe_state={self._snapshot_locked()}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"{op_name} timeout (split={split}, lane={lane}); "
+                    f"pipe_state={self._snapshot_locked()}"
+                )
+            self._cv.wait(timeout=min(0.05, remaining))
+
+    @staticmethod
+    def _split_tile(tile, split):
+        dim = 0 if split == 1 else 1
+        size = int(tile.shape[dim])
+        if size % 2 != 0:
+            raise ValueError(f"Split mode {split} requires even dimension size, got {size}")
+        half = size // 2
+        if dim == 0:
+            part0 = tile[:half, ...].clone()
+            part1 = tile[half:, ...].clone()
+        else:
+            part0 = tile[:, :half, ...].clone()
+            part1 = tile[:, half:, ...].clone()
+
+        full_shape = getattr(tile, "_pypto_full_shape", None)
+        if full_shape is not None:
+            full0 = list(int(s) for s in full_shape)
+            full1 = list(int(s) for s in full_shape)
+            full0[dim] = min(full0[dim], half)
+            full1[dim] = max(full1[dim] - half, 0)
+            part0._pypto_full_shape = tuple(full0)
+            part1._pypto_full_shape = tuple(full1)
+
+        valid_shape = getattr(tile, "_pypto_valid_shape", None)
+        if valid_shape is not None:
+            valid0 = list(int(s) for s in valid_shape)
+            valid1 = list(int(s) for s in valid_shape)
+            valid0[dim] = min(valid0[dim], half)
+            valid1[dim] = max(valid1[dim] - half, 0)
+            part0._pypto_valid_shape = tuple(valid0)
+            part1._pypto_valid_shape = tuple(valid1)
+
+        return part0, part1
+
+    @staticmethod
+    def _merge_tile(part0, part1, split):
+        dim = 0 if split == 1 else 1
+        merged = torch.cat([part0, part1], dim=dim)
+
+        full0 = getattr(part0, "_pypto_full_shape", tuple(part0.shape))
+        full1 = getattr(part1, "_pypto_full_shape", tuple(part1.shape))
+        if len(full0) == len(full1):
+            merged_full = list(int(s) for s in full0)
+            merged_full[dim] = int(full0[dim]) + int(full1[dim])
+            merged._pypto_full_shape = tuple(merged_full)
+
+        valid0 = getattr(part0, "_pypto_valid_shape", tuple(part0.shape))
+        valid1 = getattr(part1, "_pypto_valid_shape", tuple(part1.shape))
+        if len(valid0) == len(valid1):
+            merged_valid = list(int(s) for s in valid0)
+            merged_valid[dim] = int(valid0[dim]) + int(valid1[dim])
+            full_shape = getattr(merged, "_pypto_full_shape", None)
+            if full_shape is not None:
+                merged_valid = [min(v, int(f)) for v, f in zip(merged_valid, full_shape)]
+            merged._pypto_valid_shape = tuple(merged_valid)
+
+        return merged
+
+    def push_to_aiv(self, tile, split):
+        split = int(split)
+        with self._cv:
+            if split == 0:
+                if self._no_split_dual_aiv_dispatch:
+                    self._to_aiv_dual_nosplit[0].append(_copy_region_attrs(tile, tile.clone()))
+                    self._to_aiv_dual_nosplit[1].append(_copy_region_attrs(tile, tile.clone()))
+                else:
+                    self._to_aiv.append(_copy_region_attrs(tile, tile.clone()))
+            elif split in (1, 2):
+                lane0, lane1 = self._split_tile(tile, split)
+                self._to_aiv_split[split][0].append(lane0)
+                self._to_aiv_split[split][1].append(lane1)
+            else:
+                raise ValueError(f"Unsupported split mode for push_to_aiv: {split}")
+            self._cv.notify_all()
+
+    def pop_from_aic(self, split):
+        split = int(split)
+        lane = _get_subblock_idx()
+        with self._cv:
+            if split == 0:
+                if self._no_split_dual_aiv_dispatch:
+                    if lane not in (0, 1):
+                        raise ValueError(
+                            f"No-split dual-dispatch tpop_from_aic requires lane in {{0,1}}, got {lane}"
+                        )
+                    queue = self._to_aiv_dual_nosplit[lane]
+                    self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane)
+                    return queue.popleft()
+                self._wait_for_locked(lambda: len(self._to_aiv) > 0, "tpop_from_aic", split, lane)
+                return self._to_aiv.popleft()
+            if split in (1, 2):
+                if lane not in (0, 1):
+                    raise ValueError(f"Split tpop_from_aic requires lane in {{0,1}}, got {lane}")
+                queue = self._to_aiv_split[split][lane]
+                self._wait_for_locked(lambda: len(queue) > 0, "tpop_from_aic", split, lane)
+                return queue.popleft()
+            raise ValueError(f"Unsupported split mode for pop_from_aic: {split}")
+
+    def push_to_aic(self, tile, split):
+        split = int(split)
+        lane = _get_subblock_idx()
+        with self._cv:
+            if split == 0:
+                if self._no_split_dual_aiv_dispatch:
+                    if lane not in (0, 1):
+                        raise ValueError(
+                            f"No-split dual-dispatch tpush_to_aic requires lane in {{0,1}}, got {lane}"
+                        )
+                    self._to_aic_dual_nosplit[lane].append(_copy_region_attrs(tile, tile.clone()))
+                else:
+                    self._to_aic.append(_copy_region_attrs(tile, tile.clone()))
+            elif split in (1, 2):
+                if lane not in (0, 1):
+                    raise ValueError(f"Split tpush_to_aic requires lane in {{0,1}}, got {lane}")
+                self._to_aic_split[split][lane].append(_copy_region_attrs(tile, tile.clone()))
+            else:
+                raise ValueError(f"Unsupported split mode for push_to_aic: {split}")
+            self._cv.notify_all()
+
+    def pop_from_aiv(self, split):
+        split = int(split)
+        lane = _get_subblock_idx()
+        with self._cv:
+            if split == 0:
+                if self._no_split_dual_aiv_dispatch:
+                    lane0_q = self._to_aic_dual_nosplit[0]
+                    lane1_q = self._to_aic_dual_nosplit[1]
+                    self._wait_for_locked(
+                        lambda: len(lane0_q) > 0 and len(lane1_q) > 0,
+                        "tpop_from_aiv",
+                        split,
+                        lane,
+                    )
+                    lane0_tile = lane0_q.popleft()
+                    lane1_q.popleft()
+                    return lane0_tile
+                self._wait_for_locked(lambda: len(self._to_aic) > 0, "tpop_from_aiv", split, lane)
+                return self._to_aic.popleft()
+            if split in (1, 2):
+                lane0_q = self._to_aic_split[split][0]
+                lane1_q = self._to_aic_split[split][1]
+                self._wait_for_locked(
+                    lambda: len(lane0_q) > 0 and len(lane1_q) > 0,
+                    "tpop_from_aiv",
+                    split,
+                    lane,
+                )
+                part0 = lane0_q.popleft()
+                part1 = lane1_q.popleft()
+                return self._merge_tile(part0, part1, split)
+            raise ValueError(f"Unsupported split mode for pop_from_aiv: {split}")
+
+
+_cross_core_rt = _CrossCoreRuntime()
+
+
+def _run_mixed_kernels(group_name, meta, *args):
+    aic_name = meta["aic"]
+    aiv_name = meta["aiv"]
+    split = int(meta.get("split", 0))
+    dual_aiv_dispatch = bool(meta.get("dual_aiv_dispatch", False))
+    num_aiv_lanes = 2 if split in (1, 2) or dual_aiv_dispatch else 1
+
+    _cross_core_rt.reset(no_split_dual_aiv_dispatch=(split == 0 and dual_aiv_dispatch))
+    aic_fn = globals().get(aic_name)
+    aiv_fn = globals().get(aiv_name)
+    if aic_fn is None or aiv_fn is None:
+        raise RuntimeError(
+            f"Mixed-kernel function lookup failed for {group_name}: "
+            f"aic={aic_name!r}, aiv={aiv_name!r}"
+        )
+
+    run_cancel = threading.Event()
+    _set_runtime_cancel_event(run_cancel)
+    failures = []
+    failure_lock = threading.Lock()
+    results = {}
+    results_lock = threading.Lock()
+
+    def _runner(func, func_name, role, lane):
+        try:
+            _set_subblock_idx(0 if lane is None else lane)
+            value = func(*args)
+            with results_lock:
+                results[(role, lane)] = value
+        except Exception:
+            if run_cancel.is_set():
+                return
+            with failure_lock:
+                failures.append((func_name, lane, traceback.format_exc()))
+        finally:
+            _set_subblock_idx(0)
+
+    try:
+        threads = [
+            threading.Thread(
+                target=_runner,
+                args=(aic_fn, aic_name, "aic", None),
+                name=f"{group_name}-aic",
+            )
+        ]
+        for lane in range(num_aiv_lanes):
+            threads.append(
+                threading.Thread(
+                    target=_runner,
+                    args=(aiv_fn, aiv_name, "aiv", lane),
+                    name=f"{group_name}-aiv-lane{lane}",
+                )
+            )
+
+        for t in threads:
+            t.start()
+
+        deadline = time.monotonic() + _MIXED_KERNEL_TIMEOUT_SEC
+        for t in threads:
+            remaining = max(0.0, deadline - time.monotonic())
+            t.join(timeout=remaining)
+
+        alive = [t.name for t in threads if t.is_alive()]
+        timed_out = len(alive) > 0
+
+        if timed_out or failures:
+            run_cancel.set()
+            _cross_core_rt.notify_all()
+            for t in threads:
+                if t.is_alive():
+                    t.join(timeout=0.2)
+
+        if timed_out:
+            alive_after_cancel = [t.name for t in threads if t.is_alive()]
+            if alive_after_cancel:
+                alive = alive_after_cancel
+            raise RuntimeError(
+                f"Mixed-kernel execution timeout for {group_name}; "
+                f"alive_threads={alive}; pipe_state={_cross_core_rt.snapshot()}"
+            )
+        if failures:
+            fn, lane, tb = failures[0]
+            raise RuntimeError(
+                f"Mixed-kernel execution failed in {fn} (lane={lane}) for {group_name}\\n{tb}"
+            )
+
+        if ("aiv", 0) in results:
+            return results[("aiv", 0)]
+        non_none_keys = [f"{role}:{lane}" for (role, lane), value in results.items() if value is not None]
+        if non_none_keys:
+            raise RuntimeError(
+                f"Mixed-kernel return contract violation for {group_name}; "
+                f"expected aiv lane 0, got non-None returns from {non_none_keys}"
+            )
+        return None
+    finally:
+        _set_runtime_cancel_event(None)
+        _set_subblock_idx(0)
+
+
+def _run_group_call(group_name, *args):
+    meta = _GROUP_META.get(group_name)
+    if meta is None:
+        return globals()[group_name](*args)
+    return _run_mixed_kernels(group_name, meta, *args)
 
 def _coerce_shape(shape):
     return tuple(int(s) for s in shape)
@@ -303,6 +666,68 @@ def _handle_fillpad(a: list[str], kw: dict[str, Any]) -> str:
     return f"_fillpad({a[0]}, {_pad_mode_literal(kw)})"
 
 
+def _split_mode_to_int(split_mode: Any) -> int:
+    if split_mode is None:
+        return 0
+    if isinstance(split_mode, int):
+        return int(split_mode)
+    value = getattr(split_mode, "value", None)
+    if value is not None:
+        return int(value)
+    try:
+        return int(split_mode)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid split mode: {split_mode!r}") from exc
+
+
+def _split_kwarg(kw: dict[str, Any]) -> int:
+    return _split_mode_to_int(kw.get("split", 0))
+
+
+def _handle_tpush_to_aiv(a: list[str], kw: dict[str, Any]) -> str:
+    return f"_cross_core_rt.push_to_aiv({a[0]}, {_split_kwarg(kw)})"
+
+
+def _handle_tpush_to_aic(a: list[str], kw: dict[str, Any]) -> str:
+    return f"_cross_core_rt.push_to_aic({a[0]}, {_split_kwarg(kw)})"
+
+
+def _handle_tpop_from_aic(_a: list[str], kw: dict[str, Any]) -> str:
+    return f"_cross_core_rt.pop_from_aic({_split_kwarg(kw)})"
+
+
+def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:
+    return f"_cross_core_rt.pop_from_aiv({_split_kwarg(kw)})"
+
+
+def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
+    funcs_by_name = {func.name: func for func in program.functions.values()}
+    group_meta: dict[str, dict[str, Any]] = {}
+
+    for func in program.functions.values():
+        if func.func_type != _ir.FunctionType.Group:
+            continue
+
+        aic_name = f"{func.name}_aic"
+        aiv_name = f"{func.name}_aiv"
+        if aic_name not in funcs_by_name or aiv_name not in funcs_by_name:
+            continue
+
+        aiv_func = funcs_by_name[aiv_name]
+        split = _split_mode_to_int(func.split)
+        if split == 0:
+            split = _split_mode_to_int(aiv_func.split)
+        dual_aiv_dispatch = bool(getattr(aiv_func, "attrs", {}).get("dual_aiv_dispatch", False))
+        group_meta[func.name] = {
+            "aic": aic_name,
+            "aiv": aiv_name,
+            "split": split,
+            "dual_aiv_dispatch": dual_aiv_dispatch,
+        }
+
+    return group_meta
+
+
 # Build the dispatch table
 _OP_MAP: dict[str, OpHandler] = {}
 
@@ -445,10 +870,11 @@ def _register_ops() -> None:
     m["tile.subsc"] = lambda a, _kw: f"({a[0]} - {a[1]} - {a[2]})"
 
     # --- Cross-core pipe ops ---
-    m["tile.tpush_to_aiv"] = lambda a, _kw: f"_pipes['to_aiv'].append({a[0]}.clone())"
-    m["tile.tpush_to_aic"] = lambda a, _kw: f"_pipes['to_aic'].append({a[0]}.clone())"
-    m["tile.tpop_from_aic"] = lambda _a, _kw: "_pipes['to_aic'].popleft()"
-    m["tile.tpop_from_aiv"] = lambda _a, _kw: "_pipes['to_aiv'].popleft()"
+    m["tile.tpush_to_aiv"] = _handle_tpush_to_aiv
+    m["tile.tpush_to_aic"] = _handle_tpush_to_aic
+    m["tile.tpop_from_aic"] = _handle_tpop_from_aic
+    m["tile.tpop_from_aiv"] = _handle_tpop_from_aiv
+    m["tile.get_subblock_idx"] = lambda _a, _kw: "_get_subblock_idx()"
 
     # --- System ops (no-ops) ---
     for op_name in (
@@ -508,15 +934,24 @@ _BINARY_OP_STR: dict[type, str] = {
 class TorchCodegen(_ir.IRVisitor):
     """Emit executable PyTorch code from PyPTO IR."""
 
-    def __init__(self, *, check_shapes: bool = False) -> None:
+    def __init__(
+        self, *, check_shapes: bool = False, group_meta: dict[str, dict[str, Any]] | None = None
+    ) -> None:
         super().__init__()
         self._lines: list[str] = []
         self._indent: int = 0
         self._expr_result: str = ""
-        self._var_names: dict[int, str] = {}  # id(Var) -> unique name
+        # Fast-path name cache keyed by Python wrapper id.
+        self._var_names_by_id: dict[int, str] = {}
+        # Stable name cache keyed by semantic variable identity.
+        self._var_names_by_key: dict[tuple[Any, ...], str] = {}
+        # Keep wrapper refs alive during one function emission to avoid Python
+        # reusing object ids for short-lived nanobind wrappers.
+        self._seen_var_refs: list[_ir.Var] = []
         self._name_counter: dict[str, int] = {}
         self._yield_targets: list[str] = []  # names to assign on yield
         self._check_shapes: bool = check_shapes
+        self._group_meta: dict[str, dict[str, Any]] = group_meta or {}
 
     # -- helpers --
 
@@ -543,10 +978,47 @@ class TorchCodegen(_ir.IRVisitor):
         return f"{base}_{count}"
 
     def _name_of(self, var: _ir.Var) -> str:
+        key = self._var_semantic_key(var)
         vid = id(var)
-        if vid not in self._var_names:
-            self._var_names[vid] = self._unique_name(var.name_hint)
-        return self._var_names[vid]
+        if vid in self._var_names_by_id:
+            return self._var_names_by_id[vid]
+
+        if key in self._var_names_by_key:
+            name = self._var_names_by_key[key]
+        else:
+            name = self._unique_name(var.name_hint)
+            self._var_names_by_key[key] = name
+
+        self._var_names_by_id[vid] = name
+        self._seen_var_refs.append(var)
+        return name
+
+    @staticmethod
+    def _var_semantic_key(var: _ir.Var) -> tuple[Any, ...]:
+        """Build a stable key for nanobind-backed IR vars.
+
+        IR callbacks may wrap the same underlying C++ Var with different Python
+        objects, so ``id(var)`` alone is not stable across visits. We key by
+        semantic fields that remain stable across wrappers.
+        """
+        span = getattr(var, "span", None)
+        span_key: tuple[Any, ...] | None = None
+        if span is not None and getattr(span, "is_valid", False):
+            span_key = (
+                getattr(span, "filename", ""),
+                int(getattr(span, "begin_line", 0)),
+                int(getattr(span, "begin_column", 0)),
+                int(getattr(span, "end_line", 0)),
+                int(getattr(span, "end_column", 0)),
+            )
+
+        var_type = getattr(var, "type", None)
+        return (
+            type(var).__name__,
+            getattr(var, "name_hint", ""),
+            span_key,
+            str(var_type) if var_type is not None else "",
+        )
 
     def _visit_expr_str(self, expr: _ir.Expr) -> str:
         # Force nested Call nodes through our Python visit_call implementation.
@@ -577,7 +1049,9 @@ class TorchCodegen(_ir.IRVisitor):
     def _alias_return_vars(self, return_vars: list[_ir.Var], names: list[str]) -> None:
         """Map return_vars to the same names as iter_args after a loop."""
         for rv, name in zip(return_vars, names):
-            self._var_names[id(rv)] = name
+            self._var_names_by_id[id(rv)] = name
+            self._var_names_by_key[self._var_semantic_key(rv)] = name
+            self._seen_var_refs.append(rv)
 
     # -- top-level --
 
@@ -586,6 +1060,14 @@ class TorchCodegen(_ir.IRVisitor):
             self.visit_function(func)
 
     def visit_function(self, func: _ir.Function) -> None:
+        # Keep names function-local. IR may reuse object ids across functions;
+        # sharing maps at program scope can emit stale names.
+        self._var_names_by_id = {}
+        self._var_names_by_key = {}
+        self._seen_var_refs = []
+        self._name_counter = {}
+        self._yield_targets = []
+
         params = [self._name_of(p) for p in func.params]
         self._emit(f"def {func.name}({', '.join(params)}):")
         self._indent += 1
@@ -667,7 +1149,14 @@ class TorchCodegen(_ir.IRVisitor):
             self._expr_result = handler(arg_strs, kw)
         elif isinstance(op.op, _ir.GlobalVar):
             # Cross-function call
-            self._expr_result = f"{op_name}({', '.join(arg_strs)})"
+            if op_name in self._group_meta:
+                args_str = ", ".join(arg_strs)
+                if args_str:
+                    self._expr_result = f"_run_group_call('{op_name}', {args_str})"
+                else:
+                    self._expr_result = f"_run_group_call('{op_name}')"
+            else:
+                self._expr_result = f"{op_name}({', '.join(arg_strs)})"
         else:
             raise ValueError(
                 f"Unsupported op '{op_name}' in torch_codegen. "
@@ -887,8 +1376,15 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
     Returns:
         String of executable Python/PyTorch code
     """
-    cg = TorchCodegen(check_shapes=check_shapes)
+    group_meta: dict[str, dict[str, Any]] = {}
+    if isinstance(node, _ir.Program):
+        group_meta = _build_group_meta(node)
+
+    cg = TorchCodegen(check_shapes=check_shapes, group_meta=group_meta)
     lines = [_PREAMBLE]
+    if group_meta:
+        lines.append(f"_GROUP_META.update({group_meta!r})")
+        lines.append("")
 
     if isinstance(node, _ir.Program):
         cg.visit_program(node)
