@@ -12,28 +12,15 @@
 Most tests use Before/After style with ir.assert_structural_equal.
 Tests involving MemorySpace.Bias (not expressible in the DSL) use per-function
 structural equality for AIV plus string-based assertions for AIC.
+
+Backend setup (Ascend950) is handled by the directory-level ``conftest.py``.
 """
 
 import re
 
 import pypto.language as pl
 import pytest
-from pypto import backend, ir, passes
-from pypto.backend import BackendType
-
-# ---------------------------------------------------------------------------
-# Backend fixture: expand_mixed_kernel now requires Ascend950 backend
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _setup_backend():
-    """Configure Ascend950 backend before each test and reset afterward."""
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend950)
-    yield
-    backend.reset_for_testing()
-
+from pypto import ir, passes
 
 # ---------------------------------------------------------------------------
 # Shared helpers: program builders and pass invocation
@@ -166,6 +153,58 @@ def _assert_function_equal(actual_program, expected_program, func_name):
     ir.assert_structural_equal(actual, expected)
 
 
+def _assert_aiv_structural_eq(actual_program, expected_program, func_name="main_incore_0_aiv"):
+    """Assert AIV function structural equality between actual and expected programs."""
+    _assert_function_equal(actual_program, expected_program, func_name)
+
+
+def _get_aic_str(actual_program, func_name="main_incore_0_aic"):
+    """Return the AIC function's printed source, asserting it exists.
+
+    Centralizes the ``get_function(...).as_python()`` pattern so pyright knows the
+    function lookup must succeed before we serialize it.
+    """
+    func = actual_program.get_function(func_name)
+    assert func is not None, f"Function '{func_name}' not found in actual program"
+    return func.as_python()
+
+
+def _assert_aic_contains(actual_program, *expected_ops, func_name="main_incore_0_aic"):
+    """Assert AIC function exists and its string representation contains given ops."""
+    func = actual_program.get_function(func_name)
+    assert func is not None, f"Function '{func_name}' not found in actual program"
+    assert func.func_type == pl.FunctionType.AIC
+    aic_str = func.as_python()
+    for op in expected_ops:
+        assert op in aic_str, f"Expected '{op}' in AIC function but not found.\nAIC code:\n{aic_str}"
+
+
+def _assert_aiv_aic_split(
+    actual_program,
+    expected_aiv_program,
+    *aic_expected_ops,
+    aiv_func_name="main_incore_0_aiv",
+    aic_func_name="main_incore_0_aic",
+    group_func_name="main_incore_0",
+):
+    """Assert AIV structural equality + AIC string assertions + Group calls both.
+
+    This is the standard assertion pattern for tests where AIC uses
+    MemorySpace.Bias (not expressible in the DSL) so we verify AIC via string
+    while AIV is verified structurally.
+    """
+    _assert_aiv_structural_eq(actual_program, expected_aiv_program, aiv_func_name)
+    _assert_aic_contains(actual_program, *aic_expected_ops, func_name=aic_func_name)
+
+    # Group calls AIC then AIV
+    group_func = actual_program.get_function(group_func_name)
+    assert group_func is not None
+    assert group_func.func_type == pl.FunctionType.Group
+    group_str = group_func.as_python()
+    assert aic_func_name in group_str
+    assert aiv_func_name in group_str
+
+
 def _make_matmul_program():
     """Standard mixed kernel: load->Mat->Left/Right, matmul, move->Vec, store."""
 
@@ -193,6 +232,490 @@ def _make_matmul_program():
             return out_0
 
     return P
+
+
+def _make_cube_bias_before(cube_op: str):
+    """Build a Before program that calls a cube_bias variant (matmul_bias / gemv_bias).
+
+    The DSL parser requires literal op references in the function body, so we cannot
+    pass the op as a closure variable; we dispatch on the op name instead. The shapes
+    and surrounding load/move/store are identical across variants.
+    """
+    if cube_op == "matmul_bias":
+
+        @pl.program
+        class BeforeMatmulBias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[1, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                bias: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                a_mat = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                bias_tile = pl.load(bias, [0, 0], [1, 128])
+                bias_mat = pl.move(
+                    bias_tile,
+                    target_memory=pl.MemorySpace.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                c_tile = pl.matmul_bias(a_left, b_right, bias_mat)
+                c_vec = pl.move(
+                    c_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0
+
+        return BeforeMatmulBias
+    if cube_op == "gemv_bias":
+
+        @pl.program
+        class BeforeGemvBias:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[1, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                bias: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+            ) -> pl.Tensor[[1, 128], pl.FP32]:
+                a_mat = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                bias_tile = pl.load(bias, [0, 0], [1, 128])
+                bias_mat = pl.move(
+                    bias_tile,
+                    target_memory=pl.MemorySpace.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                c_tile = pl.gemv_bias(a_left, b_right, bias_mat)
+                c_vec = pl.move(
+                    c_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+                return out_0
+
+        return BeforeGemvBias
+    raise ValueError(f"unknown cube_bias op: {cube_op}")
+
+
+def _make_cube_bias_expected_aiv():
+    """Expected AIV side after expand for any cube_bias variant.
+
+    The AIV does not contain the bias op itself (it stays in AIC); both matmul_bias
+    and gemv_bias produce the same AIV: load bias -> move to Vec NZ -> tpush -> tpop.
+    """
+
+    @pl.program
+    class ExpectedAIV:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main_incore_0_aiv(
+            self,
+            a: pl.Tensor[[1, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            bias: pl.Tensor[[1, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+        ) -> pl.Tensor[[1, 128], pl.FP32]:
+            bias_tile = pl.load(bias, [0, 0], [1, 128])
+            bias_tile_nz = pl.move(
+                bias_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            pl.tpush_to_aic(bias_tile_nz, split=0)
+            c_vec: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+            out_0_store: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
+            return out_0_store
+
+    return ExpectedAIV
+
+
+def _make_cube_acc_before(cube_op: str):
+    """Build a Before program that chains a cube op with its _acc variant.
+
+    matmul_acc reuses (a_left, b_right); gemv_acc requires fresh moves a_left2/b_right2.
+    """
+    if cube_op == "matmul_acc":
+
+        @pl.program
+        class BeforeMatmulAcc:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile = pl.matmul(a_left, b_right)
+                d_tile = pl.matmul_acc(c_tile, a_left, b_right)
+                d_vec = pl.move(
+                    d_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
+                return out_0
+
+        return BeforeMatmulAcc
+
+    if cube_op == "gemv_acc":
+
+        @pl.program
+        class BeforeGemvAcc:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                c_tile = pl.gemv(a_left, b_right)
+                a_left2 = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_right2 = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                d_tile = pl.gemv_acc(c_tile, a_left2, b_right2)
+                d_vec = pl.move(
+                    d_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
+                return out_0
+
+        return BeforeGemvAcc
+
+    raise ValueError(f"unknown cube_acc op: {cube_op}")
+
+
+def _make_cube_acc_expected_aiv():
+    """Expected AIV side after expand for any cube_acc variant.
+
+    Both matmul_acc and gemv_acc keep all CUBE compute in AIC and produce an identical
+    AIV: receive the accumulated result via tpop, store, return.
+    """
+
+    @pl.program
+    class ExpectedAIV:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main_incore_0_aiv(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            d_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(split=0)
+            out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
+            return out_0_store
+
+    return ExpectedAIV
+
+
+def _make_post_chain_program(post_op: str):
+    """Build (Before, ExpectedAIV) for matmul followed by an exp -> {add,mul} chain.
+
+    The AIC side is identical across variants (load/move/matmul/tpush), so we verify
+    it via string contains; the AIV chain differs only in the second op call.
+    """
+    if post_op == "add":
+
+        @pl.program
+        class BeforeAdd:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                exp_tile = pl.exp(z_vec)
+                sum_tile = pl.add(exp_tile, exp_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
+                return out_0
+
+        @pl.program
+        class ExpectedAIVAdd:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                exp_tile = pl.exp(z_vec)
+                sum_tile = pl.add(exp_tile, exp_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
+                return out_0_store
+
+        return BeforeAdd, ExpectedAIVAdd
+
+    if post_op == "mul":
+
+        @pl.program
+        class BeforeMul:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                z_exp = pl.exp(z_vec)
+                z_mul = pl.mul(z_exp, z_exp)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
+                return out_0
+
+        @pl.program
+        class ExpectedAIVMul:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                z_exp = pl.exp(z_vec)
+                z_mul = pl.mul(z_exp, z_exp)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
+                return out_0_store
+
+        return BeforeMul, ExpectedAIVMul
+
+    raise ValueError(f"unknown post_op: {post_op}")
+
+
+def _make_v2c_boundary_program(vec_op: str):
+    """Build (Before, Expected) for the V->C boundary test where a vector op precedes
+    matmul. The IR shape is identical across vec_op variants; only the literal call
+    name and the SSA variable suffix (sum / sub) differ.
+    """
+    if vec_op == "add":
+
+        @pl.program
+        class BeforeAdd:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sum = pl.add(x_tile, x_tile)
+                x_sum_mat = pl.move(
+                    x_sum,
+                    target_memory=pl.MemorySpace.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_sum_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        @pl.program
+        class ExpectedAdd:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                x_sum_mat: pl.Tile[
+                    [16, 128],
+                    pl.BF16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0)
+                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_sum_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=0)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sum = pl.add(x_tile, x_tile)
+                x_sum_nz = pl.move(
+                    x_sum,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(x_sum_nz, split=0)
+                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                self.main_incore_0_aic(x, y, out_0)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
+                return result
+
+        return BeforeAdd, ExpectedAdd
+
+    if vec_op == "sub":
+
+        @pl.program
+        class BeforeSub:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sub = pl.sub(x_tile, x_tile)
+                x_sub_mat = pl.move(
+                    x_sub,
+                    target_memory=pl.MemorySpace.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                x_sub_left = pl.move(x_sub_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_sub_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        @pl.program
+        class ExpectedSub:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                x_sub_mat: pl.Tile[
+                    [16, 128],
+                    pl.BF16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0)
+                x_sub_left = pl.move(x_sub_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_sub_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=0)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sub = pl.sub(x_tile, x_tile)
+                x_sub_nz = pl.move(
+                    x_sub,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(x_sub_nz, split=0)
+                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                self.main_incore_0_aic(x, y, out_0)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
+                return result
+
+        return BeforeSub, ExpectedSub
+
+    raise ValueError(f"unknown v2c vector op: {vec_op}")
 
 
 # ---------------------------------------------------------------------------
@@ -523,95 +1046,14 @@ class TestCrossCoreBoundaries:
 
         ir.assert_structural_equal(After, Expected)
 
-    def test_v2c_boundary_add_to_matmul(self):
-        """Pre-matmul vector op: add(x,x) produces V->C boundary to matmul."""
+    @pytest.mark.parametrize("vec_op", ["add", "sub"])
+    def test_v2c_boundary_pre_matmul_vector_op(self, vec_op):
+        """Pre-matmul vector op (add/sub) produces V->C boundary to matmul.
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
-                x_sum = pl.add(x_tile, x_tile)
-                x_sum_mat = pl.move(
-                    x_sum,
-                    target_memory=pl.MemorySpace.Mat,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_sum_left, y_right)
-                z_vec = pl.move(
-                    z_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
+        Both ops produce identical IR shapes; only the call op and SSA naming differ.
+        """
+        Before, Expected = _make_v2c_boundary_program(vec_op)
         After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ):
-                x_sum_mat: pl.Tile[
-                    [16, 128],
-                    pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
-                ] = pl.tpop_from_aiv(split=0)
-                x_sum_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_sum_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
-                x_sum = pl.add(x_tile, x_tile)
-                x_sum_nz = pl.move(
-                    x_sum,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                pl.tpush_to_aic(x_sum_nz, split=0)
-                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                self.main_incore_0_aic(x, y, out_0)
-                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-                return result
-
         ir.assert_structural_equal(After, Expected)
 
     def test_v2c_boundary_direct_to_left_keeps_mat_tpop(self):
@@ -711,161 +1153,58 @@ class TestCrossCoreBoundaries:
 class TestCubeOpVariants:
     """Test that all cube op variants are correctly classified and placed in AIC."""
 
-    def test_matmul_acc_in_aic(self):
-        """matmul + matmul_acc -> both in AIC, none in AIV."""
+    @pytest.mark.parametrize(
+        "cube_op, expected_aic_calls",
+        [
+            ("matmul_acc", ("matmul", "matmul_acc")),
+            ("gemv_acc", ("gemv", "gemv_acc")),
+        ],
+    )
+    def test_cube_acc_in_aic(self, cube_op, expected_aic_calls):
+        """Cube_acc variants (matmul_acc / gemv_acc) keep accumulator chain entirely in AIC.
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile = pl.matmul(a_left, b_right)
-                d_tile = pl.matmul_acc(c_tile, a_left, b_right)
-                d_vec = pl.move(
-                    d_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0
-
+        Both variants produce an identical AIV (single tpop -> store -> return); the AIC
+        contents differ only in the literal op calls, which we verify via string check.
+        """
+        Before = _make_cube_acc_before(cube_op)
+        ExpectedAIV = _make_cube_acc_expected_aiv()
         After = _expand(Before)
+        _assert_aiv_aic_split(
+            After,
+            ExpectedAIV,
+            *expected_aic_calls,
+            "tpush_to_aiv",
+        )
+        # AIC must NOT contain V->C boundary ops (no pre-matmul vector input).
+        aic_str = _get_aic_str(After)
+        assert "tpop_from_aiv" not in aic_str
 
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ):
-                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile = pl.matmul(a_left, b_right)
-                d_tile = pl.matmul_acc(c_tile, a_left, b_right)
-                pl.tpush_to_aiv(d_tile, split=0)
+    @pytest.mark.parametrize("cube_op", ["matmul_bias", "gemv_bias"])
+    def test_cube_bias_in_aic(self, cube_op):
+        """Cube bias variants (matmul_bias / gemv_bias) trigger split with bias V->C boundary.
 
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                d_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                self.main_incore_0_aic(a, b, out_0)
-                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
-
-    def test_matmul_bias_in_aic(self):
-        """tile.matmul_bias is a CUBE op -> triggers split with bias V->C boundary."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[1, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                a_mat = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
-                bias_mat = pl.move(
-                    bias_tile,
-                    target_memory=pl.MemorySpace.Mat,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                c_tile = pl.matmul_bias(a_left, b_right, bias_mat)
-                c_vec = pl.move(
-                    c_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
-
+        Both ops share the same I/O shapes [1, 128]x[128, 128] -> [1, 128] and produce
+        an identical AIV side; only the AIC-side op call differs (verified via string).
+        """
+        Before = _make_cube_bias_before(cube_op)
+        ExpectedAIV = _make_cube_bias_expected_aiv()
         After = _expand(Before)
-
-        # AIV Expected (no Bias MemorySpace, so DSL can express it)
-        @pl.program
-        class ExpectedAIV:
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                a: pl.Tensor[[1, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
-                bias_tile_nz = pl.move(
-                    bias_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                pl.tpush_to_aic(bias_tile_nz, split=0)
-                c_vec: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0_store
-
-        _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
-
-        # AIC uses MemorySpace.Bias (not expressible in DSL), verify via string
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        assert aic_func.func_type == pl.FunctionType.AIC
-        aic_str = aic_func.as_python()
-        assert "matmul_bias" in aic_str
-        assert "tpop_from_aiv" in aic_str
-        assert "tpush_to_aiv" in aic_str
-        assert "Mem.Bias" in aic_str
-
-        # Group calls AIC then AIV
-        group_func = After.get_function("main_incore_0")
-        assert group_func is not None
-        assert group_func.func_type == pl.FunctionType.Group
-        group_str = group_func.as_python()
-        assert "main_incore_0_aic" in group_str
-        assert "main_incore_0_aiv" in group_str
+        _assert_aiv_aic_split(
+            After,
+            ExpectedAIV,
+            cube_op,
+            "tpop_from_aiv",
+            "tpush_to_aiv",
+            "Mem.Bias",
+        )
 
     def test_gemv_in_aic(self):
-        """tile.gemv is a CUBE op -> triggers split."""
+        """tile.gemv is a CUBE op -> triggers split.
+
+        The split mechanism for plain CUBE ops is exercised in detail by
+        ``TestSplitStructure.test_matmul_split_before_after``; here we only verify
+        that gemv is correctly placed in AIC and produces the standard tpop AIV.
+        """
 
         @pl.program
         class Before:
@@ -890,206 +1229,12 @@ class TestCubeOpVariants:
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
                 return out_0
 
+        ExpectedAIV = _make_cube_acc_expected_aiv()  # gemv produces same standard AIV.
         After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ):
-                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile = pl.gemv(a_left, b_right)
-                pl.tpush_to_aiv(c_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                c_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                self.main_incore_0_aic(a, b, out_0)
-                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
-
-    def test_gemv_acc_in_aic(self):
-        """tile.gemv_acc is a CUBE op -> triggers split."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile = pl.gemv(a_left, b_right)
-                a_left2 = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_right2 = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                d_tile = pl.gemv_acc(c_tile, a_left2, b_right2)
-                d_vec = pl.move(
-                    d_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0
-
-        After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ):
-                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                c_tile = pl.gemv(a_left, b_right)
-                a_left2 = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_right2 = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                d_tile = pl.gemv_acc(c_tile, a_left2, b_right2)
-                pl.tpush_to_aiv(d_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                d_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(d_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[16, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                self.main_incore_0_aic(a, b, out_0)
-                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(a, b, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
-
-    def test_gemv_bias_in_aic(self):
-        """tile.gemv_bias is a CUBE op -> triggers split with bias V->C boundary."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                a: pl.Tensor[[1, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                a_mat = pl.load(a, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
-                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
-                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
-                bias_mat = pl.move(
-                    bias_tile,
-                    target_memory=pl.MemorySpace.Mat,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                c_tile = pl.gemv_bias(a_left, b_right, bias_mat)
-                c_vec = pl.move(
-                    c_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0
-
-        After = _expand(Before)
-
-        # AIV Expected (no Bias MemorySpace, so DSL can express it)
-        @pl.program
-        class ExpectedAIV:
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                a: pl.Tensor[[1, 128], pl.BF16],
-                b: pl.Tensor[[128, 128], pl.BF16],
-                bias: pl.Tensor[[1, 128], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
-            ) -> pl.Tensor[[1, 128], pl.FP32]:
-                bias_tile = pl.load(bias, [0, 0], [1, 128])
-                bias_tile_nz = pl.move(
-                    bias_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                pl.tpush_to_aic(bias_tile_nz, split=0)
-                c_vec: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[1, 128], pl.FP32] = pl.store(c_vec, [0, 0], out_0)
-                return out_0_store
-
-        _assert_function_equal(After, ExpectedAIV, "main_incore_0_aiv")
-
-        # AIC uses MemorySpace.Bias (not expressible in DSL), verify via string
-        aic_func = After.get_function("main_incore_0_aic")
-        assert aic_func is not None
-        assert aic_func.func_type == pl.FunctionType.AIC
-        aic_str = aic_func.as_python()
-        assert "gemv_bias" in aic_str
-        assert "tpop_from_aiv" in aic_str
-        assert "tpush_to_aiv" in aic_str
-        assert "Mem.Bias" in aic_str
-
-        # Group calls AIC then AIV
-        group_func = After.get_function("main_incore_0")
-        assert group_func is not None
-        assert group_func.func_type == pl.FunctionType.Group
-        group_str = group_func.as_python()
-        assert "main_incore_0_aic" in group_str
-        assert "main_incore_0_aiv" in group_str
+        _assert_aiv_aic_split(After, ExpectedAIV, "gemv", "tpush_to_aiv")
+        # gemv has no V->C boundary input.
+        aic_str = _get_aic_str(After)
+        assert "tpop_from_aiv" not in aic_str
 
 
 # ---------------------------------------------------------------------------
@@ -1099,97 +1244,6 @@ class TestCubeOpVariants:
 
 class TestVectorOpClassification:
     """Test that vector ops are correctly classified and placed in AIV."""
-
-    def test_sub_is_vector(self):
-        """tile.sub should be in AIV with V->C boundary, not AIC."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
-                x_sub = pl.sub(x_tile, x_tile)
-                x_sub_mat = pl.move(
-                    x_sub,
-                    target_memory=pl.MemorySpace.Mat,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                x_sub_left = pl.move(x_sub_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_sub_left, y_right)
-                z_vec = pl.move(
-                    z_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0
-
-        After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ):
-                x_sub_mat: pl.Tile[
-                    [16, 128],
-                    pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
-                ] = pl.tpop_from_aiv(split=0)
-                x_sub_left = pl.move(x_sub_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_sub_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                x_tile = pl.load(x, [0, 0], [16, 128])
-                x_sub = pl.sub(x_tile, x_tile)
-                x_sub_nz = pl.move(
-                    x_sub,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.col_major,
-                    slayout=pl.TileLayout.row_major,
-                )
-                pl.tpush_to_aic(x_sub_nz, split=0)
-                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 64], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
-            ) -> pl.Tensor[[16, 64], pl.FP32]:
-                self.main_incore_0_aic(x, y, out_0)
-                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
 
     def test_dn_transpose_moves_in_aic(self):
         """Cube moves (Mat->Left/Right) with DN layout and transpose stay in AIC."""
@@ -1278,153 +1332,25 @@ class TestVectorOpClassification:
 class TestRealisticPatterns:
     """Test realistic computation patterns (attention, post-processing chains)."""
 
-    def test_attention_pattern_split(self):
-        """matmul -> exp -> add: AIC gets matmul, AIV gets exp+add+store."""
+    @pytest.mark.parametrize("post_op", ["add", "mul"])
+    def test_post_chain_after_matmul_lands_in_aiv(self, post_op):
+        """matmul -> exp -> {add,mul} -> store: matmul stays in AIC, vector chain in AIV.
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(
-                    z_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                exp_tile = pl.exp(z_vec)
-                sum_tile = pl.add(exp_tile, exp_tile)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
-                return out_0
-
+        Both the attention pattern (exp + add) and a generic vector-postprocessing
+        chain (exp + mul) split the same way: AIC keeps load/move/matmul/tpush,
+        AIV pops, runs the vector chain, and stores. Only the literal post op
+        differs.
+        """
+        Before, ExpectedAIV = _make_post_chain_program(post_op)
         After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ):
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                exp_tile = pl.exp(z_vec)
-                sum_tile = pl.add(exp_tile, exp_tile)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(sum_tile, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                self.main_incore_0_aic(x, y, out_0)
-                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
-
-    def test_matmul_chain_vector_postprocessing(self):
-        """matmul -> exp -> mul -> store: multiple vector post-ops in AIV."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                z_vec = pl.move(
-                    z_tile,
-                    target_memory=pl.MemorySpace.Vec,
-                    blayout=pl.TileLayout.row_major,
-                    slayout=pl.TileLayout.none_box,
-                )
-                z_exp = pl.exp(z_vec)
-                z_mul = pl.mul(z_exp, z_exp)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
-                return out_0
-
-        After = _expand(Before)
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.AIC)
-            def main_incore_0_aic(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ):
-                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
-                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
-                z_tile = pl.matmul(x_left, y_right)
-                pl.tpush_to_aiv(z_tile, split=0)
-
-            @pl.function(type=pl.FunctionType.AIV)
-            def main_incore_0_aiv(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
-                    split=0
-                )
-                z_exp = pl.exp(z_vec)
-                z_mul = pl.mul(z_exp, z_exp)
-                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_mul, [0, 0], out_0)
-                return out_0_store
-
-            @pl.function(type=pl.FunctionType.Group)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                self.main_incore_0_aic(x, y, out_0)
-                result: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
-                return result
-
-        ir.assert_structural_equal(After, Expected)
+        _assert_aiv_aic_split(After, ExpectedAIV, "matmul", "tpush_to_aiv")
+        aic_str = _get_aic_str(After)
+        # No V->C boundary into AIC.
+        assert "tpop_from_aiv" not in aic_str
+        # Post-processing chain lives in AIV only (use ``.<op>(`` to avoid matching
+        # substrings inside other op names like matmul).
+        assert ".exp(" not in aic_str
+        assert f".{post_op}(" not in aic_str
 
 
 # ---------------------------------------------------------------------------
