@@ -10,9 +10,9 @@
 """Unit tests for InterchangeChunkLoops pass.
 
 Test strategy:
-  Build a `Before` program, run prerequisite passes + InterchangeChunkLoops,
-  and compare to an explicitly-constructed `Expected` program using
-  `ir.assert_structural_equal(...)`.
+  Build a ``Before`` program, run prerequisite passes + InterchangeChunkLoops,
+  and compare to an explicitly-constructed ``Expected`` program using
+  ``ir.assert_structural_equal(After, Expected)``.
 """
 
 import re

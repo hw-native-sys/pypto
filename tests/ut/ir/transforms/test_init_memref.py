@@ -12,6 +12,8 @@
 Most tests use the Before/Expected pattern with
 ``ir.assert_structural_equal(After, Expected)``.
 DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
+This aligns MemRef objects consistently: if two tiles share a MemRef in
+``After``, the corresponding tiles in ``Expected`` must also share.
 
 Two tests are kept as raw-IR / diagnostic tests because the inputs cannot be
 expressed via the DSL:

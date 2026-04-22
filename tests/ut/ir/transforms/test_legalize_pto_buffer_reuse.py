@@ -18,6 +18,8 @@ Test strategy:
 - IR-level tests use the Before/Expected pattern with
   ``ir.assert_structural_equal(After, Expected)``.
   DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
+  This makes structural comparison sensitive to MemRef identity sharing:
+  two tiles that share a MemRef in ``After`` must also share in ``Expected``.
 - TestLegalizeWithCodegen retains the IRBuilder-based construction and MLIR
   string assertions, since those tests verify codegen output (alloc counts,
   addresses, dynamic-shape rendering) rather than IR shape.
