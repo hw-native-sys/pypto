@@ -27,10 +27,11 @@ ir::TileView Ascend950Handler::BuildCrossCoreTransferView(ir::MemorySpace dest_m
                                                           const ir::TileView& original_view) const {
   // Ascend950 (a5): hardware cross-core pipe carries data in fractal layout.
   //   Left -> NZ (col_major blayout, row_major slayout)
-  //   Right -> NZ (vec -> Mat does not support ZN fractal, so use NZ as on
-  //                Ascend910B; this also works for the final Right operand)
+  //   Right -> NZ (A5 V2C inserts Vec tiles into the Mat FIFO via
+  //                TINSERT_IMPL<TInsertMode::NZ>, so the bridge tile must
+  //                stay NZ rather than ZN)
   //   Mat -> NZ
-  //   Vec -> preserve original (already-final layout)
+  //   Vec -> preserve the caller-requested final layout
   ir::TileView result = original_view;
   switch (dest_ms) {
     case ir::MemorySpace::Left:

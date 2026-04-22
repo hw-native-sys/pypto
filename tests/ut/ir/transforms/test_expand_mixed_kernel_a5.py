@@ -702,6 +702,89 @@ class TestCrossCoreBoundaries:
 
         ir.assert_structural_equal(After, Expected)
 
+    def test_v2c_boundary_direct_to_right_uses_nz_transfer_view(self):
+        """Direct V->C move to Right must use an NZ bridge tile on Ascend950."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_tile = pl.load(y, [0, 0], [128, 64])
+                y_right = pl.move(y_tile, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        After = _expand(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC)
+            def main_incore_0_aic(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_right_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+                y_right = pl.move(
+                    y_right_mat,
+                    target_memory=pl.MemorySpace.Right,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.col_major,
+                )
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=0)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                y_tile = pl.load(y, [0, 0], [128, 64])
+                y_tile_nz = pl.move(
+                    y_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(y_tile_nz, split=0)
+                z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                self.main_incore_0_aic(x, y, out_0)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
+                return result
+
+        ir.assert_structural_equal(After, Expected)
+
 
 # ---------------------------------------------------------------------------
 # Cube op variant classification

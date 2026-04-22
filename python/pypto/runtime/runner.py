@@ -129,10 +129,15 @@ class RunConfig:
             raise ValueError(
                 f"Invalid platform {self.platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'."
             )
-        # Auto-correct platform to match backend_type so compilation and execution
-        # always target the same architecture. The arch label ("a2a3", "a5"...)
-        # is owned by the per-backend BackendHandler so adding a new backend
-        # only requires implementing the handler.
+        # A caller-provided platform is the public source of truth for runtime
+        # toolchain selection. Keep backend_type synchronized with it so codegen
+        # and execution target the same architecture, rather than silently
+        # rewriting the requested platform back to the default backend.
+        if self.platform.startswith("a5"):
+            self.backend_type = BackendType.Ascend950
+        else:
+            self.backend_type = BackendType.Ascend910B
+
         backend = _backend_core.get_backend_instance(self.backend_type)
         expected_arch = backend.get_handler().get_pto_target_arch()
         if not self.platform.startswith(expected_arch):
