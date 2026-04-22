@@ -1215,7 +1215,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    pad_value: PadValue | None = None,
+    pad_value: PadValue | int | float | None = None,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.
 
@@ -1225,14 +1225,17 @@ def slice(
         offset: Offset dimensions for the slice
         valid_shape: Valid shape dimensions. When omitted, shape is reused as the
             logical valid shape.
-        pad_value: Optional padding mode (PadValue.zero, PadValue.max, or
-            PadValue.min) applied to out-of-valid-shape elements. Only
-            meaningful when ``valid_shape`` is smaller than ``shape``.
+        pad_value: Optional padding mode for out-of-valid-shape elements.
+            ``None`` or ``PadValue.null`` means no padding (the default).
+            Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
+            the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
+            spelling as :func:`tile.fillpad`). Only meaningful when
+            ``valid_shape`` is smaller than ``shape``.
 
     Returns:
         Tile wrapping the slice operation
     """
-    if pad_value is not None and pad_value != PadValue.null and valid_shape is None:
+    if pad_value is not None and pad_value is not PadValue.null and valid_shape is None:
         warnings.warn(
             f"tile.slice received pad_value={pad_value!r} but no valid_shape. "
             f"pad_value has no effect unless valid_shape is smaller than shape. "

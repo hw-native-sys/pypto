@@ -1919,7 +1919,7 @@ def slice(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    pad_value: PadValue | None = None,
+    pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tile with static shape and optional valid shape.
@@ -1930,9 +1930,13 @@ def slice(
         offset: Offset dimensions for the slice, or a MakeTuple
         valid_shape: Valid shape dimensions, or a MakeTuple. When omitted, shape
             is reused as the valid shape.
-        pad_value: Optional padding mode for out-of-valid-shape elements
-            (PadValue.zero, PadValue.max, or PadValue.min). When omitted, no
-            padding is applied (equivalent to PadValue.null).
+        pad_value: Optional padding mode for out-of-valid-shape elements.
+            Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
+            the literal sugars ``0``, ``math.inf``, ``-math.inf`` (normalized
+            via :func:`normalize_pad_value`). ``PadValue.null`` is passed
+            through unchanged and means "no padding". When omitted (``None``),
+            the kwarg is not forwarded — the deducer defaults to
+            ``PadValue.null``.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1957,7 +1961,11 @@ def slice(
 
     kwargs: dict[str, Any] = {}
     if pad_value is not None:
-        kwargs["pad_value"] = pad_value
+        # PadValue.null is a legal "no padding" signal for slice (unlike
+        # fillpad, which requires a real padding mode). Pass it through;
+        # normalize the rest via the shared helper so numeric sugar and
+        # validation match tile.fillpad exactly.
+        kwargs["pad_value"] = pad_value if pad_value is PadValue.null else normalize_pad_value(pad_value)
 
     return _ir_core.create_op_call("tile.slice", args, kwargs, actual_span)
 

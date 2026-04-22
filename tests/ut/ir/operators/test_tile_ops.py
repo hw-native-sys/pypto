@@ -9,6 +9,8 @@
 
 """Unit tests for tile operations."""
 
+import math
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
@@ -1093,6 +1095,26 @@ class TestTileSliceReshapeOps:
                 {"pad_value": 5},
                 span,
             )
+
+    def test_tile_slice_accepts_numeric_sugar_pad_value(self):
+        """tile.slice maps 0 / math.inf / -math.inf onto PadValue zero/max/min."""
+        tile_var = self._make_slice_tile_var()
+        for literal, expected_pad in [
+            (0, ir.PadValue.zero),
+            (math.inf, ir.PadValue.max),
+            (-math.inf, ir.PadValue.min),
+        ]:
+            call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=literal)
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType)
+            assert result_type.tile_view is not None
+            assert result_type.tile_view.pad == expected_pad
+
+    def test_tile_slice_rejects_bad_numeric_pad_value_at_python_boundary(self):
+        """Non-sugar numeric values are rejected at the Python API boundary."""
+        tile_var = self._make_slice_tile_var()
+        with pytest.raises(ValueError, match="fillpad pad_value"):
+            tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=5)
 
     def test_tile_slice_pad_without_valid_shape_warns(self):
         """DSL emits a UserWarning when pad_value is set but valid_shape is None."""
