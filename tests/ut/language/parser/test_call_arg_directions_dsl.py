@@ -7,15 +7,18 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Printer + parser coverage for the ``pl.adir.<dir>(...)`` DSL surface syntax.
+"""Printer + parser coverage for the ``Call.attrs['arg_directions']`` DSL surface.
 
 ``Call.attrs['arg_directions']`` is normally populated by the
 ``DeriveCallDirections`` pass and is invisible in the DSL surface syntax. To
-make the attr round-trip through ``python_print`` → ``parse``, the printer
-wraps each cross-function call argument with ``pl.adir.<dir>(...)`` (an
-identity helper provided by ``pypto.language.arg_direction``). The parser then
-strips these wrappers and restores ``arg_directions`` on the rebuilt
-:class:`ir.Call`.
+make the attr round-trip through ``python_print`` -> ``parse``, the printer
+emits a trailing ``attrs={"arg_directions": [pl.adir.<dir>, ...]}`` keyword on
+each cross-function call. The parser recognizes this keyword and restores
+``arg_directions`` on the rebuilt :class:`ir.Call`.
+
+The per-argument ``pl.adir.<dir>(arg)`` wrapper form is *not* supported on
+either the printer or the parser side -- ``pl.adir.<name>`` symbols are bare
+aliases of the matching :class:`ir.ArgDirection` enum value.
 
 These tests pin down both halves of that contract independently of the
 ``DeriveCallDirections`` pass.
@@ -85,11 +88,11 @@ def _make_two_callsite_program() -> ir.Program:
 # ---------------------------------------------------------------------------
 
 
-class TestPrinterEmitsAdirWrappers:
-    """``IRPythonPrinter`` wraps cross-function call args with ``pl.adir.<dir>(...)``."""
+class TestPrinterEmitsAttrsKwarg:
+    """``IRPythonPrinter`` surfaces ``arg_directions`` via a trailing ``attrs=`` keyword."""
 
-    def test_no_wrapper_when_arg_directions_empty(self):
-        """Legacy / pre-derive Call objects must print bare arguments."""
+    def test_no_attrs_when_arg_directions_empty(self):
+        """Legacy / pre-derive Call objects must print bare arguments without ``attrs=``."""
         Prog = _make_two_callsite_program()
         # Sanity: the freshly parsed call has no derived directions.
         calls = _user_calls(Prog, "kernel")
@@ -98,10 +101,11 @@ class TestPrinterEmitsAdirWrappers:
 
         printed = Prog.as_python()
         assert "self.kernel(x, dst)" in printed
+        assert "attrs=" not in printed
         assert "pl.adir." not in printed
 
-    def test_wrappers_emitted_after_derive(self):
-        """Once ``DeriveCallDirections`` has run, every arg is wrapped."""
+    def test_attrs_kwarg_emitted_after_derive(self):
+        """Once ``DeriveCallDirections`` has run, the call carries an ``attrs=`` kwarg."""
         Prog = _make_two_callsite_program()
         out = passes.derive_call_directions()(Prog)
         calls = _user_calls(out, "kernel")
@@ -112,8 +116,11 @@ class TestPrinterEmitsAdirWrappers:
         ]
 
         printed = out.as_python()
-        # Both args are wrapped, in the correct order, with the matching helper.
-        assert "self.kernel(pl.adir.input(x), pl.adir.output_existing(dst))" in printed
+        assert (
+            'self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})'
+        ) in printed
+        # Per-argument wrapper form is no longer emitted by the printer.
+        assert "pl.adir.input(x)" not in printed
 
     def test_wrapper_name_table_is_consistent(self):
         """``DIRECTION_TO_NAME`` covers every enum value and matches the printer's choices."""
@@ -122,81 +129,15 @@ class TestPrinterEmitsAdirWrappers:
         for name, direction in NAME_TO_DIRECTION.items():
             assert DIRECTION_TO_NAME[direction] == name
 
+    def test_printer_emits_each_direction_marker(self):
+        """The printer's ``pl.adir.<name>`` output covers every ``ArgDirection`` variant.
 
-# ---------------------------------------------------------------------------
-# Parser
-# ---------------------------------------------------------------------------
-
-
-class TestParserStripsAdirWrappers:
-    """The parser recognizes ``pl.adir.<dir>(inner)`` and recovers ``arg_directions``."""
-
-    def test_parse_single_wrapper_populates_arg_directions(self):
-        code = """
-import pypto.language as pl
-
-@pl.program
-class Prog:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[64], pl.FP32],
-        out: pl.Out[pl.Tensor[[64], pl.FP32]],
-    ) -> pl.Tensor[[64], pl.FP32]:
-        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
-        return ret
-
-    @pl.function
-    def main(
-        self,
-        x: pl.Tensor[[64], pl.FP32],
-        dst: pl.Tensor[[64], pl.FP32],
-    ) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(pl.adir.input(x), pl.adir.output_existing(dst))
-        return r
-"""
-        prog = pl.parse(code)
-        calls = _user_calls(prog, "kernel")
-        assert len(calls) == 1
-        assert [d for d in calls[0].arg_directions] == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.OutputExisting,
-        ]
-
-    def test_parse_legacy_call_keeps_arg_directions_empty(self):
-        """A call with no wrappers must yield an empty ``arg_directions`` (legacy form)."""
-        code = """
-import pypto.language as pl
-
-@pl.program
-class Prog:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        x: pl.Tensor[[64], pl.FP32],
-        out: pl.Out[pl.Tensor[[64], pl.FP32]],
-    ) -> pl.Tensor[[64], pl.FP32]:
-        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
-        return ret
-
-    @pl.function
-    def main(
-        self,
-        x: pl.Tensor[[64], pl.FP32],
-        dst: pl.Tensor[[64], pl.FP32],
-    ) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
-        return r
-"""
-        prog = pl.parse(code)
-        calls = _user_calls(prog, "kernel")
-        assert len(calls) == 1
-        assert list(calls[0].arg_directions) == []
-
-    def test_all_six_wrappers_round_trip_through_parse(self):
-        """Each ``pl.adir.<name>`` helper resolves to its matching ``ArgDirection``."""
+        Build the IR via the parser (using the supported ``attrs=`` kwarg form so
+        every direction is exercised), then re-print it and assert that the
+        emitted ``attrs={"arg_directions": [...]}`` lists each marker by its
+        canonical name. This guards the printer/parser contract end-to-end and
+        independently of ``DeriveCallDirections``.
+        """
         code = """
 import pypto.language as pl
 
@@ -226,15 +167,20 @@ class Prog:
         f: pl.Scalar[pl.INT64],
     ):
         self.kernel(
-            pl.adir.input(a),
-            pl.adir.output(b),
-            pl.adir.inout(c),
-            pl.adir.output_existing(d),
-            pl.adir.no_dep(e),
-            pl.adir.scalar(f),
+            a, b, c, d, e, f,
+            attrs={"arg_directions": [
+                pl.adir.input,
+                pl.adir.output,
+                pl.adir.inout,
+                pl.adir.output_existing,
+                pl.adir.no_dep,
+                pl.adir.scalar,
+            ]},
         )
 """
         prog = pl.parse(code)
+
+        # Sanity: the parsed Call carries all six directions in order.
         calls = _user_calls(prog, "kernel")
         assert len(calls) == 1
         assert [d for d in calls[0].arg_directions] == [
@@ -246,7 +192,26 @@ class Prog:
             ir.ArgDirection.Scalar,
         ]
 
-    def test_mixing_wrapped_and_bare_args_is_rejected(self):
+        printed = prog.as_python()
+        assert (
+            'self.kernel(a, b, c, d, e, f, attrs={"arg_directions": ['
+            "pl.adir.input, pl.adir.output, pl.adir.inout, "
+            "pl.adir.output_existing, pl.adir.no_dep, pl.adir.scalar]})"
+        ) in printed
+        # The wrapper form must never appear in printer output.
+        for name in NAME_TO_DIRECTION:
+            assert f"pl.adir.{name}(" not in printed
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+
+class TestParserExtractsAttrsKwarg:
+    """The parser recognizes ``attrs={"arg_directions": [...]}`` and restores the vector."""
+
+    def test_attrs_kwarg_populates_arg_directions(self):
         code = """
 import pypto.language as pl
 
@@ -268,13 +233,20 @@ class Prog:
         x: pl.Tensor[[64], pl.FP32],
         dst: pl.Tensor[[64], pl.FP32],
     ) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(pl.adir.input(x), dst)
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(
+            x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+        )
         return r
 """
-        with pytest.raises(Exception, match="mixes wrapped"):
-            pl.parse(code)
+        prog = pl.parse(code)
+        calls = _user_calls(prog, "kernel")
+        assert len(calls) == 1
+        assert [d for d in calls[0].arg_directions] == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.OutputExisting,
+        ]
 
-    def test_unknown_direction_marker_is_rejected(self):
+    def test_attrs_kwarg_unknown_marker_rejected(self):
         code = """
 import pypto.language as pl
 
@@ -288,13 +260,41 @@ class Prog:
 
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(pl.adir.bogus(x))
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, attrs={"arg_directions": [pl.adir.bogus]})
         return r
 """
         with pytest.raises(Exception, match="bogus"):
             pl.parse(code)
 
-    def test_wrapper_must_take_single_positional_arg(self):
+    def test_attrs_kwarg_size_mismatch_rejected(self):
+        code = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64], pl.FP32]],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+        return ret
+
+    @pl.function
+    def main(
+        self,
+        x: pl.Tensor[[64], pl.FP32],
+        dst: pl.Tensor[[64], pl.FP32],
+    ) -> pl.Tensor[[64], pl.FP32]:
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input]})
+        return r
+"""
+        with pytest.raises(Exception, match=r"(?i)length|match"):
+            pl.parse(code)
+
+    def test_attrs_kwarg_unknown_key_rejected(self):
         code = """
 import pypto.language as pl
 
@@ -308,11 +308,65 @@ class Prog:
 
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(pl.adir.input(x, x))
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, attrs={"bogus": [pl.adir.input]})
         return r
 """
-        with pytest.raises(Exception, match="exactly one positional"):
+        with pytest.raises(Exception, match="bogus"):
             pl.parse(code)
+
+    def test_other_keyword_args_still_rejected(self):
+        code = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], x)
+        return ret
+
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, foo=1)
+        return r
+"""
+        with pytest.raises(Exception, match="foo"):
+            pl.parse(code)
+
+    def test_per_argument_wrapper_form_no_longer_supported(self):
+        """``pl.adir.<dir>(arg)`` is removed; the markers are not callable."""
+        code = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+        ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], x)
+        return ret
+
+    @pl.function
+    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(pl.adir.input(x))
+        return r
+"""
+        # The parser routes ``pl.adir.input(x)`` through the generic op-call
+        # path, where it is rejected as an unsupported function call.
+        with pytest.raises(Exception):  # noqa: B017, PT011
+            pl.parse(code)
+
+    def test_marker_alias_resolves_to_enum_value(self):
+        """``pl.adir.<name>`` evaluates to the matching ``ArgDirection`` enum value."""
+        from pypto.language import adir  # noqa: PLC0415
+
+        assert adir.input is ir.ArgDirection.Input
+        assert adir.output is ir.ArgDirection.Output
+        assert adir.output_existing is ir.ArgDirection.OutputExisting
+        assert adir.inout is ir.ArgDirection.InOut
+        assert adir.no_dep is ir.ArgDirection.NoDep
+        assert adir.scalar is ir.ArgDirection.Scalar
 
 
 # ---------------------------------------------------------------------------

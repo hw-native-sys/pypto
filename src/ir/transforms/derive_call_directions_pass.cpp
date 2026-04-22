@@ -82,6 +82,14 @@ class CallDirectionMutator : public IRMutator {
       return call;
     }
 
+    // Respect explicit call-site directions. The Call constructor's
+    // ValidateArgDirectionsAttr already enforces size == args_.size(), and
+    // some directions (e.g. NoDep) are not derivable here, so a populated
+    // attrs['arg_directions'] is treated as authoritative and left as-is.
+    if (call->HasArgDirections()) {
+      return call;
+    }
+
     std::vector<ArgDirection> dirs;
     dirs.reserve(call->args_.size());
     for (size_t i = 0; i < call->args_.size(); ++i) {

@@ -90,11 +90,11 @@ def make_call(
 
 __all__ = [
     "ArgDirection",
+    "inout",
     "input",
+    "make_call",
+    "no_dep",
     "output",
     "output_existing",
-    "inout",
-    "no_dep",
     "scalar",
-    "make_call",
 ]

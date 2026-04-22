@@ -261,6 +261,54 @@ class TestDeriveIdempotent:
 
 
 # ---------------------------------------------------------------------------
+# Derive pass: explicit call-site directions are preserved
+# ---------------------------------------------------------------------------
+
+
+class TestDerivePreservesExplicit:
+    """Pre-populated Call.attrs['arg_directions'] is treated as authoritative."""
+
+    def test_explicit_directions_not_overwritten(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
+                return r
+
+        # Pre-populate the Out-param slot with `Output` (runtime-allocation
+        # semantics). The derive pass would otherwise emit `OutputExisting`
+        # for an external/param-rooted destination, so this checks that the
+        # explicit call-site choice survives instead of being overwritten.
+        explicit = [ir.ArgDirection.Input, ir.ArgDirection.Output]
+        prog = _RewriteUserCall(explicit).run(Prog)
+
+        before = _user_calls(prog)
+        assert len(before) == 1
+        assert _dirs(before[0]) == explicit
+
+        derived = passes.derive_call_directions()(prog)
+
+        after = _user_calls(derived)
+        assert len(after) == 1
+        assert _dirs(after[0]) == explicit
+
+
+# ---------------------------------------------------------------------------
 # Verify pass: positive case
 # ---------------------------------------------------------------------------
 

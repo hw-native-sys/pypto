@@ -3043,17 +3043,20 @@ class ASTParser:
                 if method_name in self.global_vars:
                     gvar = self.global_vars[method_name]
                     span = self.span_tracker.get_span(call)
-                    self._reject_keyword_args(method_name, call, span)
+                    # ``attrs={"arg_directions": [...]}`` is the preferred way to
+                    # surface call-site directions on cross-function calls; any
+                    # other keyword argument is still rejected.
+                    self._reject_keyword_args(method_name, call, span, allowed={"attrs"})
 
                     # Validate argument count before parsing args to fail fast
                     func_obj = self.gvar_to_func.get(gvar)
                     if func_obj is not None:
                         self._validate_call_arg_count(method_name, func_obj, len(call.args), span)
 
-                    raw_args, arg_directions = self._strip_arg_direction_wrappers(
-                        method_name, call.args, span
-                    )
-                    args = [self.parse_expression(arg) for arg in raw_args]
+                    arg_directions = self._extract_arg_directions_from_attrs(method_name, call, span)
+                    if arg_directions is None:
+                        arg_directions = []
+                    args = [self.parse_expression(arg) for arg in call.args]
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3237,92 +3240,129 @@ class ASTParser:
             return ir.Call(gvar, args, span)
         return ir.Call(gvar, args, return_type, span)
 
-    def _strip_arg_direction_wrappers(
-        self,
-        method_name: str,
-        ast_args: list[ast.expr],
+    @staticmethod
+    def _reject_keyword_args(
+        func_name: str,
+        call: ast.Call,
         span: ir.Span,
-    ) -> tuple[list[ast.expr], list[ir.ArgDirection]]:
-        """Detect ``pl.adir.<dir>(inner)`` wrappers around ``self.method`` arguments.
-
-        Either every positional argument is wrapped or none are (mixed forms are
-        rejected). When all wrappers are present, returns the unwrapped inner AST
-        nodes and the matching :class:`ir.ArgDirection` vector. When none are
-        wrapped, returns the original args and an empty vector (legacy form).
+        allowed: set[str] | None = None,
+    ) -> None:
+        """Reject keyword arguments not in *allowed*.
 
         Args:
-            method_name: Name of the cross-function method being called (used in
-                error messages).
-            ast_args: Positional ``ast.expr`` nodes from the call.
+            func_name: Function name used in error messages.
+            call: AST call node.
+            span: Source span of the call.
+            allowed: Optional set of keyword names that are permitted. When
+                ``None``, all keyword arguments are rejected (the default).
+        """
+        allowed = allowed or set()
+        for kw in call.keywords:
+            if kw.arg not in allowed:
+                hint = (
+                    f"Allowed keyword arguments: {sorted(allowed)}"
+                    if allowed
+                    else "Pass all arguments positionally"
+                )
+                raise ParserTypeError(
+                    f"Function '{func_name}' does not accept keyword argument '{kw.arg}'",
+                    span=span,
+                    hint=hint,
+                )
+
+    def _extract_arg_directions_from_attrs(
+        self,
+        method_name: str,
+        call: ast.Call,
+        span: ir.Span,
+    ) -> list[ir.ArgDirection] | None:
+        """Extract ``arg_directions`` from an ``attrs={"arg_directions": [...]}`` kwarg.
+
+        Recognized form::
+
+            self.kernel(x, y, attrs={"arg_directions": [pl.adir.input, pl.adir.output]})
+
+        The list elements must be bare attribute references of the form
+        ``pl.adir.<name>`` where ``<name>`` is a valid direction marker.
+
+        Args:
+            method_name: Name of the cross-function method being called (used
+                in error messages).
+            call: AST call node.
             span: Source span of the call (used for error reporting).
 
         Returns:
-            ``(inner_args, directions)`` where ``directions`` is empty if no
-            wrapper was found.
+            The parsed direction vector, or ``None`` when no ``attrs=`` keyword
+            argument is present.
 
         Raises:
-            ParserSyntaxError: If wrappers are partially present or use an
-                unknown direction name.
+            ParserSyntaxError / ParserTypeError: If the ``attrs=`` value does
+                not match the expected shape or uses an unknown direction name.
         """
         from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
-        wrapper_info: list[tuple[ast.expr, ir.ArgDirection] | None] = []
-        for arg in ast_args:
-            if not isinstance(arg, ast.Call):
-                wrapper_info.append(None)
-                continue
-            func = arg.func
-            if (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Attribute)
-                and func.value.attr == "adir"
-                and isinstance(func.value.value, ast.Name)
-                and func.value.value.id == "pl"
-            ):
-                dir_name = func.attr
-                if dir_name not in NAME_TO_DIRECTION:
+        attrs_kw: ast.keyword | None = next((kw for kw in call.keywords if kw.arg == "attrs"), None)
+        if attrs_kw is None:
+            return None
+
+        if not isinstance(attrs_kw.value, ast.Dict):
+            raise ParserTypeError(
+                f"'attrs=' on call to '{method_name}' must be a dict literal",
+                span=self.span_tracker.get_span(attrs_kw.value),
+                hint='e.g. attrs={"arg_directions": [pl.adir.input, ...]}',
+            )
+
+        directions: list[ir.ArgDirection] | None = None
+        for key_node, value_node in zip(attrs_kw.value.keys, attrs_kw.value.values):
+            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                raise ParserSyntaxError(
+                    f"'attrs=' on call to '{method_name}' must use string-literal keys",
+                    span=self.span_tracker.get_span(key_node) if key_node else span,
+                )
+            if key_node.value != "arg_directions":
+                raise ParserSyntaxError(
+                    f"Unsupported attrs key '{key_node.value}' on call to '{method_name}'",
+                    span=self.span_tracker.get_span(key_node),
+                    hint="Only 'arg_directions' is currently recognized",
+                )
+            if not isinstance(value_node, ast.List):
+                raise ParserTypeError(
+                    f"attrs['arg_directions'] on call to '{method_name}' must be a list literal",
+                    span=self.span_tracker.get_span(value_node),
+                )
+            parsed: list[ir.ArgDirection] = []
+            for elt in value_node.elts:
+                if not (
+                    isinstance(elt, ast.Attribute)
+                    and isinstance(elt.value, ast.Attribute)
+                    and elt.value.attr == "adir"
+                    and isinstance(elt.value.value, ast.Name)
+                    and elt.value.value.id == "pl"
+                ):
                     raise ParserSyntaxError(
-                        f"Unknown call-site direction marker 'pl.adir.{dir_name}' in call to '{method_name}'",
-                        span=self.span_tracker.get_span(arg),
+                        f"attrs['arg_directions'] on call to '{method_name}' must contain "
+                        "'pl.adir.<name>' references only",
+                        span=self.span_tracker.get_span(elt),
+                    )
+                if elt.attr not in NAME_TO_DIRECTION:
+                    raise ParserSyntaxError(
+                        f"Unknown call-site direction marker 'pl.adir.{elt.attr}' in call to '{method_name}'",
+                        span=self.span_tracker.get_span(elt),
                         hint=("Valid markers: " + ", ".join(f"pl.adir.{n}" for n in NAME_TO_DIRECTION)),
                     )
-                if len(arg.args) != 1 or arg.keywords:
-                    raise ParserSyntaxError(
-                        f"'pl.adir.{dir_name}' must wrap exactly one positional argument",
-                        span=self.span_tracker.get_span(arg),
-                    )
-                wrapper_info.append((arg.args[0], NAME_TO_DIRECTION[dir_name]))
-            else:
-                wrapper_info.append(None)
+                parsed.append(NAME_TO_DIRECTION[elt.attr])
+            directions = parsed
 
-        wrapped_count = sum(1 for w in wrapper_info if w is not None)
-        if wrapped_count == 0:
-            return list(ast_args), []
-        if wrapped_count != len(ast_args):
-            raise ParserSyntaxError(
-                f"Call to '{method_name}' mixes wrapped (pl.adir.*) and bare "
-                f"arguments; either wrap all of them or none",
-                span=span,
-            )
+        if directions is None:
+            return []
 
-        inner_args: list[ast.expr] = []
-        directions: list[ir.ArgDirection] = []
-        for entry in wrapper_info:
-            assert entry is not None  # narrowed by wrapped_count check
-            inner, direction = entry
-            inner_args.append(inner)
-            directions.append(direction)
-        return inner_args, directions
-
-    @staticmethod
-    def _reject_keyword_args(func_name: str, call: ast.Call, span: ir.Span) -> None:
-        """Reject keyword arguments on function calls that only support positional args."""
-        if call.keywords:
+        if directions and len(directions) != len(call.args):
             raise ParserTypeError(
-                f"Function '{func_name}' does not accept keyword arguments",
+                f"attrs['arg_directions'] length ({len(directions)}) on call to "
+                f"'{method_name}' must match positional arg count ({len(call.args)})",
                 span=span,
-                hint="Pass all arguments positionally",
             )
+        return directions
 
     @staticmethod
     def _validate_call_arg_count(func_name: str, func: ir.Function, got: int, span: ir.Span) -> None:
