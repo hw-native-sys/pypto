@@ -672,6 +672,134 @@ class TestFillpad:
         ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
 
 
+class TestValidShapeDivergence:
+    """Tiles with identical storage but divergent ``valid_shape`` can share a MemRef.
+
+    Reproduces the scenario from issue #1094: unrolled / partially-unrolled
+    kernels produce sibling branches whose tiles differ only in ``valid_shape``
+    (driven by per-branch boundary guards). Those tiles should share a backing
+    allocation; each variable keeps its own ``valid_shape`` at every use site.
+    """
+
+    def test_different_valid_shape_can_reuse(self):
+        """Two sequential loads with different static ``valid_shape`` share one MemRef."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                )
+                _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], valid_shapes=[32, 64]
+                )
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+                output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                tile_a: pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.MemRef(mem_vec_3, 0, 16384),
+                    pl.Mem.Vec,
+                    pl.TileView(valid_shape=[48, 64]),
+                ] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [48, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                _res_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    tile_a, [0, 0], output_a
+                )
+                tile_b: pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.MemRef(mem_vec_3, 0, 16384),
+                    pl.Mem.Vec,
+                    pl.TileView(valid_shape=[32, 64]),
+                ] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)] = pl.tile.store(
+                    tile_b, [0, 0], output_b
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
+    def test_non_2d_divergent_valid_shape_blocks_reuse(self):
+        """3D tiles with divergent ``valid_shape`` must NOT reuse (set_validshape is 2D-only)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[4, 64, 64], pl.FP32],
+                output_a: pl.Out[pl.Tensor[[4, 64, 64], pl.FP32]],
+                output_b: pl.Out[pl.Tensor[[4, 64, 64], pl.FP32]],
+            ) -> pl.Tensor[[4, 64, 64], pl.FP32]:
+                tile_a: pl.Tile[[4, 64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0, 0], [4, 64, 64], valid_shapes=[4, 48, 64]
+                )
+                _res_a: pl.Tensor[[4, 64, 64], pl.FP32] = pl.store(tile_a, [0, 0, 0], output_a)
+                tile_b: pl.Tile[[4, 64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0, 0], [4, 64, 64], valid_shapes=[4, 32, 64]
+                )
+                result: pl.Tensor[[4, 64, 64], pl.FP32] = pl.store(tile_b, [0, 0, 0], output_b)
+                return result
+
+        After = _run_pipeline(Before)
+        # Collect base_ptr names from every tile AssignStmt in the After IR.
+        # 3D tiles with divergent valid_shape must NOT share a MemRef — the
+        # compatibility check's 2D guard keeps them on the strict path.
+        bases = _collect_tile_memref_bases(After)
+        tile_a_base = bases.get("tile_a")
+        tile_b_base = bases.get("tile_b")
+        assert tile_a_base is not None and tile_b_base is not None, (
+            f"Expected tile_a and tile_b in After IR; got bases: {bases}"
+        )
+        assert tile_a_base != tile_b_base, (
+            f"3D divergent-valid_shape tiles should NOT share a MemRef, but both bind to {tile_a_base}"
+        )
+
+
+def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
+    """Return ``{tile_var_name: memref_base_name}`` for every AssignStmt in the program.
+
+    Walks the first function's body using a small IRVisitor subclass that
+    records the MemRef base name when a tile-typed variable is assigned.
+    """
+    result: dict[str, str] = {}
+    main_func = next(iter(program.functions.values()))
+
+    class _Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            var_type = stmt.var.type
+            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                result[stmt.var.name_hint] = var_type.memref.base_.name_hint
+            super().visit_assign_stmt(stmt)
+
+    visitor = _Collector()
+    visitor.visit_stmt(main_func.body)
+    return result
+
+
 class TestViewOps:
     """Tests for view operations (reshape) with memory reuse."""
 

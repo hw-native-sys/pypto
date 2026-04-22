@@ -53,10 +53,11 @@ program_optimized = reuse_pass(program)
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - 大小兼容（复用目标必须足够大）
-- 完整的 TileType 兼容性 — 由 `AreTileTypesCompatible` 检查：
+- TileType 兼容性 — 由 `AreTileTypesCompatible` 检查：
   - 相同 shape（所有维度必须精确匹配）
   - 相同 dtype（例如 FP32 与 BF16 阻止复用，自动处理 `tile.cast`）
-  - 相同 TileView 属性：所有字段（`valid_shape`、`stride`、`start_offset`、`blayout`、`slayout`、`fractal`、`pad`）通过 `TileView::operator==` 比较（例如 `tile.fillpad` 改变 `valid_shape` 和 `pad`，因此其输出不能复用其输入）
+  - 相同 TileView 存储属性：`stride`、`start_offset`、`blayout`、`slayout`、`fractal`、`pad` 必须都结构相等（例如 `tile.fillpad` 改变 `pad`，因此其输出不能复用其输入 —— 仅 `pad` 不一致即阻止复用）
+  - 对于 2D tile，`valid_shape` 不要求匹配：复用后每个 tile 在自己的 TileType 中保留各自的 `valid_shape`，PTO codegen 会为每个变量发射带有各自静态 valid 范围的 `alloc_tile` 声明，它们共享底层 buffer。这样，`PartialUnrollTileLoops` 产生的仅在边界守护 `valid_shape` 上不同的兄弟分支 tile 可以共用一个后备分配。对于 N-D tile，`valid_shape` 不一致仍然阻止复用。
 
 **Alloc 清理**：
 

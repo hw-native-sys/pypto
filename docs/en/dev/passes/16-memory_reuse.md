@@ -53,10 +53,11 @@ program_optimized = reuse_pass(program)
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
 - Compatible sizes (reuse target must be large enough)
-- Full TileType compatibility — checked by `AreTileTypesCompatible`:
+- TileType compatibility — checked by `AreTileTypesCompatible`:
   - Same shape (all dimensions must match exactly)
   - Same dtype (e.g., FP32 vs BF16 prevents reuse, handling `tile.cast` automatically)
-  - Same TileView attributes when present: all fields (`valid_shape`, `stride`, `start_offset`, `blayout`, `slayout`, `fractal`, `pad`) are compared via `TileView::operator==` (e.g., `tile.fillpad` changes `valid_shape` and `pad`, so its output cannot reuse its input)
+  - Same TileView storage attributes when present: `stride`, `start_offset`, `blayout`, `slayout`, `fractal`, `pad` must all match structurally (e.g., `tile.fillpad` changes `pad`, so its output cannot reuse its input — `pad` divergence alone blocks reuse)
+  - `valid_shape` is **not** required to match for 2D tiles: each reused tile keeps its own `valid_shape` in its TileType, and PTO codegen emits per-variable `alloc_tile` declarations that alias the shared buffer with each member's own static valid extent. This lets sibling-branch tiles produced by `PartialUnrollTileLoops` (differing only in boundary-guard `valid_shape`) share one backing allocation. For N-D tiles, `valid_shape` divergence still blocks reuse.
 
 **Alloc cleanup**:
 

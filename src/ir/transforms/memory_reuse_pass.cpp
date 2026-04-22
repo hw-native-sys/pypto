@@ -848,22 +848,30 @@ static bool AreTileExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::v
   return true;
 }
 
+// Compare TileView fields that govern physical storage.  `valid_shape` is
+// intentionally excluded: it is per-use metadata that PTO codegen carries on
+// each tile var's own alloc_tile declaration.  Two reused tiles that share a
+// MemRef but differ in `valid_shape` end up as multiple alloc_tile
+// declarations aliased to the same address, each with its own static valid
+// extent — which PTO already supports for view-op chains.  See issue #1094.
 static bool AreTileViewsEqual(const TileView& a, const TileView& b) {
-  return AreTileExprVectorsEqual(a.valid_shape, b.valid_shape) &&
-         AreTileExprVectorsEqual(a.stride, b.stride) && AreTileExprsEqual(a.start_offset, b.start_offset) &&
+  return AreTileExprVectorsEqual(a.stride, b.stride) && AreTileExprsEqual(a.start_offset, b.start_offset) &&
          a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad;
 }
 
 /**
- * @brief Check if two TileType variables have fully compatible tile attributes
+ * @brief Check if two TileType variables have compatible storage attributes.
  *
- * PTO codegen binds a single alloc_tile declaration (shape, dtype, blayout, pad, etc.)
- * to each buffer.  All operations referencing that buffer share the same declaration.
- * Reuse between tiles with different attributes would cause attribute mismatches in
- * the generated PTO IR, leading to incorrect codegen or hardware behaviour.
+ * PTO codegen binds an alloc_tile declaration to each tile var; multiple
+ * declarations may alias the same physical buffer.  Reuse between tiles
+ * with mismatched storage attributes would cause attribute conflicts in the
+ * generated PTO IR.
  *
- * Checked attributes: shape, dtype, and TileView (all fields compared via the
- * structural comparison helpers above).
+ * Checked attributes: shape, dtype, and TileView fields governing storage
+ * (stride, start_offset, layouts, fractal, pad).  `valid_shape` is allowed
+ * to differ for 2D tiles — each tile var keeps its own valid_shape on its
+ * own alloc_tile declaration.  The 2D restriction matches `tile.set_validshape`
+ * which only supports 2D tiles; for N-D tiles we keep the strict check.
  */
 bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   auto t1 = As<TileType>(var1->GetType());
@@ -876,7 +884,17 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
   bool has_view1 = t1->tile_view_.has_value();
   bool has_view2 = t2->tile_view_.has_value();
   if (has_view1 != has_view2) return false;
-  if (has_view1 && !AreTileViewsEqual(t1->tile_view_.value(), t2->tile_view_.value())) return false;
+  if (has_view1) {
+    const auto& v1 = t1->tile_view_.value();
+    const auto& v2 = t2->tile_view_.value();
+    if (!AreTileViewsEqual(v1, v2)) return false;
+    // Relaxation applies only to 2D tiles.  For N-D tiles, keep the strict
+    // behaviour and require valid_shape to match.  `t1->shape_.size()` is
+    // safe to use for both tiles here because `t1->shape_ == t2->shape_`
+    // was already verified above.
+    const bool is_2d = t1->shape_.size() == 2;
+    if (!is_2d && !AreTileExprVectorsEqual(v1.valid_shape, v2.valid_shape)) return false;
+  }
   return true;
 }
 
