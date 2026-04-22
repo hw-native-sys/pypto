@@ -64,13 +64,107 @@ const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::stri
   return &spec_opt->input_constraints;
 }
 
+// Prefer the non-Vec space when two demands collide on the same var. Vec acts as
+// the permissive default, so a specialized demand (Mat, Left, Right, Acc) wins.
+bool ShouldOverrideDemand(MemorySpace existing, MemorySpace incoming) {
+  return existing == MemorySpace::Vec && incoming != MemorySpace::Vec;
+}
+
+// ============================================================================
+// Phase 0: Backward demand collection
+//
+// For each op with `input_constraints`, record "this input var is demanded to
+// live in this space". Then propagate demands backward through ops registered
+// with `set_output_memory_inherit_input()` to a fixed point so that chains like
+//   slice(tensor) -> fillpad -> matmul
+// push the matmul's Mat demand back through fillpad onto the slice's output,
+// enabling the downstream Phase 1 analyzer to resolve the slice-produced tile
+// directly to Mat instead of routing through Vec.
+// ============================================================================
+
+class DemandCollector : public IRVisitor {
+ public:
+  [[nodiscard]] const std::map<VarPtr, MemorySpace>& GetDemands() const { return demands_; }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_)) {
+      RecordDirectDemands(call);
+      RecordInheritInputEdge(op->var_, call);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_)) RecordDirectDemands(call);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  /// Propagate demand backward through OutputMemoryInheritsInput() ops.
+  /// Edges `dst -> src` are captured in program order during the forward visit;
+  /// since the inherit-input relation flows strictly backward (dst defined
+  /// after src), a single reverse-order sweep reaches the fixed point in O(N).
+  void PropagateThroughInheritInputOps() {
+    for (auto it = edges_.rbegin(); it != edges_.rend(); ++it) {
+      const auto& [dst, src] = *it;
+      auto out_it = demands_.find(dst);
+      if (out_it == demands_.end()) continue;
+      auto [ins_it, inserted] = demands_.try_emplace(src, out_it->second);
+      if (!inserted && ShouldOverrideDemand(ins_it->second, out_it->second)) {
+        ins_it->second = out_it->second;
+      }
+    }
+  }
+
+ private:
+  std::map<VarPtr, MemorySpace> demands_;
+  // `dst -> src` edges for ops with OutputMemoryInheritsInput(), captured in
+  // program order. Walked in reverse in PropagateThroughInheritInputOps.
+  std::vector<std::pair<VarPtr, VarPtr>> edges_;
+
+  void RecordDirectDemands(const CallPtr& call) {
+    auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(call->op_->name_)) return;
+    const auto& spec = reg.GetEntry(call->op_->name_).GetMemorySpec();
+    if (!spec.has_value()) return;
+    for (size_t i = 0; i < spec->input_constraints.size() && i < call->args_.size(); ++i) {
+      const auto& allowed = spec->input_constraints[i];
+      if (allowed.empty()) continue;
+      auto var = As<Var>(call->args_[i]);
+      if (!var) continue;
+      // Preferred space: the first allowed entry. Backends are expected to list
+      // the canonical choice first (e.g. tile.store uses {Vec, Acc} — a Vec
+      // producer needs no move, and Acc-origin tiles keep their space).
+      MemorySpace demand = allowed[0];
+      auto [it, inserted] = demands_.try_emplace(var, demand);
+      if (!inserted && ShouldOverrideDemand(it->second, demand)) {
+        it->second = demand;
+      }
+    }
+  }
+
+  void RecordInheritInputEdge(const VarPtr& dst, const CallPtr& call) {
+    if (!dst) return;
+    auto& reg = OpRegistry::GetInstance();
+    if (!reg.IsRegistered(call->op_->name_)) return;
+    if (!reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) return;
+    for (const auto& arg : call->args_) {
+      auto var = As<Var>(arg);
+      if (!var) continue;
+      if (!As<TileType>(var->GetType()) && !As<TensorType>(var->GetType())) continue;
+      edges_.emplace_back(dst, var);
+      break;  // first tile-typed input only (matches inherit-input semantics)
+    }
+  }
+};
+
 // ============================================================================
 // Phase 1: Analyze - infer memory_space for each tile variable
 // ============================================================================
 
 class TileMemorySpaceAnalyzer : public IRVisitor {
  public:
-  explicit TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params) {
+  TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params, const std::map<VarPtr, MemorySpace>& demands)
+      : demands_(demands) {
     for (const auto& var : params) {
       CHECK(!As<TileType>(var->GetType())) << "InCore function parameter '" << var->name_hint_
                                            << "' has TileType, but InCore parameters must be TensorType";
@@ -88,10 +182,20 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     if (auto call = As<Call>(op->value_)) {
       const std::string& op_name = call->op_->name_;
       if (op_name.rfind("tile.", 0) == 0) {
-        var_memory_[op->var_] = InferFromOp(op_name, call);
+        var_memory_[op->var_] = InferFromOp(op_name, call, op->var_);
       } else {
         // Non-tile ops producing TileType: default to Vec
         var_memory_[op->var_] = MemorySpace::Vec;
+      }
+    } else if (auto src_var = As<Var>(op->value_)) {
+      // Plain SSA alias `y = x`. Inherit x's memory space onto y so later
+      // phases (MoveCollector, Phase 3) see a consistent memory_space on the
+      // alias. The Python frontend emits these when eliding no-op
+      // tensor.fillpad(pad=zero) calls whose input already has a matching
+      // valid_shape — the alias is value-identical to its source.
+      auto src_it = var_memory_.find(src_var);
+      if (src_it != var_memory_.end()) {
+        var_memory_[op->var_] = src_it->second;
       }
     }
 
@@ -145,9 +249,10 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   }
 
  private:
+  const std::map<VarPtr, MemorySpace>& demands_;
   std::map<VarPtr, MemorySpace> var_memory_;
 
-  MemorySpace InferFromOp(const std::string& op_name, const CallPtr& call) {
+  MemorySpace InferFromOp(const std::string& op_name, const CallPtr& call, const VarPtr& out_var) {
     auto& registry = OpRegistry::GetInstance();
 
     // Handle unregistered ops (backward compat)
@@ -156,7 +261,8 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
       return MemorySpace::Vec;
     }
 
-    const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
+    const auto& entry = registry.GetEntry(op_name);
+    const auto& spec_opt = entry.GetMemorySpec();
     if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) {
       // no_memory_spec ops (e.g. tile.tpop_*): read memory_space from Call return type
       if (auto tile_type = As<TileType>(call->GetType())) {
@@ -171,11 +277,27 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     if (result.has_value()) {
       return *result;
     }
-    // nullopt -> inherit from first tile-typed input (view ops)
-    return InheritFromInput(call);
+
+    // Resolver returned nullopt — kwarg absent. Two cases:
+    // (1) Inherit-input op (fillpad/slice/...): output = first tile input's
+    //     space. Demand back-prop ensures input is or will be resolved to
+    //     match consumer demand.
+    // (2) Retargetable producer whose kwarg is absent (e.g. a converter chose
+    //     to let the pass decide): consult backward demand, then fall back.
+    // We never override a present kwarg — a Left/Right/Acc demand from a
+    // compute op (matmul) cannot be satisfied by a DDR load directly and must
+    // still route through Mat with a subsequent tile.move.
+    if (spec_opt->output_inherits_input) {
+      return InheritFromInput(call).value_or(MemorySpace::Vec);
+    }
+    if (entry.HasRetargetableMemoryKwarg()) {
+      auto demand_it = demands_.find(out_var);
+      if (demand_it != demands_.end()) return demand_it->second;
+    }
+    return InheritFromInput(call).value_or(MemorySpace::Vec);
   }
 
-  MemorySpace InheritFromInput(const CallPtr& call) {
+  std::optional<MemorySpace> InheritFromInput(const CallPtr& call) {
     for (const auto& arg : call->args_) {
       if (auto var = As<Var>(arg)) {
         auto it = var_memory_.find(var);
@@ -184,7 +306,7 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
         }
       }
     }
-    return MemorySpace::Vec;
+    return std::nullopt;
   }
 };
 
@@ -333,13 +455,17 @@ class TileMemorySpaceMutator : public IRMutator {
       return std::make_shared<AssignStmt>(As<Var>(new_var_expr), new_value, op->span_);
     }
 
-    // Rewrite tile.create's target_memory kwarg when the LHS var was promoted
-    // (e.g. the for-loop accumulator back-propagation in Phase 1 moved the
-    // init from Vec to Acc). The new result type uses the implicit TileView
-    // for the promoted memory so later passes see a consistent layout.
-    // OpRegistry deduction would otherwise keep Vec-style layout defaults.
+    // Rewrite retargetable producers' target_memory kwarg so it matches the
+    // resolved memory space. Covers tile.create / tile.load / any op registered
+    // with HasRetargetableMemoryKwarg(): if Phase 1 resolved the output to a
+    // different space than the kwarg says (or the kwarg is absent because the
+    // converter let the pass decide), we rewrite the call so codegen reads a
+    // consistent value and the result type gets a fresh implicit TileView.
     if (auto call = As<Call>(new_value); call) {
-      if (auto op_name_node = As<Op>(call->op_); op_name_node && op_name_node->name_ == "tile.create") {
+      auto& registry = OpRegistry::GetInstance();
+      const std::string& call_op_name = call->op_->name_;
+      if (registry.IsRegistered(call_op_name) &&
+          registry.GetEntry(call_op_name).HasRetargetableMemoryKwarg()) {
         auto mem_it = var_memory_.find(op->var_);
         auto old_call_type = As<TileType>(call->GetType());
         if (mem_it != var_memory_.end() && old_call_type) {
@@ -351,10 +477,6 @@ class TileMemorySpaceMutator : public IRMutator {
               break;
             }
           }
-          // tile.create defaults target_memory to Vec, so an explicit Vec call
-          // may omit the kwarg entirely. Rewrite when the kwarg is missing or
-          // differs from the promoted space: preserve other kwargs, overwrite
-          // target_memory if present, and inject it otherwise.
           if (!kwarg_target.has_value() || *kwarg_target != promoted) {
             std::vector<std::pair<std::string, std::any>> new_kwargs;
             new_kwargs.reserve(call->kwargs_.size() + 1);
@@ -535,8 +657,16 @@ class TileMemorySpaceMutator : public IRMutator {
 // ============================================================================
 
 FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
-  // Phase 1: Analyze — infer memory space for each tile variable
-  TileMemorySpaceAnalyzer analyzer(func->params_);
+  // Phase 0: Collect backward demand from op input_constraints; propagate
+  // through OutputMemoryInheritsInput() ops so demand reaches retargetable
+  // producers (tile.load/tile.create) even through view chains (slice/fillpad).
+  DemandCollector demand_collector;
+  demand_collector.VisitStmt(func->body_);
+  demand_collector.PropagateThroughInheritInputOps();
+
+  // Phase 1: Analyze — infer memory space for each tile variable, using Phase-0
+  // demand as fallback for retargetable producers whose target_memory is absent.
+  TileMemorySpaceAnalyzer analyzer(func->params_, demand_collector.GetDemands());
   analyzer.VisitStmt(func->body_);
 
   const auto& var_memory = analyzer.GetVarMemory();
@@ -544,11 +674,13 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
     return func;
   }
 
-  // Phase 2: Collect needed tile.move insertions
+  // Phase 2: Collect needed tile.move insertions for residual input-constraint
+  // mismatches (producer and demand both resolved to different fixed spaces).
   MoveCollector collector(var_memory);
   collector.VisitStmt(func->body_);
 
-  // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args
+  // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args,
+  // rewrite target_memory kwargs on retargetable producers to stay consistent.
   TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves());
   auto new_body = mutator.VisitStmt(func->body_);
 

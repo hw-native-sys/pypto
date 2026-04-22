@@ -1462,5 +1462,165 @@ class TestAutoMoveInsertion:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestInferTileMemorySpaceSSAAlias:
+    """SSA-alias propagation added by the backward-demand-inference refactor.
+
+    `y = x` where both sides are Tile-typed must forward x's resolved memory
+    space onto y. The pl.DSL parser emits these aliases when eliding no-op
+    wrappers (e.g. commented-out `pl.fillpad`), and earlier pipeline stages
+    also produce them. Before the refactor, aliases without an explicit
+    `pl.Mem.*` annotation left y with no memory_space set and later-phase
+    consumers (MoveCollector, Phase 3) diverged from x.
+    """
+
+    def test_ssa_alias_inherits_memory_space_from_source(self):
+        """`y = x` inherits x's resolved memory_space. tile.store demands Vec/Acc,
+        so a Mat alias requires a Mat→Vec move before the store — present in
+        both Before and Expected so the pass only has to propagate the alias's
+        memory_space, isolating what this test verifies."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                # The alias carries no memory_space annotation — Phase 1 must
+                # copy Mat over from x_tile.
+                x_alias: pl.Tile[[16, 128], pl.BF16] = x_tile
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_alias, y_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                y_tile: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                x_alias: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = x_tile
+                x_alias_L: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.move(
+                    x_alias, target_memory=pl.MemorySpace.Left
+                )
+                y_tile_R: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Right] = pl.move(
+                    y_tile, target_memory=pl.MemorySpace.Right
+                )
+                z_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(x_alias_L, y_tile_R)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_ssa_alias_chain_feeds_matmul(self):
+        """`y = x`, `z = y`: both aliases inherit x's memory_space. Verifies
+        Phase 1 handles transitive SSA-alias chains in a single forward sweep."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                alias_1: pl.Tile[[16, 128], pl.BF16] = x_tile
+                alias_2: pl.Tile[[16, 128], pl.BF16] = alias_1
+                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(alias_2, y_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                alias_1: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = x_tile
+                alias_2: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = alias_1
+                y_tile: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                alias_2_L: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.move(
+                    alias_2, target_memory=pl.MemorySpace.Left
+                )
+                y_tile_R: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Right] = pl.move(
+                    y_tile, target_memory=pl.MemorySpace.Right
+                )
+                z_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(alias_2_L, y_tile_R)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

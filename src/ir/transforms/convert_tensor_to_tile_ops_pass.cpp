@@ -227,9 +227,58 @@ class ConsumerSpaceCollector : public IRVisitor {
     return it != consumer_reqs_.end() ? std::optional{it->second} : std::nullopt;
   }
 
+  /// Second phase: propagate collected requirements backward through
+  ///   (a) ops registered with `set_output_memory_inherit_input()` — output
+  ///       memory equals the first tile/tensor-typed input's, so a demand on
+  ///       the output is equivalently a demand on that input, and
+  ///   (b) plain SSA aliases `y = x` where both sides are shaped Vars (the
+  ///       parser elides no-op `tensor.fillpad(pad=zero)` into this form when
+  ///       the input's valid_shape already zeroes the pad region).
+  ///
+  /// Edges are recorded in program order during the forward visit. Since the
+  /// inherit-input and alias relations are acyclic and flow strictly backward
+  /// (output/dst defined after input/src), a single reverse-order sweep
+  /// reaches the fixed point in O(N). Total pass cost stays O(N log N).
+  void PropagateThroughInheritInputOps() {
+    for (auto it = propagation_edges_.rbegin(); it != propagation_edges_.rend(); ++it) {
+      const auto& [dst, src] = *it;
+      auto out_it = consumer_reqs_.find(dst);
+      if (out_it == consumer_reqs_.end()) continue;
+      const auto& req = out_it->second;
+      auto [ins_it, inserted] = consumer_reqs_.try_emplace(src, req);
+      if (!inserted && ins_it->second.space == MemorySpace::Vec && req.space != MemorySpace::Vec) {
+        ins_it->second = req;
+      }
+    }
+  }
+
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (!op) return;
+    auto is_shaped = [](const TypePtr& t) { return As<TensorType>(t) || As<TileType>(t); };
+
+    // Record a propagation edge `dst -> src` in program order when the RHS is
+    // either a plain SSA alias (both sides shaped) or an inherit-input Call
+    // (first shaped input carries the memory-space relation). The reverse walk
+    // in phase 2 then resolves all back-propagation in a single pass.
+    if (op->var_ && is_shaped(op->var_->GetType())) {
+      if (auto src_var = As<Var>(op->value_); src_var && is_shaped(src_var->GetType())) {
+        propagation_edges_.emplace_back(op->var_.get(), src_var.get());
+      } else if (auto call = As<Call>(op->value_);
+                 call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+        auto& op_reg = OpRegistry::GetInstance();
+        if (op_reg.IsRegistered(call->op_->name_) &&
+            op_reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) {
+          for (const auto& arg : call->args_) {
+            if (auto arg_var = As<Var>(arg); arg_var && is_shaped(arg_var->GetType())) {
+              propagation_edges_.emplace_back(op->var_.get(), arg_var.get());
+              break;
+            }
+          }
+        }
+      }
+    }
+
     auto call = As<Call>(op->value_);
     if (!call || std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
       IRVisitor::VisitStmt_(op);
@@ -261,6 +310,10 @@ class ConsumerSpaceCollector : public IRVisitor {
  private:
   const OpConversionRegistry& registry_;
   std::unordered_map<const Var*, ConsumerSpaceReq> consumer_reqs_;
+  // `dst -> src` edges captured in program order — covers both Call-valued
+  // inherit-input ops and plain SSA aliases. A single reverse-order walk in
+  // PropagateThroughInheritInputOps reaches the fixed point.
+  std::vector<std::pair<const Var*, const Var*>> propagation_edges_;
 };
 
 // ============================================================================
@@ -1186,8 +1239,11 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
   // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.
+  // Then propagate demands backward through pass-through ops (tensor.fillpad etc.) so a
+  // chain like `slice → fillpad → matmul` routes the slice's load directly into Mat.
   ConsumerSpaceCollector consumer_collector(conv_registry);
   consumer_collector.VisitStmt(func->body_);
+  consumer_collector.PropagateThroughInheritInputOps();
 
   // Create the body mutator
   TensorToTileMutator mutator(conv_registry, op_registry, consumer_collector);

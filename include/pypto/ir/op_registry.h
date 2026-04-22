@@ -55,7 +55,9 @@ struct OpMemorySpaceSpec {
   std::vector<std::vector<MemorySpace>> input_constraints;
 
   /// Resolves output memory space from the Call's kwargs.
-  /// Returns nullopt to signal "inherit from first tile-typed input" (view ops).
+  /// Returns nullopt when the space cannot be resolved from kwargs alone — either
+  /// because the op inherits from its input (see `output_inherits_input`) or
+  /// because a retargetable kwarg is absent and InferTileMemorySpace must decide.
   using OutputResolver =
       std::function<std::optional<MemorySpace>(const std::vector<std::pair<std::string, std::any>>& kwargs)>;
   OutputResolver deduce_output_memory;
@@ -63,6 +65,12 @@ struct OpMemorySpaceSpec {
   /// When set, the output reuses the MemRef of the input argument at this index.
   /// Used by accumulate ops (matmul_acc, gemv_acc) where the output IS the input buffer.
   std::optional<size_t> output_reuses_input_arg;
+
+  /// True when the output memory space is defined to equal the first tile-typed
+  /// input's memory space (set via `set_output_memory_inherit_input`).
+  /// InferTileMemorySpace uses this for forward inheritance and backward-demand
+  /// propagation through view-like ops; memory reuse uses it to skip retargeting.
+  bool output_inherits_input = false;
 };
 
 /**
@@ -311,9 +319,14 @@ class OpRegistryEntry {
     return *this;
   }
 
-  /// Set output memory from kwarg (e.g., tile.load reads target_memory)
-  inline OpRegistryEntry& set_output_memory_from_kwarg(const std::string& kwarg_key = "target_memory",
-                                                       MemorySpace default_space = MemorySpace::Vec) {
+  /// Set output memory from kwarg (e.g., tile.load reads target_memory).
+  /// When the kwarg is absent, the resolver falls back to `default_space`. Pass
+  /// `std::nullopt` (the default) to mark the op as retargetable: the resolver
+  /// returns nullopt and InferTileMemorySpace decides the final memory space
+  /// from producer/consumer context.
+  inline OpRegistryEntry& set_output_memory_from_kwarg(
+      const std::string& kwarg_key = "target_memory",
+      std::optional<MemorySpace> default_space = std::nullopt) {
     EnsureMemorySpec();
     auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
     spec.deduce_output_memory = [kwarg_key,
@@ -323,15 +336,18 @@ class OpRegistryEntry {
           return std::optional<MemorySpace>(AnyCast<MemorySpace>(v, kwarg_key));
         }
       }
-      return std::optional<MemorySpace>(default_space);
+      return default_space;
     };
     return *this;
   }
 
-  /// Set output memory inherited from first tile-typed input (view ops)
+  /// Set output memory inherited from first tile-typed input (view ops).
+  /// The resolver returns nullopt; InferTileMemorySpace resolves by copying the input's
+  /// (already-resolved) memory space onto the output.
   inline OpRegistryEntry& set_output_memory_inherit_input() {
     EnsureMemorySpec();
     auto& spec = *memory_spec_;  // NOLINT(bugprone-unchecked-optional-access)
+    spec.output_inherits_input = true;
     spec.deduce_output_memory =
         [](const std::vector<std::pair<std::string, std::any>>&) -> std::optional<MemorySpace> {
       return std::nullopt;
@@ -364,6 +380,27 @@ class OpRegistryEntry {
 
   /// Get memory spec (nullopt if not annotated)
   [[nodiscard]] const std::optional<OpMemorySpaceSpec>& GetMemorySpec() const { return memory_spec_; }
+
+  /// True when this op's output memory space equals its first tile-typed input's
+  /// (registered via `set_output_memory_inherit_input`). The single source of truth
+  /// for passes that need to propagate memory-space information through view-like ops
+  /// (InferTileMemorySpace, memory reuse).
+  /// An op may combine this with `set_output_reuses_input(idx)` (e.g. in-place
+  /// variants like tile.fillpad_inplace that reuse the input's MemRef in place);
+  /// the memory-space-inheritance relation still holds.
+  [[nodiscard]] bool OutputMemoryInheritsInput() const {
+    return memory_spec_.has_value() && memory_spec_->output_inherits_input;
+  }
+
+  /// True when this op's output memory space can be chosen by the compiler
+  /// (e.g. `tile.load`, `tile.create`): the op carries a writable `target_memory`
+  /// kwarg that InferTileMemorySpace can rewrite to match consumer demand.
+  /// Inherit-input and fixed-output ops don't participate in retargeting.
+  [[nodiscard]] bool HasRetargetableMemoryKwarg() const {
+    if (!memory_spec_.has_value() || !memory_spec_->deduce_output_memory) return false;
+    if (memory_spec_->output_inherits_input) return false;
+    return op_ && op_->HasAttr("target_memory");
+  }
 
   /// Declare that this op's output reuses the MemRef of the input at arg_index.
   /// Used for accumulate ops where the output writes into the input buffer.

@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -126,30 +127,44 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   CHECK(shapes_tuple->elements_.size() > 0)
       << "The operator " << op_name << " requires at least one dimension, but got empty shapes tuple";
 
-  auto target_memory = GetKwarg<MemorySpace>(kwargs, "target_memory");
+  // target_memory is optional: when absent, memory_space stays unresolved and
+  // InferTileMemorySpace will pick it from consumer demand. Layout is deferred in
+  // that case — the pass recomputes TileView via GetImplicitTileView once the
+  // space is known.
+  std::optional<MemorySpace> target_memory_opt;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "target_memory") {
+      target_memory_opt = AnyCast<MemorySpace>(v, "target_memory");
+      break;
+    }
+  }
   bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
 
-  // Transpose is only supported when loading to L1 (Mat)
-  CHECK(!transpose || target_memory == MemorySpace::Mat)
-      << "The operator " << op_name
-      << " only supports transpose=true when target_memory is Mat (L1), but got "
-      << static_cast<int>(target_memory);
+  // Transpose semantics are Mat-specific. Callers that use transpose=true must
+  // commit to target_memory=Mat at construction — InferTileMemorySpace does not
+  // revisit transpose decisions.
+  CHECK(!transpose || (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Mat))
+      << "The operator " << op_name << " only supports transpose=true when target_memory is Mat (L1)";
 
   CHECK(!transpose || shapes_tuple->elements_.size() >= 2)
       << "The operator " << op_name << " requires at least 2D shapes for transpose=true, but got "
       << shapes_tuple->elements_.size() << "D";
 
-  // Nz/Zn for transpose false/true
+  // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
+  // the default-constructed view is kept and InferTileMemorySpace rebuilds it
+  // once the memory space is resolved.
   TileView tile_view;
-  if (target_memory == MemorySpace::Mat) {
-    tile_view.blayout = TileLayout::col_major;
-    tile_view.slayout = TileLayout::row_major;
-    if (transpose) {
-      std::swap(tile_view.blayout, tile_view.slayout);
+  if (target_memory_opt.has_value()) {
+    if (*target_memory_opt == MemorySpace::Mat) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::row_major;
+      if (transpose) {
+        std::swap(tile_view.blayout, tile_view.slayout);
+      }
+    } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
+               last_dim && last_dim->value_ == 1) {
+      tile_view.blayout = TileLayout::col_major;
     }
-  } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
-             last_dim && last_dim->value_ == 1) {
-    tile_view.blayout = TileLayout::col_major;
   }
 
   // Build tile shape from shapes tuple.
@@ -515,7 +530,9 @@ REGISTER_OP("tile.create")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
-    .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
+    // No fallback: when target_memory is absent, memory_space stays unresolved and
+    // InferTileMemorySpace picks the space from consumer demand.
+    .set_output_memory_from_kwarg("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCreateTileType(args, kwargs, "tile.create");
@@ -535,7 +552,9 @@ REGISTER_OP("tile.load")
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<bool>("transpose")
-    .set_output_memory_from_kwarg("target_memory", MemorySpace::Vec)
+    // No fallback: when target_memory is absent, memory_space stays unresolved and
+    // InferTileMemorySpace picks the space from consumer demand.
+    .set_output_memory_from_kwarg("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileLoadType(args, kwargs, "tile.load");

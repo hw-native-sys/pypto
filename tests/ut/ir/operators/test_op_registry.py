@@ -522,10 +522,12 @@ class TestOpMemorySpecRegistry:
         assert constraints[2] == [ir.MemorySpace.Right]
 
     def test_load_spec(self):
-        """tile.load output is from kwarg, defaults to Vec."""
+        """tile.load output is retargetable: resolves from target_memory kwarg if
+        present, otherwise deferred for InferTileMemorySpace to decide from
+        consumer demand."""
         spec = ir.get_op_memory_spec("tile.load")
         assert spec is not None
-        assert spec["output_memory"] == ir.MemorySpace.Vec
+        assert spec["output_memory"] == "deferred"
         assert spec["input_constraints"] == []
 
     def test_store_spec(self):
@@ -682,10 +684,11 @@ class TestOpMemorySpecRegistry:
         assert spec["output_memory"] == ir.MemorySpace.Vec
 
     def test_create_spec(self):
-        """tile.create output is from kwarg, defaults to Vec."""
+        """tile.create output is retargetable: resolves from target_memory kwarg
+        if present, otherwise deferred for InferTileMemorySpace to decide."""
         spec = ir.get_op_memory_spec("tile.create")
         assert spec is not None
-        assert spec["output_memory"] == ir.MemorySpace.Vec
+        assert spec["output_memory"] == "deferred"
 
 
 class TestRegistryInfrastructure:
@@ -703,11 +706,13 @@ class TestRegistryInfrastructure:
         assert spec is not None
         assert isinstance(spec["output_memory"], ir.MemorySpace)
 
-    def test_kwarg_output_returns_default_enum(self):
-        """Kwarg-based output resolves to default MemorySpace enum."""
+    def test_kwarg_output_returns_deferred(self):
+        """Retargetable ops (tile.load/tile.create) report 'deferred' when the
+        target_memory kwarg is absent — InferTileMemorySpace resolves from
+        consumer demand."""
         spec = ir.get_op_memory_spec("tile.load")
         assert spec is not None
-        assert isinstance(spec["output_memory"], ir.MemorySpace)
+        assert spec["output_memory"] == "deferred"
 
     def test_inherit_output_returns_string(self):
         """Inherit-from-input output returns the string 'inherit_from_input'."""

@@ -1511,6 +1511,142 @@ class TestSliceMatmulConversion:
         )
         _assert_convert_equal(before, expected)
 
+    def test_slice_alias_then_matmul_routes_load_to_mat(self):
+        """tensor.slice → SSA alias → tensor.matmul emits tile.load(Mat).
+
+        Reproduction of the qwen3 decode MLP-down pattern: the parser elides
+        `y = x` aliases (e.g. from commented-out `pl.fillpad` wrappers), leaving
+        a chain `slice → alias → matmul`. ConsumerSpaceCollector must propagate
+        matmul's Mat demand backward through the alias so the slice lowers to
+        a Mat-targeted load instead of the default Vec (which otherwise routes
+        the whole scope through AIV and breaks the AIC/AIV split).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                a_slice: pl.Tensor[[16, 128], pl.BF16] = pl.slice(a, [16, 128], [0, 0])
+                b_slice: pl.Tensor[[128, 128], pl.BF16] = pl.slice(b, [128, 128], [0, 0])
+                a_alias: pl.Tensor[[16, 128], pl.BF16] = a_slice
+                b_alias: pl.Tensor[[128, 128], pl.BF16] = b_slice
+                c: pl.Tensor[[16, 128], pl.BF16] = pl.matmul(a_alias, b_alias)
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.assemble(out_0, c, [0, 0])
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                return self.main_incore_0(a, b, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                a_slice__tile: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                b_slice__tile: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                a_alias: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = a_slice__tile
+                b_alias: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = b_slice__tile
+                c__tile: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_alias, b_alias)
+                out_0__tile: pl.Tensor[[16, 128], pl.BF16] = pl.tile.store(c__tile, [0, 0], out_0)
+                return out_0__tile
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                out_0: pl.Tensor[[16, 128], pl.BF16] = pl.create_tensor([16, 128], dtype=pl.BF16)
+                return self.main_incore_0(a, b, out_0)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_slice_chain_of_aliases_then_matmul(self):
+        """Demand propagates through a chain of SSA aliases, not just one hop.
+
+        Ensures the single reverse-order sweep over ``propagation_edges_`` handles
+        transitive closure: slice → alias1 → alias2 → matmul must still reach
+        the slice-produced var and push Mat onto the emitted tile.load.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                a_slice: pl.Tensor[[16, 128], pl.BF16] = pl.slice(a, [16, 128], [0, 0])
+                a_alias1: pl.Tensor[[16, 128], pl.BF16] = a_slice
+                a_alias2: pl.Tensor[[16, 128], pl.BF16] = a_alias1
+                c: pl.Tensor[[16, 64], pl.BF16] = pl.matmul(a_alias2, b)
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.assemble(out_0, c, [0, 0])
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                return self.main_incore_0(a, b, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                a_slice__tile: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [16, 128], [16, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                a_alias1: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = a_slice__tile
+                a_alias2: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = a_alias1
+                b__tile: pl.Tile[[128, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 64], [128, 64], target_memory=pl.Mem.Mat, transpose=False
+                )
+                c__tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_alias2, b__tile)
+                out_0__tile: pl.Tensor[[16, 64], pl.BF16] = pl.tile.store(c__tile, [0, 0], out_0)
+                return out_0__tile
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.BF16],
+                b: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.BF16]:
+                out_0: pl.Tensor[[16, 64], pl.BF16] = pl.create_tensor([16, 64], dtype=pl.BF16)
+                return self.main_incore_0(a, b, out_0)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestScatterUpdateConversion:
     """Tests for tensor.scatter_update → tile.scatter_update conversion."""

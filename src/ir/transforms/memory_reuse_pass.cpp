@@ -394,16 +394,11 @@ class TopDownRetargeter {
     return c.bases.count(target_base) > 0;
   }
 
-  /// True when the op is registered with set_output_memory_inherit_input:
-  /// the memory spec exists, has no output_reuses_input_arg, and its
-  /// deduce_output_memory lambda returns nullopt for empty kwargs (the
-  /// signature the inherit-input registration leaves behind).
+  /// True when the op is registered with set_output_memory_inherit_input.
+  /// Delegates to the shared OpRegistryEntry predicate so passes that reason
+  /// about pass-through ops (here and InferTileMemorySpace) agree on the set.
   static bool IsOutputMemoryInheritInput(const OpRegistryEntry& entry) {
-    const auto& spec = entry.GetMemorySpec();
-    if (!spec.has_value()) return false;
-    if (spec->output_reuses_input_arg.has_value()) return false;
-    if (!spec->deduce_output_memory) return false;
-    return !spec->deduce_output_memory({}).has_value();
+    return entry.OutputMemoryInheritsInput();
   }
 
   static bool HasKwarg(const Call& call, const std::string& key) {

@@ -472,7 +472,8 @@ void BindIR(nb::module_& m) {
       [](const std::string& op_name) -> nb::object {
         auto& registry = OpRegistry::GetInstance();
         if (!registry.IsRegistered(op_name)) return nb::none();
-        const auto& spec = registry.GetEntry(op_name).GetMemorySpec();
+        const auto& entry = registry.GetEntry(op_name);
+        const auto& spec = entry.GetMemorySpec();
         if (!spec.has_value()) return nb::none();
         // Empty spec (from no_memory_spec()) — no constraints and no resolver
         if (spec->input_constraints.empty() && !spec->deduce_output_memory) return nb::none();
@@ -486,13 +487,20 @@ void BindIR(nb::module_& m) {
           inputs.append(nb::cast(allowed));
         }
         result["input_constraints"] = inputs;
-        // Output (resolve with empty kwargs for display)
-        if (spec->deduce_output_memory) {
+        // Output (resolve with empty kwargs for display). Distinguishes:
+        //   - Fixed/default-seeded: resolver returns a concrete MemorySpace.
+        //   - Inherit-input (slice/reshape/...): marker string "inherit_from_input".
+        //   - Retargetable with no kwarg default (tile.load/tile.create without
+        //     target_memory): deferred — InferTileMemorySpace resolves from
+        //     consumer demand. Reported as the string "deferred".
+        if (entry.OutputMemoryInheritsInput()) {
+          result["output_memory"] = "inherit_from_input";
+        } else if (spec->deduce_output_memory) {
           auto out = spec->deduce_output_memory({});
           if (out.has_value()) {
             result["output_memory"] = *out;
           } else {
-            result["output_memory"] = "inherit_from_input";
+            result["output_memory"] = "deferred";
           }
         } else {
           result["output_memory"] = nb::none();

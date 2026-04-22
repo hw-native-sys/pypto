@@ -48,16 +48,14 @@ namespace ir {
 
 namespace {
 
-// Check if operation is a view operation (zero-copy metadata transform)
-// using the registry: deduce_output_memory returning nullopt = view op.
+// Check if operation is a view operation (zero-copy metadata transform).
+// A view op is one registered with set_output_memory_inherit_input() — its
+// output reuses the input's MemRef view. Delegates to the shared registry
+// predicate so InferTileMemorySpace and InitMemRef agree on the set.
 bool IsViewOperation(const std::string& op_name) {
   auto& registry = OpRegistry::GetInstance();
   if (!registry.IsRegistered(op_name)) return false;
-
-  const auto& spec_opt = registry.GetEntry(op_name).GetMemorySpec();
-  if (!spec_opt.has_value() || !spec_opt->deduce_output_memory) return false;
-
-  return !spec_opt->deduce_output_memory({}).has_value();
+  return registry.GetEntry(op_name).OutputMemoryInheritsInput();
 }
 
 // Check if an operation's output should reuse the MemRef of a specific input argument.

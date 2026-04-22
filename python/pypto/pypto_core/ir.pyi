@@ -2493,8 +2493,17 @@ def get_op_memory_spec(op_name: str) -> dict[str, Any] | None:
 
     Returns:
         Dict with 'input_constraints' (list of lists of MemorySpace) and
-        'output_memory' (MemorySpace, 'inherit_from_input', or None) keys,
-        or None if the operator has no memory spec or is not registered.
+        'output_memory' keys, or None if the operator has no memory spec or
+        is not registered. 'output_memory' is one of:
+
+        * A ``MemorySpace`` — fixed or kwarg-resolved (e.g. `tile.matmul` →
+          ``MemorySpace.Acc``).
+        * ``'inherit_from_input'`` — the output takes its memory space from
+          the first tile-typed input (e.g. `tile.slice`, `tile.reshape`).
+        * ``'deferred'`` — a retargetable producer whose ``target_memory``
+          kwarg was absent; `InferTileMemorySpace` resolves it later from
+          consumer demand (e.g. `tile.load`, `tile.create`).
+        * ``None`` — no resolver registered for this op.
     """
 
 # ========== Op Conversion Registry ==========
