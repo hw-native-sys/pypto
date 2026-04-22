@@ -210,7 +210,7 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
 
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
@@ -318,7 +318,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
 
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
@@ -431,7 +431,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             return result
 
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
@@ -531,7 +531,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             return result
 
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_gm_pipe_buffer_per_call_allocation():
@@ -650,7 +650,7 @@ def test_gm_pipe_buffer_per_call_allocation():
 
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_gm_pipe_buffer_per_call_inside_for_loop():
@@ -759,7 +759,7 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
 
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_gm_pipe_buffer_param_direction_is_out():
@@ -870,7 +870,7 @@ def test_gm_pipe_buffer_param_direction_is_out():
 
     Expected = _patch_tensor_create_manual_dep(Expected, "main")
     After = _run_pipeline(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_accumulator_with_tile_create_classifies_as_pure_aic():

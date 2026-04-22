@@ -10,10 +10,8 @@
 """Tests for InitMemRefPass.
 
 Most tests use the Before/Expected pattern with
-`ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)`.
-`auto_mapping=True` aligns MemRef objects consistently across the comparison:
-if two tiles share a MemRef in ``After``, the corresponding tiles in
-``Expected`` must also share (i.e. use the same ``mem_*`` pointer name).
+``ir.assert_structural_equal(After, Expected)``.
+DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
 
 Two tests are kept as raw-IR / diagnostic tests because the inputs cannot be
 expressed via the DSL:
@@ -79,7 +77,7 @@ class TestBasic:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_pipeline(self):
         """load→move→matmul→store: Vec/Mat/Left/Right/Acc memory spaces each get their own MemRef."""
@@ -148,7 +146,7 @@ class TestBasic:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestMemRefSharing:
@@ -189,7 +187,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_view_op_shares_memref_with_input(self):
         """tile.reshape chain shares a single MemRef (only 1 alloc needed)."""
@@ -233,7 +231,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
@@ -308,7 +306,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestYieldMemRef:
@@ -376,7 +374,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_if_yield_return_var_shares_memref(self):
         """IfStmt: return_var shares MemRef with the then-branch yield value."""
@@ -452,7 +450,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_tile_alias_shares_source_memref(self):
         """Tile alias (``a = b``) shares MemRef with source tile, not a fresh one."""
@@ -513,7 +511,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestDynamicValidShape:

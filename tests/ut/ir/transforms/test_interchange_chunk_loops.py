@@ -12,7 +12,7 @@
 Test strategy:
   Build a `Before` program, run prerequisite passes + InterchangeChunkLoops,
   and compare to an explicitly-constructed `Expected` program using
-  `ir.assert_structural_equal(..., enable_auto_mapping=True)`.
+  `ir.assert_structural_equal(...)`.
 """
 
 import re
@@ -64,7 +64,7 @@ class TestSingleParallelChunk:
                 return x5
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNestedParallelChunks:
@@ -108,7 +108,7 @@ class TestNestedParallelChunks:
                 return x9
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_two_nested_parallel_with_iter_args(self):
         """Two nested parallel chunked loops with iter_args: verify SSA threading.
@@ -153,7 +153,7 @@ class TestNestedParallelChunks:
                 return x9
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNestedChunkChainsInitSubstitution:
@@ -206,7 +206,7 @@ class TestNestedChunkChainsInitSubstitution:
                 return x9
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_nested_chains_outline_no_crash(self):
         """Nested parallel chunk chains followed by OutlineIncoreScopes must not crash.
@@ -332,7 +332,7 @@ class TestNestedChunksWithInterveningStatements:
                 return x10
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_no_crash_with_intervening_stmt(self):
         """Nested chunks with intervening stmt: outline must not crash."""
@@ -382,7 +382,7 @@ class TestChunkWithRemainderInChain:
                 return x7
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_chunk_with_remainder_body_contains_remainder_loop(self):
         """Remainder loop inside chain body is preserved after interchange.
@@ -422,7 +422,7 @@ class TestChunkWithRemainderInChain:
                 return x7
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestRemainderLoops:
@@ -491,7 +491,7 @@ class TestRemainderLoops:
                 return x22
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNonChunkedLoops:
@@ -518,7 +518,7 @@ class TestNonChunkedLoops:
                 return x3
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestSequentialChunks:
@@ -553,7 +553,7 @@ class TestSequentialChunks:
                 return x5
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_nested_sequential_chunks_get_incore(self):
         """Nested sequential chunked loops: no interchange, but get InCore wrapping."""
@@ -593,7 +593,7 @@ class TestSequentialChunks:
                 return x9
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestExistingInCore:
@@ -629,7 +629,7 @@ class TestExistingInCore:
                 return x5
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestAutoIncoreConsumed:
@@ -669,7 +669,7 @@ class TestAutoIncoreConsumed:
                 return x5
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestPassProperties:
@@ -773,7 +773,7 @@ class TestNonChunkStatementsWrapping:
                 return x1
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_standalone_op_before_parallel_chunk(self):
         """Standalone op before parallel chunk: op wrapped separately, chunk interchanged."""
@@ -807,7 +807,7 @@ class TestNonChunkStatementsWrapping:
                 return x6
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_standalone_op_after_parallel_chunk(self):
         """Standalone op after parallel chunk: chunk interchanged, op wrapped separately."""
@@ -841,7 +841,7 @@ class TestNonChunkStatementsWrapping:
                 return x6
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_host_side_assemble_after_parallel_chunk_not_wrapped(self):
         """Host-side tail assemble after a chunk stays outside InCore."""
@@ -880,7 +880,7 @@ class TestNonChunkStatementsWrapping:
                 return out_1_0
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_multiple_parallel_chunks_no_regression(self):
         """Multiple parallel chunks with no standalone ops: all interchanged, no extra wrapping."""
@@ -923,7 +923,7 @@ class TestNonChunkStatementsWrapping:
                 return x10
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_non_chunked_loop_inside_auto_incore_wrapped(self):
         """Non-chunked loop with tensor ops inside auto_incore gets wrapped in InCore."""
@@ -948,7 +948,7 @@ class TestNonChunkStatementsWrapping:
                 return x3
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_mixed_parallel_and_sequential_chunks(self):
         """Mixed parallel chunk + sequential chunk: parallel interchanged, sequential wrapped."""
@@ -991,7 +991,7 @@ class TestNonChunkStatementsWrapping:
                 return x10
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestScalarAssignmentNotWrapped:
@@ -1034,7 +1034,7 @@ class TestScalarAssignmentNotWrapped:
                 return x8
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_scalar_assign_not_wrapped_outline_no_crash(self):
         """Scalar assignment stays in orchestration after outline — no undefined variable."""

@@ -84,7 +84,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         After = _run_pass(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_rewrites_column_vector_abs_through_row_major_reshape(self):
         """`tile.abs` (unary) on `[N, 1]` col_major vector should be repaired."""
@@ -130,7 +130,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         After = _run_pass(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_rewrites_column_vector_muls_through_row_major_reshape(self):
         """`tile.muls` (tile x scalar) on `[N, 1]` col_major should repair only the tile input."""
@@ -176,7 +176,7 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         After = _run_pass(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

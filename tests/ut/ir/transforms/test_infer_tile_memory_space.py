@@ -78,7 +78,7 @@ class TestInferTileMemorySpaceKwargOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_load_with_mat_kwarg(self):
         """tile.load(target_memory=Mat) -> Mat."""
@@ -130,7 +130,7 @@ class TestInferTileMemorySpaceKwargOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_move_with_left_kwarg(self):
         """tile.move(target_memory=Left) -> Left."""
@@ -186,7 +186,7 @@ class TestInferTileMemorySpaceKwargOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_create_default_vec(self):
         """tile.create without target_memory kwarg defaults to Vec."""
@@ -232,7 +232,7 @@ class TestInferTileMemorySpaceKwargOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestInferTileMemorySpaceCubeOps:
@@ -298,7 +298,7 @@ class TestInferTileMemorySpaceCubeOps:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_full_pipeline(self):
         """Full matmul pipeline: load->Mat, move->Left/Right, matmul->Acc."""
@@ -370,7 +370,7 @@ class TestInferTileMemorySpaceCubeOps:
                 return sij
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestInferTileMemorySpaceOtherOps:
@@ -418,7 +418,7 @@ class TestInferTileMemorySpaceOtherOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_elementwise_after_matmul_gets_vec(self):
         """tile.add after matmul: auto-insert move Acc->Vec before add."""
@@ -503,7 +503,7 @@ class TestInferTileMemorySpaceOtherOps:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_chained_elementwise_inherits(self):
         """Chained elementwise ops: add then mul both inherit Vec."""
@@ -549,7 +549,7 @@ class TestInferTileMemorySpaceOtherOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestInferTileMemorySpaceEdgeCases:
@@ -639,7 +639,7 @@ class TestInferTileMemorySpaceEdgeCases:
                 return a
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_pass_is_idempotent(self):
         """Running the pass twice produces the same result."""
@@ -779,7 +779,7 @@ class TestInferTileMemorySpaceInheritOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_slice_inherits_vec(self):
         """tile.slice inherits Vec memory space from input tile."""
@@ -823,7 +823,7 @@ class TestInferTileMemorySpaceInheritOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_reshape_inherits_mat(self):
         """tile.reshape inherits Mat memory space from input loaded to Mat."""
@@ -886,7 +886,7 @@ class TestInferTileMemorySpaceInheritOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_slice_inherits_mat(self):
         """tile.slice inherits Mat memory space from Mat input."""
@@ -942,7 +942,7 @@ class TestInferTileMemorySpaceInheritOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_chained_view_ops_inherit(self):
         """reshape(slice(load(Mat))) — all inherit Mat from the load."""
@@ -1005,7 +1005,7 @@ class TestInferTileMemorySpaceInheritOps:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestAutoMoveInsertion:
@@ -1071,7 +1071,7 @@ class TestAutoMoveInsertion:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_auto_moves_from_mat(self):
         """tile.matmul with Mat inputs -> auto-insert moves to Left/Right."""
@@ -1141,7 +1141,7 @@ class TestAutoMoveInsertion:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_matmul_moves_are_inserted_at_first_consumer(self):
         """Auto-inserted moves should be materialized at first constrained use.
@@ -1231,7 +1231,7 @@ class TestAutoMoveInsertion:
                 return result
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_no_move_when_already_correct(self):
         """No move inserted when input already in correct space."""
@@ -1303,7 +1303,7 @@ class TestAutoMoveInsertion:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_eval_stmt_consumer_collects_and_inserts_move(self):
         """EvalStmt consumers should also trigger required auto-inserted moves."""
@@ -1345,7 +1345,7 @@ class TestAutoMoveInsertion:
                 return out_0
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_store_no_move_for_vec(self):
         """tile.store accepts Vec — no move needed for Vec tile."""
@@ -1387,7 +1387,7 @@ class TestAutoMoveInsertion:
                 return y
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_store_no_move_for_acc(self):
         """tile.store accepts Acc — no move needed for matmul output."""
@@ -1459,7 +1459,7 @@ class TestAutoMoveInsertion:
                 return z
 
         After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

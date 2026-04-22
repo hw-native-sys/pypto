@@ -153,10 +153,17 @@ assert not ir.structural_equal(var, const)  # False
 
 | 使用场景 | 设置 |
 | -------- | ---- |
+| Pass 变换测试（Before/Expected 模式） | `False`（默认）— DefField 始终自动映射 |
+| 序列化往返测试 | `True` — 反序列化的变量不会是 DefField |
 | 不考虑变量名的模式匹配 | `True` |
 | 优化规则的模板匹配 | `True` |
 | 使用相同变量的精确匹配 | `False` |
 | CSE（公共子表达式消除） | `False` |
+
+> **为何 pass 测试不需要：** `VisitDefField` 内部始终启用自动映射
+> （见 `structural_equal.cpp:650`），填充双向变量映射表。
+> 当相同的变量之后作为 UsualField 引用出现时，会在映射表中找到 —
+> 即使 `enable_auto_mapping=False`。
 
 ## structural_hash 函数
 

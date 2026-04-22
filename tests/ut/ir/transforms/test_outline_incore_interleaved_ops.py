@@ -123,7 +123,7 @@ class TestNonParallelCodeBetweenChunks:
                 return x8
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_interleaved_range_loop_gets_incore(self):
         """A range loop between parallel chunks must get an InCore scope.
@@ -205,7 +205,7 @@ class TestNonParallelCodeBetweenChunks:
                 return x9
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_all_ops_outlined_end_to_end(self):
         """End-to-end: all compute ops inside auto_incore must be outlined.
@@ -277,7 +277,7 @@ class TestNonParallelCodeBetweenChunks:
                 return x8
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestNestedForStmtRecursion:
@@ -353,7 +353,7 @@ class TestNestedForStmtRecursion:
                 return x10
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_single_forstmt_body_with_mixed_children(self):
         """auto_incore body is a single ForStmt (not SeqStmts).
@@ -406,7 +406,7 @@ class TestNestedForStmtRecursion:
                 return x6
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_multiple_non_parallel_ops_between_chunks(self):
         """Multiple consecutive non-parallel ops between chunks must all be wrapped."""
@@ -474,7 +474,7 @@ class TestNestedForStmtRecursion:
                 return x9
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_no_parallel_chunks_no_wrapping(self):
         """auto_incore with only non-parallel code (no chunks) should not crash.
@@ -513,7 +513,7 @@ class TestNestedForStmtRecursion:
                 return x1
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestHostSideTailOps:
@@ -560,7 +560,7 @@ class TestHostSideTailOps:
                 return out_1
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

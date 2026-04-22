@@ -39,7 +39,7 @@ def test_nested_call_in_call_args():
             return result
 
     After = passes.flatten_call_expr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_deeply_nested_calls():
@@ -62,7 +62,7 @@ def test_deeply_nested_calls():
             return result
 
     After = passes.flatten_call_expr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_multiple_nested_calls():
@@ -93,7 +93,7 @@ def test_multiple_nested_calls():
             return result
 
     After = passes.flatten_call_expr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_nested_calls_in_control_flow():
@@ -131,7 +131,7 @@ def test_nested_calls_in_control_flow():
             return r5
 
     After = passes.flatten_call_expr()(passes.convert_to_ssa()(Before))
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_flatten_preserves_flat_code():
@@ -154,7 +154,7 @@ def test_flatten_preserves_flat_code():
             return result
 
     After = passes.flatten_call_expr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_complex_nested_expression_tree():
@@ -182,7 +182,7 @@ def test_complex_nested_expression_tree():
             return result
 
     After = passes.flatten_call_expr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

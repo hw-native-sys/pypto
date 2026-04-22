@@ -534,7 +534,7 @@ class TestFlattenPreservesFuncType:
                 return result
 
         After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_preserve_incore_func_type(self):
         """func_type=InCore is preserved after flattening."""
@@ -555,7 +555,7 @@ class TestFlattenPreservesFuncType:
                 return result
 
         After = passes.flatten_call_expr()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestFlattenCallInScopeStmt:

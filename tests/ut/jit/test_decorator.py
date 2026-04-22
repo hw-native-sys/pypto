@@ -432,7 +432,7 @@ class TestMultiFuncIntegration:
         got = add_entry.compile_for_test(a, b, c)
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         expected_post_pass = pm.run_passes(Expected)
-        ir.assert_structural_equal(got, expected_post_pass, enable_auto_mapping=True)
+        ir.assert_structural_equal(got, expected_post_pass)
 
 
 class TestRoundTrip:

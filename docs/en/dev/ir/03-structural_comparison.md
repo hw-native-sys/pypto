@@ -153,10 +153,17 @@ assert not ir.structural_equal(var, const)  # False
 
 | Use Case | Setting |
 | -------- | ------- |
+| Pass transform tests (Before/Expected pattern) | `False` (default) — DefFields always auto-map |
+| Serialization round-trip tests | `True` — deserialized Vars are never DefFields |
 | Pattern matching regardless of variable names | `True` |
 | Template matching for optimization rules | `True` |
 | Exact matching with same variables | `False` |
 | CSE (Common Subexpression Elimination) | `False` |
+
+> **Why pass tests don't need it:** `VisitDefField` always enables auto-mapping
+> internally (see `structural_equal.cpp:650`), populating the bidirectional Var
+> maps. When the same Vars later appear as UsualField references, they are found
+> in the maps — even with `enable_auto_mapping=False`.
 
 ## structural_hash Function
 

@@ -16,10 +16,8 @@ view-like operations (fillpad, reshape).
 
 Test strategy:
 - IR-level tests use the Before/Expected pattern with
-  ``ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)``.
-  ``enable_auto_mapping`` makes structural comparison sensitive to MemRef
-  identity sharing — two tiles that share a MemRef before vs. two tiles
-  with separate MemRefs after the split is visible structurally.
+  ``ir.assert_structural_equal(After, Expected)``.
+  DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
 - TestLegalizeWithCodegen retains the IRBuilder-based construction and MLIR
   string assertions, since those tests verify codegen output (alloc counts,
   addresses, dynamic-shape rendering) rather than IR shape.
@@ -92,7 +90,7 @@ class TestLegalSharingPreserved:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_fillpad_view_keeps_shared(self):
         """fillpad changes pad but keeps same shape -> legal view."""
@@ -140,7 +138,7 @@ class TestLegalSharingPreserved:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestAscend910BSplitLoadTpopHazard:
@@ -181,7 +179,7 @@ class TestAscend910BSplitLoadTpopHazard:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_ascend950_keeps_compatible_share(self):
         backend.reset_for_testing()
@@ -220,7 +218,7 @@ class TestAscend910BSplitLoadTpopHazard:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +268,7 @@ class TestIllegalSharingSplit:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
     def test_split_propagates_through_view_chain(self):
         """A split writer's legal views should follow the new MemRef."""
@@ -325,7 +323,7 @@ class TestIllegalSharingSplit:
                 return result
 
         After = passes.legalize_pto_buffer_reuse()(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
 
 
 # ---------------------------------------------------------------------------

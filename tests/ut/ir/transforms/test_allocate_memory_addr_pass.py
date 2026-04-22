@@ -54,7 +54,7 @@ def test_allocate_memory_addr_simple():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_multiple_tiles():
@@ -101,7 +101,7 @@ def test_allocate_memory_addr_multiple_tiles():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
@@ -145,7 +145,7 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -242,7 +242,7 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
     After = passes.init_mem_ref()(After)
     After = passes.memory_reuse()(After)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_empty_function():
@@ -261,7 +261,7 @@ def test_allocate_memory_addr_empty_function():
             return output
 
     After = passes.allocate_memory_addr()(Before)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_allocs_are_prepended_to_body():
@@ -304,7 +304,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocate_memory_addr_raw_pointer_uniqueness():
@@ -352,7 +352,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_allocated_memory_addr_verifier_passes_after_add_alloc():
@@ -395,7 +395,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_memrefs_before_allocate_have_unallocated_addr():
@@ -527,7 +527,7 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
 
         After = passes.init_mem_ref()(Before)
         After = passes.allocate_memory_addr()(After)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(After, Expected)
     finally:
         if was_configured:
             reset_for_testing()
