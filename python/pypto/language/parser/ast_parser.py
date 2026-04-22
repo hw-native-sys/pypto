@@ -2847,18 +2847,20 @@ class ASTParser:
                 output_vars.append(new_var)
                 self.scope_manager.define_var(var_name, new_var, allow_redef=True)
 
+        # Generate a stable worker name used as both the scope name_hint
+        # (so OutlineHierarchyScopes preserves it) and the SubWorker registry key.
+        worker_name = name_hint
+        if not worker_name:
+            worker_name = f"{self._func_name}_host_worker_{self._sub_worker_counter}"
+        self._sub_worker_counter += 1
+
         # EvalStmt(Var) for inputs, AssignStmt for outputs — signals for OutlineHierarchyScopes
-        with self.builder.scope(ir.ScopeKind.Hierarchy, span, level=level, role=role, name_hint=name_hint):
+        with self.builder.scope(ir.ScopeKind.Hierarchy, span, level=level, role=role, name_hint=worker_name):
             for var in external_vars:
                 self.builder.eval_stmt(var)
             for out_var in output_vars:
                 rhs = external_vars[0] if external_vars else ir.ConstInt(0, DataType.INT32, span)
                 self.builder.assign(out_var, rhs)
-
-        worker_name = name_hint
-        if not worker_name:
-            worker_name = f"{self._func_name}_host_worker_{self._sub_worker_counter}"
-        self._sub_worker_counter += 1
 
         body_source = self._extract_with_body_source(stmt)
         self._sub_worker_bodies[worker_name] = body_source

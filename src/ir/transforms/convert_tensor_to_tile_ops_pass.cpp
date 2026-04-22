@@ -1734,6 +1734,73 @@ Pass ConvertTensorToTileOps() {
       }
     }
 
+    // Phase 3: Propagate Out/InOut param directions from callees to callers.
+    // After Phase 1 marks InCore params as Out/InOut, callers that pass their
+    // own parameters through must inherit the direction.  Fixed-point iteration
+    // handles multi-level call chains (host_orch → chip_orch → incore).
+    {
+      std::unordered_map<std::string, FunctionPtr> func_map;
+      for (const auto& func : functions_phase2b) {
+        func_map[func->name_] = func;
+      }
+
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        for (auto& func : functions_phase2b) {
+          if (func->func_type_ == FunctionType::InCore) continue;
+
+          std::unordered_map<const Var*, size_t> param_idx;
+          for (size_t i = 0; i < func->params_.size(); ++i) {
+            param_idx[func->params_[i].get()] = i;
+          }
+
+          class CallScanner : public IRVisitor {
+           public:
+            std::vector<CallPtr> calls;
+            void VisitExpr_(const CallPtr& call) override {
+              if (std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
+                calls.push_back(call);
+              }
+              IRVisitor::VisitExpr_(call);
+            }
+          };
+          CallScanner scanner;
+          scanner.VisitStmt(func->body_);
+
+          auto new_dirs = func->param_directions_;
+          for (const auto& call : scanner.calls) {
+            auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+            if (!gv) continue;
+            auto callee_it = func_map.find(gv->name_);
+            if (callee_it == func_map.end()) continue;
+            const auto& callee = callee_it->second;
+            for (size_t ai = 0; ai < call->args_.size() && ai < callee->param_directions_.size(); ++ai) {
+              auto arg_var = As<Var>(call->args_[ai]);
+              if (!arg_var) continue;
+              auto pi = param_idx.find(arg_var.get());
+              if (pi == param_idx.end()) continue;
+              ParamDirection callee_dir = callee->param_directions_[ai];
+              ParamDirection& caller_dir = new_dirs[pi->second];
+              if (callee_dir == ParamDirection::Out && caller_dir == ParamDirection::In) {
+                caller_dir = ParamDirection::Out;
+              } else if (callee_dir == ParamDirection::InOut && caller_dir != ParamDirection::InOut) {
+                caller_dir = ParamDirection::InOut;
+              }
+            }
+          }
+
+          if (new_dirs != func->param_directions_) {
+            changed = true;
+            auto new_func = MutableCopy(func);
+            new_func->param_directions_ = std::move(new_dirs);
+            func = new_func;
+            func_map[func->name_] = func;
+          }
+        }
+      }
+    }
+
     return std::make_shared<Program>(functions_phase2b, program->name_, program->span_);
   };
 

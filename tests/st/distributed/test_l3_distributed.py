@@ -77,6 +77,31 @@ class L3DependencyProgram:
         return out_f
 
 
+@pl.program
+class L3DependencyInlineProgram:
+    """L3: all levels inlined into host_orch via pl.at() using tensor API."""
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host_orch(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        b: pl.Tensor[[128, 128], pl.FP32],
+        f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CHIP, role=pl.Role.Orchestrator):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.add(a, b)
+                out_f = pl.assemble(f, out, [0, 0])
+        with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):
+            expected = torch.full((128, 128), 5.0, dtype=torch.float32)
+            if not torch.allclose(out_f, expected, rtol=1e-5, atol=1e-5):
+                raise AssertionError(
+                    f"SubWorker verify failed: expected 5.0, "
+                    f"got max={out_f.max().item()}, min={out_f.min().item()}"
+                )
+        return out_f
+
+
 class TestL3Dependency:
     """L3 distributed runtime: compile and execute via Worker(level=3)."""
 
@@ -102,6 +127,31 @@ class TestL3Dependency:
         expected = torch.full((128, 128), 5.0, dtype=torch.float32)
         assert torch.allclose(f, expected, rtol=1e-5, atol=1e-5), (
             f"L3 dependency test failed: expected f = a + b = 5.0, "
+            f"got max diff = {(f - expected).abs().max().item()}"
+        )
+
+    def test_execute_inline(self, test_config):
+        """End-to-end: all levels inlined via pl.at(), verify f = a + b."""
+        compiled = ir.compile(
+            L3DependencyInlineProgram,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=[7],
+                num_sub_workers=1,
+                block_dim=3,
+                aicpu_thread_num=4,
+            ),
+        )
+
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        f = torch.zeros((128, 128), dtype=torch.float32)
+
+        compiled(a, b, f)
+
+        expected = torch.full((128, 128), 5.0, dtype=torch.float32)
+        assert torch.allclose(f, expected, rtol=1e-5, atol=1e-5), (
+            f"L3 inline dependency test failed: expected f = a + b = 5.0, "
             f"got max diff = {(f - expected).abs().max().item()}"
         )
 

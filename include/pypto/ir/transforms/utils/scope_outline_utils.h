@@ -495,6 +495,10 @@ class ScopeOutliner : public IRMutator {
     // returned regardless of whether they appear in used_after, because the
     // store mutates an externally-visible buffer (e.g. loop-carried state).
     //
+    // Skip for Hierarchy scopes: the outlined function receives the buffer
+    // as an InOut parameter, so the store side-effect is already visible
+    // to the caller without an explicit return.
+    //
     // Track two pointer identities per store target:
     //   - var_objects_ pointer (ext_it->second.get()) — goes into output_vars
     //     and store_output_set for consistent classification
@@ -502,14 +506,16 @@ class ScopeOutliner : public IRMutator {
     //     StoreEvalToAssignMutator, which matches against the un-substituted
     //     scope body where store targets retain their original pointers
     std::unordered_map<const Var*, const Var*> store_body_ptrs;
-    for (const Var* var_ptr : store_collector.store_targets) {
-      if (!body_collector.var_defs.count(var_ptr)) {
-        auto ext_it = var_objects_.find(var_ptr);
-        CHECK(ext_it != var_objects_.end())
-            << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
-        output_vars.push_back(ext_it->second);
-        store_output_set.insert(ext_it->second.get());
-        store_body_ptrs[ext_it->second.get()] = var_ptr;
+    if (op->GetScopeKind() != ScopeKind::Hierarchy) {
+      for (const Var* var_ptr : store_collector.store_targets) {
+        if (!body_collector.var_defs.count(var_ptr)) {
+          auto ext_it = var_objects_.find(var_ptr);
+          CHECK(ext_it != var_objects_.end())
+              << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
+          output_vars.push_back(ext_it->second);
+          store_output_set.insert(ext_it->second.get());
+          store_body_ptrs[ext_it->second.get()] = var_ptr;
+        }
       }
     }
 
