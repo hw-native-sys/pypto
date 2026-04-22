@@ -170,13 +170,20 @@ def _get_aic_str(actual_program, func_name="main_incore_0_aic"):
 
 
 def _assert_aic_contains(actual_program, *expected_ops, func_name="main_incore_0_aic"):
-    """Assert AIC function exists and its string representation contains given ops."""
+    """Assert AIC function exists and its string representation contains given ops.
+
+    Each ``expected_op`` is matched as ``.<op>(`` to avoid substring collisions
+    (e.g. ``matmul`` must not accidentally match ``matmul_acc``), unless the
+    value contains a ``.`` (like ``MemorySpace.Bias``), in which case it is
+    matched verbatim.
+    """
     func = actual_program.get_function(func_name)
     assert func is not None, f"Function '{func_name}' not found in actual program"
     assert func.func_type == pl.FunctionType.AIC
     aic_str = func.as_python()
     for op in expected_ops:
-        assert op in aic_str, f"Expected '{op}' in AIC function but not found.\nAIC code:\n{aic_str}"
+        needle = op if "." in op else f".{op}("
+        assert needle in aic_str, f"Expected '{needle}' in AIC function but not found.\nAIC code:\n{aic_str}"
 
 
 def _assert_aiv_aic_split(
@@ -187,22 +194,34 @@ def _assert_aiv_aic_split(
     aic_func_name="main_incore_0_aic",
     group_func_name="main_incore_0",
 ):
-    """Assert AIV structural equality + AIC string assertions + Group calls both.
+    """Assert AIV structural equality + AIC string assertions + Group calls AIC then AIV.
 
     This is the standard assertion pattern for tests where AIC uses
     MemorySpace.Bias (not expressible in the DSL) so we verify AIC via string
     while AIV is verified structurally.
+
+    The Group call-order check walks the actual IR body statements rather than
+    doing a string-level ``in`` check, so re-ordering or spurious name
+    occurrences cannot pass.
     """
     _assert_aiv_structural_eq(actual_program, expected_aiv_program, aiv_func_name)
     _assert_aic_contains(actual_program, *aic_expected_ops, func_name=aic_func_name)
 
-    # Group calls AIC then AIV
+    # Verify Group body calls AIC then AIV by traversing IR statements
     group_func = actual_program.get_function(group_func_name)
-    assert group_func is not None
+    assert group_func is not None, f"Group function '{group_func_name}' not found"
     assert group_func.func_type == pl.FunctionType.Group
-    group_str = group_func.as_python()
-    assert aic_func_name in group_str
-    assert aiv_func_name in group_str
+    stmts = ir.flatten_to_stmts(group_func.body)
+    calls: list[str] = []
+    for stmt in stmts:
+        call = None
+        if isinstance(stmt, ir.EvalStmt):
+            call = stmt.expr
+        elif isinstance(stmt, ir.AssignStmt):
+            call = stmt.value
+        if isinstance(call, ir.Call) and isinstance(call.op, ir.GlobalVar):
+            calls.append(call.op.name)
+    assert calls == [aic_func_name, aiv_func_name], f"Expected Group to call AIC then AIV, got: {calls}"
 
 
 def _make_matmul_program():
@@ -1195,7 +1214,7 @@ class TestCubeOpVariants:
             cube_op,
             "tpop_from_aiv",
             "tpush_to_aiv",
-            "Mem.Bias",
+            "pl.Mem.Bias",
         )
 
     def test_gemv_in_aic(self):
