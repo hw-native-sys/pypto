@@ -22,6 +22,8 @@ Tests:
   BiDirectNoSplitTest : V↔C, no split.             c += (a+1) @ b (parallel over N in blocks)
 """
 
+import os
+import shlex
 import sys
 from typing import Any
 
@@ -49,11 +51,32 @@ def _has_explicit_platform_arg(args: tuple[str, ...] | list[str]) -> bool:
     return any(arg == "--platform" or arg.startswith("--platform=") for arg in args)
 
 
+def _get_platform_arg_sources(config: pytest.Config) -> tuple[str, ...]:
+    """Collect raw CLI args from pytest/runtime entrypoints.
+
+    ``Config.invocation_params.args`` is the preferred source, but some
+    pytest launch paths do not preserve option flags there consistently.
+    Fall back to the process argv and ``PYTEST_ADDOPTS`` so collection-time
+    explicit-platform checks behave the same in local runs and CI.
+    """
+    args: list[str] = []
+
+    params = getattr(config, "invocation_params", None)
+    if params is not None:
+        args.extend(params.args)
+
+    args.extend(sys.argv[1:])
+
+    addopts = os.environ.get("PYTEST_ADDOPTS")
+    if addopts:
+        args.extend(shlex.split(addopts))
+
+    return tuple(args)
+
+
 def _resolve_backend_type(config: pytest.Config) -> BackendType:
     """Resolve backend strictly from an explicitly provided --platform."""
-    params = getattr(config, "invocation_params", None)
-    invocation_args = tuple(params.args) if params is not None else ()
-    if not _has_explicit_platform_arg(invocation_args):
+    if not _has_explicit_platform_arg(_get_platform_arg_sources(config)):
         raise pytest.UsageError(
             "tests/st/runtime/test_cross_core.py requires an explicit --platform "
             "(a2a3, a2a3sim, a5, or a5sim)"
