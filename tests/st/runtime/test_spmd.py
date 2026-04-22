@@ -10,9 +10,10 @@
 """
 Runtime tests for SPMD (Single Program Multiple Data) execution.
 
-This module tests multi-block data-parallel dispatch using pl.spmd(core_num=N)
-and pl.tile.get_block_idx(). Each block processes a different slice of the input
-tensors and writes its result to the corresponding output region.
+This module tests multi-block data-parallel dispatch using pl.spmd(N) (or the
+equivalent loop form ``for i in pl.spmd(N)``) together with pl.tile.get_block_idx().
+Each block processes a different slice of the input tensors and writes its result
+to the corresponding output region.
 
 Tests cover:
   - Single SPMD submission smoke tests (add, mul)
@@ -64,7 +65,7 @@ class SPMDAddProgram:
         b: pl.Tensor[[512, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
     ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             out = self.spmd_add(a, b, out)
         return out
 
@@ -95,7 +96,7 @@ class SPMDMulProgram:
         b: pl.Tensor[[512, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
     ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             out = self.spmd_mul(a, b, out)
         return out
 
@@ -164,11 +165,11 @@ class SPMDThreeSubmitProgram:
         t2: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
         out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
     ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             t1 = self.spmd_add(a, b, t1)
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             t2 = self.spmd_mul(t1, a, t2)
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             out = self.spmd_sub(t2, b, out)
         return out
 
@@ -211,15 +212,15 @@ class SPMDEscalating5Program:
         b: pl.Tensor[[2048, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[2048, 128], pl.FP32]],
     ) -> pl.Tensor[[2048, 128], pl.FP32]:
-        with pl.spmd(core_num=1):
+        with pl.spmd(1):
             out = self.kernel_add(a, b, out, 0)
-        with pl.spmd(core_num=2):
+        with pl.spmd(2):
             out = self.kernel_add(a, b, out, 1)
-        with pl.spmd(core_num=3):
+        with pl.spmd(3):
             out = self.kernel_add(a, b, out, 3)
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             out = self.kernel_add(a, b, out, 6)
-        with pl.spmd(core_num=6):
+        with pl.spmd(6):
             out = self.kernel_add(a, b, out, 10)
         return out
 
@@ -274,7 +275,7 @@ class SPMDMixedKernelProgram:
         bias: pl.Tensor[[256, 64], pl.FP32],
         out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
     ) -> pl.Tensor[[256, 64], pl.FP32]:
-        with pl.spmd(core_num=4):
+        with pl.spmd(4):
             out = self.matmul_bias(a, b, bias, out)
         return out
 
@@ -313,7 +314,7 @@ class SPMDSyncStartProgram:
         b: pl.Tensor[[512, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
     ) -> pl.Tensor[[512, 128], pl.FP32]:
-        with pl.spmd(core_num=4, sync_start=True):
+        with pl.spmd(4, sync_start=True):
             out = self.spmd_add(a, b, out)
         return out
 
@@ -352,13 +353,13 @@ class SPMDSyncStartMixedProgram:
         b: pl.Tensor[[3072, 128], pl.FP32],
         out: pl.Out[pl.Tensor[[3072, 128], pl.FP32]],
     ) -> pl.Tensor[[3072, 128], pl.FP32]:
-        with pl.spmd(core_num=2):  # T0: baseline
+        with pl.spmd(2):  # T0: baseline
             out = self.kernel_add(a, b, out, 0)
-        with pl.spmd(core_num=8, sync_start=True):  # T1
+        with pl.spmd(8, sync_start=True):  # T1
             out = self.kernel_add(a, b, out, 2)
-        with pl.spmd(core_num=2, sync_start=True):  # T2
+        with pl.spmd(2, sync_start=True):  # T2
             out = self.kernel_add(a, b, out, 10)
-        with pl.spmd(core_num=12, sync_start=True):  # T3
+        with pl.spmd(12, sync_start=True):  # T3
             out = self.kernel_add(a, b, out, 12)
         return out
 

@@ -2190,7 +2190,7 @@ class TestTensorReadWriteOffsetCodegen:
                 bias: pl.Tensor[[64, 64], pl.FP32],
                 out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
             ) -> pl.Tensor[[64, 64], pl.FP32]:
-                with pl.spmd(core_num=4, sync_start=True):
+                with pl.spmd(4, sync_start=True):
                     out = self.kernel(a, b, bias, out)
                 return out
 
