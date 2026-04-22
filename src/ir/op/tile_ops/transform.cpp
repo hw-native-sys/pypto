@@ -188,6 +188,20 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
 
   tile_view.blayout = InferTileLayoutFromShape(new_shape);
 
+  // Read optional pad_value kwarg (default PadValue::null = no padding).
+  PadValue pad_value = PadValue::null;
+  for (const auto& [k, v] : kwargs) {
+    if (k != "pad_value") continue;
+    CHECK(v.type() == typeid(PadValue))
+        << "tile.slice pad_value must be a PadValue enum, got " << v.type().name();
+    pad_value = std::any_cast<PadValue>(v);
+    CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
+          pad_value == PadValue::min)
+        << "tile.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
+    break;
+  }
+  tile_view.pad = pad_value;
+
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -298,6 +312,7 @@ REGISTER_OP("tile.slice")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("valid_shape", "Optional logical valid shape (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .set_output_memory_inherit_input()
+    .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSliceType(args, kwargs);

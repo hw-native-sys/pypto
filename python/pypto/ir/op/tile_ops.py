@@ -1919,6 +1919,7 @@ def slice(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    pad_value: PadValue | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tile with static shape and optional valid shape.
@@ -1929,6 +1930,9 @@ def slice(
         offset: Offset dimensions for the slice, or a MakeTuple
         valid_shape: Valid shape dimensions, or a MakeTuple. When omitted, shape
             is reused as the valid shape.
+        pad_value: Optional padding mode for out-of-valid-shape elements
+            (PadValue.zero, PadValue.max, or PadValue.min). When omitted, no
+            padding is applied (equivalent to PadValue.null).
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1951,7 +1955,11 @@ def slice(
             )
         args.append(valid_shape_tuple)
 
-    return _ir_core.create_op_call("tile.slice", args, {}, actual_span)
+    kwargs: dict[str, Any] = {}
+    if pad_value is not None:
+        kwargs["pad_value"] = pad_value
+
+    return _ir_core.create_op_call("tile.slice", args, kwargs, actual_span)
 
 
 def reshape(

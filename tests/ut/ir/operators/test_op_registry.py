@@ -485,6 +485,12 @@ def test_fillpad_kwarg_schema():
     assert tile_fillpad_inplace_op.has_attr("pad_value")
 
 
+def test_tile_slice_pad_value_kwarg_schema():
+    """Test that tile.slice declares pad_value in its kwarg schema."""
+    tile_slice_op = ir.get_op("tile.slice")
+    assert tile_slice_op.has_attr("pad_value")
+
+
 class TestOpMemorySpecRegistry:
     """Test that op memory specs are correctly registered and queryable."""
 

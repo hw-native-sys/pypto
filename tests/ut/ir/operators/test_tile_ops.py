@@ -1017,6 +1017,95 @@ class TestTileSliceReshapeOps:
         with pytest.raises(ValueError, match="compile-time constant"):
             tile.slice(tile_var, [8, valid_n], [0, 0])
 
+    @staticmethod
+    def _make_slice_tile_var():
+        """Build a [16, 32] FP16 tile Var for slice pad_value tests."""
+        span = ir.Span.unknown()
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim32], DataType.FP16)
+        return ir.Var("tile", tile_type, span)
+
+    def test_tile_slice_with_pad_value_zero(self):
+        """tile.slice writes pad_value=zero to the output tile_view.pad."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.zero)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.slice"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.zero
+        assert len(result_type.tile_view.valid_shape) == 2
+        assert isinstance(result_type.tile_view.valid_shape[0], ir.ConstInt)
+        assert result_type.tile_view.valid_shape[0].value == 8
+        assert isinstance(result_type.tile_view.valid_shape[1], ir.ConstInt)
+        assert result_type.tile_view.valid_shape[1].value == 4
+
+    def test_tile_slice_with_pad_value_min(self):
+        """tile.slice writes pad_value=min to the output tile_view.pad."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.min)
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.min
+
+    def test_tile_slice_with_pad_value_max(self):
+        """tile.slice writes pad_value=max to the output tile_view.pad."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.max)
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.max
+
+    def test_tile_slice_default_pad_is_null(self):
+        """tile.slice without pad_value defaults to PadValue.null (backward compat)."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0])
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        assert result_type.tile_view.pad == ir.PadValue.null
+
+    def test_tile_slice_rejects_bad_pad_value(self):
+        """tile.slice rejects a non-PadValue pad_value kwarg via registry validation."""
+        tile_var = self._make_slice_tile_var()
+        span = tile_var.span
+        shape_tuple = ir.MakeTuple(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)], span
+        )
+        offset_tuple = ir.MakeTuple(
+            [ir.ConstInt(0, DataType.INT32, span), ir.ConstInt(0, DataType.INT32, span)], span
+        )
+        valid_shape_tuple = ir.MakeTuple(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(4, DataType.INT32, span)], span
+        )
+        with pytest.raises(TypeError, match="'pad_value'.*incompatible type"):
+            ir.create_op_call(
+                "tile.slice",
+                [tile_var, shape_tuple, offset_tuple, valid_shape_tuple],
+                {"pad_value": 5},
+                span,
+            )
+
+    def test_tile_slice_pad_without_valid_shape_warns(self):
+        """DSL emits a UserWarning when pad_value is set but valid_shape is None."""
+        span = ir.Span.unknown()
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim32 = ir.ConstInt(32, DataType.INT32, span)
+        tile_type = ir.TileType([dim16, dim32], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        tile_arg = pl.Tile(expr=tile_var)
+        with pytest.warns(UserWarning, match="pad_value has no effect"):
+            pl.tile.slice(tile_arg, [8, 16], [0, 0], pad_value=pl.PadValue.zero)
+
     def test_tile_reshape(self):
         """Test tile.reshape operation."""
         span = ir.Span.unknown()

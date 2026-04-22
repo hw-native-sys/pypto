@@ -15,6 +15,7 @@ that accept and return Tile types instead of raw Expr/Call objects.
 Accessed as ``pl.tile.*``
 """
 
+import warnings
 from collections.abc import Sequence
 from typing import overload
 
@@ -1214,6 +1215,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
+    pad_value: PadValue | None = None,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.
 
@@ -1223,10 +1225,23 @@ def slice(
         offset: Offset dimensions for the slice
         valid_shape: Valid shape dimensions. When omitted, shape is reused as the
             logical valid shape.
+        pad_value: Optional padding mode (PadValue.zero, PadValue.max, or
+            PadValue.min) applied to out-of-valid-shape elements. Only
+            meaningful when ``valid_shape`` is smaller than ``shape``.
 
     Returns:
         Tile wrapping the slice operation
     """
+    if pad_value is not None and pad_value != PadValue.null and valid_shape is None:
+        warnings.warn(
+            f"tile.slice received pad_value={pad_value!r} but no valid_shape. "
+            f"pad_value has no effect unless valid_shape is smaller than shape. "
+            f"If you intend to narrow the valid region later via "
+            f"tile.set_validshape, you can ignore this warning; otherwise "
+            f"pass valid_shape=... to tile.slice.",
+            stacklevel=2,
+        )
+
     tile_expr = tile.unwrap()
     normalized_valid_shape = None if valid_shape is None else _normalize_intlike(valid_shape)
     call_expr = _ir_ops.slice(
@@ -1234,6 +1249,7 @@ def slice(
         _normalize_intlike(shape),
         _normalize_intlike(offset),
         normalized_valid_shape,
+        pad_value=pad_value,
     )
     return Tile(expr=call_expr)
 
