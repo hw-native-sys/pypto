@@ -155,6 +155,72 @@ class ColSum_32x64_FP16:
         return output
 
 
+@pl.program
+class ColSum_16x16_FP32_Sequential:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        input_tensor: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        tile: pl.Tile[[16, 16], pl.FP32] = pl.load(input_tensor, [0, 0], [16, 16])
+        result: pl.Tile[[1, 16], pl.FP32] = pl.tile.col_sum(tile)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        input_tensor: pl.Tensor[[16, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        output = self.kernel(input_tensor, output)
+        return output
+
+
+@pl.program
+class ColSum_8x128_FP32_Sequential:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        input_tensor: pl.Tensor[[8, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        tile: pl.Tile[[8, 128], pl.FP32] = pl.load(input_tensor, [0, 0], [8, 128])
+        result: pl.Tile[[1, 128], pl.FP32] = pl.tile.col_sum(tile)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        input_tensor: pl.Tensor[[8, 128], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 128], pl.FP32]],
+    ) -> pl.Tensor[[1, 128], pl.FP32]:
+        output = self.kernel(input_tensor, output)
+        return output
+
+
+@pl.program
+class ColSum_32x64_FP16_Sequential:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP16],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP16]],
+    ) -> pl.Tensor[[1, 64], pl.FP16]:
+        tile: pl.Tile[[32, 64], pl.FP16] = pl.load(input_tensor, [0, 0], [32, 64])
+        result: pl.Tile[[1, 64], pl.FP16] = pl.tile.col_sum(tile)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        input_tensor: pl.Tensor[[32, 64], pl.FP16],
+        output: pl.Out[pl.Tensor[[1, 64], pl.FP16]],
+    ) -> pl.Tensor[[1, 64], pl.FP16]:
+        output = self.kernel(input_tensor, output)
+        return output
+
+
 # =============================================================================
 # Programs — col_max
 # =============================================================================
@@ -472,6 +538,80 @@ class ColSum32x64FP16(PTOTestCase):
         tensors["output"][:] = buf[0:1]
 
 
+class ColSum16x16FP32Sequential(PTOTestCase):
+    def get_name(self) -> str:
+        return "col_sum_16x16_fp32_sequential"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("input_tensor", [16, 16], DataType.FP32, init_value=torch.randn),
+            TensorSpec("output", [1, 16], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ColSum_16x16_FP32_Sequential
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.sum(tensors["input_tensor"], dim=0, keepdim=True)
+
+
+class ColSum8x128FP32Sequential(PTOTestCase):
+    def get_name(self) -> str:
+        return "col_sum_8x128_fp32_sequential"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("input_tensor", [8, 128], DataType.FP32, init_value=torch.randn),
+            TensorSpec("output", [1, 128], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ColSum_8x128_FP32_Sequential
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.sum(tensors["input_tensor"], dim=0, keepdim=True)
+
+
+class ColSum32x64FP16Sequential(PTOTestCase):
+    def get_name(self) -> str:
+        return "col_sum_32x64_fp16_sequential"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("input_tensor", [32, 64], DataType.FP16, init_value=torch.randn),
+            TensorSpec("output", [1, 64], DataType.FP16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ColSum_32x64_FP16_Sequential
+
+    def compute_expected(self, tensors, params=None):
+        # Sequential reduction in FP16: accumulate rows one by one
+        inp = tensors["input_tensor"]
+        acc = inp[0].clone()
+        for i in range(1, inp.shape[0]):
+            acc = (acc + inp[i]).half()
+        tensors["output"][:] = acc.unsqueeze(0)
+
+
 # =============================================================================
 # Test Cases — col_max
 # =============================================================================
@@ -692,6 +832,18 @@ class TestColSum:
 
     def test_32x64_fp32_sequential(self, test_runner):
         result = test_runner.run(ColSum32x64FP32Sequential())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_16x16_fp32_sequential(self, test_runner):
+        result = test_runner.run(ColSum16x16FP32Sequential())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_8x128_fp32_sequential(self, test_runner):
+        result = test_runner.run(ColSum8x128FP32Sequential())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_32x64_fp16_sequential(self, test_runner):
+        result = test_runner.run(ColSum32x64FP16Sequential())
         assert result.passed, f"Test failed: {result.error}"
 
 
