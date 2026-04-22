@@ -345,8 +345,13 @@ def slice(
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
 
 
-def fillpad(value: T, pad_value: PadValue = PadValue.zero) -> T:
-    """Fill invalid elements, dispatched by input type."""
+def fillpad(value: T, pad_value: PadValue | int | float = PadValue.zero) -> T:
+    """Fill invalid elements, dispatched by input type.
+
+    ``pad_value`` accepts the ``PadValue`` enum or the literal sugars ``0``,
+    ``math.inf``, ``-math.inf``. Other values raise — the hardware only
+    supports the three padding modes.
+    """
     if isinstance(value, Tensor):
         return _tensor.fillpad(value, pad_value)
     if isinstance(value, Tile):

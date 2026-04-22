@@ -32,6 +32,7 @@ from pypto.pypto_core.ir import (
 )
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
+from ._pad_value import normalize_pad_value
 
 
 def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _ir_core.MakeTuple) -> None:
@@ -479,22 +480,29 @@ def full(
     return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 
 
-def fillpad(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None = None) -> Call:
+def fillpad(tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None) -> Call:
     """Fill remaining tile elements with specified padding value.
 
     Args:
         tile: Input tile (TileType)
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression that returns the filled and padded tile
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.fillpad", [tile], {"pad_value": pad_value}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.fillpad", [tile], {"pad_value": normalize_pad_value(pad_value)}, actual_span
+    )
 
 
-def fillpad_inplace(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span | None = None) -> Call:
+def fillpad_inplace(
+    tile: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None
+) -> Call:
     """Fill padding elements of input tile in place with specified pad value.
 
     Unlike fillpad which returns a new tile, this operation mutates the input
@@ -503,14 +511,19 @@ def fillpad_inplace(tile: Expr, pad_value: PadValue = PadValue.zero, span: Span 
 
     Args:
         tile: Input tile (TileType)
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression (result typically discarded since op is in-place)
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.fillpad_inplace", [tile], {"pad_value": pad_value}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.fillpad_inplace", [tile], {"pad_value": normalize_pad_value(pad_value)}, actual_span
+    )
 
 
 # ============================================================================

@@ -79,7 +79,7 @@ Transfer data between memory hierarchy levels.
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | Move tile between memory levels (including Vec→Vec) |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
-| `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; tensor inputs lower to tile fillpad in InCore code |
+| `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | Fill invalid view elements using the requested pad value; accepts the `PadValue.zero/max/min` enum or the literal sugars `0`, `math.inf`, `-math.inf` (other values raise). Tensor inputs lower to tile fillpad in InCore code |
 | `get_block_idx` | `() -> Scalar` | Get current hardware block index (UINT64) |
 
 ## Tile Arithmetic (`pl.tile.*`)

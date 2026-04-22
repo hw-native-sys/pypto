@@ -74,7 +74,7 @@
 | `move` | `(tile: Tile, target_memory: Mem) -> Tile` | 在内存层级间移动 tile（包括 Vec→Vec 拷贝） |
 | `create` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem = Mem.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
-| `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue = PadValue.zero) -> Tensor \| Tile` | 按指定 pad 值填充无效视图区域；Tensor 输入会在 InCore 代码中下沉为 tile fillpad |
+| `fillpad` | `(input: Tensor \| Tile, pad_value: PadValue \| int \| float = PadValue.zero) -> Tensor \| Tile` | 按指定 pad 值填充无效视图区域；接受 `PadValue.zero/max/min` 枚举，或字面量 `0`、`math.inf`、`-math.inf`（其他值会报错）；Tensor 输入会在 InCore 代码中下沉为 tile fillpad |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |
 
 ## Tile 算术（`pl.tile.*`）

@@ -413,12 +413,15 @@ def full(shape: list[int], dtype: DataType, value: int | float) -> Tile:
     return Tile(expr=call_expr)
 
 
-def fillpad(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
+def fillpad(tile: Tile, pad_value: PadValue | int | float = PadValue.zero) -> Tile:
     """Fill remaining tile elements with specified padding value.
 
     Args:
         tile: Input tile
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
 
     Returns:
         Tile wrapping the fillpad operation
@@ -427,7 +430,7 @@ def fillpad(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
     return Tile(expr=call_expr)
 
 
-def fillpad_inplace(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
+def fillpad_inplace(tile: Tile, pad_value: PadValue | int | float = PadValue.zero) -> Tile:
     """Fill padding elements of input tile in place.
 
     Unlike fillpad which allocates a new output tile, this operation reuses
@@ -436,7 +439,10 @@ def fillpad_inplace(tile: Tile, pad_value: PadValue = PadValue.zero) -> Tile:
 
     Args:
         tile: Input tile
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min). Default is zero.
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
 
     Returns:
         Tile with padding filled (shares memory with the input tile).

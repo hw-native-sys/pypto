@@ -17,6 +17,7 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PadValue, ScalarType, Span, TensorLayout
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
+from ._pad_value import normalize_pad_value
 
 
 def create(
@@ -179,19 +180,25 @@ def slice(
     return _ir_core.create_op_call("tensor.slice", args, {}, actual_span)
 
 
-def fillpad(tensor: Expr, pad_value: PadValue = PadValue.zero, span: Span | None = None) -> Call:
+def fillpad(
+    tensor: Expr, pad_value: PadValue | int | float = PadValue.zero, span: Span | None = None
+) -> Call:
     """Fill invalid tensor view elements with the specified padding value.
 
     Args:
         tensor: Input tensor expression
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min)
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Other values
+            raise — the hardware only supports the three padding modes.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression creating a padded tensor
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.fillpad", [tensor], {"pad_value": pad_value}, actual_span)
+    return _ir_core.create_op_call(
+        "tensor.fillpad", [tensor], {"pad_value": normalize_pad_value(pad_value)}, actual_span
+    )
 
 
 def matmul(

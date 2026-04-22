@@ -182,12 +182,15 @@ def slice(
     return Tensor(expr=call_expr)
 
 
-def fillpad(tensor: Tensor, pad_value: PadValue = PadValue.zero) -> Tensor:
+def fillpad(tensor: Tensor, pad_value: PadValue | int | float = PadValue.zero) -> Tensor:
     """Fill invalid tensor view elements with the specified padding value.
 
     Args:
         tensor: Input tensor
-        pad_value: Padding mode (PadValue.zero, PadValue.max, or PadValue.min)
+        pad_value: ``PadValue`` enum (``zero`` / ``max`` / ``min``), or one of
+            the literal sugars ``0``, ``math.inf``, ``-math.inf``. Default is
+            ``PadValue.zero``. Other values raise — the hardware only supports
+            the three padding modes.
 
     Returns:
         Tensor wrapping the fillpad operation
