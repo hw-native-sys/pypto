@@ -98,7 +98,7 @@ class BackendHandler {
    *        adapter `tile.move` before the actual tpush.
    *
    * Ascend950 hardware cross-core pipe expects fractal layout at the boundary
-   * (Left -> NZ, Right -> ZN), so the AIV producer must convert.
+   * (Left / Right / Mat -> NZ), so the AIV producer must convert.
    * Ascend910B routes via UB -> GM -> Mat which accepts ND directly, so no
    * adapter is needed.
    */
@@ -141,9 +141,14 @@ class BackendHandler {
    *   for matching ND/DN/NZ layouts.
    *
    * Ascend950 (a5): hardware cross-core pipe carries data in fractal layout
-   *   directly. Left/Right/Mat all use NZ at the transfer boundary
-   *   (Left -> NZ, Right -> NZ as well because vec -> Mat does not support
-   *   ZN fractal); Vec preserves the original view.
+   *   directly. Left / Right / Mat all use NZ at the transfer boundary
+   *   because A5 V2C inserts Vec tiles into the Mat FIFO with
+   *   `TINSERT_IMPL<TInsertMode::NZ>`; Vec preserves the caller-requested
+   *   final view:
+   *   Left -> NZ (col_major blayout, row_major slayout)
+   *   Right -> NZ (col_major blayout, row_major slayout)
+   *   Mat -> NZ (col_major blayout, row_major slayout)
+   *   Vec -> preserve original view
    *
    * @param dest_ms Destination memory space (must be Vec / Mat / Left / Right).
    * @param original_view Caller-supplied view of the source tile.

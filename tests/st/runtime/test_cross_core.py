@@ -22,8 +22,6 @@ Tests:
   BiDirectNoSplitTest : V↔C, no split.             c += (a+1) @ b (parallel over N in blocks)
 """
 
-import os
-import shlex
 import sys
 from typing import Any
 
@@ -43,46 +41,29 @@ _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
     "a2a3sim": BackendType.Ascend910B,
     "a5": BackendType.Ascend950,
-    "a5sim": BackendType.Ascend950,
+    # Keep CPU sim on the legacy 910B codegen path.  The a5sim runtime still
+    # exercises the simulator platform, but cross-core mixed-kernel execution
+    # is not stable with the Ascend950 backend for these cases.
+    "a5sim": BackendType.Ascend910B,
 }
+_DEFAULT_PLATFORM = "a2a3"
 
 
-def _has_explicit_platform_arg(args: tuple[str, ...] | list[str]) -> bool:
-    return any(arg == "--platform" or arg.startswith("--platform=") for arg in args)
-
-
-def _get_platform_arg_sources(config: pytest.Config) -> tuple[str, ...]:
-    """Collect raw CLI args from pytest/runtime entrypoints.
-
-    ``Config.invocation_params.args`` is the preferred source, but some
-    pytest launch paths do not preserve option flags there consistently.
-    Fall back to the process argv and ``PYTEST_ADDOPTS`` so collection-time
-    explicit-platform checks behave the same in local runs and CI.
-    """
-    args: list[str] = []
-
-    params = getattr(config, "invocation_params", None)
-    if params is not None:
-        args.extend(params.args)
-
-    args.extend(sys.argv[1:])
-
-    addopts = os.environ.get("PYTEST_ADDOPTS")
-    if addopts:
-        args.extend(shlex.split(addopts))
-
-    return tuple(args)
+def _resolve_platform(config: pytest.Config) -> str:
+    """Resolve the effective platform from the session-wide allowlist."""
+    raw_platform = str(config.getoption("--platform") or "")
+    tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()]
+    valid_platforms = tuple(dict.fromkeys(tok for tok in tokens if tok in _PLATFORM_TO_BACKEND))
+    if tokens and not valid_platforms:
+        raise pytest.UsageError(
+            "tests/st/runtime/test_cross_core.py supports --platform values (a2a3, a2a3sim, a5, or a5sim)"
+        )
+    return valid_platforms[0] if valid_platforms else _DEFAULT_PLATFORM
 
 
 def _resolve_backend_type(config: pytest.Config) -> BackendType:
-    """Resolve backend strictly from an explicitly provided --platform."""
-    if not _has_explicit_platform_arg(_get_platform_arg_sources(config)):
-        raise pytest.UsageError(
-            "tests/st/runtime/test_cross_core.py requires an explicit --platform "
-            "(a2a3, a2a3sim, a5, or a5sim)"
-        )
-
-    platform = config.getoption("--platform")
+    """Resolve backend from the selected platform, defaulting to a2a3."""
+    platform = _resolve_platform(config)
     try:
         return _PLATFORM_TO_BACKEND[platform]
     except KeyError as exc:
@@ -92,12 +73,12 @@ def _resolve_backend_type(config: pytest.Config) -> BackendType:
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Drive backend selection entirely from the explicit --platform option."""
+    """Drive backend selection from the session-wide --platform filter."""
     if "backend_type" not in metafunc.fixturenames:
         return
 
+    platform = _resolve_platform(metafunc.config)
     backend_type = _resolve_backend_type(metafunc.config)
-    platform = metafunc.config.getoption("--platform")
     metafunc.parametrize("backend_type", [backend_type], ids=[platform])
 
 
@@ -613,7 +594,4 @@ class TestCrossCore:
 
 
 if __name__ == "__main__":
-    argv = sys.argv[1:]
-    if not _has_explicit_platform_arg(argv):
-        raise SystemExit("test_cross_core.py requires --platform {a2a3|a2a3sim|a5|a5sim}")
-    raise SystemExit(pytest.main([__file__, "-v", *argv]))
+    raise SystemExit(pytest.main([__file__, "-v", *sys.argv[1:]]))

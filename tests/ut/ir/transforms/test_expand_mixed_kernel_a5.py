@@ -741,7 +741,15 @@ class TestCrossCoreBoundaries:
             ):
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
-                y_right_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+                y_right_mat: pl.Tile[
+                    [128, 64],
+                    pl.BF16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.col_major,
+                        slayout=pl.TileLayout.row_major,
+                    ),
+                ] = pl.tpop_from_aiv(split=0)
                 y_right = pl.move(
                     y_right_mat,
                     target_memory=pl.MemorySpace.Right,
