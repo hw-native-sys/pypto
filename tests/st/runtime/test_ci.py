@@ -202,6 +202,46 @@ class TensorArangeAliasProgram:
         return output
 
 
+@pl.program
+class CiUint32AscendProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.UINT32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.UINT32]:
+        seq: pl.Tile[[ROWS, COLS], pl.UINT32] = pl.tile.ci(5, [ROWS, COLS], dtype=pl.UINT32)
+        out: pl.Tensor[[ROWS, COLS], pl.UINT32] = pl.store(seq, offsets=[0, 0], output_tensor=output)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.UINT32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.UINT32]:
+        output = self.kernel(output)
+        return output
+
+
+@pl.program
+class CiUint16AscendProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.UINT16]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.UINT16]:
+        seq: pl.Tile[[ROWS, COLS], pl.UINT16] = pl.tile.ci(0, [ROWS, COLS], dtype=pl.UINT16)
+        out: pl.Tensor[[ROWS, COLS], pl.UINT16] = pl.store(seq, offsets=[0, 0], output_tensor=output)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.UINT16]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.UINT16]:
+        output = self.kernel(output)
+        return output
+
+
 # --- Test Cases ---
 
 
@@ -341,6 +381,34 @@ class TensorArangeAliasTestCase(_CiBaseTestCase):
         tensors["output"][:] = torch.arange(N - 1, -1, -1, dtype=torch.int32).reshape(ROWS, COLS)
 
 
+class CiUint32AscendTestCase(_CiBaseTestCase):
+    def get_name(self) -> str:
+        return "ci_uint32_ascend"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [TensorSpec("output", [ROWS, COLS], DataType.UINT32, is_output=True)]
+
+    def get_program(self) -> Any:
+        return CiUint32AscendProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.arange(5, 5 + N, dtype=torch.int64).to(torch.uint32).reshape(ROWS, COLS)
+
+
+class CiUint16AscendTestCase(_CiBaseTestCase):
+    def get_name(self) -> str:
+        return "ci_uint16_ascend"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [TensorSpec("output", [ROWS, COLS], DataType.UINT16, is_output=True)]
+
+    def get_program(self) -> Any:
+        return CiUint16AscendProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.arange(0, N, dtype=torch.int64).to(torch.uint16).reshape(ROWS, COLS)
+
+
 # --- Tests ---
 
 
@@ -381,6 +449,14 @@ class TestCi:
 
     def test_tensor_arange_ascending(self, test_runner):
         result = test_runner.run(TensorArangeAscendingTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_ci_uint32_ascend(self, test_runner):
+        result = test_runner.run(CiUint32AscendTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_ci_uint16_ascend(self, test_runner):
+        result = test_runner.run(CiUint16AscendTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
 

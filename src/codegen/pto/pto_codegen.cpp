@@ -722,6 +722,13 @@ std::string PTOCodegen::GetOrEmitConstant(int64_t value, DataType dt) {
   if (it != fs_.emitted_numeric_constants.end()) return it->second;
 
   std::string mlir_type = GetTypeString(dt);
+  // MLIR's arith.constant requires signless integer return types (upstream
+  // ArithOps.cpp ConstantOp::verify). For unsigned dtypes, emit the constant
+  // at the signless type and bridge to the unsigned type via
+  // builtin.unrealized_conversion_cast; some consumer ops (e.g. pto.tci) in
+  // turn require the operand type to match the destination dtype exactly.
+  bool is_unsigned = dt.IsUnsignedInt() && !mlir_type.empty() && mlir_type[0] == 'u';
+  std::string signless_type = is_unsigned ? mlir_type.substr(1) : mlir_type;
   std::string ssa_suffix = "_" + mlir_type;
 
   std::string ssa_id;
@@ -741,8 +748,17 @@ std::string PTOCodegen::GetOrEmitConstant(int64_t value, DataType dt) {
   } else {
     name = NewTemp();
   }
-  fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : " << mlir_type
-                        << "\n";
+
+  if (is_unsigned) {
+    std::string signless_name = NewTemp();
+    fs_.constants_section << fs_.constants_indent << signless_name << " = arith.constant " << value << " : "
+                          << signless_type << "\n";
+    fs_.constants_section << fs_.constants_indent << name << " = builtin.unrealized_conversion_cast "
+                          << signless_name << " : " << signless_type << " to " << mlir_type << "\n";
+  } else {
+    fs_.constants_section << fs_.constants_indent << name << " = arith.constant " << value << " : "
+                          << mlir_type << "\n";
+  }
   fs_.emitted_numeric_constants[key] = name;
   return name;
 }
@@ -1160,6 +1176,9 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     return GetTypeString(const_float->dtype());
   }
   if (auto const_int = As<ir::ConstInt>(expr)) {
+    // The SSA value produced by GetOrEmitConstant is cast back to the dtype's
+    // MLIR type (via unrealized_conversion_cast for unsigned), so the use-site
+    // annotation matches the declared dtype directly.
     return GetTypeString(const_int->dtype());
   }
   return "";

@@ -427,8 +427,9 @@ TypePtr DeduceTensorCiType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK(found_dtype) << "tensor.ci requires 'dtype' kwarg";
-  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32)
-      << "tensor.ci dtype must be one of {INT16, INT32}, but got " << dtype.ToString();
+  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32 || dtype == DataType::UINT16 ||
+        dtype == DataType::UINT32)
+      << "tensor.ci dtype must be one of {INT16, INT32, UINT16, UINT32}, but got " << dtype.ToString();
 
   // First arg: start scalar; dtype must match destination dtype.
   auto start_scalar_type = As<ScalarType>(args[0]->GetType());

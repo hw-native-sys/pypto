@@ -2264,12 +2264,15 @@ class TestTensorCiOp:
         assert "descending=True" in str(call)
 
     def test_tensor_ci_rejects_float_dtype(self):
-        with pytest.raises(ValueError, match=r"INT16.*INT32"):
+        with pytest.raises(ValueError, match=r"INT16.*INT32.*UINT16.*UINT32"):
             tensor.ci(0, [1, 32], dtype=DataType.FP32)
 
-    def test_tensor_ci_rejects_uint_dtype(self):
-        with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tensor.ci(0, [1, 16], dtype=DataType.UINT32)
+    @pytest.mark.parametrize("dtype", [DataType.INT16, DataType.UINT16, DataType.UINT32])
+    def test_tensor_ci_accepts_non_int32_dtypes(self, dtype):
+        call = tensor.ci(0, [1, 16], dtype=dtype)
+        t = call.type
+        assert isinstance(t, ir.TensorType)
+        assert t.dtype == dtype
 
     def test_tensor_ci_rejects_cols_equal_one(self):
         with pytest.raises(ValueError, match="innermost dimension"):

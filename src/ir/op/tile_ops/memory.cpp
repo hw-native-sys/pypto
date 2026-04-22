@@ -397,8 +397,9 @@ TypePtr DeduceTileCiType(const std::vector<ExprPtr>& args,
 
   // Extract dtype and validate it is one of the supported integer types.
   DataType dtype = GetKwarg<DataType>(kwargs, "dtype");
-  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32)
-      << "The operator " << op_name << " requires dtype to be one of {INT16, INT32}, but got "
+  CHECK(dtype == DataType::INT16 || dtype == DataType::INT32 || dtype == DataType::UINT16 ||
+        dtype == DataType::UINT32)
+      << "The operator " << op_name << " requires dtype to be one of {INT16, INT32, UINT16, UINT32}, but got "
       << dtype.ToString();
 
   // First argument is the scalar start value; its dtype must match the destination dtype.

@@ -2532,12 +2532,12 @@ class TestTileCiOp:
         assert "descending=True" in str(call)
 
     def test_tile_ci_rejects_float_dtype(self):
-        with pytest.raises(ValueError, match=r"INT16.*INT32"):
+        with pytest.raises(ValueError, match=r"INT16.*INT32.*UINT16.*UINT32"):
             tile.ci(0, [1, 32], dtype=DataType.FP32)
 
-    def test_tile_ci_rejects_uint_dtype(self):
-        with pytest.raises(ValueError, match=r"INT16.*INT32"):
-            tile.ci(0, [1, 16], dtype=DataType.UINT32)
+    def test_tile_ci_accepts_uint_dtype(self):
+        call = tile.ci(0, [1, 16], dtype=DataType.UINT32)
+        assert call is not None
 
     def test_tile_ci_rejects_cols_equal_one(self):
         with pytest.raises(ValueError, match="innermost dimension"):
