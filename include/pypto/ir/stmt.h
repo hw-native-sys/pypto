@@ -723,7 +723,9 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  *     body
  * with pl.at(level=pl.Level.HOST, role=pl.Role.Worker):  # -> HierarchyScopeStmt
  *     body
- * with pl.spmd(core_num=8):  # -> SpmdScopeStmt
+ * with pl.spmd(8):           # -> SpmdScopeStmt
+ *     body
+ * for i in pl.spmd(8):       # -> SpmdScopeStmt(body=InCoreScopeStmt(...))
  *     body
  *
  * **Semantics:**

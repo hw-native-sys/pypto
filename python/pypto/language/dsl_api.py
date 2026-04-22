@@ -869,27 +869,32 @@ class SpmdContext:
 
 
 def spmd(
-    *,
     core_num: int,
+    *,
     sync_start: bool = False,
     name_hint: str = "",
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
+    The first argument is the number of blocks and is positional — mirroring
+    ``range(n)``. Loop start is fixed at 0 and step at 1; each block gets an
+    index ``i`` in ``[0, core_num)``.
+
     Two usage forms:
 
-    1. ``with pl.spmd(...):`` — body must be a single call to a pre-defined
+    1. ``with pl.spmd(n):`` — body must be a single call to a pre-defined
        InCore kernel. Can stand alone (implicit cluster) or nest inside
        ``pl.cluster()``.
 
-    2. ``for i in pl.spmd(...):`` — loop-style. The iteration variable binds
+    2. ``for i in pl.spmd(n):`` — loop-style. The iteration variable binds
        the per-block index (equivalent to ``pl.tile.get_block_idx()``); the
        body is auto-outlined into a synthetic InCore function, so inline
        tile/tensor ops work without a separate ``@pl.function(type=InCore)``
        declaration.
 
     Args:
-        core_num: Number of blocks for SPMD dispatch. Must be a positive integer.
+        core_num: Number of blocks for SPMD dispatch. Positional; must be a
+            positive integer.
         sync_start: If True, all blocks start execution simultaneously (default: False).
         name_hint: Optional name hint for the outlined function.
 
@@ -898,11 +903,11 @@ def spmd(
 
     Examples:
         >>> # Single-kernel context-manager form
-        >>> with pl.spmd(core_num=4):
+        >>> with pl.spmd(4):
         ...     out = self.kernel(a, b, out)
         >>>
         >>> # Loop form — body runs per-block with i = tile.get_block_idx()
-        >>> for i in pl.spmd(core_num=4):
+        >>> for i in pl.spmd(4):
         ...     offset = i * 128
         ...     tile_a = pl.load(a, [offset, 0], [128, 128])
         ...     tile_b = pl.load(b, [offset, 0], [128, 128])
@@ -910,7 +915,7 @@ def spmd(
         >>>
         >>> # SPMD inside cluster (mixed kernel)
         >>> with pl.cluster():
-        ...     with pl.spmd(core_num=4, sync_start=True):
+        ...     with pl.spmd(4, sync_start=True):
         ...         out = self.kernel(a, b, out)
     """
     if not isinstance(core_num, int) or isinstance(core_num, bool) or core_num <= 0:

@@ -91,7 +91,7 @@ class Before:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x: pl.Tensor[[64], pl.FP32],
              out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.spmd(core_num=4, sync_start=True):
+        with pl.spmd(4, sync_start=True):
             out = self.kernel(x, out)
         return out
 ```

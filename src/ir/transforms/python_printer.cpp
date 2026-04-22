@@ -1119,8 +1119,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   auto first_call = first_assign ? As<Call>(first_assign->value_) : nullptr;
   auto first_op = first_call ? As<Op>(first_call->op_) : nullptr;
   if (first_op && first_op->name_ == "tile.get_block_idx") {
-    stream_ << "for " << first_assign->var_->name_hint_ << " in " << prefix_
-            << ".spmd(core_num=" << op->core_num_;
+    stream_ << "for " << first_assign->var_->name_hint_ << " in " << prefix_ << ".spmd(" << op->core_num_;
     if (op->sync_start_) {
       stream_ << ", sync_start=True";
     }
@@ -1143,7 +1142,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     return;
   }
 
-  stream_ << "with " << prefix_ << ".spmd(core_num=" << op->core_num_;
+  stream_ << "with " << prefix_ << ".spmd(" << op->core_num_;
   if (op->sync_start_) {
     stream_ << ", sync_start=True";
   }

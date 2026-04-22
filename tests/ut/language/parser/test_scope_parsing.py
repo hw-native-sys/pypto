@@ -233,7 +233,10 @@ class TestSpmdForLoop:
 
     def test_for_spmd_builds_spmd_scope_wrapping_incore(self):
         """Loop form emits SpmdScopeStmt containing an InCoreScopeStmt whose
-        first statement binds the loop var to pl.tile.get_block_idx()."""
+        first statement binds the loop var to pl.tile.get_block_idx().
+
+        ``core_num`` is positional — mirroring ``range(n)``.
+        """
 
         @pl.program
         class TestProgram:
@@ -244,7 +247,7 @@ class TestSpmdForLoop:
                 b: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                for i in pl.spmd(core_num=4):
+                for i in pl.spmd(4):
                     offset = i * 128
                     tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                     tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
@@ -265,6 +268,27 @@ class TestSpmdForLoop:
         assert call.op.name == "tile.get_block_idx"
         assert first_stmt.var.name_hint == "i"
 
+    def test_for_spmd_accepts_core_num_kwarg(self):
+        """Backward-compat: ``pl.spmd(core_num=N)`` keyword form still parses."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=4):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert spmd.core_num == 4
+
     def test_for_spmd_sync_start_and_name_hint(self):
         """sync_start= and name_hint= pass through to SpmdScopeStmt."""
 
@@ -276,7 +300,7 @@ class TestSpmdForLoop:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                for i in pl.spmd(core_num=8, sync_start=True, name_hint="my_kernel"):
+                for i in pl.spmd(8, sync_start=True, name_hint="my_kernel"):
                     offset = i * 64
                     t: pl.Tile[[64, 128], pl.FP32] = pl.load(a, [offset, 0], [64, 128])
                     out = pl.store(t, [offset, 0], out)
@@ -310,7 +334,7 @@ class TestSpmdForLoop:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                with pl.spmd(core_num=4):
+                with pl.spmd(4):
                     out = self.kernel(a, out)
                 return out
 
@@ -337,7 +361,7 @@ class TestSpmdForLoop:
 
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i, j in pl.spmd(core_num=4):  # type: ignore[misc]
+                for i, j in pl.spmd(4):  # type: ignore[misc]
                     _ = i + j
                 return a
 
@@ -347,7 +371,7 @@ class TestSpmdForLoop:
 
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.spmd(core_num=4, chunk=2):  # type: ignore[call-arg]
+                for i in pl.spmd(4, chunk=2):  # type: ignore[call-arg]
                     _ = i
                 return a
 
@@ -357,7 +381,7 @@ class TestSpmdForLoop:
 
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.spmd(core_num=4, init_values=(0,)):  # type: ignore[call-arg]
+                for i in pl.spmd(4, init_values=(0,)):  # type: ignore[call-arg]
                     _ = i
                 return a
 
@@ -377,7 +401,27 @@ class TestSpmdForLoop:
 
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.spmd(core_num=0):
+                for i in pl.spmd(0):
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_duplicate_core_num(self):
+        """Supplying ``core_num`` positionally *and* as a kwarg is rejected."""
+        with pytest.raises(ParserSyntaxError, match="multiple values for argument 'core_num'"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, core_num=4):  # type: ignore[misc]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_extra_positional(self):
+        """``pl.spmd`` takes a single positional ``core_num``; a second one is an error."""
+        with pytest.raises(ParserSyntaxError, match="at most one positional argument"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, 2):  # type: ignore[misc]
                     _ = i
                 return a
 
@@ -385,7 +429,7 @@ class TestSpmdForLoop:
         """Printing the for-spmd IR emits the loop form so it reparses cleanly.
 
         The printer detects the SpmdScopeStmt(InCoreScopeStmt(i = get_block_idx; ...))
-        pattern and emits ``for i in pl.spmd(core_num=N):``. Emitting the
+        pattern and emits ``for i in pl.spmd(N):`` (positional). Emitting the
         with-form here would fail because the body has multiple statements.
         """
 
@@ -397,14 +441,14 @@ class TestSpmdForLoop:
                 a: pl.Tensor[[512, 128], pl.FP32],
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
-                for i in pl.spmd(core_num=4):
+                for i in pl.spmd(4):
                     offset = i * 128
                     t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
                     out = pl.store(t, [offset, 0], out)
                 return out
 
         printed = Original.as_python()
-        assert "for i in pl.spmd(core_num=4):" in printed
+        assert "for i in pl.spmd(4):" in printed
 
         reparsed = parse_program(printed)
         main_fn = next(f for f in reparsed.functions.values() if f.name == "main")
@@ -416,7 +460,7 @@ class TestSpmdForLoop:
 
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                for i in pl.spmd(core_num=4, sync_start=1):  # type: ignore[arg-type]
+                for i in pl.spmd(4, sync_start=1):  # type: ignore[arg-type]
                     _ = i
                 return a
 

@@ -2378,7 +2378,7 @@ class ASTParser:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(core_num=4):",
+                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(4):",
                     )
             scope_kind = scope_kind_map[func_attr]
             span = self.span_tracker.get_span(stmt)
@@ -2404,43 +2404,54 @@ class ASTParser:
         *,
         usage_hint: str,
     ) -> tuple[int, bool | None, str]:
-        """Parse pl.spmd() keyword arguments.
+        """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=)`` arguments.
 
-        Returns ``(core_num, sync_start, name_hint)``. Raises ParserSyntaxError
-        for missing core_num, non-literal values, or unexpected kwargs.
-        Callers that want to pre-screen loop-specific kwargs should do so
-        before calling this helper.
+        The first positional argument is ``core_num`` (range-like). Returns
+        ``(core_num, sync_start, name_hint)``. Raises ParserSyntaxError for
+        missing core_num, non-literal values, or unexpected kwargs.
         """
-        if call.args:
+
+        def _validate_core_num_node(value_node: ast.AST, source: ast.AST) -> int:
+            if (
+                not isinstance(value_node, ast.Constant)
+                or not isinstance(value_node.value, int)
+                or isinstance(value_node.value, bool)
+            ):
+                raise ParserSyntaxError(
+                    "core_num must be an integer literal",
+                    span=self.span_tracker.get_span(source),
+                    hint=usage_hint,
+                )
+            if value_node.value <= 0:
+                raise ParserSyntaxError(
+                    f"core_num must be a positive integer, got {value_node.value}",
+                    span=self.span_tracker.get_span(source),
+                    hint=usage_hint,
+                )
+            return value_node.value
+
+        if len(call.args) > 1:
             raise ParserSyntaxError(
-                "pl.spmd() does not accept positional arguments",
-                span=self.span_tracker.get_span(anchor),
+                "pl.spmd() accepts at most one positional argument (core_num)",
+                span=self.span_tracker.get_span(call.args[1]),
                 hint=usage_hint,
             )
         core_num: int | None = None
+        if call.args:
+            core_num = _validate_core_num_node(call.args[0], call.args[0])
         sync_start: bool | None = None
         name_hint = ""
         for kw in call.keywords:
             if kw.arg == "name_hint":
                 name_hint = self._parse_scope_name_hint(kw.value, "pl.spmd()")
             elif kw.arg == "core_num":
-                if (
-                    not isinstance(kw.value, ast.Constant)
-                    or not isinstance(kw.value.value, int)
-                    or isinstance(kw.value.value, bool)
-                ):
+                if core_num is not None:
                     raise ParserSyntaxError(
-                        "core_num must be an integer literal",
-                        span=self.span_tracker.get_span(anchor),
+                        "pl.spmd() got multiple values for argument 'core_num'",
+                        span=self.span_tracker.get_span(kw.value),
                         hint=usage_hint,
                     )
-                if kw.value.value <= 0:
-                    raise ParserSyntaxError(
-                        f"core_num must be a positive integer, got {kw.value.value}",
-                        span=self.span_tracker.get_span(anchor),
-                        hint=usage_hint,
-                    )
-                core_num = kw.value.value
+                core_num = _validate_core_num_node(kw.value, kw.value)
             elif kw.arg == "sync_start":
                 if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
                     raise ParserSyntaxError(
@@ -2453,11 +2464,11 @@ class ASTParser:
                 raise ParserSyntaxError(
                     f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
                     span=self.span_tracker.get_span(anchor),
-                    hint="Supported keywords: 'core_num', 'sync_start', 'name_hint'",
+                    hint="Supported keywords: 'sync_start', 'name_hint'",
                 )
         if core_num is None:
             raise ParserSyntaxError(
-                "pl.spmd() requires core_num argument",
+                "pl.spmd() requires core_num (first positional argument)",
                 span=self.span_tracker.get_span(anchor),
                 hint=usage_hint,
             )
@@ -2470,15 +2481,15 @@ class ASTParser:
         scope_kind_map: dict[str, "ir.ScopeKind"],
     ) -> None:
         """Parse ``with pl.spmd(...):`` into a ScopeStmt(Spmd)."""
-        with_hint = "Use 'with pl.spmd(core_num=4):' with a single function call inside."
+        with_hint = "Use 'with pl.spmd(4):' with a single function call inside."
         core_num, sync_start, name_hint = self._parse_spmd_kwargs(stmt, context_expr, usage_hint=with_hint)
         # Validate body is exactly one statement that is a function call.
-        # The loop form (for i in pl.spmd(...):) is what accepts inline
+        # The loop form (for i in pl.spmd(n):) is what accepts inline
         # multi-statement bodies.
         spmd_hint = (
             "The 'with pl.spmd()' form wraps a single kernel call. Use "
-            "'for i in pl.spmd(core_num=4):' to write inline tile/tensor "
-            "ops with access to the block index."
+            "'for i in pl.spmd(4):' to write inline tile/tensor ops with "
+            "access to the block index."
         )
         if len(stmt.body) != 1:
             raise ParserSyntaxError(
@@ -2510,7 +2521,7 @@ class ASTParser:
         )
 
     def _parse_spmd_for_loop(self, stmt: ast.For, iter_call: ast.Call) -> None:
-        """Parse ``for i in pl.spmd(core_num=N, ...): body`` into
+        """Parse ``for i in pl.spmd(N, ...): body`` into
         ``SpmdScopeStmt(body=InCoreScopeStmt(body=<bind i; body>))``.
 
         The loop variable is bound to ``pl.tile.get_block_idx()`` as the first
@@ -2519,8 +2530,8 @@ class ASTParser:
         declaration.
         """
         spmd_hint = (
-            "Use 'for i in pl.spmd(core_num=4):' — the loop variable is bound "
-            "to the per-block index (equivalent to pl.tile.get_block_idx())."
+            "Use 'for i in pl.spmd(4):' — the loop variable is bound to the "
+            "per-block index (equivalent to pl.tile.get_block_idx())."
         )
         if not isinstance(stmt.target, ast.Name):
             raise ParserSyntaxError(

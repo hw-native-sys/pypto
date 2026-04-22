@@ -278,11 +278,11 @@ cluster = ir.ClusterScopeStmt(name_hint="", body=body, span=span)
 hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
 
-# with pl.spmd(core_num=8):
+# with pl.spmd(8):
 spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
                         name_hint="", body=body, span=span)
 
-# for i in pl.spmd(core_num=8):          # loop-style surface syntax
+# for i in pl.spmd(8):                    # loop-style surface syntax
 #     offset = i * 64
 #     tile = pl.load(a, [offset, 0], [64, 128])
 #     ...
