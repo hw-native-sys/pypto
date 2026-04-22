@@ -2403,12 +2403,14 @@ class ASTParser:
         call: ast.Call,
         *,
         usage_hint: str,
-    ) -> tuple[int, bool | None, str]:
+    ) -> tuple[int, bool, str]:
         """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=)`` arguments.
 
         The first positional argument is ``core_num`` (range-like). Returns
-        ``(core_num, sync_start, name_hint)``. Raises ParserSyntaxError for
-        missing core_num, non-literal values, or unexpected kwargs.
+        ``(core_num, sync_start, name_hint)`` with ``sync_start`` defaulting
+        to ``False`` (matching the DSL default). Raises ParserSyntaxError for
+        missing core_num, non-literal values, unexpected kwargs, or
+        ``**kwargs`` unpacking.
         """
 
         def _validate_core_num_node(value_node: ast.AST, source: ast.AST) -> int:
@@ -2439,9 +2441,17 @@ class ASTParser:
         core_num: int | None = None
         if call.args:
             core_num = _validate_core_num_node(call.args[0], call.args[0])
-        sync_start: bool | None = None
+        sync_start: bool = False
         name_hint = ""
         for kw in call.keywords:
+            if kw.arg is None:
+                # `pl.spmd(**cfg)` — ast.keyword.arg is None for **kwargs unpacking.
+                raise ParserSyntaxError(
+                    "pl.spmd() does not accept **kwargs; pass core_num (positional) "
+                    "and sync_start=/name_hint= explicitly",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint=usage_hint,
+                )
             if kw.arg == "name_hint":
                 name_hint = self._parse_scope_name_hint(kw.value, "pl.spmd()")
             elif kw.arg == "core_num":

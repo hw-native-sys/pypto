@@ -862,10 +862,16 @@ class SpmdContext:
 
     def __iter__(self) -> Iterator[Any]:
         # Lets `for i in pl.spmd(...)` type-check and parse at the Python
-        # level. Never executed at runtime — @pl.program / @pl.function
-        # intercept the AST and the parser replaces this construct with
-        # a SpmdScopeStmt wrapping an InCoreScopeStmt.
-        return iter(())
+        # level. The @pl.program / @pl.function decorators intercept the AST,
+        # so this method should never actually run — if it does, the caller
+        # is using pl.spmd() outside the DSL interception path. Raise
+        # loudly rather than silently yielding zero iterations.
+        raise RuntimeError(
+            "pl.spmd(...) loop form is only valid inside a @pl.program / "
+            "@pl.function body; the parser replaces the for-loop with an "
+            "SpmdScopeStmt. If you're seeing this, the surrounding function "
+            "was not decorated."
+        )
 
 
 def spmd(

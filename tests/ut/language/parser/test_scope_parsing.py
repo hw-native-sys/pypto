@@ -464,6 +464,61 @@ class TestSpmdForLoop:
                     _ = i
                 return a
 
+    def test_for_spmd_rejects_kwargs_unpacking(self):
+        """``pl.spmd(**cfg)`` raises a targeted diagnostic rather than the
+        confusing default error that tries to format ``kw.arg=None``.
+
+        The parser's kwarg walk sees ``ast.keyword(arg=None, value=...)``
+        for ``**`` unpacking; our handler rejects it before ever attempting
+        to evaluate the unpacked expression, so the value need not be a
+        supported expression kind.
+        """
+        with pytest.raises(ParserSyntaxError, match=r"does not accept \*\*kwargs"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(**a):  # type: ignore[misc]
+                    _ = i
+                return a
+
+    def test_for_spmd_loop_var_survives_ssa_shadowing_in_printer(self):
+        """Regression: when the outer scope already defines ``i``, SSA renames
+        the inner loop variable (e.g., ``i_1``). The printer must emit the
+        renamed name in the ``for ... in`` header so the header matches the
+        body."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                # Outer `i` shadows the loop var; the printer must rename.
+                i = 0  # noqa: F841
+                for i in pl.spmd(4):  # type: ignore[assignment]
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        printed = Original.as_python()
+        # Extract the `for <var> in pl.spmd(4):` header and verify `<var>` is
+        # referenced in the body (e.g. `<var> * 128`).
+        for line in printed.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("for ") and "pl.spmd(" in stripped:
+                header_var = stripped.split()[1]
+                break
+        else:
+            raise AssertionError(f"no for-spmd header in printed output:\n{printed}")
+        assert f"{header_var} * 128" in printed, (
+            f"loop var {header_var!r} from header not referenced in body; "
+            f"printer likely printed a stale raw name_hint:\n{printed}"
+        )
+        parse_program(printed)  # round-trips cleanly
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
