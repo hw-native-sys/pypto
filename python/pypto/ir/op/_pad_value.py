@@ -20,7 +20,8 @@ import math
 from pypto.pypto_core.ir import PadValue
 
 _HINT = (
-    "Use pl.PadValue.zero / pl.PadValue.max / pl.PadValue.min, or one of the literals 0, math.inf, -math.inf."
+    "Use pl.PadValue.zero / pl.PadValue.max / pl.PadValue.min, "
+    "or one of the literals 0, 0.0, math.inf, -math.inf."
 )
 
 
@@ -66,6 +67,6 @@ def normalize_pad_value(pad_value: object) -> PadValue:
         )
     raise TypeError(
         f"fillpad pad_value must be a PadValue or one of "
-        f"0 / math.inf / -math.inf; got {type(pad_value).__name__} "
+        f"0 / 0.0 / math.inf / -math.inf; got {type(pad_value).__name__} "
         f"{pad_value!r}. {_HINT}"
     )
