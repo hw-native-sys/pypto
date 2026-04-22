@@ -19,6 +19,7 @@ Orchestrates the full test execution pipeline:
 """
 
 import concurrent.futures
+import ctypes
 import importlib.util
 import logging
 import shutil
@@ -26,28 +27,30 @@ import tempfile
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
+import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
-from pypto.runtime.golden_writer import (
+from pypto.runtime.kernel_compiler import KernelCompiler
+from pypto.runtime.runner import (
+    RunConfig,
+    RunResult,
+)
+
+from harness.core.golden_writer import (
     _data_dir_has_files,
     _extract_compute_golden,
     _materialize_tensors,
     _save_data_files,
     generate_golden_source,
 )
-from pypto.runtime.kernel_compiler import KernelCompiler
-from pypto.runtime.runner import (
-    RunConfig,
-    RunResult,
-    _execute_on_device,
-)
-from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
-
 from harness.core.harness import PTOTestCase
+from harness.core.tensor_spec import TensorSpec as RuntimeTensorSpec
 
 # tests/st/harness/core/test_runner.py -> tests/st/ -> project root
 _ST_DIR = Path(__file__).parent.parent.parent
@@ -131,6 +134,214 @@ def _default_work_dir(test_name: str) -> Path:
     """Return the default output path for a saved test: build_output/{testName}_{timestamp}."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return _PROJECT_ROOT / "build_output" / f"{test_name}_{timestamp}"
+
+
+def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
+    """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
+
+    Returns ``None`` if the directory does not exist or any required file is
+    missing, allowing the caller to fall back to live computation.
+    """
+    if not out_dir.is_dir():
+        return None
+    result = {}
+    for name in output_names:
+        pt_file = out_dir / f"{name}.pt"
+        if not pt_file.exists():
+            return None
+        result[name] = torch.load(pt_file, weights_only=True)
+    return result
+
+
+_OrchArgsTuple = tuple[Any, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+
+def _collect_orch_args(
+    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
+    is_output: Callable[[str], bool],
+) -> _OrchArgsTuple:
+    """Shared logic for building ``ChipStorageTaskArgs`` from ``(name, value)`` pairs.
+
+    Args:
+        items: Ordered ``(name, value)`` pairs.  Each value is either a
+            ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
+        is_output: Predicate that returns ``True`` if the named tensor is an
+            output to be validated.
+
+    Returns:
+        ``(orch_args, all_tensors, inputs, outputs)``.
+    """
+    from pypto.runtime.device_runner import (  # noqa: PLC0415
+        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+        scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    orch_args = ChipStorageTaskArgs()
+    all_tensors: dict[str, Any] = {}
+    inputs: dict[str, torch.Tensor] = {}
+    outputs: dict[str, torch.Tensor] = {}
+
+    for name, val in items:
+        if isinstance(val, torch.Tensor):
+            val = val.cpu().contiguous()
+            orch_args.add_tensor(make_tensor_arg(val))
+            all_tensors[name] = val
+            if is_output(name):
+                outputs[name] = val
+            else:
+                inputs[name] = val
+        elif isinstance(val, ctypes._SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(val))
+            all_tensors[name] = val.value
+
+    return orch_args, all_tensors, inputs, outputs
+
+
+def build_orch_args_from_inputs(
+    inputs_result: list[tuple[str, Any]],
+    output_names: set[str],
+) -> _OrchArgsTuple:
+    """Build ``ChipStorageTaskArgs`` from pre-generated ``(name, value)`` tuples.
+
+    This variant is used by the test harness path where inputs come from
+    ``golden.py``'s ``generate_inputs()`` function rather than ``TensorSpec``.
+
+    Args:
+        inputs_result: List of ``(name, value)`` tuples where each value is
+            either a ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
+        output_names: Set of tensor names that are outputs.
+
+    Returns:
+        ``(orch_args, all_tensors, inputs, outputs)``.
+    """
+    return _collect_orch_args(
+        inputs_result,
+        lambda name: name in output_names or name.startswith("out"),
+    )
+
+
+def _execute_on_device(
+    work_dir: Path,
+    golden_path: Path,
+    chip_callable: Any,
+    runtime_name: str,
+    platform: str,
+    device_id: int,
+    runtime_profiling: bool = False,
+) -> None:
+    """Load inputs, execute on device, and validate against golden.
+
+    Shared execution logic used by both :func:`run` and the test harness
+    (``test_runner.py``).  The caller is responsible for compiling binaries
+    via ``compile_and_assemble`` and passing the result here.
+
+    Tolerances (``RTOL``, ``ATOL``) are read from the generated ``golden.py``.
+
+    Args:
+        work_dir: Root output directory containing ``data/``, ``golden.py``, etc.
+        golden_path: Path to the generated ``golden.py`` file.
+        chip_callable: Pre-compiled ``ChipCallable`` from ``compile_and_assemble``.
+        runtime_name: Runtime name from ``compile_and_assemble``.
+        platform: Target execution platform.
+        device_id: Hardware device index.
+        runtime_profiling: If ``True``, enable runtime profiling.
+    """
+    from pypto.runtime.device_runner import (  # noqa: PLC0415
+        execute_on_device,
+    )
+    from pypto.runtime.runner import _collect_swimlane_data, _snapshot_profiling_state  # noqa: PLC0415
+
+    # Load golden.py to get generate_inputs and compute_golden
+    spec = importlib.util.spec_from_file_location("_golden", str(golden_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load golden.py from {golden_path}")
+    golden_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(golden_module)
+
+    # Generate inputs (loads from data/in/ when use_data_files golden.py)
+    params: dict[str, str] = {"name": "Default"}
+    result = golden_module.generate_inputs(params)
+
+    output_names = set(getattr(golden_module, "__outputs__", []))
+    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
+
+    # Load pre-computed golden from data/out/ if available
+    out_dir = golden_path.parent / "data" / "out"
+    golden_out = _load_golden_from_data_dir(out_dir, output_names)
+    if golden_out is None:
+        golden_out = {k: v.clone() for k, v in outputs.items()}
+        golden_with_inputs = {**inputs, **golden_out}
+        golden_module.compute_golden(golden_with_inputs, params)
+
+    # Execute
+    if runtime_profiling:
+        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+
+    execute_on_device(
+        chip_callable,
+        orch_args,
+        platform,
+        runtime_name,
+        device_id,
+        enable_profiling=runtime_profiling,
+    )
+
+    if runtime_profiling:
+        _collect_swimlane_data(
+            work_dir,
+            platform,
+            device_id,
+            pre_run_logs,
+            device_log_dir,
+            pre_run_perf_files,
+        )
+
+    # Validate
+    validate_golden(
+        outputs,
+        golden_out,
+        rtol=getattr(golden_module, "RTOL", 1e-5),
+        atol=getattr(golden_module, "ATOL", 1e-5),
+    )
+
+
+def validate_golden(
+    outputs: dict[str, torch.Tensor],
+    golden: dict[str, torch.Tensor],
+    rtol: float = 1e-5,
+    atol: float = 1e-5,
+) -> None:
+    """Compare actual outputs against golden reference using ``torch.allclose``.
+
+    Raises:
+        AssertionError: If any output tensor does not match within tolerances.
+    """
+    for name, actual_tensor in outputs.items():
+        actual = actual_tensor.cpu()
+        expected = golden[name].cpu()
+        _log.info(f"Comparing {name}: shape={actual.shape}, dtype={actual.dtype}")
+
+        if not torch.allclose(actual, expected, rtol=rtol, atol=atol):
+            close_mask = torch.isclose(actual, expected, rtol=rtol, atol=atol)
+            mismatch_indices = torch.where(~close_mask.flatten())[0]
+            flat_actual = actual.flatten()
+            flat_expected = expected.flatten()
+            n_show = min(20, mismatch_indices.numel())
+            idx = mismatch_indices[:n_show]
+            lines = [
+                f"    [{i.item()}] actual={flat_actual[i].item()}, expected={flat_expected[i].item()}"
+                for i in idx
+            ]
+            raise AssertionError(
+                f"Output '{name}' does not match golden.\n"
+                f"Mismatched elements: {mismatch_indices.numel()}/{actual.numel()}\n"
+                f"rtol={rtol}, atol={atol}\n"
+                f"First {n_show} mismatches:\n" + "\n".join(lines)
+            )
+
+        matched = torch.isclose(actual, expected, rtol=rtol, atol=atol).sum().item()
+        _log.info(f"  {name}: PASS ({matched}/{actual.numel()} elements matched)")
 
 
 def _write_golden_for_test_case(test_case: PTOTestCase, output_path: Path) -> None:

@@ -24,7 +24,6 @@ Typical usage::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -45,23 +44,6 @@ from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 from .env_manager import get_simpler_root as _get_simpler_root
 
 _OUTPUTS_DIR = Path("outputs")
-
-
-def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
-    """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
-
-    Returns ``None`` if the directory does not exist or any required file is
-    missing, allowing the caller to fall back to live computation.
-    """
-    if not out_dir.is_dir():
-        return None
-    result = {}
-    for name in output_names:
-        pt_file = out_dir / f"{name}.pt"
-        if not pt_file.exists():
-            return None
-        result[name] = torch.load(pt_file, weights_only=True)
-    return result
 
 
 @dataclass
@@ -96,13 +78,6 @@ class RunConfig:
             default (``PrePipeline``, or ``PYPTO_WARNING_LEVEL`` env var).
         disabled_warnings: Set of warning checks to disable during compilation.
             ``None`` uses the default (``UnusedControlFlowResult`` disabled).
-        golden_data_dir: Target directory for ``.pt`` data files.  When set,
-            the generated ``golden.py`` always loads tensors from this path.
-            If the directory already contains all required ``.pt`` files they
-            are reused; otherwise the directory is created and data is generated
-            there.  Use a path from a previous run
-            (e.g. ``build_output/<name>_<ts>/data``) to reuse existing golden
-            data, or specify a new path to persist data to a fixed location.
     """
 
     __test__ = False  # Not a pytest test class
@@ -122,7 +97,6 @@ class RunConfig:
     compile_profiling: bool = False
     warning_level: WarningLevel | None = None
     disabled_warnings: WarningCheckSet | None = None
-    golden_data_dir: str | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -275,97 +249,6 @@ def run(
         compiled(*tensors, config=config)
 
     return compiled
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _execute_on_device(
-    work_dir: Path,
-    golden_path: Path,
-    chip_callable: Any,
-    runtime_name: str,
-    platform: str,
-    device_id: int,
-    runtime_profiling: bool = False,
-) -> None:
-    """Load inputs, execute on device, and validate against golden.
-
-    Shared execution logic used by both :func:`run` and the test harness
-    (``test_runner.py``).  The caller is responsible for compiling binaries
-    via ``compile_and_assemble`` and passing the result here.
-
-    Tolerances (``RTOL``, ``ATOL``) are read from the generated ``golden.py``.
-
-    Args:
-        work_dir: Root output directory containing ``data/``, ``golden.py``, etc.
-        golden_path: Path to the generated ``golden.py`` file.
-        chip_callable: Pre-compiled ``ChipCallable`` from ``compile_and_assemble``.
-        runtime_name: Runtime name from ``compile_and_assemble``.
-        platform: Target execution platform.
-        device_id: Hardware device index.
-        runtime_profiling: If ``True``, enable runtime profiling.
-    """
-    from .device_runner import (  # noqa: PLC0415
-        build_orch_args_from_inputs,
-        execute_on_device,
-        validate_golden,
-    )
-
-    # Load golden.py to get generate_inputs and compute_golden
-    spec = importlib.util.spec_from_file_location("_golden", str(golden_path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load golden.py from {golden_path}")
-    golden_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(golden_module)
-
-    # Generate inputs (loads from data/in/ when use_data_files golden.py)
-    params: dict[str, str] = {"name": "Default"}
-    result = golden_module.generate_inputs(params)
-
-    output_names = set(getattr(golden_module, "__outputs__", []))
-    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
-
-    # Load pre-computed golden from data/out/ if available
-    out_dir = golden_path.parent / "data" / "out"
-    golden_out = _load_golden_from_data_dir(out_dir, output_names)
-    if golden_out is None:
-        golden_out = {k: v.clone() for k, v in outputs.items()}
-        golden_with_inputs = {**inputs, **golden_out}
-        golden_module.compute_golden(golden_with_inputs, params)
-
-    # Execute
-    if runtime_profiling:
-        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
-
-    execute_on_device(
-        chip_callable,
-        orch_args,
-        platform,
-        runtime_name,
-        device_id,
-        enable_profiling=runtime_profiling,
-    )
-
-    if runtime_profiling:
-        _collect_swimlane_data(
-            work_dir,
-            platform,
-            device_id,
-            pre_run_logs,
-            device_log_dir,
-            pre_run_perf_files,
-        )
-
-    # Validate
-    validate_golden(
-        outputs,
-        golden_out,
-        rtol=getattr(golden_module, "RTOL", 1e-5),
-        atol=getattr(golden_module, "ATOL", 1e-5),
-    )
 
 
 # ---------------------------------------------------------------------------

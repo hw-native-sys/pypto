@@ -7,17 +7,17 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for pypto.runtime.golden_writer."""
+"""Unit tests for golden_writer."""
 
 import pytest
-from pypto.runtime.golden_writer import (
+from harness.core.golden_writer import (
     _extract_callable_expr,
     _extract_closure_constants,
     _extract_compute_golden,
     generate_golden_source,
     write_golden,
 )
-from pypto.runtime.tensor_spec import ScalarSpec, TensorSpec
+from harness.core.tensor_spec import ScalarSpec, TensorSpec
 
 torch = pytest.importorskip("torch")
 

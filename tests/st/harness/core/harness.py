@@ -25,7 +25,8 @@ import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.runtime.runner import RunConfig
-from pypto.runtime.tensor_spec import ScalarSpec
+
+from harness.core.tensor_spec import ScalarSpec
 
 # ---------------------------------------------------------------------------
 # Pre-defined platform parameter lists for @pytest.mark.parametrize.

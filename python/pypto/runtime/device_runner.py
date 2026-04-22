@@ -15,7 +15,6 @@ implementations of:
 - :func:`compile_and_assemble`: Compile kernels + orchestration C++ → binaries,
   assemble into ``ChipCallable``, locate runtime binaries.
 - :func:`execute_on_device`: Run a ``ChipCallable`` on device via ``ChipWorker``.
-- :func:`validate_golden`: Compare actual outputs against golden reference.
 - :func:`ensure_pto_isa_root`: Manage PTO-ISA repository (clone/checkout).
 
 These functions eliminate all Python-level imports from Simpler. The only
@@ -29,19 +28,14 @@ Simpler dependency remaining is:
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import importlib.util
 import logging
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
-
-import torch
 
 from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
@@ -51,8 +45,6 @@ from .task_interface import (
     ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
-    make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
-    scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 logger = logging.getLogger(__name__)
@@ -497,113 +489,3 @@ def execute_on_device(
         worker.run(chip_callable, orch_args, cfg)
 
     worker.close()
-
-
-# ---------------------------------------------------------------------------
-# Golden validation
-# ---------------------------------------------------------------------------
-
-
-def validate_golden(
-    outputs: dict[str, torch.Tensor],
-    golden: dict[str, torch.Tensor],
-    rtol: float = 1e-5,
-    atol: float = 1e-5,
-) -> None:
-    """Compare actual outputs against golden reference using ``torch.allclose``.
-
-    Raises:
-        AssertionError: If any output tensor does not match within tolerances.
-    """
-    for name, actual_tensor in outputs.items():
-        actual = actual_tensor.cpu()
-        expected = golden[name].cpu()
-        logger.info(f"Comparing {name}: shape={actual.shape}, dtype={actual.dtype}")
-
-        if not torch.allclose(actual, expected, rtol=rtol, atol=atol):
-            close_mask = torch.isclose(actual, expected, rtol=rtol, atol=atol)
-            mismatch_indices = torch.where(~close_mask.flatten())[0]
-            flat_actual = actual.flatten()
-            flat_expected = expected.flatten()
-            n_show = min(20, mismatch_indices.numel())
-            idx = mismatch_indices[:n_show]
-            lines = [
-                f"    [{i.item()}] actual={flat_actual[i].item()}, expected={flat_expected[i].item()}"
-                for i in idx
-            ]
-            raise AssertionError(
-                f"Output '{name}' does not match golden.\n"
-                f"Mismatched elements: {mismatch_indices.numel()}/{actual.numel()}\n"
-                f"rtol={rtol}, atol={atol}\n"
-                f"First {n_show} mismatches:\n" + "\n".join(lines)
-            )
-
-        matched = torch.isclose(actual, expected, rtol=rtol, atol=atol).sum().item()
-        logger.info(f"  {name}: PASS ({matched}/{actual.numel()} elements matched)")
-
-
-# ---------------------------------------------------------------------------
-# Tensor argument construction
-# ---------------------------------------------------------------------------
-
-# Return type for build_orch_args_from_inputs.
-_OrchArgsTuple = tuple[ChipStorageTaskArgs, dict[str, Any], dict[str, torch.Tensor], dict[str, torch.Tensor]]
-
-
-def _collect_orch_args(
-    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
-    is_output: Callable[[str], bool],
-) -> _OrchArgsTuple:
-    """Shared logic for building ``ChipStorageTaskArgs`` from ``(name, value)`` pairs.
-
-    Args:
-        items: Ordered ``(name, value)`` pairs.  Each value is either a
-            ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
-        is_output: Predicate that returns ``True`` if the named tensor is an
-            output to be validated.
-
-    Returns:
-        ``(orch_args, all_tensors, inputs, outputs)``.
-    """
-    orch_args = ChipStorageTaskArgs()
-    all_tensors: dict[str, Any] = {}
-    inputs: dict[str, torch.Tensor] = {}
-    outputs: dict[str, torch.Tensor] = {}
-
-    for name, val in items:
-        if isinstance(val, torch.Tensor):
-            val = val.cpu().contiguous()
-            orch_args.add_tensor(make_tensor_arg(val))
-            all_tensors[name] = val
-            if is_output(name):
-                outputs[name] = val
-            else:
-                inputs[name] = val
-        elif isinstance(val, ctypes._SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(val))
-            all_tensors[name] = val.value
-
-    return orch_args, all_tensors, inputs, outputs
-
-
-def build_orch_args_from_inputs(
-    inputs_result: list[tuple[str, Any]],
-    output_names: set[str],
-) -> _OrchArgsTuple:
-    """Build ``ChipStorageTaskArgs`` from pre-generated ``(name, value)`` tuples.
-
-    This variant is used by the test harness path where inputs come from
-    ``golden.py``'s ``generate_inputs()`` function rather than ``TensorSpec``.
-
-    Args:
-        inputs_result: List of ``(name, value)`` tuples where each value is
-            either a ``torch.Tensor`` or a ``ctypes._SimpleCData`` scalar.
-        output_names: Set of tensor names that are outputs.
-
-    Returns:
-        ``(orch_args, all_tensors, inputs, outputs)``.
-    """
-    return _collect_orch_args(
-        inputs_result,
-        lambda name: name in output_names or name.startswith("out"),
-    )

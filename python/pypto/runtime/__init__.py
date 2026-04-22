@@ -25,7 +25,6 @@ Example::
 """
 
 from .runner import RunConfig, RunResult, compile_program, execute_compiled, run
-from .tensor_spec import ScalarSpec, TensorSpec
 
 __all__ = [
     "run",
@@ -33,6 +32,4 @@ __all__ = [
     "execute_compiled",
     "RunConfig",
     "RunResult",
-    "ScalarSpec",
-    "TensorSpec",
 ]
